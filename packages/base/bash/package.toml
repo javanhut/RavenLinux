@@ -1,0 +1,40 @@
+[package]
+name = "bash"
+version = "5.2.21"
+description = "GNU Bourne Again SHell"
+license = "GPL-3.0"
+homepage = "https://www.gnu.org/software/bash/"
+maintainers = ["RavenLinux Team"]
+categories = ["base", "shell"]
+
+[source]
+type = "tarball"
+url = "https://ftp.gnu.org/gnu/bash/bash-5.2.21.tar.gz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "autotools"
+configure_flags = [
+    "--prefix=/usr",
+    "--without-bash-malloc",
+    "--with-installed-readline"
+]
+build_flags = ["-j$(nproc)"]
+pre_build = []
+post_build = []
+pre_install = []
+post_install = []
+
+[dependencies]
+runtime = ["readline", "ncurses"]
+build = ["readline", "ncurses"]
+
+[install]
+files = [
+    { src = "bash", dest = "/usr/bin/bash", mode = 755 }
+]
+symlinks = [
+    { target = "/usr/bin/bash", link = "/bin/bash" },
+    { target = "/usr/bin/bash", link = "/usr/bin/sh" },
+    { target = "/usr/bin/bash", link = "/bin/sh" }
+]

@@ -1,0 +1,110 @@
+# RavenLinux Init Configuration
+# /etc/raven/init.toml
+
+[system]
+# System hostname (can be overridden by /etc/hostname)
+hostname = "raven"
+
+# Default runlevel/target
+default_runlevel = "default"
+
+# Shutdown timeout in seconds (services have this long to stop)
+shutdown_timeout = 10
+
+# Enable automatic kernel module loading
+load_modules = true
+
+# Enable udev/eudev for device management
+enable_udev = true
+
+# Enable network initialization
+enable_network = true
+
+# Log level: trace, debug, info, warn, error
+log_level = "info"
+
+
+# =============================================================================
+# Services
+# =============================================================================
+
+# Getty on tty1 (main console)
+[[services]]
+name = "getty-tty1"
+description = "Getty login on tty1"
+exec = "/sbin/agetty"
+args = ["--noclear", "--autologin", "root", "tty1", "linux"]
+restart = true
+enabled = true
+critical = false
+
+# Getty on tty2
+[[services]]
+name = "getty-tty2"
+description = "Getty login on tty2"
+exec = "/sbin/agetty"
+args = ["tty2", "linux"]
+restart = true
+enabled = true
+critical = false
+
+# Syslog daemon (if available)
+[[services]]
+name = "syslogd"
+description = "System logger"
+exec = "/sbin/syslogd"
+args = ["-n"]
+restart = true
+enabled = false  # Enable when syslogd is installed
+critical = false
+
+# Kernel log daemon (if available)
+[[services]]
+name = "klogd"
+description = "Kernel logger"
+exec = "/sbin/klogd"
+args = ["-n"]
+restart = true
+enabled = false  # Enable when klogd is installed
+critical = false
+
+# D-Bus system bus (for desktop)
+[[services]]
+name = "dbus"
+description = "D-Bus system message bus"
+exec = "/usr/bin/dbus-daemon"
+args = ["--system", "--nofork", "--nopidfile"]
+restart = true
+enabled = false  # Enable when dbus is installed
+critical = false
+
+# Network manager (when available)
+[[services]]
+name = "network"
+description = "Network management"
+exec = "/sbin/dhcpcd"
+args = ["-B", "-q"]
+restart = false
+enabled = false  # Enable when dhcpcd is installed
+critical = false
+
+
+# =============================================================================
+# Additional mount points (beyond the essential ones)
+# =============================================================================
+
+# Example: Mount /home partition
+# [[mounts]]
+# source = "LABEL=HOME"
+# target = "/home"
+# fstype = "ext4"
+# options = "defaults,noatime"
+# mount_at_boot = true
+
+# Example: Mount NFS share
+# [[mounts]]
+# source = "server:/export/data"
+# target = "/mnt/data"
+# fstype = "nfs"
+# options = "rw,soft"
+# mount_at_boot = false

@@ -1,0 +1,39 @@
+[package]
+name = "git"
+version = "2.43.0"
+description = "Fast, scalable, distributed revision control system"
+license = "GPL-2.0"
+homepage = "https://git-scm.com"
+repository = "https://github.com/git/git"
+maintainers = ["RavenLinux Team"]
+categories = ["dev-tools", "vcs"]
+
+[source]
+type = "tarball"
+url = "https://www.kernel.org/pub/software/scm/git/git-2.43.0.tar.xz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "make"
+configure_flags = [
+    "--prefix=/usr",
+    "--with-gitconfig=/etc/gitconfig",
+    "--with-editor=/usr/bin/vim",
+    "--with-openssl",
+    "--with-curl",
+    "--with-expat"
+]
+build_flags = ["-j$(nproc)", "all", "doc"]
+pre_build = []
+post_build = []
+pre_install = []
+post_install = []
+
+[dependencies]
+runtime = ["curl", "expat", "openssl", "pcre2", "zlib"]
+build = ["asciidoc", "curl", "expat", "openssl", "pcre2", "xmlto"]
+
+[install]
+files = [
+    { src = "git", dest = "/usr/bin/git", mode = 755 }
+]

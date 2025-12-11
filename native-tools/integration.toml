@@ -1,0 +1,112 @@
+# RavenLinux Native Tools Integration Configuration
+# This file defines how your custom tools integrate with the system
+
+[editor]
+# Your custom file editor
+name = "raven-editor"           # Package name (change to your tool's name)
+binary = "raven-editor"         # Binary name
+description = "Native RavenLinux Editor"
+
+# Environment variables to set
+[editor.env]
+EDITOR = "${binary}"
+VISUAL = "${binary}"
+GIT_EDITOR = "${binary}"
+
+# File associations (MIME types)
+[editor.associations]
+text = ["text/*"]
+code = [
+    "text/x-c",
+    "text/x-python",
+    "text/x-rust",
+    "text/x-go",
+    "application/javascript",
+    "application/json",
+    "application/toml",
+    "application/yaml",
+]
+
+# Desktop entry
+[editor.desktop]
+name = "Raven Editor"
+icon = "raven-editor"
+categories = ["Development", "TextEditor"]
+keywords = ["text", "editor", "code", "development"]
+
+[vcs]
+# Your custom version control system
+name = "raven-vcs"              # Package name (change to your tool's name)
+binary = "raven-vcs"            # Binary name
+description = "Native RavenLinux Version Control"
+
+# Environment
+[vcs.env]
+RAVEN_VCS = "${binary}"
+
+# Integration with rvn package manager
+[vcs.rvn]
+use_for_packages = true         # Use for package development
+init_command = "init"           # Command to initialize repo
+status_command = "status"       # Command for status
+add_command = "add"
+commit_command = "commit"
+
+# File manager integration
+[vcs.filemanager]
+show_status = true              # Show file status in file manager
+status_indicators = true        # Use status indicators
+diff_tool = true                # Use as diff tool
+
+[lang]
+# Your custom programming language
+name = "raven-lang"             # Package name (change to your tool's name)
+binary = "ravenlang"            # Compiler/interpreter binary
+description = "Native RavenLinux Programming Language"
+file_extension = ".rvn"         # Source file extension
+
+# Environment
+[lang.env]
+RAVEN_LANG_HOME = "/usr/lib/raven-lang"
+PATH_APPEND = "/usr/lib/raven-lang/bin"
+
+# rvn dev integration
+[lang.rvn_dev]
+command = "rvn dev ravenlang"   # How users install/manage it
+versions = ["latest"]           # Available versions
+
+# Editor integration
+[lang.editor]
+syntax_highlighting = true
+lsp_support = false             # Set to true if you have an LSP server
+formatter = "ravenlang fmt"     # Format command (if available)
+linter = "ravenlang lint"       # Lint command (if available)
+
+# Project templates
+[lang.templates]
+hello_world = "ravenlang new hello"
+web_app = "ravenlang new web"
+cli_app = "ravenlang new cli"
+
+# Build system
+[lang.build]
+system = "custom"
+build_command = "ravenlang build"
+run_command = "ravenlang run"
+test_command = "ravenlang test"
+
+# System integration
+[system]
+# Which tool is the "default" for each category
+default_editor = "editor"
+default_vcs = "vcs"
+
+# Shell integration
+[system.shell]
+# Add completions for bash/zsh/fish
+completions = true
+
+# Aliases to set up
+[system.shell.aliases]
+e = "${editor.binary}"          # Quick edit command
+v = "${vcs.binary}"             # Quick vcs command

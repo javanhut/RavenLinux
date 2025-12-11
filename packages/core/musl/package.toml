@@ -1,0 +1,32 @@
+[package]
+name = "musl"
+version = "1.2.5"
+description = "Lightweight, fast, simple, and correct C library"
+license = "MIT"
+homepage = "https://musl.libc.org"
+maintainers = ["RavenLinux Team"]
+categories = ["core", "libc"]
+
+[source]
+type = "tarball"
+url = "https://musl.libc.org/releases/musl-1.2.5.tar.gz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "make"
+configure_flags = ["--prefix=/usr"]
+build_flags = []
+env = { "CFLAGS" = "-O2 -pipe" }
+pre_build = []
+post_build = []
+pre_install = []
+post_install = []
+
+[dependencies]
+runtime = []
+build = ["gcc"]
+
+[install]
+symlinks = [
+    { target = "/usr/lib/libc.so", link = "/lib/ld-musl-x86_64.so.1" }
+]

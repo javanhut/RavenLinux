@@ -1,0 +1,25 @@
+# RavenLinux zshenv - sourced for all zsh instances
+
+# Path
+typeset -U path
+path=(
+    ~/bin
+    ~/.local/bin
+    /usr/local/bin
+    /usr/bin
+    /bin
+    $path
+)
+
+# RavenLinux environment
+export RAVEN_LINUX=1
+
+# Locale
+export LANG="${LANG:-en_US.UTF-8}"
+export LC_ALL="${LC_ALL:-en_US.UTF-8}"
+
+# XDG directories
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+export XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"

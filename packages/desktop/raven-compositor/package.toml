@@ -1,0 +1,44 @@
+[package]
+name = "raven-compositor"
+version = "0.1.0"
+description = "RavenDE Wayland compositor"
+license = "MIT"
+homepage = "https://ravenlinux.org"
+maintainers = ["RavenLinux Team"]
+categories = ["desktop", "compositor", "wayland"]
+
+[source]
+type = "local"
+path = "/usr/src/raven/desktop/compositor"
+
+[build]
+system = "cargo"
+configure_flags = []
+build_flags = ["--release"]
+env = { "RUSTFLAGS" = "-C target-cpu=native" }
+pre_build = []
+post_build = []
+pre_install = []
+post_install = []
+
+[dependencies]
+runtime = [
+    "wayland",
+    "libinput",
+    "pixman",
+    "libdrm",
+    "mesa"
+]
+build = [
+    "rust",
+    "wayland-protocols",
+    "libinput",
+    "pixman",
+    "libdrm",
+    "mesa"
+]
+
+[install]
+files = [
+    { src = "target/release/raven-compositor", dest = "/usr/bin/raven-compositor", mode = 755 }
+]

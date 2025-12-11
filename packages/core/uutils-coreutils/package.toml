@@ -1,0 +1,173 @@
+[package]
+name = "uutils-coreutils"
+version = "0.0.27"
+description = "Cross-platform Rust rewrite of GNU coreutils"
+license = "MIT"
+homepage = "https://uutils.github.io/"
+repository = "https://github.com/uutils/coreutils"
+maintainers = ["RavenLinux Team"]
+categories = ["core", "utilities"]
+
+[source]
+type = "git"
+url = "https://github.com/uutils/coreutils.git"
+ref = "0.0.27"
+
+[build]
+system = "cargo"
+build_flags = ["--release", "--features=unix"]
+env = { "RUSTFLAGS" = "-C target-cpu=native" }
+
+[dependencies]
+runtime = []
+build = ["rust"]
+
+[install]
+# uutils builds a single multicall binary like busybox
+# or individual binaries - we use multicall for size
+files = [
+    { src = "target/release/coreutils", dest = "/usr/bin/coreutils", mode = 755 }
+]
+
+# Symlinks for all utilities
+symlinks = [
+    # File operations
+    { target = "/usr/bin/coreutils", link = "/usr/bin/cat" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/cp" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/mv" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/rm" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/ln" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/mkdir" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/rmdir" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/touch" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/chmod" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/chown" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/chgrp" },
+
+    # Directory listing
+    { target = "/usr/bin/coreutils", link = "/usr/bin/ls" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/dir" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/vdir" },
+
+    # Text processing
+    { target = "/usr/bin/coreutils", link = "/usr/bin/head" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/tail" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/cut" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/paste" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/sort" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/uniq" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/wc" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/tr" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/tee" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/nl" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/od" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/fmt" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/fold" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/join" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/split" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/csplit" },
+
+    # Output
+    { target = "/usr/bin/coreutils", link = "/usr/bin/echo" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/printf" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/yes" },
+
+    # Disk/filesystem
+    { target = "/usr/bin/coreutils", link = "/usr/bin/df" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/du" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/stat" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/sync" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/truncate" },
+
+    # User/group
+    { target = "/usr/bin/coreutils", link = "/usr/bin/id" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/whoami" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/groups" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/users" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/who" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/logname" },
+
+    # System info
+    { target = "/usr/bin/coreutils", link = "/usr/bin/uname" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/hostname" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/uptime" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/arch" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/nproc" },
+
+    # Date/time
+    { target = "/usr/bin/coreutils", link = "/usr/bin/date" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/cal" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/sleep" },
+
+    # Path operations
+    { target = "/usr/bin/coreutils", link = "/usr/bin/basename" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/dirname" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/realpath" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/readlink" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/pwd" },
+
+    # Checksums
+    { target = "/usr/bin/coreutils", link = "/usr/bin/md5sum" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/sha1sum" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/sha256sum" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/sha512sum" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/b2sum" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/cksum" },
+
+    # Conditionals
+    { target = "/usr/bin/coreutils", link = "/usr/bin/test" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/[" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/true" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/false" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/expr" },
+
+    # Misc
+    { target = "/usr/bin/coreutils", link = "/usr/bin/env" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/printenv" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/seq" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/shuf" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/factor" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/numfmt" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/base64" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/base32" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/expand" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/unexpand" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/comm" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/tsort" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/shred" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/mktemp" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/mknod" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/mkfifo" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/tty" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/stty" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/nohup" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/timeout" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/nice" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/pathchk" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/link" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/unlink" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/dd" },
+    { target = "/usr/bin/coreutils", link = "/usr/bin/install" },
+
+    # Compat symlinks in /bin
+    { target = "/usr/bin/coreutils", link = "/bin/cat" },
+    { target = "/usr/bin/coreutils", link = "/bin/cp" },
+    { target = "/usr/bin/coreutils", link = "/bin/mv" },
+    { target = "/usr/bin/coreutils", link = "/bin/rm" },
+    { target = "/usr/bin/coreutils", link = "/bin/ls" },
+    { target = "/usr/bin/coreutils", link = "/bin/mkdir" },
+    { target = "/usr/bin/coreutils", link = "/bin/rmdir" },
+    { target = "/usr/bin/coreutils", link = "/bin/echo" },
+    { target = "/usr/bin/coreutils", link = "/bin/pwd" },
+    { target = "/usr/bin/coreutils", link = "/bin/ln" },
+    { target = "/usr/bin/coreutils", link = "/bin/chmod" },
+    { target = "/usr/bin/coreutils", link = "/bin/chown" },
+    { target = "/usr/bin/coreutils", link = "/bin/date" },
+    { target = "/usr/bin/coreutils", link = "/bin/df" },
+    { target = "/usr/bin/coreutils", link = "/bin/sync" },
+    { target = "/usr/bin/coreutils", link = "/bin/uname" },
+    { target = "/usr/bin/coreutils", link = "/bin/hostname" },
+    { target = "/usr/bin/coreutils", link = "/bin/sleep" },
+    { target = "/usr/bin/coreutils", link = "/bin/true" },
+    { target = "/usr/bin/coreutils", link = "/bin/false" }
+]

@@ -1,0 +1,68 @@
+[package]
+name = "raven-compositor"
+version = "0.1.0"
+edition = "2021"
+authors = ["RavenLinux Team"]
+description = "RavenDE Wayland Compositor"
+license = "MIT"
+
+[dependencies]
+# Wayland
+wayland-server = "0.31"
+wayland-protocols = { version = "0.31", features = ["server", "staging"] }
+wayland-backend = "0.3"
+
+# Smithay - Wayland compositor library (Rust alternative to wlroots)
+smithay = { version = "0.3", default-features = false, features = [
+    "desktop",
+    "backend_drm",
+    "backend_libinput",
+    "backend_udev",
+    "backend_session_libseat",
+    "backend_winit",
+    "renderer_gl",
+    "wayland_frontend",
+    "xwayland",
+] }
+smithay-drm-extras = "0.1"
+
+# Input
+input = "0.8"
+
+# Graphics
+khronos-egl = "6.0"
+gl = "0.14"
+drm = "0.11"
+gbm = "0.14"
+
+# Async
+tokio = { version = "1.35", features = ["full"] }
+calloop = "0.12"
+
+# Configuration
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Utilities
+bitflags = "2.4"
+indexmap = "2.1"
+smallvec = "1.11"
+
+# XDG
+xdg = "2.5"
+
+[features]
+default = ["xwayland"]
+xwayland = []
+
+[profile.release]
+lto = true
+codegen-units = 1

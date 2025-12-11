@@ -1,0 +1,60 @@
+# RavenLinux default zshrc
+
+# History
+HISTFILE=~/.zsh_history
+HISTSIZE=10000
+SAVEHIST=10000
+setopt appendhistory
+setopt sharehistory
+setopt hist_ignore_dups
+setopt hist_ignore_space
+
+# Directory navigation
+setopt autocd
+setopt autopushd
+setopt pushdignoredups
+
+# Completion
+autoload -Uz compinit
+compinit
+zstyle ':completion:*' menu select
+zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'
+
+# Colors
+autoload -Uz colors
+colors
+
+# Key bindings - emacs style
+bindkey -e
+bindkey '^[[A' history-search-backward
+bindkey '^[[B' history-search-forward
+bindkey '^[[H' beginning-of-line
+bindkey '^[[F' end-of-line
+bindkey '^[[3~' delete-char
+
+# Prompt
+autoload -Uz vcs_info
+precmd() { vcs_info }
+zstyle ':vcs_info:git:*' formats ' %F{cyan}(%b)%f'
+setopt prompt_subst
+PROMPT='%F{blue}%n%f@%F{green}%m%f %F{yellow}%~%f${vcs_info_msg_0_} %# '
+
+# Aliases
+alias ls='ls --color=auto'
+alias ll='ls -lah'
+alias la='ls -A'
+alias l='ls -CF'
+alias grep='grep --color=auto'
+alias ..='cd ..'
+alias ...='cd ../..'
+
+# RavenLinux specific
+alias rvn='rvn'
+alias raven-update='rvn upgrade'
+
+# Editor (will be your custom editor)
+export EDITOR="${EDITOR:-raven-editor}"
+export VISUAL="${VISUAL:-raven-editor}"
+
+# Load local config if exists
+[[ -f ~/.zshrc.local ]] && source ~/.zshrc.local

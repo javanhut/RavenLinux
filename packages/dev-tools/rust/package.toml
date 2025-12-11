@@ -1,0 +1,50 @@
+[package]
+name = "rust"
+version = "1.75.0"
+description = "The Rust programming language toolchain"
+license = "Apache-2.0 OR MIT"
+homepage = "https://www.rust-lang.org"
+repository = "https://github.com/rust-lang/rust"
+maintainers = ["RavenLinux Team"]
+categories = ["dev-tools", "compilers", "languages"]
+
+[source]
+type = "tarball"
+url = "https://static.rust-lang.org/dist/rustc-1.75.0-src.tar.xz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "custom"
+configure_flags = []
+build_flags = []
+env = { "RUSTFLAGS" = "-C target-cpu=native" }
+pre_build = [
+    "cat > config.toml << 'EOF'",
+    "[llvm]",
+    "link-shared = true",
+    "targets = \"X86\"",
+    "",
+    "[build]",
+    "docs = false",
+    "extended = true",
+    "tools = [\"cargo\", \"clippy\", \"rustfmt\", \"rust-analyzer\"]",
+    "",
+    "[install]",
+    "prefix = \"/usr\"",
+    "",
+    "[rust]",
+    "channel = \"stable\"",
+    "rpath = false",
+    "codegen-units = 1",
+    "EOF"
+]
+post_build = []
+pre_install = []
+post_install = []
+
+[dependencies]
+runtime = ["llvm-libs", "openssl", "zlib"]
+build = ["cmake", "curl", "llvm", "ninja", "openssl", "python"]
+
+[install]
+directories = ["/usr/lib/rustlib"]

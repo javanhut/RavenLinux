@@ -1,0 +1,40 @@
+[package]
+name = "linux"
+version = "6.11.0"
+description = "The Linux kernel and modules"
+license = "GPL-2.0"
+homepage = "https://kernel.org"
+maintainers = ["RavenLinux Team"]
+categories = ["core", "kernel"]
+
+[source]
+type = "tarball"
+url = "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.11.tar.xz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "make"
+configure_flags = []
+build_flags = ["-j$(nproc)"]
+pre_build = [
+    "make mrproper",
+    "cp /etc/raven/kernel-config .config",
+    "make olddefconfig"
+]
+post_build = []
+pre_install = []
+post_install = [
+    "depmod -a ${pkgver}",
+    "mkinitcpio -p raven"
+]
+
+[dependencies]
+runtime = []
+build = ["bc", "kmod", "libelf", "pahole", "perl", "python"]
+
+[install]
+files = [
+    { src = "arch/x86/boot/bzImage", dest = "/boot/vmlinuz-raven" },
+    { src = "System.map", dest = "/boot/System.map-raven" }
+]
+directories = ["/lib/modules/${pkgver}"]
