@@ -16,23 +16,96 @@ A developer-focused Linux distribution built from scratch with custom tooling.
 RavenLinux is an independent Linux distribution designed for developers and application development. It features:
 
 - **Custom Package Manager** (`rvn`) - Fast, Rust-based package management with developer workspaces
-- **Custom Desktop Environment** (RavenDE) - Wayland compositor built for coding workflows
-- **Custom Bootloader** (RavenBoot) - Multi-boot UEFI bootloader for coexistence with other OSes
-- **Native Tools Integration** - First-class support for custom development tools
+- **Custom Bootloader** (RavenBoot) - Multi-boot UEFI bootloader with Linux EFI stub support
+- **Native Tools Integration** - First-class support for Vem editor, Carrion language, and Ivaldi VCS
+- **Minimal Base** - Built with musl libc for a clean, lightweight system
 - **Rolling Release** - Always up-to-date packages
+
+## Downloads
+
+Download the latest release from [GitHub Releases](../../releases):
+
+| File | Description |
+|------|-------------|
+| `ravenlinux-vX.X.X.iso` | Bootable ISO image |
+| `raven-usb-vX.X.X-linux-x86_64` | USB flasher tool |
+| `ravenlinux-vX.X.X-source.tar.gz` | Complete source code |
+| `ravenlinux-tools-vX.X.X-linux-x86_64.tar.gz` | All tools bundled |
+
+### Quick Install
+
+```bash
+# Download the ISO and raven-usb tool, then flash to USB
+chmod +x raven-usb-*-linux-x86_64
+sudo ./raven-usb-*-linux-x86_64 ravenlinux-*.iso /dev/sdX
+
+# Boot from USB and follow the installer
+```
 
 ## Technology Stack
 
-| Component | Language | Purpose |
-|-----------|----------|---------|
-| Kernel | C | Linux kernel |
-| Bootloader | Rust | UEFI multi-boot loader |
-| Package Manager | Rust | System package management |
-| Compositor | Rust | Wayland desktop compositor |
-| Installer | Rust | System installer |
-| Native Tools | Go | Custom editor, VCS, language |
+| Component | Language | Description |
+|-----------|----------|-------------|
+| Kernel | C | Linux kernel with EFI stub |
+| Bootloader | Rust | UEFI multi-boot loader (RavenBoot) |
+| Init System | Rust | Custom init and service manager |
+| Package Manager | Rust | System package management (rvn) |
+| Text Editor | Go | Vem - Modal editor with syntax highlighting |
+| Version Control | Go | Ivaldi - Distributed VCS |
+| Programming Language | Go | Carrion - Custom programming language |
+| Installer | Go | GUI system installer |
+| USB Flasher | Go | Tool to create bootable USB drives |
 
-## Quick Start
+## Native Tools
+
+RavenLinux includes these custom development tools:
+
+### Vem (Text Editor)
+Modal text editor with syntax highlighting and modern editing features.
+```bash
+vem myfile.txt
+```
+
+### Carrion (Programming Language)
+Custom programming language designed for system scripting and application development.
+```bash
+carrion run script.crn
+```
+
+### Ivaldi (Version Control)
+Distributed version control system with a focus on simplicity.
+```bash
+ivaldi init
+ivaldi commit -m "Initial commit"
+```
+
+## Building from Source
+
+### Requirements
+
+- Linux system (tested on Arch Linux)
+- 20GB+ disk space
+- 8GB+ RAM recommended
+- Rust toolchain
+- Go toolchain (1.23+)
+- Build tools: gcc, make, cmake, meson
+
+### Build Steps
+
+```bash
+# Clone the repository
+git clone https://github.com/javanhut/RavenLinux.git
+cd RavenLinux
+
+# Build everything and generate ISO
+./scripts/build.sh all
+
+# Or build individual stages:
+./scripts/build.sh stage1    # Download toolchain and build base
+./scripts/build.sh stage2    # Build native sysroot
+./scripts/build.sh stage3    # Build packages
+./scripts/build.sh stage4    # Generate ISO
+```
 
 ### Development Environment
 
@@ -53,60 +126,25 @@ RavenLinux is an independent Linux distribution designed for developers and appl
 ./scripts/dev-env.sh status
 ```
 
-### Building
-
-```bash
-# Build cross-compilation toolchain
-./scripts/build.sh stage0
-
-# Build base system
-./scripts/build.sh stage1
-
-# Native rebuild
-./scripts/build.sh stage2
-
-# Build packages
-./scripts/build.sh stage3
-
-# Generate ISO
-./scripts/build.sh stage4
-
-# Or build everything
-./scripts/build.sh all
-```
-
 ## Project Structure
 
 ```
 RavenLinux/
-├── bootloader/          # Custom UEFI bootloader (Rust)
-├── build/               # Build artifacts (generated)
+├── bootloader/          # RavenBoot UEFI bootloader (Rust)
+├── init/                # Init system and service manager (Rust)
+├── tools/
+│   ├── rvn/             # Package manager (Rust)
+│   ├── raven-installer/ # GUI system installer (Go)
+│   └── raven-usb/       # USB flasher tool (Go)
 ├── configs/             # System configurations
-├── desktop/             # RavenDE desktop environment
-│   ├── compositor/      # Wayland compositor (Rust)
-│   ├── panel/           # Top panel
-│   ├── launcher/        # Application launcher
-│   ├── files/           # File manager
-│   ├── terminal/        # Terminal emulator
-│   └── settings/        # System settings
-├── etc/                 # Base system configuration
-├── installer/           # System installer (Rust)
-├── iso/                 # ISO generation files
-├── native-tools/        # Your custom Go tools
-│   ├── editor/          # Custom file editor
-│   ├── vcs/             # Custom version control
-│   └── lang/            # Custom programming language
-├── packages/            # Package definitions
-│   ├── core/            # Core system packages
-│   ├── base/            # Base utilities
-│   ├── desktop/         # Desktop packages
-│   └── dev-tools/       # Developer tools
+│   └── kernel/          # Kernel configs
 ├── scripts/             # Build and utility scripts
 │   ├── build.sh         # Main build script
 │   ├── dev-env.sh       # Development environment
+│   ├── build-initramfs.sh
 │   └── stages/          # Build stage scripts
-└── tools/
-    └── rvn/             # Package manager (Rust)
+├── etc/                 # Base system configuration
+└── .github/workflows/   # CI/CD pipelines
 ```
 
 ## Package Manager (rvn)
@@ -121,7 +159,6 @@ rvn search editor
 # Developer tools
 rvn dev rust           # Set up Rust toolchain
 rvn dev node 20        # Set up Node.js 20
-rvn dev docker         # Set up containers
 
 # Workspaces (isolated dev environments)
 rvn workspace create myproject --lang rust,python
@@ -137,87 +174,52 @@ rvn system health      # Check system health
 
 The custom UEFI bootloader supports:
 
+- Linux EFI stub booting with initrd support
 - Multi-boot with other operating systems
 - Auto-detection of Windows, other Linux distros
-- Keyboard navigation and timeout
+- Keyboard navigation and configurable timeout
 - Configuration via `/EFI/raven/boot.conf`
 - Recovery mode boot option
 
-## Desktop Environment (RavenDE)
+### Boot Configuration
 
-- **Compositor**: Wayland-native with tiling + floating modes
-- **Keybindings**: Vim-style navigation (Super+H/J/K/L)
-- **Workspaces**: Dynamic workspace management
-- **Developer Focus**: Git integration, terminal-centric
+```conf
+# /EFI/raven/boot.conf
+timeout = 5
+default = 0
 
-Default shortcuts:
-- `Super + Enter` - Terminal
-- `Super + Space` - Launcher
-- `Super + Q` - Close window
-- `Super + 1-9` - Switch workspace
-- `Super + H/J/K/L` - Focus navigation
+[entry]
+name = "Raven Linux"
+kernel = "\EFI\raven\vmlinuz"
+initrd = "\EFI\raven\initramfs.img"
+cmdline = "rdinit=/init quiet"
+type = linux-efi
 
-## Native Tools
+[entry]
+name = "Raven Linux (Recovery)"
+kernel = "\EFI\raven\vmlinuz"
+initrd = "\EFI\raven\initramfs.img"
+cmdline = "rdinit=/init single"
+type = linux-efi
+```
 
-RavenLinux includes first-class support for custom development tools:
-
-1. **Custom Editor** - Default system editor
-2. **Custom VCS** - Integrated version control
-3. **Custom Language** - Pre-installed programming language
-
-See `native-tools/README.md` for integration details.
-
-## Requirements
-
-### Build Host
-- Linux system (tested on Arch Linux)
-- 20GB+ disk space
-- 8GB+ RAM recommended
-- GCC, Make, CMake, Meson
-- Rust toolchain
-- Go toolchain
+## System Requirements
 
 ### Target System
-- x86_64 CPU
-- UEFI firmware
+- x86_64 CPU with UEFI firmware
 - 2GB RAM minimum (4GB recommended)
 - 20GB disk space
 
-## Development
+### Build Host
+- Linux system
+- 20GB+ disk space
+- 8GB+ RAM recommended
+- Internet connection for downloading sources
 
-### Testing Changes
+## Contributing
 
-1. Edit files in `build/dev-merged/` (after mounting overlay)
-2. Test in chroot: `./scripts/dev-env.sh chroot`
-3. Test in VM: `./scripts/dev-env.sh qemu -g`
-
-### Adding Packages
-
-Create `packages/<category>/<name>/package.toml`:
-
-```toml
-[package]
-name = "example"
-version = "1.0.0"
-description = "Example package"
-
-[source]
-type = "tarball"
-url = "https://example.com/example-1.0.0.tar.gz"
-sha256 = "..."
-
-[build]
-system = "make"
-
-[dependencies]
-runtime = ["libc"]
-build = ["gcc"]
-```
+Contributions welcome! Please open an issue or pull request on GitHub.
 
 ## License
 
 MIT License - See LICENSE file
-
-## Contributing
-
-Contributions welcome! Please read CONTRIBUTING.md first.
