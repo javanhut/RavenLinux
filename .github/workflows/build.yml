@@ -358,17 +358,50 @@ jobs:
           name: raven-boot-efi
           path: build/packages/boot/
 
+      - name: Install Rust toolchain for uutils
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build uutils-coreutils
+        run: |
+          mkdir -p build/bin
+          git clone --depth 1 https://github.com/uutils/coreutils.git build/sources/uutils-coreutils
+          cd build/sources/uutils-coreutils
+          cargo build --release --features unix
+          cp target/release/coreutils ../../bin/coreutils
+          chmod +x ../../bin/coreutils
+
+      - name: Prepare packages
+        run: |
+          # Make downloaded binaries executable and rename them
+          chmod +x build/packages/bin/* 2>/dev/null || true
+          chmod +x build/packages/boot/* 2>/dev/null || true
+
+          # Rename binaries to expected names (remove -linux-x86_64 suffix if present)
+          cd build/packages/bin
+          for f in *-linux-x86_64; do
+            [ -f "$f" ] && mv "$f" "${f%-linux-x86_64}" 2>/dev/null || true
+          done
+          cd -
+
+          # Ensure rvn is in place
+          if [ -f build/packages/bin/rvn ]; then
+            chmod +x build/packages/bin/rvn
+          fi
+
       - name: Setup sysroot
         run: |
           chmod +x scripts/stages/stage2-native.sh
           export RAVEN_ROOT="${PWD}"
           export RAVEN_BUILD="${PWD}/build"
-          ./scripts/stages/stage2-native.sh
+          sudo -E ./scripts/stages/stage2-native.sh
 
       - name: Build initramfs
         run: |
           chmod +x scripts/build-initramfs.sh
-          ./scripts/build-initramfs.sh || echo "Using fallback initramfs"
+          export RAVEN_ROOT="${PWD}"
+          export RAVEN_BUILD="${PWD}/build"
+          # Initramfs build needs sudo for mknod device nodes
+          sudo -E ./scripts/build-initramfs.sh
 
       - name: Build ISO
         run: |
@@ -376,7 +409,8 @@ jobs:
           export RAVEN_ROOT="${PWD}"
           export RAVEN_BUILD="${PWD}/build"
           export RAVEN_VERSION="${{ env.RAVEN_VERSION }}"
-          ./scripts/stages/stage4-iso.sh
+          export PACKAGES_DIR="${PWD}/build/packages"
+          sudo -E ./scripts/stages/stage4-iso.sh
 
       - name: Generate checksums
         run: |
@@ -413,10 +447,34 @@ jobs:
         with:
           path: artifacts
 
+      - name: Create source tarball
+        run: |
+          # Create a clean source tarball for building from source
+          # Exclude build artifacts, .git, and other unnecessary files
+          tar --exclude='.git' \
+              --exclude='build' \
+              --exclude='*.iso' \
+              --exclude='target' \
+              --exclude='*.o' \
+              --exclude='*.a' \
+              --exclude='.github/workflows/*.log' \
+              -czvf ravenlinux-${{ github.ref_name }}-source.tar.gz \
+              --transform "s,^,ravenlinux-${{ github.ref_name }}/," \
+              .
+
       - name: Prepare release assets
         run: |
           mkdir -p release
 
+          # ===========================================
+          # STANDALONE: raven-usb (USB flasher tool)
+          # ===========================================
+          cp artifacts/go-packages/raven-usb raven-usb-${{ github.ref_name }}-linux-x86_64
+          chmod +x raven-usb-${{ github.ref_name }}-linux-x86_64
+
+          # ===========================================
+          # Tools bundle (all other tools)
+          # ===========================================
           # Go packages
           cp artifacts/go-packages/vem release/vem-linux-x86_64
           cp artifacts/go-packages/carrion release/carrion-linux-x86_64
@@ -445,18 +503,49 @@ jobs:
           # Bootloader
           cp artifacts/raven-boot-efi/raven-boot.efi release/raven-boot.efi
 
-          # Create checksums
+          # Create checksums for tools
           cd release
           sha256sum * > SHA256SUMS
 
-          # Create tarball
+          # Create tools tarball
           cd ..
           tar czvf ravenlinux-tools-${{ github.ref_name }}-linux-x86_64.tar.gz -C release .
+
+          # Create checksums for all release files
+          sha256sum ravenlinux-${{ github.ref_name }}-source.tar.gz > ravenlinux-${{ github.ref_name }}-source.tar.gz.sha256
+          sha256sum raven-usb-${{ github.ref_name }}-linux-x86_64 > raven-usb-${{ github.ref_name }}-linux-x86_64.sha256
+          sha256sum ravenlinux-tools-${{ github.ref_name }}-linux-x86_64.tar.gz > ravenlinux-tools-${{ github.ref_name }}-linux-x86_64.tar.gz.sha256
 
       - name: Generate release notes
         run: |
           cat << 'EOF' > RELEASE_NOTES.md
           # RavenLinux ${{ github.ref_name }}
+
+          ## Downloads
+
+          | File | Description |
+          |------|-------------|
+          | `ravenlinux-${{ github.ref_name }}.iso` | Bootable ISO image - burn to USB and boot |
+          | `raven-usb-${{ github.ref_name }}-linux-x86_64` | USB flasher tool - use to write ISO to USB drive |
+          | `ravenlinux-${{ github.ref_name }}-source.tar.gz` | Complete source code for building from scratch |
+          | `ravenlinux-tools-${{ github.ref_name }}-linux-x86_64.tar.gz` | All tools bundled together |
+
+          ## Quick Start
+
+          ### Option 1: Flash ISO to USB
+          ```bash
+          # Download the ISO and raven-usb tool
+          chmod +x raven-usb-*-linux-x86_64
+          sudo ./raven-usb-*-linux-x86_64 ravenlinux-*.iso /dev/sdX
+          ```
+
+          ### Option 2: Build from Source
+          ```bash
+          # Extract and build
+          tar xzf ravenlinux-${{ github.ref_name }}-source.tar.gz
+          cd ravenlinux-${{ github.ref_name }}
+          ./scripts/build.sh
+          ```
 
           ## Components
 
@@ -470,12 +559,7 @@ jobs:
           | `raven-usb` | USB bootable drive creator |
           | `raven-boot.efi` | UEFI bootloader |
 
-          ## Installation
-
-          ### Full System
-          Download the ISO and boot from USB to install RavenLinux.
-
-          ### Individual Tools
+          ## Individual Tool Installation
 
           ```bash
           # Text editor
@@ -491,9 +575,6 @@ jobs:
           sudo install -m 755 rvn-linux-x86_64 /usr/local/bin/rvn
           ```
 
-          ### Bootloader
-          Copy `raven-boot.efi` to `/EFI/raven/` on your EFI System Partition.
-
           ## Checksums
 
           See `SHA256SUMS` file for verification.
@@ -504,8 +585,12 @@ jobs:
         with:
           body_path: RELEASE_NOTES.md
           files: |
+            ravenlinux-${{ github.ref_name }}-source.tar.gz
+            ravenlinux-${{ github.ref_name }}-source.tar.gz.sha256
+            raven-usb-${{ github.ref_name }}-linux-x86_64
+            raven-usb-${{ github.ref_name }}-linux-x86_64.sha256
             ravenlinux-tools-${{ github.ref_name }}-linux-x86_64.tar.gz
-            release/*
+            ravenlinux-tools-${{ github.ref_name }}-linux-x86_64.tar.gz.sha256
           draft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
         env:
@@ -529,9 +614,26 @@ jobs:
           name: ravenlinux-iso
           path: iso
 
+      - name: Prepare ISO for release
+        run: |
+          # Rename ISO to include version tag
+          cd iso
+          for f in raven-*.iso; do
+            if [ -f "$f" ]; then
+              mv "$f" "ravenlinux-${{ github.ref_name }}.iso"
+            fi
+          done
+
+          # Generate checksums for ISO
+          sha256sum ravenlinux-${{ github.ref_name }}.iso > ravenlinux-${{ github.ref_name }}.iso.sha256
+          md5sum ravenlinux-${{ github.ref_name }}.iso > ravenlinux-${{ github.ref_name }}.iso.md5
+
       - name: Upload ISO to release
         uses: softprops/action-gh-release@v1
         with:
-          files: iso/*.iso
+          files: |
+            iso/ravenlinux-${{ github.ref_name }}.iso
+            iso/ravenlinux-${{ github.ref_name }}.iso.sha256
+            iso/ravenlinux-${{ github.ref_name }}.iso.md5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
