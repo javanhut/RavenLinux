@@ -33,9 +33,20 @@ fi
 # Options
 MEMORY="2G"
 GRAPHICS=""
-KERNEL="/boot/vmlinuz-linux"
-INITRD="/boot/initramfs-linux.img"
 CMDLINE="rdinit=/init"
+
+# Use RavenLinux kernel/initramfs if available, otherwise fall back to host
+if [[ -f "${RAVEN_BUILD}/kernel/boot/vmlinuz-raven" ]]; then
+    KERNEL="${RAVEN_BUILD}/kernel/boot/vmlinuz-raven"
+else
+    KERNEL="/boot/vmlinuz-linux"
+fi
+
+if [[ -f "${RAVEN_BUILD}/initramfs-raven.img" ]]; then
+    INITRD="${RAVEN_BUILD}/initramfs-raven.img"
+else
+    INITRD="/boot/initramfs-linux.img"
+fi
 
 show_help() {
     cat << EOF

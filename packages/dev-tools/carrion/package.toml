@@ -1,0 +1,33 @@
+[package]
+name = "carrion"
+version = "main"
+description = "The Carrion Programming Language - a modern interpreted language"
+license = "MIT"
+homepage = "https://github.com/javanhut/TheCarrionLanguage"
+repository = "https://github.com/javanhut/TheCarrionLanguage"
+maintainers = ["javanhut"]
+categories = ["dev-tools", "languages", "interpreters"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/TheCarrionLanguage.git"
+ref = "main"
+
+[build]
+system = "go"
+build_flags = ["-o", "carrion"]
+env = { "CGO_ENABLED" = "0" }
+pre_build = ["go mod download"]
+post_build = []
+
+[dependencies]
+runtime = []
+build = ["go"]
+
+[install]
+files = [
+    { src = "carrion", dest = "/usr/bin/carrion", mode = 755 }
+]
+
+# Additional tools that come with Carrion
+# These may be built separately if they exist as separate binaries

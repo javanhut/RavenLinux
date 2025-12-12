@@ -1,0 +1,30 @@
+[package]
+name = "ivaldi"
+version = "main"
+description = "Ivaldi VCS - A modern version control system with content-addressable storage"
+license = "MIT"
+homepage = "https://github.com/javanhut/IvaldiVCS"
+repository = "https://github.com/javanhut/IvaldiVCS"
+maintainers = ["javanhut"]
+categories = ["dev-tools", "vcs"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/IvaldiVCS.git"
+ref = "main"
+
+[build]
+system = "go"
+build_flags = ["-o", "ivaldi"]
+env = { "CGO_ENABLED" = "0" }
+pre_build = ["go mod download"]
+post_build = []
+
+[dependencies]
+runtime = []
+build = ["go"]
+
+[install]
+files = [
+    { src = "ivaldi", dest = "/usr/bin/ivaldi", mode = 755 }
+]

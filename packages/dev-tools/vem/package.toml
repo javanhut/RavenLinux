@@ -1,0 +1,36 @@
+[package]
+name = "vem"
+version = "main"
+description = "A lightweight, GPU-accelerated text editor built with Go and Gio"
+license = "MIT"
+homepage = "https://github.com/javanhut/Vem"
+repository = "https://github.com/javanhut/Vem"
+maintainers = ["javanhut"]
+categories = ["dev-tools", "editors"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/Vem.git"
+ref = "main"
+
+[build]
+system = "go"
+build_flags = ["-o", "vem"]
+env = { "CGO_ENABLED" = "1" }
+pre_build = ["go mod download"]
+post_build = []
+
+[dependencies]
+# Vem requires Wayland for display
+runtime = ["wayland", "vulkan-loader", "mesa"]
+build = ["go", "wayland-protocols", "vulkan-headers"]
+
+[install]
+files = [
+    { src = "vem", dest = "/usr/bin/vem", mode = 755 }
+]
+
+[environment]
+# Set vem as an available editor option
+EDITOR = "vem"
+VISUAL = "vem"
