@@ -4,22 +4,33 @@
 # =============================================================================
 # Builds the raven-compositor Wayland compositor
 
-set -e
+set -euo pipefail
+
+# =============================================================================
+# Environment Setup
+# =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="${RAVEN_ROOT:-$(dirname "$SCRIPT_DIR")}"
 COMPOSITOR_DIR="${PROJECT_ROOT}/desktop/compositor"
-OUTPUT_DIR="${PROJECT_ROOT}/build/packages/bin"
+OUTPUT_DIR="${RAVEN_BUILD:-${PROJECT_ROOT}/build}/packages/bin"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# =============================================================================
+# Logging (use shared library or define fallbacks)
+# =============================================================================
 
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+if [[ -f "${SCRIPT_DIR}/lib/logging.sh" ]]; then
+    source "${SCRIPT_DIR}/lib/logging.sh"
+else
+    # Fallback logging functions
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    BLUE='\033[0;34m'
+    NC='\033[0m'
+    log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+    log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+    log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+fi
 
 echo ""
 echo "=========================================="

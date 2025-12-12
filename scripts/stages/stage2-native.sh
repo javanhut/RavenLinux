@@ -8,23 +8,34 @@
 
 set -euo pipefail
 
+# =============================================================================
+# Environment Setup (with defaults for standalone execution)
+# =============================================================================
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
-BUILD_DIR="${PROJECT_ROOT}/build"
-SYSROOT_DIR="${BUILD_DIR}/sysroot"
-LOGS_DIR="${BUILD_DIR}/logs"
+PROJECT_ROOT="${RAVEN_ROOT:-$(dirname "$(dirname "$SCRIPT_DIR")")}"
+BUILD_DIR="${RAVEN_BUILD:-${PROJECT_ROOT}/build}"
+SYSROOT_DIR="${SYSROOT_DIR:-${BUILD_DIR}/sysroot}"
+LOGS_DIR="${LOGS_DIR:-${BUILD_DIR}/logs}"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# =============================================================================
+# Logging (use shared library or define fallbacks)
+# =============================================================================
 
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+if [[ -f "${PROJECT_ROOT}/scripts/lib/logging.sh" ]]; then
+    source "${PROJECT_ROOT}/scripts/lib/logging.sh"
+else
+    # Fallback logging functions
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    NC='\033[0m'
+    log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+    log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+    log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+    log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+fi
 
 # =============================================================================
 # Copy shells from host

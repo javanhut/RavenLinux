@@ -4,24 +4,36 @@
 
 set -euo pipefail
 
-RAVEN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RAVEN_BUILD="${RAVEN_ROOT}/build"
+# =============================================================================
+# Environment Setup
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RAVEN_ROOT="${RAVEN_ROOT:-$(dirname "$SCRIPT_DIR")}"
+RAVEN_BUILD="${RAVEN_BUILD:-${RAVEN_ROOT}/build}"
 DEV_ROOT="${RAVEN_BUILD}/dev-root"
 DEV_WORK="${RAVEN_BUILD}/dev-work"
 DEV_MERGED="${RAVEN_BUILD}/dev-merged"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+# =============================================================================
+# Logging (use shared library or define fallbacks)
+# =============================================================================
 
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+if [[ -f "${SCRIPT_DIR}/lib/logging.sh" ]]; then
+    source "${SCRIPT_DIR}/lib/logging.sh"
+else
+    # Fallback logging functions
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    NC='\033[0m'
+    log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+    log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+    log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+    log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+fi
 
 show_help() {
     cat << 'EOF'

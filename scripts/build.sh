@@ -45,6 +45,12 @@ TOOLCHAIN_DIR="${RAVEN_BUILD}/toolchain"
 SYSROOT_DIR="${RAVEN_BUILD}/sysroot"
 STAGING_DIR="${RAVEN_BUILD}/staging"
 SOURCES_DIR="${RAVEN_BUILD}/sources"
+LOGS_DIR="${RAVEN_BUILD}/logs"
+PACKAGES_DIR="${RAVEN_BUILD}/packages"
+
+# Export all variables for stage scripts
+export RAVEN_ROOT RAVEN_BUILD RAVEN_VERSION RAVEN_ARCH RAVEN_TARGET RAVEN_JOBS
+export TOOLCHAIN_DIR SYSROOT_DIR STAGING_DIR SOURCES_DIR LOGS_DIR PACKAGES_DIR
 
 # Source shared logging library
 source "${SCRIPT_DIR}/lib/logging.sh"

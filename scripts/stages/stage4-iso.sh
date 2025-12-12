@@ -10,15 +10,18 @@
 
 set -euo pipefail
 
-# Allow running standalone or sourced from build.sh
+# =============================================================================
+# Environment Setup (with defaults for standalone execution)
+# =============================================================================
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${RAVEN_ROOT:-$(dirname "$(dirname "$SCRIPT_DIR")")}"
 BUILD_DIR="${RAVEN_BUILD:-${PROJECT_ROOT}/build}"
-SYSROOT_DIR="${BUILD_DIR}/sysroot"
-PACKAGES_DIR="${BUILD_DIR}/packages"
+SYSROOT_DIR="${SYSROOT_DIR:-${BUILD_DIR}/sysroot}"
+PACKAGES_DIR="${PACKAGES_DIR:-${BUILD_DIR}/packages}"
 ISO_DIR="${BUILD_DIR}/iso"
 ISO_ROOT="${ISO_DIR}/iso-root"
-LOGS_DIR="${BUILD_DIR}/logs"
+LOGS_DIR="${LOGS_DIR:-${BUILD_DIR}/logs}"
 
 # Version info
 RAVEN_VERSION="${RAVEN_VERSION:-2025.12}"
@@ -26,20 +29,26 @@ RAVEN_ARCH="${RAVEN_ARCH:-x86_64}"
 ISO_LABEL="RAVEN_LIVE"
 ISO_OUTPUT="${PROJECT_ROOT}/raven-${RAVEN_VERSION}-${RAVEN_ARCH}.iso"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+# =============================================================================
+# Logging (use shared library or define fallbacks)
+# =============================================================================
 
-# Use existing log functions or define them
-type log_info &>/dev/null || log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-type log_success &>/dev/null || log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-type log_warn &>/dev/null || log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-type log_error &>/dev/null || log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-log_step() { echo -e "${CYAN}[STEP]${NC} $1"; }
+if [[ -f "${PROJECT_ROOT}/scripts/lib/logging.sh" ]]; then
+    source "${PROJECT_ROOT}/scripts/lib/logging.sh"
+else
+    # Fallback logging functions
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    NC='\033[0m'
+    log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+    log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+    log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+    log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+    log_step() { echo -e "${CYAN}[STEP]${NC} $1"; }
+fi
 
 # =============================================================================
 # Check dependencies

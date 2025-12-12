@@ -45,7 +45,36 @@ fi
 # =============================================================================
 # Colors for terminal output
 # =============================================================================
-if [[ -t 1 ]]; then
+
+# Determine if we should use colors:
+# - NO_COLOR env var disables colors (https://no-color.org/)
+# - TERM=dumb or unset means no color support
+# - Not a terminal (piped/redirected) means no colors
+# - FORCE_COLOR=1 overrides and enables colors
+_use_colors() {
+    # User explicitly disabled colors
+    [[ -n "${NO_COLOR:-}" ]] && return 1
+
+    # User explicitly enabled colors
+    [[ "${FORCE_COLOR:-}" == "1" ]] && return 0
+
+    # Not a terminal (piped or redirected)
+    [[ ! -t 1 ]] && return 1
+
+    # Dumb terminal or no TERM set
+    [[ -z "${TERM:-}" || "${TERM:-}" == "dumb" ]] && return 1
+
+    # Check if terminal supports colors (if tput available)
+    if command -v tput &>/dev/null; then
+        [[ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]] && return 0
+        return 1
+    fi
+
+    # Default: assume colors work in interactive terminal
+    return 0
+}
+
+if _use_colors; then
     RED='\033[0;31m'
     GREEN='\033[0;32m'
     YELLOW='\033[1;33m'
@@ -55,7 +84,7 @@ if [[ -t 1 ]]; then
     BOLD='\033[1m'
     NC='\033[0m' # No Color
 else
-    # No colors if not a terminal
+    # No colors
     RED=''
     GREEN=''
     YELLOW=''
@@ -95,8 +124,8 @@ init_logging() {
                 echo "  Description: ${description}"
             fi
             echo "  Started:     $(date '+%Y-%m-%d %H:%M:%S')"
-            echo "  Hostname:    $(hostname)"
-            echo "  User:        $(whoami)"
+            echo "  Hostname:    $(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo 'unknown')"
+            echo "  User:        $(whoami 2>/dev/null || echo "${USER:-unknown}")"
             echo "  Working Dir: $(pwd)"
             echo "  Kernel:      $(uname -r)"
             echo "=============================================================================="

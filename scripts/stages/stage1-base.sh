@@ -7,16 +7,26 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
-BUILD_DIR="${PROJECT_ROOT}/build"
-SOURCES_DIR="${BUILD_DIR}/sources"
-SYSROOT_DIR="${BUILD_DIR}/sysroot"
-LOGS_DIR="${BUILD_DIR}/logs"
+# =============================================================================
+# Environment Setup (with defaults for standalone execution)
+# =============================================================================
 
-# Source common functions from parent
-source "${PROJECT_ROOT}/scripts/build.sh" 2>/dev/null || {
-    # Define logging if not sourced
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${RAVEN_ROOT:-$(dirname "$(dirname "$SCRIPT_DIR")")}"
+BUILD_DIR="${RAVEN_BUILD:-${PROJECT_ROOT}/build}"
+SOURCES_DIR="${SOURCES_DIR:-${BUILD_DIR}/sources}"
+SYSROOT_DIR="${SYSROOT_DIR:-${BUILD_DIR}/sysroot}"
+LOGS_DIR="${LOGS_DIR:-${BUILD_DIR}/logs}"
+RAVEN_JOBS="${RAVEN_JOBS:-$(nproc)}"
+
+# =============================================================================
+# Logging (use shared library or define fallbacks)
+# =============================================================================
+
+if [[ -f "${PROJECT_ROOT}/scripts/lib/logging.sh" ]]; then
+    source "${PROJECT_ROOT}/scripts/lib/logging.sh"
+else
+    # Fallback logging functions
     RED='\033[0;31m'
     GREEN='\033[0;32m'
     YELLOW='\033[1;33m'
@@ -26,9 +36,7 @@ source "${PROJECT_ROOT}/scripts/build.sh" 2>/dev/null || {
     log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
     log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
     log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-}
-
-RAVEN_JOBS="${RAVEN_JOBS:-$(nproc)}"
+fi
 
 # =============================================================================
 # Build uutils-coreutils (Rust implementation)
