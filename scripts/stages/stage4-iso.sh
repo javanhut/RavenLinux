@@ -98,49 +98,26 @@ export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export HOME=/root
 export TERM=linux
 export LANG=en_US.UTF-8
+export PS1='[raven:\w]# '
 
-echo "Starting Raven Linux..."
-
-# Mount essential filesystems
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
-mkdir -p /dev/pts /dev/shm
-mount -t devpts devpts /dev/pts
-mount -t tmpfs tmpfs /dev/shm
-mount -t tmpfs tmpfs /tmp
-mount -t tmpfs tmpfs /run
+# Mount essential filesystems if not already mounted
+mountpoint -q /proc || mount -t proc proc /proc
+mountpoint -q /sys || mount -t sysfs sysfs /sys
+mountpoint -q /dev || mount -t devtmpfs devtmpfs /dev 2>/dev/null || mount -t tmpfs tmpfs /dev
+mkdir -p /dev/pts /dev/shm /tmp /run
+mountpoint -q /dev/pts || mount -t devpts devpts /dev/pts
+mountpoint -q /dev/shm || mount -t tmpfs tmpfs /dev/shm
+mountpoint -q /tmp || mount -t tmpfs tmpfs /tmp
+mountpoint -q /run || mount -t tmpfs tmpfs /run
 
 # Set hostname
-hostname raven
-echo "raven" > /etc/hostname 2>/dev/null || true
+hostname raven 2>/dev/null || true
 
-# Start udevd if available
-if [[ -x /sbin/udevd ]]; then
-    /sbin/udevd --daemon 2>/dev/null
-    udevadm trigger 2>/dev/null
-    udevadm settle 2>/dev/null
-elif [[ -x /lib/systemd/systemd-udevd ]]; then
-    /lib/systemd/systemd-udevd --daemon 2>/dev/null
-fi
-
-# Configure networking
-for iface in /sys/class/net/e* /sys/class/net/eth*; do
-    [[ -d "$iface" ]] || continue
-    name="$(basename "$iface")"
-    ip link set "$name" up 2>/dev/null
-    if command -v dhcpcd &>/dev/null; then
-        dhcpcd -q "$name" 2>/dev/null &
-    elif command -v dhclient &>/dev/null; then
-        dhclient "$name" 2>/dev/null &
-    fi
-done
-
-# Wait briefly for network
-sleep 1
+# Suppress kernel messages
+dmesg -n 1 2>/dev/null || true
 
 # Clear screen and show banner
-clear
+clear 2>/dev/null || true
 cat << 'BANNER'
 
     ██████╗  █████╗ ██╗   ██╗███████╗███╗   ██╗
@@ -154,7 +131,7 @@ cat << 'BANNER'
 BANNER
 
 echo "  Welcome to Raven Linux Live!"
-echo "  Version: $(grep VERSION_ID /etc/os-release 2>/dev/null | cut -d= -f2 || echo "2025.12")"
+echo "  Version: 2025.12"
 echo ""
 echo "  Built-in Tools:"
 echo "    vem        - Text editor"
@@ -162,13 +139,26 @@ echo "    carrion    - Programming language"
 echo "    ivaldi     - Version control system"
 echo "    rvn        - Package manager"
 echo ""
-echo "  Installation:"
-echo "    raven-install  - GUI installer to install Raven Linux to disk"
-echo "    raven-usb      - Create bootable USB drives"
+echo "  Type 'poweroff' to shutdown, 'reboot' to restart"
 echo ""
 
-# Start login shell
-exec /bin/zsh -l 2>/dev/null || exec /bin/bash -l || exec /bin/sh
+# Start an interactive shell loop
+# This keeps init running and respawns the shell if it exits
+cd /root
+while true; do
+    # Try bash first (most feature-rich)
+    if [ -x /bin/bash ]; then
+        /bin/bash --login -i
+    elif [ -x /bin/sh ]; then
+        /bin/sh -l
+    else
+        echo "No shell available! Sleeping..."
+        sleep 10
+    fi
+    echo ""
+    echo "Shell exited. Restarting..."
+    sleep 1
+done
 INIT
     chmod +x "${SYSROOT_DIR}/init"
 
@@ -293,23 +283,23 @@ default = 0
 
 [entry]
 name = "Raven Linux Live"
-kernel = "\\boot\\vmlinuz"
-initrd = "\\boot\\initramfs.img"
-cmdline = "rdinit=/init quiet loglevel=3"
+kernel = "\\EFI\\raven\\vmlinuz"
+initrd = "\\EFI\\raven\\initramfs.img"
+cmdline = "rdinit=/init quiet loglevel=3 console=tty0 console=ttyS0,115200"
 type = linux-efi
 
 [entry]
 name = "Raven Linux Live (Verbose)"
-kernel = "\\boot\\vmlinuz"
-initrd = "\\boot\\initramfs.img"
-cmdline = "rdinit=/init"
+kernel = "\\EFI\\raven\\vmlinuz"
+initrd = "\\EFI\\raven\\initramfs.img"
+cmdline = "rdinit=/init console=tty0 console=ttyS0,115200"
 type = linux-efi
 
 [entry]
 name = "Raven Linux (Recovery)"
-kernel = "\\boot\\vmlinuz"
-initrd = "\\boot\\initramfs.img"
-cmdline = "rdinit=/init single"
+kernel = "\\EFI\\raven\\vmlinuz"
+initrd = "\\EFI\\raven\\initramfs.img"
+cmdline = "rdinit=/init single console=tty0 console=ttyS0,115200"
 type = linux-efi
 EOF
 
@@ -342,17 +332,17 @@ set color_normal=cyan/black
 set color_highlight=white/blue
 
 menuentry "Raven Linux Live" --class raven {
-    linux /boot/vmlinuz rdinit=/init quiet loglevel=3
+    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 console=tty0 console=ttyS0,115200
     initrd /boot/initramfs.img
 }
 
 menuentry "Raven Linux Live (Verbose)" --class raven {
-    linux /boot/vmlinuz rdinit=/init
+    linux /boot/vmlinuz rdinit=/init console=tty0 console=ttyS0,115200
     initrd /boot/initramfs.img
 }
 
 menuentry "Raven Linux (Recovery)" --class raven {
-    linux /boot/vmlinuz rdinit=/init single
+    linux /boot/vmlinuz rdinit=/init single console=tty0 console=ttyS0,115200
     initrd /boot/initramfs.img
 }
 
@@ -389,8 +379,20 @@ create_efi_image() {
 
     local efi_img="${ISO_ROOT}/boot/efiboot.img"
 
+    # Calculate size needed: kernel + initramfs + bootloader + some headroom
+    local kernel_size=0
+    local initrd_size=0
+    [[ -f "${ISO_ROOT}/boot/vmlinuz" ]] && kernel_size=$(stat -c%s "${ISO_ROOT}/boot/vmlinuz")
+    [[ -f "${ISO_ROOT}/boot/initramfs.img" ]] && initrd_size=$(stat -c%s "${ISO_ROOT}/boot/initramfs.img")
+
+    # Size in MB: (kernel + initramfs + 5MB headroom) / 1MB, minimum 40MB
+    local size_mb=$(( (kernel_size + initrd_size + 5*1024*1024) / (1024*1024) ))
+    [[ $size_mb -lt 40 ]] && size_mb=40
+
+    log_info "Creating ${size_mb}MB EFI boot image..."
+
     # Create FAT image for EFI
-    dd if=/dev/zero of="${efi_img}" bs=1M count=10 2>/dev/null
+    dd if=/dev/zero of="${efi_img}" bs=1M count=${size_mb} 2>/dev/null
 
     if command -v mkfs.vfat &>/dev/null; then
         mkfs.vfat "${efi_img}" 2>/dev/null
@@ -401,18 +403,40 @@ create_efi_image() {
         return 1
     fi
 
-    # Copy EFI files using mtools
+    # Copy files using mtools
     if command -v mcopy &>/dev/null; then
+        # Create directory structure
         mmd -i "${efi_img}" ::/EFI 2>/dev/null || true
         mmd -i "${efi_img}" ::/EFI/BOOT 2>/dev/null || true
-        mcopy -i "${efi_img}" "${ISO_ROOT}/EFI/BOOT/BOOTX64.EFI" ::/EFI/BOOT/ 2>/dev/null || true
+        mmd -i "${efi_img}" ::/EFI/raven 2>/dev/null || true
+        mmd -i "${efi_img}" ::/boot 2>/dev/null || true
+        mmd -i "${efi_img}" ::/boot/grub 2>/dev/null || true
 
-        if [[ -d "${ISO_ROOT}/EFI/raven" ]]; then
-            mmd -i "${efi_img}" ::/EFI/raven 2>/dev/null || true
-            for f in "${ISO_ROOT}/EFI/raven"/*; do
-                [[ -f "$f" ]] && mcopy -i "${efi_img}" "$f" ::/EFI/raven/ 2>/dev/null || true
-            done
+        # Copy bootloader (RavenBoot or GRUB)
+        mcopy -i "${efi_img}" "${ISO_ROOT}/EFI/BOOT/BOOTX64.EFI" ::/EFI/BOOT/ 2>/dev/null || true
+        log_info "  Copied EFI bootloader"
+
+        # Copy RavenBoot config if present
+        if [[ -f "${ISO_ROOT}/EFI/raven/boot.conf" ]]; then
+            mcopy -i "${efi_img}" "${ISO_ROOT}/EFI/raven/boot.conf" ::/EFI/raven/ 2>/dev/null || true
+            log_info "  Copied RavenBoot config"
         fi
+
+        # Copy GRUB config as fallback
+        if [[ -f "${ISO_ROOT}/boot/grub/grub.cfg" ]]; then
+            mcopy -i "${efi_img}" "${ISO_ROOT}/boot/grub/grub.cfg" ::/boot/grub/ 2>/dev/null || true
+        fi
+
+        # Copy kernel and initramfs to EFI/raven/ for RavenBoot
+        if [[ -f "${ISO_ROOT}/boot/vmlinuz" ]]; then
+            mcopy -i "${efi_img}" "${ISO_ROOT}/boot/vmlinuz" ::/EFI/raven/ 2>/dev/null || true
+            log_info "  Copied kernel to EFI image"
+        fi
+        if [[ -f "${ISO_ROOT}/boot/initramfs.img" ]]; then
+            mcopy -i "${efi_img}" "${ISO_ROOT}/boot/initramfs.img" ::/EFI/raven/ 2>/dev/null || true
+            log_info "  Copied initramfs to EFI image"
+        fi
+
         log_success "EFI image created"
     else
         log_warn "mtools not found, EFI boot may not work"
@@ -510,7 +534,7 @@ print_summary() {
     if [[ -f "${PACKAGES_DIR}/boot/raven-boot.efi" ]]; then
         echo "  Bootloader: RavenBoot (UEFI)"
     else
-        echo "  Bootloader: GRUB"
+        echo "  Bootloader: GRUB (UEFI)"
     fi
 
     echo ""
@@ -544,7 +568,7 @@ main() {
     copy_boot_files
     create_squashfs
     setup_ravenboot || true  # Continue even if RavenBoot not available
-    setup_grub
+    setup_grub  # GRUB as fallback for BIOS
     create_efi_image
     create_iso_info
     generate_iso

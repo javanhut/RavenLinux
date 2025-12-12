@@ -63,7 +63,8 @@ create_directory_structure() {
     log_step "Creating directory structure..."
 
     mkdir -p "${INITRAMFS_DIR}"/{bin,sbin,usr/bin,usr/sbin,usr/lib,lib,lib64}
-    mkdir -p "${INITRAMFS_DIR}"/{dev,proc,sys,run,tmp,mnt,root}
+    mkdir -p "${INITRAMFS_DIR}"/{dev,proc,sys,run,tmp,root}
+    mkdir -p "${INITRAMFS_DIR}"/mnt/{cdrom,squashfs,root,overlay,work}
     mkdir -p "${INITRAMFS_DIR}"/etc/{raven,rvn}
     mkdir -p "${INITRAMFS_DIR}"/var/{log,tmp}
 
@@ -117,7 +118,8 @@ copy_binaries() {
     done
 
     # These need to come from host (not in uutils or need special handling)
-    local host_bins=(mount umount dmesg clear reset ps kill free grep sed awk find xargs poweroff reboot)
+    # Include switch_root for live boot
+    local host_bins=(mount umount dmesg clear reset ps kill free grep sed awk find xargs poweroff reboot switch_root losetup blkid)
     for bin in "${host_bins[@]}"; do
         if command -v "$bin" &>/dev/null; then
             cp "$(which "$bin")" "${INITRAMFS_DIR}/bin/" 2>/dev/null || true
@@ -271,49 +273,158 @@ create_init() {
 
     cat > "${INITRAMFS_DIR}/init" <<'INITSCRIPT'
 #!/bin/bash
-# RavenLinux minimal init
+# RavenLinux Live Boot Init
+# Mounts the squashfs filesystem from the live ISO and switches to it
 
-# Set PATH immediately so symlinked commands work
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 
-echo "Starting Raven Linux..."
+# Helper functions
+msg() { echo -e "\033[1;34m::\033[0m $1"; }
+err() { echo -e "\033[1;31mERROR:\033[0m $1"; }
+rescue_shell() {
+    err "Boot failed! Dropping to rescue shell..."
+    err "Reason: $1"
+    echo ""
+    echo "  You can try to fix the problem manually."
+    echo "  Type 'reboot' to restart, 'poweroff' to shut down."
+    echo ""
+    exec /bin/bash
+}
+
+msg "Starting Raven Linux..."
 
 # Mount essential filesystems
+msg "Mounting virtual filesystems..."
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
-/bin/coreutils mkdir -p /dev/pts
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || mount -t tmpfs tmpfs /dev
+mkdir -p /dev/pts /dev/shm
 mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /dev/shm
 
-# Set hostname
-/bin/coreutils hostname raven 2>/dev/null || hostname raven 2>/dev/null || true
+# Create mount points
+mkdir -p /mnt/cdrom /mnt/squashfs /mnt/root /mnt/overlay /mnt/work
 
-# Basic kernel messages
+# Suppress kernel messages for cleaner output
 dmesg -n 1 2>/dev/null || true
 
-clear 2>/dev/null || true
-echo ""
-echo "  ====================================="
-echo "  |       R A V E N   L I N U X       |"
-echo "  ====================================="
-echo ""
-echo "  Welcome to Raven Linux!"
-echo "  This is a minimal test environment."
-echo ""
-/bin/coreutils cat /etc/os-release
-echo ""
-echo "  Type 'poweroff' to shutdown"
-echo "  Or press Ctrl+A, X to exit QEMU"
-echo ""
+# Wait for devices to settle (CD-ROM may take a moment)
+msg "Waiting for devices..."
+sleep 2
 
-# Check for zsh, fall back to bash
-if [ -x /bin/zsh ]; then
-    exec /bin/zsh -l
-elif [ -x /bin/bash ]; then
-    exec /bin/bash -l
-else
-    exec /bin/bash
+# Find the boot device (CD-ROM with our live filesystem)
+BOOT_DEVICE=""
+ISO_LABEL="RAVEN_LIVE"
+
+msg "Searching for boot device..."
+
+# Method 1: Look for device with our label using blkid
+if command -v blkid &>/dev/null; then
+    for dev in /dev/sr0 /dev/sr1 /dev/cdrom /dev/dvd; do
+        if [ -b "$dev" ]; then
+            label=$(blkid -o value -s LABEL "$dev" 2>/dev/null)
+            if [ "$label" = "$ISO_LABEL" ]; then
+                BOOT_DEVICE="$dev"
+                msg "Found boot device by label: $BOOT_DEVICE"
+                break
+            fi
+        fi
+    done
 fi
+
+# Method 2: Try common CD-ROM devices
+if [ -z "$BOOT_DEVICE" ]; then
+    for dev in /dev/sr0 /dev/sr1 /dev/cdrom /dev/loop0; do
+        if [ -b "$dev" ]; then
+            BOOT_DEVICE="$dev"
+            msg "Using device: $BOOT_DEVICE"
+            break
+        fi
+    done
+fi
+
+if [ -z "$BOOT_DEVICE" ]; then
+    rescue_shell "No boot device found"
+fi
+
+# Mount the CD-ROM/ISO
+msg "Mounting boot device..."
+if ! mount -t iso9660 -o ro "$BOOT_DEVICE" /mnt/cdrom 2>/dev/null; then
+    # Try auto detection
+    if ! mount -o ro "$BOOT_DEVICE" /mnt/cdrom 2>/dev/null; then
+        rescue_shell "Failed to mount boot device: $BOOT_DEVICE"
+    fi
+fi
+
+# Check for squashfs
+SQUASHFS="/mnt/cdrom/raven/filesystem.squashfs"
+if [ ! -f "$SQUASHFS" ]; then
+    # Try alternative locations
+    for alt in "/mnt/cdrom/live/filesystem.squashfs" "/mnt/cdrom/squashfs.img"; do
+        if [ -f "$alt" ]; then
+            SQUASHFS="$alt"
+            break
+        fi
+    done
+fi
+
+if [ ! -f "$SQUASHFS" ]; then
+    ls -la /mnt/cdrom/ 2>/dev/null
+    rescue_shell "Squashfs not found at $SQUASHFS"
+fi
+
+msg "Found squashfs: $SQUASHFS"
+
+# Mount the squashfs
+msg "Mounting squashfs filesystem..."
+if ! mount -t squashfs -o ro,loop "$SQUASHFS" /mnt/squashfs 2>/dev/null; then
+    rescue_shell "Failed to mount squashfs"
+fi
+
+# Create overlay filesystem for writable live system
+msg "Setting up overlay filesystem..."
+mount -t tmpfs tmpfs /mnt/overlay
+mkdir -p /mnt/overlay/upper /mnt/overlay/work
+
+if mount -t overlay overlay -o lowerdir=/mnt/squashfs,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work /mnt/root 2>/dev/null; then
+    msg "Overlay mounted successfully"
+else
+    # Fallback: mount squashfs directly (read-only)
+    msg "Overlay failed, using read-only root"
+    mount --bind /mnt/squashfs /mnt/root
+fi
+
+# Move the virtual filesystems to the new root
+msg "Preparing to switch root..."
+mkdir -p /mnt/root/proc /mnt/root/sys /mnt/root/dev /mnt/root/mnt/cdrom
+
+mount --move /proc /mnt/root/proc
+mount --move /sys /mnt/root/sys
+mount --move /dev /mnt/root/dev
+mount --bind /mnt/cdrom /mnt/root/mnt/cdrom 2>/dev/null || true
+
+# Find init in the new root
+NEW_INIT=""
+for init in /init /sbin/init /bin/init; do
+    if [ -x "/mnt/root$init" ]; then
+        NEW_INIT="$init"
+        break
+    fi
+done
+
+if [ -z "$NEW_INIT" ]; then
+    # Fallback to shell
+    NEW_INIT="/bin/bash"
+fi
+
+msg "Switching to live filesystem..."
+msg "Running $NEW_INIT"
+
+# Switch to the new root
+exec switch_root /mnt/root "$NEW_INIT"
+
+# If switch_root fails
+rescue_shell "switch_root failed"
 INITSCRIPT
 
     chmod +x "${INITRAMFS_DIR}/init"
