@@ -40,8 +40,80 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  RAVEN_VERSION: "2025.12"
+  KERNEL_VERSION: "6.17.11"
 
 jobs:
+  # ===========================================================================
+  # Build Go Components
+  # ===========================================================================
+  build-go:
+    name: Build Go Components
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Install GUI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev \
+            libxi-dev libxxf86vm-dev libwayland-dev pkg-config
+
+      - name: Build Vem (text editor)
+        run: |
+          mkdir -p build/packages/bin build/sources
+          git clone --depth 1 https://github.com/javanhut/Vem.git build/sources/vem
+          cd build/sources/vem
+          CGO_ENABLED=1 go build -o ../../../vem .
+
+      - name: Build Carrion (programming language)
+        run: |
+          git clone --depth 1 https://github.com/javanhut/TheCarrionLanguage.git build/sources/carrion
+          cd build/sources/carrion
+          CGO_ENABLED=0 go build -o ../../../carrion ./src/main.go
+
+      - name: Build Ivaldi (version control)
+        run: |
+          git clone --depth 1 https://github.com/javanhut/IvaldiVCS.git build/sources/ivaldi
+          cd build/sources/ivaldi
+          CGO_ENABLED=0 go build -o ../../../ivaldi .
+
+      - name: Build raven-installer
+        run: |
+          cd tools/raven-installer
+          go mod download
+          CGO_ENABLED=1 go build -o ../../raven-installer .
+
+      - name: Build raven-usb
+        run: |
+          cd tools/raven-usb
+          go mod download
+          CGO_ENABLED=1 go build -o ../../raven-usb .
+
+      - name: Upload Go packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-packages
+          path: |
+            vem
+            carrion
+            ivaldi
+            raven-installer
+            raven-usb
+          if-no-files-found: error
+
+
   # ===========================================================================
   # Build Rust Components
   # ===========================================================================
@@ -179,23 +251,24 @@ jobs:
       - name: Cache kernel source
         uses: actions/cache@v4
         with:
-          path: linux-*
-          key: linux-kernel-6.11.0
+          path: build/sources/linux-${{ env.KERNEL_VERSION }}*
+          key: linux-kernel-${{ env.KERNEL_VERSION }}
 
       - name: Download kernel source
         run: |
-          if [ ! -d "linux-6.11" ]; then
-            wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.11.tar.xz
-            tar xf linux-6.11.tar.xz
-            rm linux-6.11.tar.xz
+          mkdir -p build/sources
+          cd build/sources
+          if [ ! -d "linux-${{ env.KERNEL_VERSION }}" ]; then
+            wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${{ env.KERNEL_VERSION }}.tar.xz
+            tar xf linux-${{ env.KERNEL_VERSION }}.tar.xz
           fi
 
       - name: Configure kernel
         run: |
-          cd linux-6.11
+          cd build/sources/linux-${{ env.KERNEL_VERSION }}
           # Use RavenLinux kernel config if available, otherwise use default
-          if [ -f ../configs/kernel/config-x86_64 ]; then
-            cp ../configs/kernel/config-x86_64 .config
+          if [ -f ../../../configs/kernel/config-x86_64 ]; then
+            cp ../../../configs/kernel/config-x86_64 .config
           else
             make defconfig
             # Enable required options for modern boot
@@ -203,19 +276,30 @@ jobs:
             scripts/config --enable EFI_STUB
             scripts/config --enable IKCONFIG
             scripts/config --enable IKCONFIG_PROC
+            scripts/config --enable ZSTD_COMPRESS
+            scripts/config --enable KERNEL_ZSTD
           fi
+          # Set local version
+          scripts/config --set-str LOCALVERSION "-raven"
           make olddefconfig
 
       - name: Build kernel
         run: |
-          cd linux-6.11
-          make -j$(nproc) bzImage
+          cd build/sources/linux-${{ env.KERNEL_VERSION }}
+          make -j$(nproc) bzImage modules
+
+      - name: Package kernel
+        run: |
+          mkdir -p build/kernel/boot
+          cp build/sources/linux-${{ env.KERNEL_VERSION }}/arch/x86/boot/bzImage build/kernel/boot/vmlinuz-raven
+          cp build/sources/linux-${{ env.KERNEL_VERSION }}/System.map build/kernel/boot/System.map-raven
+          cp build/sources/linux-${{ env.KERNEL_VERSION }}/.config build/kernel/boot/config-raven
 
       - name: Upload kernel
         uses: actions/upload-artifact@v4
         with:
           name: linux-kernel
-          path: linux-6.11/arch/x86/boot/bzImage
+          path: build/kernel/boot/
           if-no-files-found: error
 
   # ===========================================================================
@@ -224,7 +308,7 @@ jobs:
   build-iso:
     name: Build ISO Image
     runs-on: ubuntu-latest
-    needs: [build-rust, build-bootloader, build-kernel]
+    needs: [build-go, build-rust, build-bootloader, build-kernel]
     if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.build_iso == 'true'
 
     steps:
@@ -241,26 +325,71 @@ jobs:
             mtools \
             dosfstools \
             grub-efi-amd64-bin \
+            grub-pc-bin \
+            squashfs-tools \
             cpio \
-            zstd
+            zstd \
+            bash \
+            zsh
 
-      - name: Download all artifacts
+      - name: Download kernel artifact
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          name: linux-kernel
+          path: build/kernel/boot/
+
+      - name: Download Go packages
+        uses: actions/download-artifact@v4
+        with:
+          name: go-packages
+          path: build/packages/bin/
+
+      - name: Download rvn package manager
+        uses: actions/download-artifact@v4
+        with:
+          name: rvn-linux-x86_64
+          path: build/packages/bin/
+        continue-on-error: true
+
+      - name: Download bootloader
+        uses: actions/download-artifact@v4
+        with:
+          name: raven-boot-efi
+          path: build/packages/boot/
+
+      - name: Setup sysroot
+        run: |
+          chmod +x scripts/stages/stage2-native.sh
+          export RAVEN_ROOT="${PWD}"
+          export RAVEN_BUILD="${PWD}/build"
+          ./scripts/stages/stage2-native.sh
+
+      - name: Build initramfs
+        run: |
+          chmod +x scripts/build-initramfs.sh
+          ./scripts/build-initramfs.sh || echo "Using fallback initramfs"
 
       - name: Build ISO
         run: |
-          chmod +x scripts/stage4-iso.sh
-          ./scripts/stage4-iso.sh
-        env:
-          ARTIFACTS_DIR: ${{ github.workspace }}/artifacts
+          chmod +x scripts/stages/stage4-iso.sh
+          export RAVEN_ROOT="${PWD}"
+          export RAVEN_BUILD="${PWD}/build"
+          export RAVEN_VERSION="${{ env.RAVEN_VERSION }}"
+          ./scripts/stages/stage4-iso.sh
+
+      - name: Generate checksums
+        run: |
+          sha256sum raven-*.iso > raven-${{ env.RAVEN_VERSION }}-x86_64.iso.sha256
+          md5sum raven-*.iso > raven-${{ env.RAVEN_VERSION }}-x86_64.iso.md5
 
       - name: Upload ISO
         uses: actions/upload-artifact@v4
         with:
           name: ravenlinux-iso
-          path: "*.iso"
+          path: |
+            raven-*.iso
+            raven-*.iso.sha256
+            raven-*.iso.md5
           if-no-files-found: warn
 
   # ===========================================================================
@@ -269,7 +398,7 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [build-rust, build-bootloader]
+    needs: [build-go, build-rust, build-bootloader]
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
@@ -287,21 +416,33 @@ jobs:
         run: |
           mkdir -p release
 
-          # Package manager
-          cp artifacts/rvn-linux-x86_64/rvn release/rvn-linux-x86_64
-          chmod +x release/rvn-linux-x86_64
+          # Go packages
+          cp artifacts/go-packages/vem release/vem-linux-x86_64
+          cp artifacts/go-packages/carrion release/carrion-linux-x86_64
+          cp artifacts/go-packages/ivaldi release/ivaldi-linux-x86_64
+          cp artifacts/go-packages/raven-installer release/raven-installer-linux-x86_64
+          cp artifacts/go-packages/raven-usb release/raven-usb-linux-x86_64
+          chmod +x release/vem-linux-x86_64 release/carrion-linux-x86_64 release/ivaldi-linux-x86_64
+          chmod +x release/raven-installer-linux-x86_64 release/raven-usb-linux-x86_64
 
-          # Init system
-          cp artifacts/raven-init-linux-x86_64/raven-init release/raven-init-linux-x86_64
-          cp artifacts/raven-rc-linux-x86_64/raven-rc release/raven-rc-linux-x86_64
-          chmod +x release/raven-init-linux-x86_64 release/raven-rc-linux-x86_64
+          # Package manager (Rust)
+          if [[ -f artifacts/rvn-linux-x86_64/rvn ]]; then
+            cp artifacts/rvn-linux-x86_64/rvn release/rvn-linux-x86_64
+            chmod +x release/rvn-linux-x86_64
+          fi
+
+          # Init system (if built)
+          if [[ -f artifacts/raven-init-linux-x86_64/raven-init ]]; then
+            cp artifacts/raven-init-linux-x86_64/raven-init release/raven-init-linux-x86_64
+            chmod +x release/raven-init-linux-x86_64
+          fi
+          if [[ -f artifacts/raven-rc-linux-x86_64/raven-rc ]]; then
+            cp artifacts/raven-rc-linux-x86_64/raven-rc release/raven-rc-linux-x86_64
+            chmod +x release/raven-rc-linux-x86_64
+          fi
 
           # Bootloader
           cp artifacts/raven-boot-efi/raven-boot.efi release/raven-boot.efi
-
-          # Installer
-          cp artifacts/raven-installer-linux-x86_64/raven-installer release/raven-installer-linux-x86_64
-          chmod +x release/raven-installer-linux-x86_64
 
           # Create checksums
           cd release
@@ -320,31 +461,37 @@ jobs:
 
           | Component | Description |
           |-----------|-------------|
+          | `vem` | Text editor with syntax highlighting |
+          | `carrion` | Carrion programming language |
+          | `ivaldi` | Version control system |
           | `rvn` | RavenLinux package manager |
-          | `raven-init` | Init system (PID 1) |
-          | `raven-rc` | Init control utility |
+          | `raven-installer` | GUI system installer |
+          | `raven-usb` | USB bootable drive creator |
           | `raven-boot.efi` | UEFI bootloader |
-          | `raven-installer` | System installer |
 
           ## Installation
 
-          ### Bootloader
-          Copy `raven-boot.efi` to `/EFI/raven/` on your EFI System Partition.
+          ### Full System
+          Download the ISO and boot from USB to install RavenLinux.
 
-          ### Package Manager
+          ### Individual Tools
+
           ```bash
+          # Text editor
+          sudo install -m 755 vem-linux-x86_64 /usr/local/bin/vem
+
+          # Carrion language
+          sudo install -m 755 carrion-linux-x86_64 /usr/local/bin/carrion
+
+          # Version control
+          sudo install -m 755 ivaldi-linux-x86_64 /usr/local/bin/ivaldi
+
+          # Package manager
           sudo install -m 755 rvn-linux-x86_64 /usr/local/bin/rvn
           ```
 
-          ### Init System
-          ```bash
-          sudo install -m 755 raven-init-linux-x86_64 /sbin/raven-init
-          sudo install -m 755 raven-rc-linux-x86_64 /sbin/raven-rc
-          sudo ln -sf raven-init /sbin/init
-          sudo ln -sf raven-rc /sbin/poweroff
-          sudo ln -sf raven-rc /sbin/reboot
-          sudo ln -sf raven-rc /sbin/halt
-          ```
+          ### Bootloader
+          Copy `raven-boot.efi` to `/EFI/raven/` on your EFI System Partition.
 
           ## Checksums
 

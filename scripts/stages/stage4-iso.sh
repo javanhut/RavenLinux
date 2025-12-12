@@ -86,6 +86,9 @@ create_live_init() {
 # RavenLinux Live Init
 
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export HOME=/root
+export TERM=linux
+export LANG=en_US.UTF-8
 
 echo "Starting Raven Linux..."
 
@@ -101,21 +104,31 @@ mount -t tmpfs tmpfs /run
 
 # Set hostname
 hostname raven
+echo "raven" > /etc/hostname 2>/dev/null || true
 
 # Start udevd if available
 if [[ -x /sbin/udevd ]]; then
     /sbin/udevd --daemon 2>/dev/null
     udevadm trigger 2>/dev/null
     udevadm settle 2>/dev/null
+elif [[ -x /lib/systemd/systemd-udevd ]]; then
+    /lib/systemd/systemd-udevd --daemon 2>/dev/null
 fi
 
 # Configure networking
-for iface in /sys/class/net/e*; do
+for iface in /sys/class/net/e* /sys/class/net/eth*; do
     [[ -d "$iface" ]] || continue
     name="$(basename "$iface")"
     ip link set "$name" up 2>/dev/null
-    dhcpcd "$name" 2>/dev/null &
+    if command -v dhcpcd &>/dev/null; then
+        dhcpcd -q "$name" 2>/dev/null &
+    elif command -v dhclient &>/dev/null; then
+        dhclient "$name" 2>/dev/null &
+    fi
 done
+
+# Wait briefly for network
+sleep 1
 
 # Clear screen and show banner
 clear
@@ -134,9 +147,15 @@ BANNER
 echo "  Welcome to Raven Linux Live!"
 echo "  Version: $(grep VERSION_ID /etc/os-release 2>/dev/null | cut -d= -f2 || echo "2025.12")"
 echo ""
-echo "  Tools: vem (editor), carrion (lang), ivaldi (vcs), rvn (pkg)"
+echo "  Built-in Tools:"
+echo "    vem        - Text editor"
+echo "    carrion    - Programming language"
+echo "    ivaldi     - Version control system"
+echo "    rvn        - Package manager"
 echo ""
-echo "  Type 'raven-install' to install to disk"
+echo "  Installation:"
+echo "    raven-install  - GUI installer to install Raven Linux to disk"
+echo "    raven-usb      - Create bootable USB drives"
 echo ""
 
 # Start login shell
@@ -187,6 +206,41 @@ copy_boot_files() {
 }
 
 # =============================================================================
+# Install packages to sysroot
+# =============================================================================
+install_packages_to_sysroot() {
+    log_step "Installing packages to sysroot..."
+
+    mkdir -p "${SYSROOT_DIR}/bin"
+
+    # Copy all built packages from packages/bin
+    if [[ -d "${PACKAGES_DIR}/bin" ]]; then
+        for pkg in "${PACKAGES_DIR}/bin"/*; do
+            [[ -f "$pkg" ]] || continue
+            local name
+            name="$(basename "$pkg")"
+            cp "$pkg" "${SYSROOT_DIR}/bin/"
+            chmod +x "${SYSROOT_DIR}/bin/${name}"
+            log_info "  Installed ${name}"
+        done
+    fi
+
+    # Create raven-install symlink for the installer
+    if [[ -f "${SYSROOT_DIR}/bin/raven-installer" ]]; then
+        ln -sf raven-installer "${SYSROOT_DIR}/bin/raven-install"
+        log_info "  Created raven-install symlink"
+    fi
+
+    # Copy desktop entries if present
+    if [[ -d "${PROJECT_ROOT}/configs/desktop" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share/applications"
+        cp "${PROJECT_ROOT}/configs/desktop"/*.desktop "${SYSROOT_DIR}/usr/share/applications/" 2>/dev/null || true
+    fi
+
+    log_success "Packages installed to sysroot"
+}
+
+# =============================================================================
 # Create squashfs filesystem
 # =============================================================================
 create_squashfs() {
@@ -194,6 +248,9 @@ create_squashfs() {
 
     # Add live init if not present
     [[ -f "${SYSROOT_DIR}/init" ]] || create_live_init
+
+    # Install packages to sysroot before creating squashfs
+    install_packages_to_sysroot
 
     mksquashfs "${SYSROOT_DIR}" "${ISO_ROOT}/raven/filesystem.squashfs" \
         -comp zstd -Xcompression-level 15 \

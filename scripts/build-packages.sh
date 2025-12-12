@@ -228,7 +228,8 @@ build_usb_creator() {
         go mod download 2>/dev/null || go mod tidy
 
         log_info "Compiling USB creator..."
-        CGO_ENABLED=0 go build -o raven-usb .
+        # Requires CGO for Gio UI graphics
+        CGO_ENABLED=1 go build -o raven-usb .
 
         mkdir -p "${OUTPUT_DIR}/bin"
         cp raven-usb "${OUTPUT_DIR}/bin/"
@@ -240,6 +241,50 @@ build_usb_creator() {
     fi
 }
 
+# Build RavenBoot bootloader
+build_bootloader() {
+    echo ""
+    echo "=========================================="
+    echo "  Building RavenBoot Bootloader"
+    echo "=========================================="
+
+    local bootloader_dir="${PROJECT_ROOT}/bootloader"
+
+    if [ -d "$bootloader_dir" ]; then
+        cd "$bootloader_dir"
+
+        # Check for cargo
+        if ! command -v cargo &>/dev/null; then
+            log_warn "Rust/Cargo not found, skipping bootloader build"
+            cd "${PROJECT_ROOT}"
+            return
+        fi
+
+        # Check for UEFI target
+        if ! rustup target list --installed 2>/dev/null | grep -q "x86_64-unknown-uefi"; then
+            log_info "Adding UEFI target..."
+            rustup target add x86_64-unknown-uefi 2>/dev/null || {
+                log_warn "Failed to add UEFI target, skipping bootloader"
+                cd "${PROJECT_ROOT}"
+                return
+            }
+        fi
+
+        log_info "Building RavenBoot with Cargo..."
+        if cargo build --target x86_64-unknown-uefi --release 2>&1; then
+            mkdir -p "${OUTPUT_DIR}/boot"
+            cp target/x86_64-unknown-uefi/release/raven-boot.efi "${OUTPUT_DIR}/boot/"
+            log_success "RavenBoot built -> ${OUTPUT_DIR}/boot/raven-boot.efi"
+        else
+            log_warn "Failed to build RavenBoot"
+        fi
+
+        cd "${PROJECT_ROOT}"
+    else
+        log_warn "Bootloader source not found, skipping"
+    fi
+}
+
 # Build all packages
 build_all() {
     build_vem
@@ -248,6 +293,7 @@ build_all() {
     build_installer
     build_rvn
     build_usb_creator
+    build_bootloader
 }
 
 # Main
@@ -283,12 +329,15 @@ main() {
         usb)
             build_usb_creator
             ;;
+        bootloader)
+            build_bootloader
+            ;;
         all)
             build_all
             ;;
         *)
             log_error "Unknown package: $target"
-            echo "Usage: $0 [vem|carrion|ivaldi|installer|rvn|usb|all]"
+            echo "Usage: $0 [vem|carrion|ivaldi|installer|rvn|usb|bootloader|all]"
             exit 1
             ;;
     esac

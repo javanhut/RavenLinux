@@ -135,6 +135,42 @@ jobs:
           echo "| raven-installer | $(du -h installer/target/release/raven-installer | cut -f1) |" >> $GITHUB_STEP_SUMMARY
 
   # ===========================================================================
+  # Go Checks
+  # ===========================================================================
+  go-check:
+    name: Go Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Install GUI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev \
+            libxi-dev libxxf86vm-dev libwayland-dev pkg-config
+
+      - name: Check raven-installer
+        run: |
+          cd tools/raven-installer
+          go mod download
+          go build -o /dev/null .
+
+      - name: Check raven-usb
+        run: |
+          cd tools/raven-usb
+          go mod download
+          go build -o /dev/null .
+
+  # ===========================================================================
   # Shell Script Checks
   # ===========================================================================
   shellcheck:
