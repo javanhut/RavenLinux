@@ -152,14 +152,14 @@ jobs:
       - name: Check raven-installer
         run: |
           cd tools/raven-installer
-          go mod download
-          go build -o /dev/null .
+          go mod tidy
+          CGO_ENABLED=1 go build -o /dev/null .
 
       - name: Check raven-usb
         run: |
           cd tools/raven-usb
-          go mod download
-          go build -o /dev/null .
+          go mod tidy
+          CGO_ENABLED=1 go build -o /dev/null .
 
   # ===========================================================================
   # Shell Script Checks

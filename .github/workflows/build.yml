@@ -93,13 +93,13 @@ jobs:
       - name: Build raven-installer
         run: |
           cd tools/raven-installer
-          go mod download
+          go mod tidy
           CGO_ENABLED=1 go build -o ../../raven-installer .
 
       - name: Build raven-usb
         run: |
           cd tools/raven-usb
-          go mod download
+          go mod tidy
           CGO_ENABLED=1 go build -o ../../raven-usb .
 
       - name: Upload Go packages
