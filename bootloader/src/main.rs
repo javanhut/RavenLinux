@@ -84,12 +84,19 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
 }
 
 fn print_banner(stdout: &mut uefi::proto::console::text::Output) {
+    let _ = stdout.set_color(Color::LightCyan, Color::Black);
     let _ = writeln!(stdout, "");
-    let _ = writeln!(stdout, "  +-------------------------------+");
-    let _ = writeln!(stdout, "  |       R A V E N   B O O T     |");
-    let _ = writeln!(stdout, "  |     RavenLinux Bootloader     |");
-    let _ = writeln!(stdout, "  +-------------------------------+");
-    let _ = writeln!(stdout, "              v{}", VERSION);
+    let _ = stdout.set_color(Color::White, Color::Black);
+    let _ = writeln!(stdout, r"    ██████╗  █████╗ ██╗   ██╗███████╗███╗   ██╗");
+    let _ = writeln!(stdout, r"    ██╔══██╗██╔══██╗██║   ██║██╔════╝████╗  ██║");
+    let _ = writeln!(stdout, r"    ██████╔╝███████║██║   ██║█████╗  ██╔██╗ ██║");
+    let _ = writeln!(stdout, r"    ██╔══██╗██╔══██║╚██╗ ██╔╝██╔══╝  ██║╚██╗██║");
+    let _ = writeln!(stdout, r"    ██║  ██║██║  ██║ ╚████╔╝ ███████╗██║ ╚████║");
+    let _ = writeln!(stdout, r"    ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝");
+    let _ = stdout.set_color(Color::Cyan, Color::Black);
+    let _ = writeln!(stdout, r"    ╔══════════════════════════════════════════════════════╗");
+    let _ = writeln!(stdout, r"    ║              B O O T L O A D E R  v{}              ║", VERSION);
+    let _ = writeln!(stdout, r"    ╚══════════════════════════════════════════════════════╝");
     let _ = writeln!(stdout, "");
 }
 
@@ -108,31 +115,45 @@ fn display_menu_with_table(
             let _ = stdout.clear();
             print_banner(stdout);
 
-            let _ = stdout.set_color(Color::White, Color::Black);
-            let _ = writeln!(stdout, "  Select an operating system to boot:\n");
+            let _ = stdout.set_color(Color::LightGray, Color::Black);
+            let _ = writeln!(stdout, "    Select an operating system to boot:");
+            let _ = writeln!(stdout, "");
 
-            // Draw entries
+            // Menu width for full-line highlight
+            const MENU_WIDTH: usize = 56;
+
+            // Draw entries with full-line highlight
             for (i, entry) in config.entries.iter().take(config.entry_count).enumerate() {
                 if i == selected {
-                    let _ = stdout.set_color(Color::Black, Color::LightCyan);
-                    let _ = writeln!(stdout, "  > {}  ", entry.name);
+                    // Selected entry - full line highlighted
+                    let _ = stdout.set_color(Color::White, Color::Cyan);
+                    let _ = write!(stdout, "    ");
+                    let _ = write!(stdout, " >> ");
+                    let _ = write!(stdout, "{}", entry.name);
+                    // Pad to fill the line
+                    let padding = MENU_WIDTH.saturating_sub(8 + entry.name.len());
+                    for _ in 0..padding {
+                        let _ = write!(stdout, " ");
+                    }
+                    let _ = writeln!(stdout, "");
                 } else {
+                    // Unselected entry
                     let _ = stdout.set_color(Color::LightGray, Color::Black);
-                    let _ = writeln!(stdout, "    {}  ", entry.name);
+                    let _ = writeln!(stdout, "        {}", entry.name);
                 }
             }
 
             let _ = stdout.set_color(Color::DarkGray, Color::Black);
             let _ = writeln!(stdout, "");
-            let _ = writeln!(stdout, "  -----------------------------------");
+            let _ = writeln!(stdout, "    ──────────────────────────────────────────────────────");
 
             if countdown_active && timeout > 0 {
-                let _ = writeln!(stdout, "  Auto-boot in {} seconds...", timeout);
+                let _ = stdout.set_color(Color::Yellow, Color::Black);
+                let _ = writeln!(stdout, "    Auto-boot in {} seconds...  Press any key to stop", timeout);
             } else {
-                let _ = writeln!(stdout, "  [Up/Down] Select  [Enter] Boot");
+                let _ = stdout.set_color(Color::LightGray, Color::Black);
+                let _ = writeln!(stdout, "    [↑/↓] Select   [Enter] Boot   [r] Reboot   [s] Shutdown");
             }
-
-            let _ = writeln!(stdout, "  [r] Reboot    [s] Shutdown");
         }
 
         // Wait for input or timeout (scoped borrow of boot_services)
