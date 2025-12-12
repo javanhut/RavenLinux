@@ -69,7 +69,10 @@ jobs:
             libgl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev \
             libxi-dev libxxf86vm-dev libwayland-dev pkg-config \
-            libvulkan-dev
+            libvulkan-dev libx11-xcb-dev libxcb-icccm4-dev libxcb-image0-dev \
+            libxcb-keysyms1-dev libxcb-randr0-dev libxcb-render-util0-dev \
+            libxcb-xfixes0-dev libxcb-xinerama0-dev libxcb-xkb-dev \
+            libegl1-mesa-dev libwayland-egl1-mesa
 
       - name: Build Vem (text editor)
         run: |
