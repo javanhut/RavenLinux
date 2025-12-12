@@ -4,36 +4,43 @@
 # =============================================================================
 # Builds custom Go packages from GitHub for RavenLinux
 #
-# Usage: ./scripts/build-packages.sh [package-name|all]
+# Usage: ./scripts/build-packages.sh [OPTIONS] [package-name|all]
+#
+# Packages:
 #   vem        Build Vem text editor
 #   carrion    Build Carrion programming language
 #   ivaldi     Build Ivaldi VCS
+#   installer  Build Raven Installer
+#   rvn        Build rvn package manager
+#   usb        Build USB creator tool
+#   bootloader Build RavenBoot bootloader
 #   all        Build all packages (default)
+#
+# Options:
+#   --no-log   Disable file logging
 
 set -e
 
-# Directories
+# =============================================================================
+# Configuration
+# =============================================================================
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-BUILD_DIR="${PROJECT_ROOT}/build"
-SOURCES_DIR="${BUILD_DIR}/sources"
-OUTPUT_DIR="${BUILD_DIR}/packages"
+export RAVEN_ROOT="$PROJECT_ROOT"
+export RAVEN_BUILD="${PROJECT_ROOT}/build"
+SOURCES_DIR="${RAVEN_BUILD}/sources"
+OUTPUT_DIR="${RAVEN_BUILD}/packages"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# Source shared logging library
+source "${SCRIPT_DIR}/lib/logging.sh"
 
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+# =============================================================================
+# Functions
+# =============================================================================
 
-# Check dependencies
 check_dependencies() {
-    log_info "Checking build dependencies..."
+    log_step "Checking build dependencies..."
 
     local missing=()
 
@@ -46,8 +53,7 @@ check_dependencies() {
     fi
 
     if [ ${#missing[@]} -ne 0 ]; then
-        log_error "Missing dependencies: ${missing[*]}"
-        exit 1
+        log_fatal "Missing dependencies: ${missing[*]}"
     fi
 
     log_success "All dependencies found (Go $(go version | awk '{print $3}'))"
@@ -68,21 +74,24 @@ build_go_package() {
     if [ -d "$src_dir" ]; then
         log_info "Updating ${name} from GitHub..."
         cd "$src_dir"
-        git fetch origin main
-        git reset --hard origin/main
+        run_logged git fetch origin main
+        run_logged git reset --hard origin/main
     else
         log_info "Cloning ${name} from GitHub..."
-        git clone --depth 1 "https://github.com/${repo}.git" "$src_dir"
+        run_logged git clone --depth 1 "https://github.com/${repo}.git" "$src_dir"
         cd "$src_dir"
     fi
 
     # Download Go dependencies
     log_info "Downloading dependencies for ${name}..."
-    go mod download
+    run_logged go mod download
 
     # Build
     log_info "Compiling ${name}..."
-    CGO_ENABLED="$cgo" go build -o "${binary}" .
+    if ! run_logged env CGO_ENABLED="$cgo" go build -o "${binary}" .; then
+        log_error "Failed to build ${name}"
+        return 1
+    fi
 
     # Copy to output
     mkdir -p "${OUTPUT_DIR}/bin"
@@ -93,10 +102,7 @@ build_go_package() {
 
 # Build Vem text editor
 build_vem() {
-    echo ""
-    echo "=========================================="
-    echo "  Building Vem Text Editor"
-    echo "=========================================="
+    log_section "Building Vem Text Editor"
 
     # Vem requires CGO for Gio UI/Wayland support
     build_go_package "vem" "javanhut/Vem" "vem" "1"
@@ -104,10 +110,7 @@ build_vem() {
 
 # Build Carrion programming language
 build_carrion() {
-    echo ""
-    echo "=========================================="
-    echo "  Building Carrion Language"
-    echo "=========================================="
+    log_section "Building Carrion Language"
 
     local name="carrion"
     local repo="javanhut/TheCarrionLanguage"
@@ -119,21 +122,24 @@ build_carrion() {
     if [ -d "$src_dir" ]; then
         log_info "Updating ${name} from GitHub..."
         cd "$src_dir"
-        git fetch origin main
-        git reset --hard origin/main
+        run_logged git fetch origin main
+        run_logged git reset --hard origin/main
     else
         log_info "Cloning ${name} from GitHub..."
-        git clone --depth 1 "https://github.com/${repo}.git" "$src_dir"
+        run_logged git clone --depth 1 "https://github.com/${repo}.git" "$src_dir"
         cd "$src_dir"
     fi
 
     # Download Go dependencies
     log_info "Downloading dependencies for ${name}..."
-    go mod download
+    run_logged go mod download
 
     # Build - Carrion has main.go in src/ directory
     log_info "Compiling ${name}..."
-    CGO_ENABLED=0 go build -o carrion ./src/main.go
+    if ! run_logged env CGO_ENABLED=0 go build -o carrion ./src/main.go; then
+        log_error "Failed to build ${name}"
+        return 1
+    fi
 
     # Copy to output
     mkdir -p "${OUTPUT_DIR}/bin"
@@ -144,35 +150,31 @@ build_carrion() {
 
 # Build Ivaldi VCS
 build_ivaldi() {
-    echo ""
-    echo "=========================================="
-    echo "  Building Ivaldi VCS"
-    echo "=========================================="
+    log_section "Building Ivaldi VCS"
 
     build_go_package "ivaldi" "javanhut/IvaldiVCS" "ivaldi" "0"
 }
 
 # Build Raven Installer
 build_installer() {
-    echo ""
-    echo "=========================================="
-    echo "  Building Raven Installer"
-    echo "=========================================="
+    log_section "Building Raven Installer"
 
     local installer_dir="${PROJECT_ROOT}/tools/raven-installer"
 
     if [ -d "$installer_dir" ]; then
         cd "$installer_dir"
         log_info "Downloading dependencies..."
-        go mod download 2>/dev/null || go mod tidy
+        run_logged go mod download 2>/dev/null || run_logged go mod tidy
 
         log_info "Compiling installer..."
-        CGO_ENABLED=1 go build -o raven-installer .
+        if run_logged env CGO_ENABLED=1 go build -o raven-installer .; then
+            mkdir -p "${OUTPUT_DIR}/bin"
+            cp raven-installer "${OUTPUT_DIR}/bin/"
+            log_success "Installer built -> ${OUTPUT_DIR}/bin/raven-installer"
+        else
+            log_error "Failed to build installer"
+        fi
 
-        mkdir -p "${OUTPUT_DIR}/bin"
-        cp raven-installer "${OUTPUT_DIR}/bin/"
-
-        log_success "Installer built -> ${OUTPUT_DIR}/bin/raven-installer"
         cd "${PROJECT_ROOT}"
     else
         log_warn "Installer source not found, skipping"
@@ -181,10 +183,7 @@ build_installer() {
 
 # Build rvn package manager
 build_rvn() {
-    echo ""
-    echo "=========================================="
-    echo "  Building rvn Package Manager"
-    echo "=========================================="
+    log_section "Building rvn Package Manager"
 
     local rvn_dir="${PROJECT_ROOT}/tools/rvn"
 
@@ -199,12 +198,12 @@ build_rvn() {
         fi
 
         log_info "Building rvn with Cargo..."
-        if cargo build --release 2>&1; then
+        if run_logged cargo build --release; then
             mkdir -p "${OUTPUT_DIR}/bin"
             cp target/release/rvn "${OUTPUT_DIR}/bin/"
             log_success "rvn built -> ${OUTPUT_DIR}/bin/rvn"
         else
-            log_warn "Failed to build rvn"
+            log_error "Failed to build rvn"
         fi
 
         cd "${PROJECT_ROOT}"
@@ -215,26 +214,25 @@ build_rvn() {
 
 # Build USB creator tool
 build_usb_creator() {
-    echo ""
-    echo "=========================================="
-    echo "  Building Raven USB Creator"
-    echo "=========================================="
+    log_section "Building Raven USB Creator"
 
     local usb_dir="${PROJECT_ROOT}/tools/raven-usb"
 
     if [ -d "$usb_dir" ]; then
         cd "$usb_dir"
         log_info "Downloading dependencies..."
-        go mod download 2>/dev/null || go mod tidy
+        run_logged go mod download 2>/dev/null || run_logged go mod tidy
 
         log_info "Compiling USB creator..."
         # Requires CGO for Gio UI graphics
-        CGO_ENABLED=1 go build -o raven-usb .
+        if run_logged env CGO_ENABLED=1 go build -o raven-usb .; then
+            mkdir -p "${OUTPUT_DIR}/bin"
+            cp raven-usb "${OUTPUT_DIR}/bin/"
+            log_success "USB creator built -> ${OUTPUT_DIR}/bin/raven-usb"
+        else
+            log_error "Failed to build USB creator"
+        fi
 
-        mkdir -p "${OUTPUT_DIR}/bin"
-        cp raven-usb "${OUTPUT_DIR}/bin/"
-
-        log_success "USB creator built -> ${OUTPUT_DIR}/bin/raven-usb"
         cd "${PROJECT_ROOT}"
     else
         log_warn "USB creator source not found, skipping"
@@ -243,10 +241,7 @@ build_usb_creator() {
 
 # Build RavenBoot bootloader
 build_bootloader() {
-    echo ""
-    echo "=========================================="
-    echo "  Building RavenBoot Bootloader"
-    echo "=========================================="
+    log_section "Building RavenBoot Bootloader"
 
     local bootloader_dir="${PROJECT_ROOT}/bootloader"
 
@@ -263,20 +258,20 @@ build_bootloader() {
         # Check for UEFI target
         if ! rustup target list --installed 2>/dev/null | grep -q "x86_64-unknown-uefi"; then
             log_info "Adding UEFI target..."
-            rustup target add x86_64-unknown-uefi 2>/dev/null || {
+            if ! run_logged rustup target add x86_64-unknown-uefi; then
                 log_warn "Failed to add UEFI target, skipping bootloader"
                 cd "${PROJECT_ROOT}"
                 return
-            }
+            fi
         fi
 
         log_info "Building RavenBoot with Cargo..."
-        if cargo build --target x86_64-unknown-uefi --release 2>&1; then
+        if run_logged cargo build --target x86_64-unknown-uefi --release; then
             mkdir -p "${OUTPUT_DIR}/boot"
             cp target/x86_64-unknown-uefi/release/raven-boot.efi "${OUTPUT_DIR}/boot/"
             log_success "RavenBoot built -> ${OUTPUT_DIR}/boot/raven-boot.efi"
         else
-            log_warn "Failed to build RavenBoot"
+            log_error "Failed to build RavenBoot"
         fi
 
         cd "${PROJECT_ROOT}"
@@ -296,19 +291,70 @@ build_all() {
     build_bootloader
 }
 
-# Main
-main() {
+print_summary() {
+    log_section "Build Complete!"
+
+    echo "  Built packages are in: ${OUTPUT_DIR}/bin/"
     echo ""
-    echo "=========================================="
-    echo "  RavenLinux Custom Packages Builder"
-    echo "=========================================="
+
+    if [[ -d "${OUTPUT_DIR}/bin" ]]; then
+        ls -lh "${OUTPUT_DIR}/bin/" 2>/dev/null || true
+    fi
+
+    if [[ -d "${OUTPUT_DIR}/boot" ]]; then
+        echo ""
+        echo "  Boot files in: ${OUTPUT_DIR}/boot/"
+        ls -lh "${OUTPUT_DIR}/boot/" 2>/dev/null || true
+    fi
+
+    echo ""
+    if is_logging_enabled; then
+        echo "  Build Log: $(get_log_file)"
+        echo ""
+    fi
+}
+
+# =============================================================================
+# Main
+# =============================================================================
+
+main() {
+    local target="all"
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-log)
+                export RAVEN_NO_LOG=1
+                shift
+                ;;
+            vem|carrion|ivaldi|installer|rvn|usb|bootloader|all)
+                target="$1"
+                shift
+                ;;
+            *)
+                log_error "Unknown package or option: $1"
+                echo "Usage: $0 [--no-log] [vem|carrion|ivaldi|installer|rvn|usb|bootloader|all]"
+                exit 1
+                ;;
+        esac
+    done
+
+    # Initialize logging
+    init_logging "build-packages" "RavenLinux Custom Packages Builder"
+    enable_logging_trap
+
+    log_section "RavenLinux Custom Packages Builder"
+
+    echo "  Target: ${target}"
+    if is_logging_enabled; then
+        echo "  Log:    $(get_log_file)"
+    fi
     echo ""
 
     mkdir -p "$SOURCES_DIR" "$OUTPUT_DIR"
 
     check_dependencies
-
-    local target="${1:-all}"
 
     case "$target" in
         vem)
@@ -335,21 +381,10 @@ main() {
         all)
             build_all
             ;;
-        *)
-            log_error "Unknown package: $target"
-            echo "Usage: $0 [vem|carrion|ivaldi|installer|rvn|usb|bootloader|all]"
-            exit 1
-            ;;
     esac
 
-    echo ""
-    echo "=========================================="
-    echo "  Build Complete!"
-    echo "=========================================="
-    echo ""
-    echo "Built packages are in: ${OUTPUT_DIR}/bin/"
-    ls -lh "${OUTPUT_DIR}/bin/" 2>/dev/null || true
-    echo ""
+    print_summary
+    finalize_logging 0
 }
 
 main "$@"

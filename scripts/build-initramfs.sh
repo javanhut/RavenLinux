@@ -1,39 +1,66 @@
 #!/bin/bash
+# =============================================================================
+# RavenLinux Initramfs Build Script
+# =============================================================================
 # Build a minimal RavenLinux initramfs for testing
 # Uses host system tools - not a full build, just for quick iteration
+#
+# Usage: ./scripts/build-initramfs.sh [OPTIONS]
+#
+# Options:
+#   --no-log    Disable file logging
 
 set -euo pipefail
 
-RAVEN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RAVEN_BUILD="${RAVEN_ROOT}/build"
+# =============================================================================
+# Configuration
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export RAVEN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+export RAVEN_BUILD="${RAVEN_ROOT}/build"
 INITRAMFS_DIR="${RAVEN_BUILD}/initramfs"
 OUTPUT="${RAVEN_BUILD}/initramfs-raven.img"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+# Source shared logging library
+source "${SCRIPT_DIR}/lib/logging.sh"
 
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+# =============================================================================
+# Argument Parsing
+# =============================================================================
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --no-log)
+            export RAVEN_NO_LOG=1
+            shift
+            ;;
+        *)
+            log_error "Unknown option: $1"
+            echo "Usage: $0 [--no-log]"
+            exit 1
+            ;;
+    esac
+done
+
+# =============================================================================
+# Functions
+# =============================================================================
 
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-        log_error "This script must be run as root (need to copy device nodes)"
+        log_fatal "This script must be run as root (need to copy device nodes)"
     fi
 }
 
 cleanup() {
-    log_info "Cleaning up old build..."
+    log_step "Cleaning up old build..."
     rm -rf "${INITRAMFS_DIR}"
     mkdir -p "${INITRAMFS_DIR}"
 }
 
 create_directory_structure() {
-    log_info "Creating directory structure..."
+    log_step "Creating directory structure..."
 
     mkdir -p "${INITRAMFS_DIR}"/{bin,sbin,usr/bin,usr/sbin,usr/lib,lib,lib64}
     mkdir -p "${INITRAMFS_DIR}"/{dev,proc,sys,run,tmp,mnt,root}
@@ -44,13 +71,13 @@ create_directory_structure() {
 }
 
 copy_binaries() {
-    log_info "Copying essential binaries..."
+    log_step "Copying essential binaries..."
 
     local UUTILS_BIN="${RAVEN_BUILD}/bin/coreutils"
 
     # Check if uutils is built
     if [[ ! -f "${UUTILS_BIN}" ]]; then
-        log_error "uutils-coreutils not built. Run: ./scripts/build-uutils.sh"
+        log_fatal "uutils-coreutils not built. Run: ./scripts/build-uutils.sh"
     fi
 
     # Copy uutils multicall binary
@@ -126,7 +153,7 @@ copy_binaries() {
 }
 
 copy_libraries() {
-    log_info "Copying required libraries..."
+    log_step "Copying required libraries..."
 
     # Find and copy required libraries for binaries in initramfs
     for bin in "${INITRAMFS_DIR}"/bin/*; do
@@ -160,7 +187,7 @@ copy_libraries() {
 }
 
 create_device_nodes() {
-    log_info "Creating device nodes..."
+    log_step "Creating device nodes..."
 
     mknod -m 600 "${INITRAMFS_DIR}/dev/console" c 5 1
     mknod -m 666 "${INITRAMFS_DIR}/dev/null" c 1 3
@@ -178,7 +205,7 @@ create_device_nodes() {
 }
 
 create_config_files() {
-    log_info "Creating configuration files..."
+    log_step "Creating configuration files..."
 
     # /etc/os-release
     cp "${RAVEN_ROOT}/etc/os-release" "${INITRAMFS_DIR}/etc/os-release"
@@ -240,7 +267,7 @@ ZSHRC
 }
 
 create_init() {
-    log_info "Creating init script..."
+    log_step "Creating init script..."
 
     cat > "${INITRAMFS_DIR}/init" <<'INITSCRIPT'
 #!/bin/bash
@@ -295,7 +322,7 @@ INITSCRIPT
 }
 
 create_initramfs() {
-    log_info "Creating initramfs image..."
+    log_step "Creating initramfs image..."
 
     cd "${INITRAMFS_DIR}"
 
@@ -311,18 +338,15 @@ create_initramfs() {
     size=$(du -h "${OUTPUT}" | cut -f1)
 
     if [[ $(stat -c%s "${OUTPUT}") -lt 1000 ]]; then
-        log_error "Initramfs creation failed - file too small"
+        log_fatal "Initramfs creation failed - file too small"
     fi
 
     log_success "Initramfs created: ${OUTPUT} (${size})"
 }
 
 print_summary() {
-    echo ""
-    echo "========================================"
-    echo "  RavenLinux Initramfs Built"
-    echo "========================================"
-    echo ""
+    log_section "RavenLinux Initramfs Built"
+
     echo "  Initramfs: ${OUTPUT}"
     echo ""
     echo "  To test, run:"
@@ -331,16 +355,40 @@ print_summary() {
     echo "  Or with graphics:"
     echo "    ./scripts/quick-test.sh -i ${OUTPUT} -g"
     echo ""
+    if is_logging_enabled; then
+        echo "  Build Log: $(get_log_file)"
+        echo ""
+    fi
 }
 
+# =============================================================================
 # Main
-check_root
-cleanup
-create_directory_structure
-copy_binaries
-copy_libraries
-create_device_nodes
-create_config_files
-create_init
-create_initramfs
-print_summary
+# =============================================================================
+
+main() {
+    # Initialize logging
+    init_logging "build-initramfs" "RavenLinux Initramfs Build"
+    enable_logging_trap
+
+    log_section "RavenLinux Initramfs Builder"
+
+    if is_logging_enabled; then
+        echo "  Log File: $(get_log_file)"
+        echo ""
+    fi
+
+    check_root
+    cleanup
+    create_directory_structure
+    copy_binaries
+    copy_libraries
+    create_device_nodes
+    create_config_files
+    create_init
+    create_initramfs
+    print_summary
+
+    finalize_logging 0
+}
+
+main "$@"

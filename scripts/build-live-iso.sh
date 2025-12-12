@@ -8,13 +8,19 @@
 #   --skip-kernel     Skip kernel build (use existing)
 #   --skip-packages   Skip package builds
 #   --minimal         Build minimal ISO without desktop
+#   --no-log          Disable file logging
 
 set -euo pipefail
 
+# =============================================================================
+# Configuration
+# =============================================================================
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-BUILD_DIR="${PROJECT_ROOT}/build"
-ISO_DIR="${BUILD_DIR}/iso"
+export RAVEN_ROOT="$PROJECT_ROOT"
+export RAVEN_BUILD="${PROJECT_ROOT}/build"
+ISO_DIR="${RAVEN_BUILD}/iso"
 LIVE_ROOT="${ISO_DIR}/live-root"
 SQUASHFS_DIR="${ISO_DIR}/squashfs"
 
@@ -24,37 +30,34 @@ RAVEN_ARCH="x86_64"
 ISO_LABEL="RAVEN_LIVE"
 ISO_OUTPUT="${PROJECT_ROOT}/raven-${RAVEN_VERSION}-${RAVEN_ARCH}.iso"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
 # Options
 SKIP_KERNEL=false
 SKIP_PACKAGES=false
 MINIMAL=false
 
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-log_step() { echo -e "${CYAN}[STEP]${NC} $1"; }
+# Source shared logging library
+source "${SCRIPT_DIR}/lib/logging.sh"
 
-# Parse arguments
+# =============================================================================
+# Argument Parsing
+# =============================================================================
+
 while [[ $# -gt 0 ]]; do
     case $1 in
         --skip-kernel) SKIP_KERNEL=true; shift ;;
         --skip-packages) SKIP_PACKAGES=true; shift ;;
         --minimal) MINIMAL=true; shift ;;
-        *) log_error "Unknown option: $1" ;;
+        --no-log) export RAVEN_NO_LOG=1; shift ;;
+        *) log_fatal "Unknown option: $1" ;;
     esac
 done
 
+# =============================================================================
+# Functions
+# =============================================================================
+
 check_dependencies() {
-    log_info "Checking build dependencies..."
+    log_step "Checking build dependencies..."
 
     local missing=()
 
@@ -66,7 +69,7 @@ check_dependencies() {
 
     if [ ${#missing[@]} -ne 0 ]; then
         log_error "Missing dependencies: ${missing[*]}"
-        echo "Install with: sudo pacman -S squashfs-tools libisoburn grub"
+        log_fatal "Install with: sudo pacman -S squashfs-tools libisoburn grub"
     fi
 
     log_success "All dependencies found"
@@ -89,19 +92,19 @@ copy_kernel() {
 
     mkdir -p "${LIVE_ROOT}/boot"
 
-    if [[ -f "${BUILD_DIR}/kernel/boot/vmlinuz-raven" ]]; then
-        cp "${BUILD_DIR}/kernel/boot/vmlinuz-raven" "${LIVE_ROOT}/boot/vmlinuz"
+    if [[ -f "${RAVEN_BUILD}/kernel/boot/vmlinuz-raven" ]]; then
+        run_logged cp "${RAVEN_BUILD}/kernel/boot/vmlinuz-raven" "${LIVE_ROOT}/boot/vmlinuz"
         log_success "Kernel copied"
     else
-        log_error "Kernel not found. Run ./scripts/build-kernel.sh first"
+        log_fatal "Kernel not found. Run ./scripts/build-kernel.sh first"
     fi
 }
 
 copy_initramfs() {
     log_step "Copying initramfs..."
 
-    if [[ -f "${BUILD_DIR}/initramfs-raven.img" ]]; then
-        cp "${BUILD_DIR}/initramfs-raven.img" "${LIVE_ROOT}/boot/initramfs.img"
+    if [[ -f "${RAVEN_BUILD}/initramfs-raven.img" ]]; then
+        run_logged cp "${RAVEN_BUILD}/initramfs-raven.img" "${LIVE_ROOT}/boot/initramfs.img"
         log_success "Initramfs copied"
     else
         log_warn "Initramfs not found, will create minimal one"
@@ -111,8 +114,8 @@ copy_initramfs() {
 copy_coreutils() {
     log_step "Copying uutils-coreutils..."
 
-    if [[ -f "${BUILD_DIR}/bin/coreutils" ]]; then
-        cp "${BUILD_DIR}/bin/coreutils" "${LIVE_ROOT}/bin/coreutils"
+    if [[ -f "${RAVEN_BUILD}/bin/coreutils" ]]; then
+        cp "${RAVEN_BUILD}/bin/coreutils" "${LIVE_ROOT}/bin/coreutils"
 
         # Create symlinks for all utilities
         local utils=(
@@ -130,7 +133,7 @@ copy_coreutils() {
 
         log_success "Coreutils installed"
     else
-        log_error "uutils-coreutils not found. Run ./scripts/build-uutils.sh first"
+        log_fatal "uutils-coreutils not found. Run ./scripts/build-uutils.sh first"
     fi
 }
 
@@ -163,7 +166,7 @@ copy_shells() {
 copy_raven_packages() {
     log_step "Copying RavenLinux custom packages..."
 
-    local packages_bin="${BUILD_DIR}/packages/bin"
+    local packages_bin="${RAVEN_BUILD}/packages/bin"
 
     if [[ -d "${packages_bin}" ]]; then
         for pkg in vem carrion ivaldi raven-installer rvn; do
@@ -191,7 +194,7 @@ copy_package_manager() {
         cd "${rvn_dir}"
 
         # Build rvn
-        if cargo build --release 2>/dev/null; then
+        if run_logged cargo build --release 2>/dev/null; then
             cp target/release/rvn "${LIVE_ROOT}/bin/rvn"
             log_success "Package manager (rvn) installed"
         else
@@ -509,7 +512,7 @@ setup_iso_structure() {
 create_squashfs() {
     log_step "Creating squashfs filesystem..."
 
-    mksquashfs "${LIVE_ROOT}" "${ISO_DIR}/iso-root/raven/filesystem.squashfs" \
+    run_logged mksquashfs "${LIVE_ROOT}" "${ISO_DIR}/iso-root/raven/filesystem.squashfs" \
         -comp zstd -Xcompression-level 15 \
         -b 1M -no-duplicates -quiet
 
@@ -522,7 +525,7 @@ setup_raven_bootloader() {
     # Copy kernel and initramfs to ISO
     cp "${LIVE_ROOT}/boot/vmlinuz" "${ISO_DIR}/iso-root/boot/vmlinuz"
     cp "${LIVE_ROOT}/boot/initramfs.img" "${ISO_DIR}/iso-root/boot/initramfs.img" 2>/dev/null || \
-        cp "${BUILD_DIR}/initramfs-raven.img" "${ISO_DIR}/iso-root/boot/initramfs.img"
+        cp "${RAVEN_BUILD}/initramfs-raven.img" "${ISO_DIR}/iso-root/boot/initramfs.img"
 
     # Create GRUB config (fallback until RavenBoot is complete)
     cat > "${ISO_DIR}/iso-root/boot/grub/grub.cfg" << EOF
@@ -565,7 +568,7 @@ EOF
 
     # Create EFI bootloader
     if command -v grub-mkstandalone &>/dev/null; then
-        grub-mkstandalone \
+        run_logged grub-mkstandalone \
             --format=x86_64-efi \
             --output="${ISO_DIR}/iso-root/EFI/BOOT/BOOTX64.EFI" \
             --locales="" \
@@ -591,7 +594,7 @@ generate_iso() {
     log_step "Generating ISO image..."
 
     # Create ISO with xorriso
-    xorriso -as mkisofs \
+    run_logged xorriso -as mkisofs \
         -iso-level 3 \
         -full-iso9660-filenames \
         -volid "${ISO_LABEL}" \
@@ -612,7 +615,7 @@ generate_iso() {
         2>/dev/null || {
             # Fallback to simpler method
             log_warn "Full ISO failed, trying simpler method..."
-            xorriso -as mkisofs \
+            run_logged xorriso -as mkisofs \
                 -R -J \
                 -volid "${ISO_LABEL}" \
                 -output "${ISO_OUTPUT}" \
@@ -621,6 +624,7 @@ generate_iso() {
 
     # Generate checksums
     sha256sum "${ISO_OUTPUT}" > "${ISO_OUTPUT}.sha256"
+    md5sum "${ISO_OUTPUT}" > "${ISO_OUTPUT}.md5"
 
     log_success "ISO generated: ${ISO_OUTPUT}"
 }
@@ -629,11 +633,8 @@ print_summary() {
     local iso_size
     iso_size=$(du -h "${ISO_OUTPUT}" 2>/dev/null | cut -f1 || echo "unknown")
 
-    echo ""
-    echo -e "${CYAN}=========================================="
-    echo "  RavenLinux Live ISO Build Complete"
-    echo "==========================================${NC}"
-    echo ""
+    log_section "RavenLinux Live ISO Build Complete"
+
     echo "  ISO:      ${ISO_OUTPUT}"
     echo "  Size:     ${iso_size}"
     echo "  Version:  ${RAVEN_VERSION}"
@@ -653,14 +654,32 @@ print_summary() {
     echo "  To write to USB:"
     echo "    sudo dd if=${ISO_OUTPUT} of=/dev/sdX bs=4M status=progress"
     echo ""
+    if is_logging_enabled; then
+        echo "  Build Log: $(get_log_file)"
+        echo ""
+    fi
 }
 
+# =============================================================================
 # Main execution
+# =============================================================================
+
 main() {
-    echo ""
-    echo -e "${CYAN}=========================================="
-    echo "  RavenLinux Live ISO Builder"
-    echo "==========================================${NC}"
+    # Initialize logging
+    init_logging "build-live-iso" "RavenLinux Live ISO Builder"
+    enable_logging_trap
+
+    log_section "RavenLinux Live ISO Builder"
+
+    echo "  Version:  ${RAVEN_VERSION}"
+    echo "  Arch:     ${RAVEN_ARCH}"
+    echo "  Options:"
+    echo "    Skip Kernel:   ${SKIP_KERNEL}"
+    echo "    Skip Packages: ${SKIP_PACKAGES}"
+    echo "    Minimal:       ${MINIMAL}"
+    if is_logging_enabled; then
+        echo "  Log File: $(get_log_file)"
+    fi
     echo ""
 
     check_dependencies
@@ -681,6 +700,8 @@ main() {
     setup_raven_bootloader
     generate_iso
     print_summary
+
+    finalize_logging 0
 }
 
 main "$@"

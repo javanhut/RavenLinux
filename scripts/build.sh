@@ -1,11 +1,35 @@
 #!/bin/bash
+# =============================================================================
 # RavenLinux Build System
+# =============================================================================
 # Main build orchestration script
+#
+# Usage: ./scripts/build.sh [OPTIONS] [STAGE]
+#
+# Options:
+#   -j, --jobs N    Number of parallel jobs (default: nproc)
+#   -a, --arch ARCH Target architecture (default: x86_64)
+#   -c, --clean     Clean build directory before building
+#   --no-log        Disable file logging
+#   -h, --help      Show this help message
+#
+# Stages:
+#   all      Build everything (default)
+#   stage0   Build cross-compilation toolchain
+#   stage1   Build base system with cross toolchain
+#   stage2   Native rebuild of entire system
+#   stage3   Build additional packages
+#   stage4   Generate bootable ISO image
 
 set -euo pipefail
 
-RAVEN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RAVEN_BUILD="${RAVEN_ROOT}/build"
+# =============================================================================
+# Configuration
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export RAVEN_ROOT="$(dirname "$SCRIPT_DIR")"
+export RAVEN_BUILD="${RAVEN_ROOT}/build"
 RAVEN_PACKAGES="${RAVEN_ROOT}/packages"
 RAVEN_TOOLS="${RAVEN_ROOT}/tools"
 RAVEN_CONFIGS="${RAVEN_ROOT}/configs"
@@ -21,39 +45,22 @@ TOOLCHAIN_DIR="${RAVEN_BUILD}/toolchain"
 SYSROOT_DIR="${RAVEN_BUILD}/sysroot"
 STAGING_DIR="${RAVEN_BUILD}/staging"
 SOURCES_DIR="${RAVEN_BUILD}/sources"
-LOGS_DIR="${RAVEN_BUILD}/logs"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+# Source shared logging library
+source "${SCRIPT_DIR}/lib/logging.sh"
 
-log_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
-
-log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-    exit 1
-}
+# =============================================================================
+# Functions
+# =============================================================================
 
 setup_directories() {
-    log_info "Setting up build directories..."
+    log_step "Setting up build directories..."
+
     mkdir -p "${TOOLCHAIN_DIR}"
     mkdir -p "${SYSROOT_DIR}"
     mkdir -p "${STAGING_DIR}"
     mkdir -p "${SOURCES_DIR}"
-    mkdir -p "${LOGS_DIR}"
+    mkdir -p "${RAVEN_LOG_DIR}"
 
     # Create sysroot directory structure
     mkdir -p "${SYSROOT_DIR}"/{bin,boot,dev,etc,home,lib,mnt,opt,proc,root,run,sbin,sys,tmp,usr,var}
@@ -70,7 +77,7 @@ download_source() {
 
     if [[ ! -f "${SOURCES_DIR}/${filename}" ]]; then
         log_info "Downloading ${name}..."
-        curl -L -o "${SOURCES_DIR}/${filename}" "$url"
+        run_logged curl -L -o "${SOURCES_DIR}/${filename}" "$url"
     else
         log_info "${name} already downloaded"
     fi
@@ -83,59 +90,79 @@ extract_source() {
     log_info "Extracting ${archive}..."
     case "$archive" in
         *.tar.gz|*.tgz)
-            tar -xzf "${SOURCES_DIR}/${archive}" -C "$dest_dir"
+            run_logged tar -xzf "${SOURCES_DIR}/${archive}" -C "$dest_dir"
             ;;
         *.tar.xz)
-            tar -xJf "${SOURCES_DIR}/${archive}" -C "$dest_dir"
+            run_logged tar -xJf "${SOURCES_DIR}/${archive}" -C "$dest_dir"
             ;;
         *.tar.bz2)
-            tar -xjf "${SOURCES_DIR}/${archive}" -C "$dest_dir"
+            run_logged tar -xjf "${SOURCES_DIR}/${archive}" -C "$dest_dir"
             ;;
         *)
-            log_error "Unknown archive format: ${archive}"
+            log_fatal "Unknown archive format: ${archive}"
             ;;
     esac
 }
 
 # Stage 0: Build cross-compilation toolchain
 build_stage0() {
-    log_info "=== Stage 0: Building Cross Toolchain ==="
+    log_section "Stage 0: Building Cross Toolchain"
 
     # This builds binutils, gcc, and musl for cross-compilation
-    source "${RAVEN_ROOT}/scripts/stages/stage0-toolchain.sh"
+    if [[ -f "${RAVEN_ROOT}/scripts/stages/stage0-toolchain.sh" ]]; then
+        run_logged source "${RAVEN_ROOT}/scripts/stages/stage0-toolchain.sh"
+    else
+        log_warn "Stage 0 script not found, skipping"
+    fi
 }
 
 # Stage 1: Build base system with cross toolchain
 build_stage1() {
-    log_info "=== Stage 1: Building Base System (Cross) ==="
+    log_section "Stage 1: Building Base System (Cross)"
 
-    source "${RAVEN_ROOT}/scripts/stages/stage1-base.sh"
+    if [[ -f "${RAVEN_ROOT}/scripts/stages/stage1-base.sh" ]]; then
+        run_logged source "${RAVEN_ROOT}/scripts/stages/stage1-base.sh"
+    else
+        log_warn "Stage 1 script not found, skipping"
+    fi
 }
 
 # Stage 2: Native rebuild
 build_stage2() {
-    log_info "=== Stage 2: Native Rebuild ==="
+    log_section "Stage 2: Native Rebuild"
 
-    source "${RAVEN_ROOT}/scripts/stages/stage2-native.sh"
+    if [[ -f "${RAVEN_ROOT}/scripts/stages/stage2-native.sh" ]]; then
+        run_logged source "${RAVEN_ROOT}/scripts/stages/stage2-native.sh"
+    else
+        log_warn "Stage 2 script not found, skipping"
+    fi
 }
 
 # Stage 3: Build additional packages
 build_stage3() {
-    log_info "=== Stage 3: Building Packages ==="
+    log_section "Stage 3: Building Packages"
 
-    source "${RAVEN_ROOT}/scripts/stages/stage3-packages.sh"
+    if [[ -f "${RAVEN_ROOT}/scripts/stages/stage3-packages.sh" ]]; then
+        run_logged source "${RAVEN_ROOT}/scripts/stages/stage3-packages.sh"
+    else
+        log_warn "Stage 3 script not found, skipping"
+    fi
 }
 
 # Stage 4: Generate ISO
 build_stage4() {
-    log_info "=== Stage 4: Generating ISO ==="
+    log_section "Stage 4: Generating ISO"
 
-    source "${RAVEN_ROOT}/scripts/stages/stage4-iso.sh"
+    if [[ -f "${RAVEN_ROOT}/scripts/stages/stage4-iso.sh" ]]; then
+        run_logged source "${RAVEN_ROOT}/scripts/stages/stage4-iso.sh"
+    else
+        log_warn "Stage 4 script not found, skipping"
+    fi
 }
 
 show_help() {
     cat << EOF
-RavenLinux Build System
+RavenLinux Build System v${RAVEN_VERSION}
 
 Usage: $(basename "$0") [OPTIONS] [STAGE]
 
@@ -151,18 +178,24 @@ Options:
     -j, --jobs N    Number of parallel jobs (default: $(nproc))
     -a, --arch ARCH Target architecture (default: x86_64)
     -c, --clean     Clean build directory before building
+    --no-log        Disable file logging
     -h, --help      Show this help message
 
 Environment Variables:
     RAVEN_ARCH      Target architecture
     RAVEN_JOBS      Number of parallel build jobs
     RAVEN_VERSION   Distribution version string
+    RAVEN_NO_LOG    Set to "1" to disable logging
+
+Log Files:
+    Build logs are saved to: ${RAVEN_BUILD}/logs/
 
 Examples:
     $(basename "$0")                    # Build everything
     $(basename "$0") stage0             # Build only toolchain
     $(basename "$0") -j 8 stage1        # Build stage1 with 8 jobs
     $(basename "$0") --clean all        # Clean build from scratch
+    $(basename "$0") --no-log stage4    # Build ISO without logging
 EOF
 }
 
@@ -171,6 +204,10 @@ clean_build() {
     rm -rf "${RAVEN_BUILD}"
     log_success "Build directory cleaned"
 }
+
+# =============================================================================
+# Main
+# =============================================================================
 
 main() {
     local stage="all"
@@ -196,24 +233,35 @@ main() {
                 clean=true
                 shift
                 ;;
+            --no-log)
+                export RAVEN_NO_LOG=1
+                shift
+                ;;
             all|stage0|stage1|stage2|stage3|stage4)
                 stage="$1"
                 shift
                 ;;
             *)
                 log_error "Unknown option: $1"
+                show_help
+                exit 1
                 ;;
         esac
     done
 
-    echo "========================================"
-    echo "  RavenLinux Build System v${RAVEN_VERSION}"
-    echo "========================================"
+    # Initialize logging
+    init_logging "build" "RavenLinux Full Build - Stage: ${stage}"
+    enable_logging_trap
+
+    log_section "RavenLinux Build System v${RAVEN_VERSION}"
+
     echo "  Architecture: ${RAVEN_ARCH}"
     echo "  Target:       ${RAVEN_TARGET}"
     echo "  Jobs:         ${RAVEN_JOBS}"
-    echo "========================================"
-    echo
+    if is_logging_enabled; then
+        echo "  Log File:     $(get_log_file)"
+    fi
+    echo ""
 
     if $clean; then
         clean_build
@@ -246,7 +294,16 @@ main() {
             ;;
     esac
 
-    log_success "Build complete!"
+    log_section "Build Complete!"
+
+    echo "  Stage:    ${stage}"
+    echo "  Duration: $(format_duration $(($(date +%s) - _RAVEN_BUILD_START_TIME)))"
+    if is_logging_enabled; then
+        echo "  Log:      $(get_log_file)"
+    fi
+    echo ""
+
+    finalize_logging 0
 }
 
 main "$@"
