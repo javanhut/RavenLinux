@@ -163,15 +163,15 @@ copy_libraries() {
             continue
         fi
 
-        # Get library dependencies
+        # Get library dependencies (|| true to handle grep finding no matches)
         timeout 2 ldd "$bin" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
             [[ -z "$lib" || ! -f "$lib" ]] && continue
             local dest="${SYSROOT_DIR}${lib}"
             if [[ ! -f "$dest" ]]; then
                 mkdir -p "$(dirname "$dest")"
-                cp -L "$lib" "$dest" 2>/dev/null && ((lib_count++)) || true
+                cp -L "$lib" "$dest" 2>/dev/null || true
             fi
-        done
+        done || true
     done
 
     # Copy dynamic linker
