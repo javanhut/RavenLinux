@@ -68,7 +68,8 @@ jobs:
           sudo apt-get install -y \
             libgl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev \
-            libxi-dev libxxf86vm-dev libwayland-dev pkg-config
+            libxi-dev libxxf86vm-dev libwayland-dev pkg-config \
+            libvulkan-dev
 
       - name: Build Vem (text editor)
         run: |
@@ -133,9 +134,6 @@ jobs:
           - name: raven-rc
             path: init
             binary: raven-rc
-          - name: raven-installer
-            path: installer
-            binary: raven-installer
 
     steps:
       - name: Checkout repository

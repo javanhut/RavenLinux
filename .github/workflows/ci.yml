@@ -68,11 +68,6 @@ jobs:
         run: cargo check --release --target x86_64-unknown-uefi
         working-directory: bootloader
 
-      # Check installer
-      - name: Check installer
-        run: cargo check --release
-        working-directory: installer
-
       # Check compositor
       - name: Check compositor
         run: cargo check --release
@@ -118,10 +113,6 @@ jobs:
         run: cargo build --release --target x86_64-unknown-uefi
         working-directory: bootloader
 
-      - name: Build installer
-        run: cargo build --release
-        working-directory: installer
-
       - name: Report binary sizes
         run: |
           echo "## Binary Sizes" >> $GITHUB_STEP_SUMMARY
@@ -132,7 +123,6 @@ jobs:
           echo "| raven-init | $(du -h init/target/release/raven-init | cut -f1) |" >> $GITHUB_STEP_SUMMARY
           echo "| raven-rc | $(du -h init/target/release/raven-rc | cut -f1) |" >> $GITHUB_STEP_SUMMARY
           echo "| raven-boot.efi | $(du -h bootloader/target/x86_64-unknown-uefi/release/raven-boot.efi | cut -f1) |" >> $GITHUB_STEP_SUMMARY
-          echo "| raven-installer | $(du -h installer/target/release/raven-installer | cut -f1) |" >> $GITHUB_STEP_SUMMARY
 
   # ===========================================================================
   # Go Checks
@@ -156,7 +146,8 @@ jobs:
           sudo apt-get install -y \
             libgl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev \
-            libxi-dev libxxf86vm-dev libwayland-dev pkg-config
+            libxi-dev libxxf86vm-dev libwayland-dev pkg-config \
+            libvulkan-dev
 
       - name: Check raven-installer
         run: |
