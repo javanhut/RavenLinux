@@ -264,7 +264,9 @@ main() {
     echo ""
 }
 
-# Run if executed directly
+# Run main (whether executed directly or sourced)
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+else
     main "$@"
 fi
