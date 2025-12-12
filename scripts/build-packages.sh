@@ -152,11 +152,102 @@ build_ivaldi() {
     build_go_package "ivaldi" "javanhut/IvaldiVCS" "ivaldi" "0"
 }
 
+# Build Raven Installer
+build_installer() {
+    echo ""
+    echo "=========================================="
+    echo "  Building Raven Installer"
+    echo "=========================================="
+
+    local installer_dir="${PROJECT_ROOT}/tools/raven-installer"
+
+    if [ -d "$installer_dir" ]; then
+        cd "$installer_dir"
+        log_info "Downloading dependencies..."
+        go mod download 2>/dev/null || go mod tidy
+
+        log_info "Compiling installer..."
+        CGO_ENABLED=1 go build -o raven-installer .
+
+        mkdir -p "${OUTPUT_DIR}/bin"
+        cp raven-installer "${OUTPUT_DIR}/bin/"
+
+        log_success "Installer built -> ${OUTPUT_DIR}/bin/raven-installer"
+        cd "${PROJECT_ROOT}"
+    else
+        log_warn "Installer source not found, skipping"
+    fi
+}
+
+# Build rvn package manager
+build_rvn() {
+    echo ""
+    echo "=========================================="
+    echo "  Building rvn Package Manager"
+    echo "=========================================="
+
+    local rvn_dir="${PROJECT_ROOT}/tools/rvn"
+
+    if [ -d "$rvn_dir" ]; then
+        cd "$rvn_dir"
+
+        # Check for cargo
+        if ! command -v cargo &>/dev/null; then
+            log_warn "Rust/Cargo not found, skipping rvn build"
+            cd "${PROJECT_ROOT}"
+            return
+        fi
+
+        log_info "Building rvn with Cargo..."
+        if cargo build --release 2>&1; then
+            mkdir -p "${OUTPUT_DIR}/bin"
+            cp target/release/rvn "${OUTPUT_DIR}/bin/"
+            log_success "rvn built -> ${OUTPUT_DIR}/bin/rvn"
+        else
+            log_warn "Failed to build rvn"
+        fi
+
+        cd "${PROJECT_ROOT}"
+    else
+        log_warn "rvn source not found, skipping"
+    fi
+}
+
+# Build USB creator tool
+build_usb_creator() {
+    echo ""
+    echo "=========================================="
+    echo "  Building Raven USB Creator"
+    echo "=========================================="
+
+    local usb_dir="${PROJECT_ROOT}/tools/raven-usb"
+
+    if [ -d "$usb_dir" ]; then
+        cd "$usb_dir"
+        log_info "Downloading dependencies..."
+        go mod download 2>/dev/null || go mod tidy
+
+        log_info "Compiling USB creator..."
+        CGO_ENABLED=0 go build -o raven-usb .
+
+        mkdir -p "${OUTPUT_DIR}/bin"
+        cp raven-usb "${OUTPUT_DIR}/bin/"
+
+        log_success "USB creator built -> ${OUTPUT_DIR}/bin/raven-usb"
+        cd "${PROJECT_ROOT}"
+    else
+        log_warn "USB creator source not found, skipping"
+    fi
+}
+
 # Build all packages
 build_all() {
     build_vem
     build_carrion
     build_ivaldi
+    build_installer
+    build_rvn
+    build_usb_creator
 }
 
 # Main
@@ -183,12 +274,21 @@ main() {
         ivaldi)
             build_ivaldi
             ;;
+        installer)
+            build_installer
+            ;;
+        rvn)
+            build_rvn
+            ;;
+        usb)
+            build_usb_creator
+            ;;
         all)
             build_all
             ;;
         *)
             log_error "Unknown package: $target"
-            echo "Usage: $0 [vem|carrion|ivaldi|all]"
+            echo "Usage: $0 [vem|carrion|ivaldi|installer|rvn|usb|all]"
             exit 1
             ;;
     esac
