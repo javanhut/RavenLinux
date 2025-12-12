@@ -79,7 +79,7 @@ setup_live_root() {
     log_step "Setting up live root filesystem..."
 
     rm -rf "${LIVE_ROOT}"
-    mkdir -p "${LIVE_ROOT}"/{bin,sbin,lib,lib64,usr/{bin,sbin,lib,share},etc,var,tmp,root,home,dev,proc,sys,run,mnt,opt}
+    mkdir -p "${LIVE_ROOT}"/{bin,sbin,lib,lib64,usr/{bin,sbin,lib,lib64,share},etc,var,tmp,root,home,dev,proc,sys,run,mnt,opt}
     mkdir -p "${LIVE_ROOT}"/usr/share/{fonts,icons,themes,backgrounds,zsh}
     mkdir -p "${LIVE_ROOT}"/etc/{skel,xdg,rvn}
     mkdir -p "${LIVE_ROOT}"/var/{log,cache,lib,tmp}
@@ -112,37 +112,52 @@ copy_initramfs() {
 }
 
 copy_coreutils() {
-    log_step "Copying uutils-coreutils..."
+    log_step "Copying coreutils..."
+
+    local utils=(
+        cat cp mv rm ln mkdir rmdir touch chmod chown chgrp
+        ls dir vdir head tail cut paste sort uniq wc tr tee
+        echo printf yes df du stat sync id whoami groups
+        uname hostname date sleep basename dirname realpath
+        readlink pwd md5sum sha256sum test true false env
+        seq dd install mktemp mknod tty xargs find grep less
+    )
 
     if [[ -f "${RAVEN_BUILD}/bin/coreutils" ]]; then
+        # Use uutils-coreutils if available (multi-call binary)
         cp "${RAVEN_BUILD}/bin/coreutils" "${LIVE_ROOT}/bin/coreutils"
-
-        # Create symlinks for all utilities
-        local utils=(
-            cat cp mv rm ln mkdir rmdir touch chmod chown chgrp
-            ls dir vdir head tail cut paste sort uniq wc tr tee
-            echo printf yes df du stat sync id whoami groups
-            uname hostname date sleep basename dirname realpath
-            readlink pwd md5sum sha256sum test true false env
-            seq dd install mktemp mknod tty
-        )
 
         for util in "${utils[@]}"; do
             ln -sf coreutils "${LIVE_ROOT}/bin/${util}"
         done
 
-        log_success "Coreutils installed"
+        log_success "Coreutils installed (uutils)"
     else
-        log_fatal "uutils-coreutils not found. Run ./scripts/build-uutils.sh first"
+        # Fallback: copy individual utilities from host
+        log_warn "uutils-coreutils not found, copying host utilities"
+
+        for util in "${utils[@]}"; do
+            if command -v "$util" &>/dev/null; then
+                local src
+                src="$(which "$util" 2>/dev/null)" || continue
+                [[ -f "$src" ]] || continue
+                cp "$src" "${LIVE_ROOT}/bin/${util}" 2>/dev/null || true
+            fi
+        done
+
+        log_success "Coreutils installed (host)"
     fi
 }
 
 copy_shells() {
     log_step "Copying shells..."
 
+    local have_zsh=false
+    local have_bash=false
+
     # Copy zsh from host
     if command -v zsh &>/dev/null; then
-        cp "$(which zsh)" "${LIVE_ROOT}/bin/zsh"
+        cp "$(which zsh)" "${LIVE_ROOT}/bin/zsh" && have_zsh=true
 
         # Copy zsh configuration files
         mkdir -p "${LIVE_ROOT}/usr/share/zsh"
@@ -153,12 +168,20 @@ copy_shells() {
 
     # Copy bash from host
     if command -v bash &>/dev/null; then
-        cp "$(which bash)" "${LIVE_ROOT}/bin/bash"
+        cp "$(which bash)" "${LIVE_ROOT}/bin/bash" && have_bash=true
         log_info "  Added bash"
     fi
 
-    # Create sh symlink to zsh
-    ln -sf zsh "${LIVE_ROOT}/bin/sh"
+    # Create sh symlink - prefer zsh, fall back to bash
+    if [[ "$have_zsh" == true ]]; then
+        ln -sf zsh "${LIVE_ROOT}/bin/sh"
+        log_info "  /bin/sh -> zsh"
+    elif [[ "$have_bash" == true ]]; then
+        ln -sf bash "${LIVE_ROOT}/bin/sh"
+        log_info "  /bin/sh -> bash"
+    else
+        log_warn "  WARNING: No shell available for /bin/sh!"
+    fi
 
     log_success "Shells installed"
 }
@@ -248,13 +271,36 @@ copy_libraries() {
         done
     done
 
-    # Copy dynamic linker
-    for ld in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-x86-64.so.2; do
-        if [[ -f "$ld" ]]; then
-            mkdir -p "${LIVE_ROOT}$(dirname "$ld")"
-            cp -L "$ld" "${LIVE_ROOT}${ld}" 2>/dev/null || true
+    # Copy dynamic linker - CRITICAL for all dynamically linked binaries
+    # Binaries expect /lib64/ld-linux-x86-64.so.2 - we MUST have it there
+    log_info "Copying dynamic linker..."
+
+    # Ensure /lib64 is a real directory with the linker in it
+    # Remove symlink if it exists and create real directory
+    if [[ -L "${LIVE_ROOT}/lib64" ]]; then
+        rm -f "${LIVE_ROOT}/lib64"
+    fi
+    mkdir -p "${LIVE_ROOT}/lib64"
+
+    # Copy the dynamic linker directly to /lib64/
+    local linker_found=false
+    for ld in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-x86-64.so.2 /usr/lib/ld-linux-x86-64.so.2; do
+        if [[ -f "$ld" ]] || [[ -L "$ld" ]]; then
+            cp -L "$ld" "${LIVE_ROOT}/lib64/ld-linux-x86-64.so.2" 2>/dev/null
+            # Also copy to /lib/ for compatibility
+            cp -L "$ld" "${LIVE_ROOT}/lib/ld-linux-x86-64.so.2" 2>/dev/null
+            linker_found=true
+            break
         fi
     done
+
+    # Verify the linker exists
+    if [[ -f "${LIVE_ROOT}/lib64/ld-linux-x86-64.so.2" ]]; then
+        log_info "  Dynamic linker installed at /lib64/ld-linux-x86-64.so.2"
+        ls -la "${LIVE_ROOT}/lib64/ld-linux-x86-64.so.2"
+    else
+        log_warn "  WARNING: Dynamic linker not found! Binaries will fail!"
+    fi
 
     log_success "Libraries copied"
 }
@@ -430,30 +476,41 @@ if command -v dhcpcd &>/dev/null; then
 fi
 
 # Clear screen and show welcome
-clear
+clear 2>/dev/null || printf '\033[2J\033[H'
+printf '\033[1;36m'
 cat << 'BANNER'
 
-  ██████╗  █████╗ ██╗   ██╗███████╗███╗   ██╗
-  ██╔══██╗██╔══██╗██║   ██║██╔════╝████╗  ██║
-  ██████╔╝███████║██║   ██║█████╗  ██╔██╗ ██║
-  ██╔══██╗██╔══██║╚██╗ ██╔╝██╔══╝  ██║╚██╗██║
-  ██║  ██║██║  ██║ ╚████╔╝ ███████╗██║ ╚████║
-  ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝
-                L I N U X
+  ╔═══════════════════════════════════════════════════════════════════════════╗
+  ║                                                                           ║
+  ║    ██████╗  █████╗ ██╗   ██╗███████╗███╗   ██╗    ██╗     ██╗███╗   ██╗   ║
+  ║    ██╔══██╗██╔══██╗██║   ██║██╔════╝████╗  ██║    ██║     ██║████╗  ██║   ║
+  ║    ██████╔╝███████║██║   ██║█████╗  ██╔██╗ ██║    ██║     ██║██╔██╗ ██║   ║
+  ║    ██╔══██╗██╔══██║╚██╗ ██╔╝██╔══╝  ██║╚██╗██║    ██║     ██║██║╚██╗██║   ║
+  ║    ██║  ██║██║  ██║ ╚████╔╝ ███████╗██║ ╚████║    ███████╗██║██║ ╚████║   ║
+  ║    ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝    ╚══════╝╚═╝╚═╝  ╚═══╝   ║
+  ║                                                                           ║
+  ║                    A Developer-Focused Linux Distribution                 ║
+  ║                                                                           ║
+  ╚═══════════════════════════════════════════════════════════════════════════╝
 
 BANNER
-
-echo "  Welcome to Raven Linux Live!"
-echo "  Version: $(cat /etc/os-release | grep VERSION_ID | cut -d= -f2)"
+printf '\033[0m'
+printf '\033[1;33m'
+echo "                              Version 2025.12"
+printf '\033[0m'
 echo ""
-echo "  Available tools:"
-echo "    vem      - Raven text editor"
-echo "    carrion  - Carrion programming language"
-echo "    ivaldi   - Ivaldi version control"
-echo "    rvn      - Raven package manager"
+printf '\033[1;37m'
+echo "  ┌─────────────────────────────────────────────────────────────────────────┐"
+echo "  │  BUILT-IN TOOLS:                                                        │"
+echo "  │    vem        - Text editor           wifi       - WiFi manager         │"
+echo "  │    carrion    - Programming language  rvn        - Package manager      │"
+echo "  │    ivaldi     - Version control       raven-install - System installer  │"
+echo "  └─────────────────────────────────────────────────────────────────────────┘"
+printf '\033[0m'
 echo ""
-echo "  Type 'raven-install' to install to disk"
-echo "  Type 'poweroff' to shutdown"
+printf '\033[0;32m'
+echo "  Type 'poweroff' to shutdown, 'reboot' to restart"
+printf '\033[0m'
 echo ""
 
 # Start login shell

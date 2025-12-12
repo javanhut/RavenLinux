@@ -53,6 +53,7 @@ sudo ./raven-usb-*-linux-x86_64 ravenlinux-*.iso /dev/sdX
 | Text Editor | Go | Vem - Modal editor with syntax highlighting |
 | Version Control | Go | Ivaldi - Distributed VCS |
 | Programming Language | Go | Carrion - Custom programming language |
+| WiFi Manager | Go | TUI/GUI tools to connect to WiFi networks |
 | Installer | Go | GUI system installer |
 | USB Flasher | Go | Tool to create bootable USB drives |
 
@@ -77,6 +78,42 @@ Distributed version control system with a focus on simplicity.
 ```bash
 ivaldi init
 ivaldi commit -m "Initial commit"
+```
+
+## Networking
+
+### WiFi Setup
+Connecting to WiFi is simple. Just run:
+```bash
+sudo wifi
+```
+
+This opens an interactive terminal interface where you can:
+- See all available networks with signal strength
+- Use arrow keys to select a network
+- Enter password when prompted
+- Connection is automatically saved for next time
+
+That's it! No complicated commands to remember.
+
+### Alternative: GUI WiFi Manager
+If you prefer a graphical interface:
+```bash
+raven-wifi
+```
+
+### Advanced: Manual WiFi (CLI)
+For power users who prefer raw commands:
+```bash
+# Using iwd
+iwctl station wlan0 scan
+iwctl station wlan0 get-networks
+iwctl station wlan0 connect "NetworkName"
+
+# Using wpa_supplicant (fallback)
+wpa_passphrase "NetworkName" "password" > /etc/wpa_supplicant.conf
+wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant.conf
+dhcpcd wlan0
 ```
 
 ## Building from Source

@@ -24,6 +24,8 @@ Cargo.lock
 
 # Temporary build directories
 /tmp/
+*.tmp/
+*.tmp/*
 /out/
 /dist/
 

@@ -280,6 +280,51 @@ build_bootloader() {
     fi
 }
 
+# Build WiFi tools
+build_wifi_tools() {
+    log_section "Building WiFi Tools"
+
+    # Build wifi TUI
+    local wifi_tui_dir="${PROJECT_ROOT}/tools/raven-wifi-tui"
+    if [ -d "$wifi_tui_dir" ]; then
+        cd "$wifi_tui_dir"
+        log_info "Downloading dependencies for wifi TUI..."
+        run_logged go mod download 2>/dev/null || run_logged go mod tidy
+
+        log_info "Compiling wifi TUI..."
+        if run_logged env CGO_ENABLED=0 go build -o wifi .; then
+            mkdir -p "${OUTPUT_DIR}/bin"
+            cp wifi "${OUTPUT_DIR}/bin/"
+            log_success "wifi (TUI) built -> ${OUTPUT_DIR}/bin/wifi"
+        else
+            log_error "Failed to build wifi TUI"
+        fi
+        cd "${PROJECT_ROOT}"
+    else
+        log_warn "WiFi TUI source not found, skipping"
+    fi
+
+    # Build raven-wifi GUI
+    local wifi_gui_dir="${PROJECT_ROOT}/tools/raven-wifi"
+    if [ -d "$wifi_gui_dir" ]; then
+        cd "$wifi_gui_dir"
+        log_info "Downloading dependencies for raven-wifi GUI..."
+        run_logged go mod download 2>/dev/null || run_logged go mod tidy
+
+        log_info "Compiling raven-wifi GUI..."
+        if run_logged env CGO_ENABLED=1 go build -o raven-wifi .; then
+            mkdir -p "${OUTPUT_DIR}/bin"
+            cp raven-wifi "${OUTPUT_DIR}/bin/"
+            log_success "raven-wifi (GUI) built -> ${OUTPUT_DIR}/bin/raven-wifi"
+        else
+            log_error "Failed to build raven-wifi GUI"
+        fi
+        cd "${PROJECT_ROOT}"
+    else
+        log_warn "WiFi GUI source not found, skipping"
+    fi
+}
+
 # Build all packages
 build_all() {
     build_vem
@@ -288,6 +333,7 @@ build_all() {
     build_installer
     build_rvn
     build_usb_creator
+    build_wifi_tools
     build_bootloader
 }
 

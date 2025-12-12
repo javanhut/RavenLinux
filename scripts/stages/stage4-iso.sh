@@ -117,29 +117,41 @@ hostname raven 2>/dev/null || true
 dmesg -n 1 2>/dev/null || true
 
 # Clear screen and show banner
-clear 2>/dev/null || true
+clear 2>/dev/null || printf '\033[2J\033[H'
+printf '\033[1;36m'
 cat << 'BANNER'
 
-    ██████╗  █████╗ ██╗   ██╗███████╗███╗   ██╗
-    ██╔══██╗██╔══██╗██║   ██║██╔════╝████╗  ██║
-    ██████╔╝███████║██║   ██║█████╗  ██╔██╗ ██║
-    ██╔══██╗██╔══██║╚██╗ ██╔╝██╔══╝  ██║╚██╗██║
-    ██║  ██║██║  ██║ ╚████╔╝ ███████╗██║ ╚████║
-    ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝
-                  L I N U X
+  ╔═══════════════════════════════════════════════════════════════════════════╗
+  ║                                                                           ║
+  ║    ██████╗  █████╗ ██╗   ██╗███████╗███╗   ██╗    ██╗     ██╗███╗   ██╗   ║
+  ║    ██╔══██╗██╔══██╗██║   ██║██╔════╝████╗  ██║    ██║     ██║████╗  ██║   ║
+  ║    ██████╔╝███████║██║   ██║█████╗  ██╔██╗ ██║    ██║     ██║██╔██╗ ██║   ║
+  ║    ██╔══██╗██╔══██║╚██╗ ██╔╝██╔══╝  ██║╚██╗██║    ██║     ██║██║╚██╗██║   ║
+  ║    ██║  ██║██║  ██║ ╚████╔╝ ███████╗██║ ╚████║    ███████╗██║██║ ╚████║   ║
+  ║    ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝    ╚══════╝╚═╝╚═╝  ╚═══╝   ║
+  ║                                                                           ║
+  ║                    A Developer-Focused Linux Distribution                 ║
+  ║                                                                           ║
+  ╚═══════════════════════════════════════════════════════════════════════════╝
 
 BANNER
-
-echo "  Welcome to Raven Linux Live!"
-echo "  Version: 2025.12"
+printf '\033[0m'
+printf '\033[1;33m'
+echo "                              Version 2025.12"
+printf '\033[0m'
 echo ""
-echo "  Built-in Tools:"
-echo "    vem        - Text editor"
-echo "    carrion    - Programming language"
-echo "    ivaldi     - Version control system"
-echo "    rvn        - Package manager"
+printf '\033[1;37m'
+echo "  ┌─────────────────────────────────────────────────────────────────────────┐"
+echo "  │  BUILT-IN TOOLS:                                                        │"
+echo "  │    vem        - Text editor           wifi       - WiFi manager         │"
+echo "  │    carrion    - Programming language  rvn        - Package manager      │"
+echo "  │    ivaldi     - Version control       raven-install - System installer  │"
+echo "  └─────────────────────────────────────────────────────────────────────────┘"
+printf '\033[0m'
 echo ""
+printf '\033[0;32m'
 echo "  Type 'poweroff' to shutdown, 'reboot' to restart"
+printf '\033[0m'
 echo ""
 
 # Start an interactive shell loop

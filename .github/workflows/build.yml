@@ -105,6 +105,18 @@ jobs:
           go mod tidy
           CGO_ENABLED=1 go build -o ../../raven-usb .
 
+      - name: Build raven-wifi (GUI)
+        run: |
+          cd tools/raven-wifi
+          go mod tidy
+          CGO_ENABLED=1 go build -o ../../raven-wifi .
+
+      - name: Build wifi (TUI)
+        run: |
+          cd tools/raven-wifi-tui
+          go mod tidy
+          CGO_ENABLED=0 go build -o ../../wifi .
+
       - name: Upload Go packages
         uses: actions/upload-artifact@v4
         with:
@@ -115,6 +127,8 @@ jobs:
             ivaldi
             raven-installer
             raven-usb
+            raven-wifi
+            wifi
           if-no-files-found: error
 
 
@@ -481,8 +495,11 @@ jobs:
           cp artifacts/go-packages/ivaldi release/ivaldi-linux-x86_64
           cp artifacts/go-packages/raven-installer release/raven-installer-linux-x86_64
           cp artifacts/go-packages/raven-usb release/raven-usb-linux-x86_64
+          cp artifacts/go-packages/raven-wifi release/raven-wifi-linux-x86_64
+          cp artifacts/go-packages/wifi release/wifi-linux-x86_64
           chmod +x release/vem-linux-x86_64 release/carrion-linux-x86_64 release/ivaldi-linux-x86_64
-          chmod +x release/raven-installer-linux-x86_64 release/raven-usb-linux-x86_64
+          chmod +x release/raven-installer-linux-x86_64 release/raven-usb-linux-x86_64 release/raven-wifi-linux-x86_64
+          chmod +x release/wifi-linux-x86_64
 
           # Package manager (Rust)
           if [[ -f artifacts/rvn-linux-x86_64/rvn ]]; then
@@ -557,6 +574,8 @@ jobs:
           | `rvn` | RavenLinux package manager |
           | `raven-installer` | GUI system installer |
           | `raven-usb` | USB bootable drive creator |
+          | `wifi` | Simple TUI WiFi manager (recommended) |
+          | `raven-wifi` | Full GUI WiFi manager |
           | `raven-boot.efi` | UEFI bootloader |
 
           ## Individual Tool Installation

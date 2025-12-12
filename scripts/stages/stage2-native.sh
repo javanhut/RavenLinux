@@ -43,9 +43,12 @@ fi
 copy_shells() {
     log_info "Copying shells..."
 
+    local have_zsh=false
+    local have_bash=false
+
     # Copy zsh
     if command -v zsh &>/dev/null; then
-        cp "$(which zsh)" "${SYSROOT_DIR}/bin/zsh"
+        cp "$(which zsh)" "${SYSROOT_DIR}/bin/zsh" && have_zsh=true
         mkdir -p "${SYSROOT_DIR}/usr/share/zsh"
         cp -r /usr/share/zsh/* "${SYSROOT_DIR}/usr/share/zsh/" 2>/dev/null || true
         log_info "  Added zsh"
@@ -53,12 +56,18 @@ copy_shells() {
 
     # Copy bash
     if command -v bash &>/dev/null; then
-        cp "$(which bash)" "${SYSROOT_DIR}/bin/bash"
+        cp "$(which bash)" "${SYSROOT_DIR}/bin/bash" && have_bash=true
         log_info "  Added bash"
     fi
 
     # Create sh symlink
-    ln -sf zsh "${SYSROOT_DIR}/bin/sh" 2>/dev/null || ln -sf bash "${SYSROOT_DIR}/bin/sh"
+    if $have_zsh; then
+        ln -sf zsh "${SYSROOT_DIR}/bin/sh"
+    elif $have_bash; then
+        ln -sf bash "${SYSROOT_DIR}/bin/sh"
+    else
+        log_warn "  WARNING: No shell available for /bin/sh!"
+    fi
 
     log_success "Shells installed"
 }
@@ -70,6 +79,12 @@ copy_system_utils() {
     log_info "Copying system utilities..."
 
     local utils=(
+        # Basic coreutils (essential!)
+        ls cat cp mv rm mkdir rmdir touch chmod chown ln
+        head tail wc cut sort uniq tr tee
+        pwd cd basename dirname realpath readlink
+        echo printf test expr env sleep
+        id whoami groups who w date
         # Process management
         ps kill killall pkill pgrep top htop
         # File operations
@@ -77,15 +92,19 @@ copy_system_utils() {
         # Disk utilities
         mount umount fdisk parted mkfs.ext4 mkfs.vfat fsck blkid lsblk
         # System info
-        dmesg lspci lsusb free uptime
+        dmesg lspci lsusb free uptime uname hostname hostnamectl
         # User management
-        su sudo passwd login
+        su sudo passwd login chpasswd useradd usermod groupadd
         # Archiving
-        tar gzip gunzip bzip2 xz zstd
+        tar gzip gunzip bzip2 xz zstd unzip zip
         # Editors (fallback)
         vi nano
-        # Misc
-        clear reset stty
+        # Terminal utilities
+        clear reset stty tput tset
+        # Locale and timezone
+        locale localedef localectl timedatectl hwclock date
+        # Systemd tools (if available, for compatibility)
+        journalctl systemctl
     )
 
     for util in "${utils[@]}"; do
@@ -98,6 +117,17 @@ copy_system_utils() {
             local dest="${SYSROOT_DIR}/bin/${util}"
             if [[ "$src" == */sbin/* ]]; then
                 dest="${SYSROOT_DIR}/sbin/${util}"
+            fi
+
+            # Special handling for uname - save as uname.real for wrapper script
+            if [[ "$util" == "uname" ]]; then
+                dest="${SYSROOT_DIR}/bin/uname.real"
+            fi
+
+            # Avoid overwriting symlink targets (e.g. uutils coreutils multi-call setup)
+            if [[ -L "$dest" ]]; then
+                log_info "  Skipping ${util} (destination is a symlink)"
+                continue
             fi
 
             cp "$src" "$dest" 2>/dev/null && log_info "  Added ${util}" || true
@@ -115,9 +145,10 @@ copy_networking() {
 
     local net_tools=(
         ip ping ping6 ss netstat route
-        dhcpcd dhclient
-        wpa_supplicant wpa_cli
-        iw iwconfig iwlist
+        dhcpcd dhclient udhcpc
+        iwd iwctl iwmon                    # iwd (preferred WiFi backend)
+        wpa_supplicant wpa_cli wpa_passphrase  # wpa_supplicant (fallback)
+        iw iwconfig iwlist rfkill
         ifconfig
         curl wget
         nc ncat
@@ -174,20 +205,232 @@ copy_libraries() {
         done || true
     done
 
-    # Copy dynamic linker
-    for ld in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-x86-64.so.2 /lib/ld-musl-x86_64.so.1; do
-        if [[ -f "$ld" ]]; then
-            mkdir -p "${SYSROOT_DIR}$(dirname "$ld")"
-            cp -L "$ld" "${SYSROOT_DIR}${ld}" 2>/dev/null || true
+    # Setup lib directories - use real directories, not symlinks
+    mkdir -p "${SYSROOT_DIR}/lib"
+    mkdir -p "${SYSROOT_DIR}/lib64"
+    mkdir -p "${SYSROOT_DIR}/usr/lib"
+    mkdir -p "${SYSROOT_DIR}/usr/lib64"
+
+    # Copy dynamic linker to /lib64/ - this is where glibc binaries expect it
+    log_info "Copying dynamic linker..."
+    for ld in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-x86-64.so.2 /lib/ld-musl-x86_64.so.1 /usr/lib/ld-linux-x86-64.so.2; do
+        if [[ -f "$ld" ]] || [[ -L "$ld" ]]; then
+            local ld_name
+            ld_name="$(basename "$ld")"
+            # Copy to both /lib64 and /lib for maximum compatibility
+            cp -L "$ld" "${SYSROOT_DIR}/lib64/${ld_name}" 2>/dev/null && log_info "  Copied ${ld_name} to /lib64/" || true
+            cp -L "$ld" "${SYSROOT_DIR}/lib/${ld_name}" 2>/dev/null || true
         fi
     done
 
-    # Create lib64 symlink if needed
-    if [[ -d "${SYSROOT_DIR}/lib" && ! -e "${SYSROOT_DIR}/lib64" ]]; then
-        ln -sf lib "${SYSROOT_DIR}/lib64"
-    fi
+    # Copy graphics/OpenGL libraries (needed for GUI apps like raven-wifi)
+    log_info "Copying graphics libraries..."
+    local graphics_libs=(
+        # OpenGL
+        libGL.so libGL.so.1
+        libGLX.so libGLX.so.0
+        libGLdispatch.so libGLdispatch.so.0
+        libOpenGL.so libOpenGL.so.0
+        # EGL
+        libEGL.so libEGL.so.1
+        # GLX
+        libglapi.so libglapi.so.0
+        # Mesa
+        libgbm.so libgbm.so.1
+        # Wayland
+        libwayland-client.so libwayland-client.so.0
+        libwayland-egl.so libwayland-egl.so.1
+        libwayland-cursor.so libwayland-cursor.so.0
+        # X11
+        libX11.so libX11.so.6
+        libXcursor.so libXcursor.so.1
+        libXrandr.so libXrandr.so.2
+        libXi.so libXi.so.6
+        libXinerama.so libXinerama.so.1
+        libXxf86vm.so libXxf86vm.so.1
+        libXext.so libXext.so.6
+        libXrender.so libXrender.so.1
+        libXfixes.so libXfixes.so.3
+        libxcb.so libxcb.so.1
+        libxkbcommon.so libxkbcommon.so.0
+        # Vulkan
+        libvulkan.so libvulkan.so.1
+    )
+
+    for lib in "${graphics_libs[@]}"; do
+        for dir in /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu /lib /lib64; do
+            if [[ -f "${dir}/${lib}" ]]; then
+                mkdir -p "${SYSROOT_DIR}/usr/lib"
+                cp -L "${dir}/${lib}" "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
+                break
+            fi
+        done
+    done
 
     log_success "Libraries copied"
+}
+
+# =============================================================================
+# Copy terminfo database (needed for clear, reset, etc.)
+# =============================================================================
+copy_terminfo() {
+    log_info "Copying terminfo database..."
+
+    # Find terminfo location
+    local terminfo_src=""
+    for dir in /usr/share/terminfo /lib/terminfo /etc/terminfo; do
+        if [[ -d "$dir" ]]; then
+            terminfo_src="$dir"
+            break
+        fi
+    done
+
+    if [[ -z "$terminfo_src" ]]; then
+        log_warn "No terminfo database found on host"
+        return
+    fi
+
+    # Copy essential terminal definitions
+    mkdir -p "${SYSROOT_DIR}/usr/share/terminfo"
+
+    # Copy common terminal types: linux, xterm, vt100, screen, etc.
+    local terms=(
+        "l/linux"
+        "x/xterm" "x/xterm-256color" "x/xterm-color"
+        "v/vt100" "v/vt102" "v/vt220"
+        "s/screen" "s/screen-256color"
+        "r/rxvt" "r/rxvt-unicode" "r/rxvt-unicode-256color"
+        "a/ansi"
+        "d/dumb"
+    )
+
+    for term in "${terms[@]}"; do
+        local src="${terminfo_src}/${term}"
+        if [[ -f "$src" ]]; then
+            local dest="${SYSROOT_DIR}/usr/share/terminfo/${term}"
+            mkdir -p "$(dirname "$dest")"
+            cp "$src" "$dest" 2>/dev/null || true
+        fi
+    done
+
+    # Also copy to /etc/terminfo as fallback
+    if [[ -d "${SYSROOT_DIR}/usr/share/terminfo" ]]; then
+        mkdir -p "${SYSROOT_DIR}/etc"
+        ln -sf ../usr/share/terminfo "${SYSROOT_DIR}/etc/terminfo" 2>/dev/null || true
+    fi
+
+    log_success "Terminfo database copied"
+}
+
+# =============================================================================
+# Copy locale data and X11 compose files
+# =============================================================================
+copy_locale_data() {
+    log_info "Setting up locale data..."
+
+    # Create locale directories
+    mkdir -p "${SYSROOT_DIR}/usr/share/locale"
+    mkdir -p "${SYSROOT_DIR}/usr/share/i18n/locales"
+    mkdir -p "${SYSROOT_DIR}/usr/share/i18n/charmaps"
+    mkdir -p "${SYSROOT_DIR}/usr/lib/locale"
+
+    # Copy locale definitions if available
+    if [[ -d /usr/share/i18n/locales ]]; then
+        cp /usr/share/i18n/locales/en_US "${SYSROOT_DIR}/usr/share/i18n/locales/" 2>/dev/null || true
+        cp /usr/share/i18n/locales/en_GB "${SYSROOT_DIR}/usr/share/i18n/locales/" 2>/dev/null || true
+        cp /usr/share/i18n/locales/POSIX "${SYSROOT_DIR}/usr/share/i18n/locales/" 2>/dev/null || true
+        cp /usr/share/i18n/locales/i18n "${SYSROOT_DIR}/usr/share/i18n/locales/" 2>/dev/null || true
+        cp /usr/share/i18n/locales/iso14651_t1 "${SYSROOT_DIR}/usr/share/i18n/locales/" 2>/dev/null || true
+        cp /usr/share/i18n/locales/iso14651_t1_common "${SYSROOT_DIR}/usr/share/i18n/locales/" 2>/dev/null || true
+        cp /usr/share/i18n/locales/translit_* "${SYSROOT_DIR}/usr/share/i18n/locales/" 2>/dev/null || true
+    fi
+
+    # Copy UTF-8 charmap
+    if [[ -d /usr/share/i18n/charmaps ]]; then
+        cp /usr/share/i18n/charmaps/UTF-8.gz "${SYSROOT_DIR}/usr/share/i18n/charmaps/" 2>/dev/null || true
+        cp /usr/share/i18n/charmaps/UTF-8 "${SYSROOT_DIR}/usr/share/i18n/charmaps/" 2>/dev/null || true
+    fi
+
+    # Copy compiled locale archive if available
+    if [[ -f /usr/lib/locale/locale-archive ]]; then
+        cp /usr/lib/locale/locale-archive "${SYSROOT_DIR}/usr/lib/locale/" 2>/dev/null || true
+    fi
+
+    # Copy individual compiled locales
+    for locale_dir in /usr/lib/locale/en_US* /usr/lib/locale/C.* /usr/lib/locale/POSIX; do
+        if [[ -d "$locale_dir" ]]; then
+            cp -r "$locale_dir" "${SYSROOT_DIR}/usr/lib/locale/" 2>/dev/null || true
+        fi
+    done
+
+    # X11 Compose files (needed for Fyne and other GUI toolkits)
+    mkdir -p "${SYSROOT_DIR}/usr/share/X11/locale"
+
+    if [[ -d /usr/share/X11/locale ]]; then
+        # Copy compose files for common locales
+        for locale in en_US.UTF-8 C UTF-8 iso8859-1 compose.dir locale.dir; do
+            if [[ -e "/usr/share/X11/locale/$locale" ]]; then
+                cp -r "/usr/share/X11/locale/$locale" "${SYSROOT_DIR}/usr/share/X11/locale/" 2>/dev/null || true
+            fi
+        done
+
+        # Copy locale.alias and compose.dir
+        cp /usr/share/X11/locale/locale.alias "${SYSROOT_DIR}/usr/share/X11/locale/" 2>/dev/null || true
+        cp /usr/share/X11/locale/locale.dir "${SYSROOT_DIR}/usr/share/X11/locale/" 2>/dev/null || true
+        cp /usr/share/X11/locale/compose.dir "${SYSROOT_DIR}/usr/share/X11/locale/" 2>/dev/null || true
+    fi
+
+    # Create locale.gen
+    cat > "${SYSROOT_DIR}/etc/locale.gen" << 'EOF'
+en_US.UTF-8 UTF-8
+en_GB.UTF-8 UTF-8
+C.UTF-8 UTF-8
+EOF
+
+    # Create locale.conf
+    cat > "${SYSROOT_DIR}/etc/locale.conf" << 'EOF'
+LANG=en_US.UTF-8
+LC_ALL=en_US.UTF-8
+EOF
+
+    # Create a minimal /etc/default/locale
+    mkdir -p "${SYSROOT_DIR}/etc/default"
+    cat > "${SYSROOT_DIR}/etc/default/locale" << 'EOF'
+LANG=en_US.UTF-8
+EOF
+
+    log_success "Locale data configured"
+}
+
+# =============================================================================
+# Copy timezone data
+# =============================================================================
+copy_timezone_data() {
+    log_info "Setting up timezone data..."
+
+    # Create timezone directories
+    mkdir -p "${SYSROOT_DIR}/usr/share/zoneinfo"
+
+    # Copy timezone data
+    if [[ -d /usr/share/zoneinfo ]]; then
+        # Copy all timezone data (it's not that large)
+        cp -r /usr/share/zoneinfo/* "${SYSROOT_DIR}/usr/share/zoneinfo/" 2>/dev/null || true
+    fi
+
+    # Set default timezone to UTC
+    ln -sf /usr/share/zoneinfo/UTC "${SYSROOT_DIR}/etc/localtime" 2>/dev/null || true
+
+    # Create timezone config
+    echo "UTC" > "${SYSROOT_DIR}/etc/timezone"
+
+    # Create adjtime for hwclock
+    cat > "${SYSROOT_DIR}/etc/adjtime" << 'EOF'
+0.0 0 0.0
+0
+UTC
+EOF
+
+    log_success "Timezone data configured"
 }
 
 # =============================================================================
@@ -196,18 +439,68 @@ copy_libraries() {
 create_configs() {
     log_info "Creating configuration files..."
 
+    local default_shell="/bin/sh"
+    if [[ -x "${SYSROOT_DIR}/bin/zsh" ]]; then
+        default_shell="/bin/zsh"
+    elif [[ -x "${SYSROOT_DIR}/bin/bash" ]]; then
+        default_shell="/bin/bash"
+    elif [[ -x "${SYSROOT_DIR}/bin/sh" ]]; then
+        default_shell="/bin/sh"
+    fi
+
     # /etc/os-release
     cat > "${SYSROOT_DIR}/etc/os-release" << 'EOF'
 NAME="Raven Linux"
 PRETTY_NAME="Raven Linux 2025.12"
 ID=raven
+ID_LIKE=arch
 BUILD_ID=rolling
 VERSION_ID=2025.12
 VERSION="2025.12 (Rolling)"
 ANSI_COLOR="38;2;23;147;209"
-HOME_URL="https://ravenlinux.org"
+HOME_URL="https://github.com/javanhut/RavenLinux"
+DOCUMENTATION_URL="https://github.com/javanhut/RavenLinux"
 LOGO=raven-logo
 EOF
+
+    # Create uname wrapper to show raven-linux
+    # Remove existing symlink first (stage1 creates /bin/uname -> coreutils)
+    rm -f "${SYSROOT_DIR}/bin/uname"
+    cat > "${SYSROOT_DIR}/bin/uname" << 'UNAMESCRIPT'
+#!/bin/sh
+# Raven Linux uname wrapper
+REAL_UNAME=/bin/uname.real
+
+if [ ! -x "$REAL_UNAME" ]; then
+    # Fallback if real uname not found
+    exec /usr/bin/uname "$@"
+fi
+
+case "$1" in
+    -a|--all)
+        # Show full info with raven-linux
+        kernel=$($REAL_UNAME -s)
+        nodename=$($REAL_UNAME -n)
+        release=$($REAL_UNAME -r)
+        version=$($REAL_UNAME -v)
+        machine=$($REAL_UNAME -m)
+        echo "raven-linux $nodename $release $version $machine"
+        ;;
+    -s|--kernel-name)
+        echo "raven-linux"
+        ;;
+    -o|--operating-system)
+        echo "Raven Linux"
+        ;;
+    "")
+        echo "raven-linux"
+        ;;
+    *)
+        exec $REAL_UNAME "$@"
+        ;;
+esac
+UNAMESCRIPT
+    chmod +x "${SYSROOT_DIR}/bin/uname"
 
     # /etc/hostname
     echo "raven" > "${SYSROOT_DIR}/etc/hostname"
@@ -220,9 +513,9 @@ EOF
 EOF
 
     # /etc/passwd
-    cat > "${SYSROOT_DIR}/etc/passwd" << 'EOF'
-root:x:0:0:root:/root:/bin/zsh
-raven:x:1000:1000:Raven User:/home/raven:/bin/zsh
+    cat > "${SYSROOT_DIR}/etc/passwd" << EOF
+root:x:0:0:root:/root:${default_shell}
+raven:x:1000:1000:Raven User:/home/raven:${default_shell}
 nobody:x:65534:65534:Nobody:/:/bin/false
 EOF
 
@@ -258,12 +551,38 @@ EOF
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export HOME="${HOME:-/root}"
 export TERM="${TERM:-linux}"
+export TERMINFO=/usr/share/terminfo
+
+# Locale settings
 export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+export LANGUAGE=en_US.UTF-8
+
+# X11/GUI locale support
+export XLOCALEDIR=/usr/share/X11/locale
+
+# XDG directories (required for GUI applications)
+_UID="$(id -u 2>/dev/null || echo 0)"
+export XDG_RUNTIME_DIR="/run/user/${_UID}"
+export XDG_CONFIG_HOME="${HOME}/.config"
+export XDG_DATA_HOME="${HOME}/.local/share"
+export XDG_CACHE_HOME="${HOME}/.cache"
+
+# Create XDG_RUNTIME_DIR if it doesn't exist
+if [ -n "$XDG_RUNTIME_DIR" ] && [ ! -d "$XDG_RUNTIME_DIR" ]; then
+    mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null
+    chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null
+fi
+
+# Editor
 export EDITOR=vem
 export VISUAL=vem
+
+# Raven identification
 export RAVEN_LINUX=1
 
-[ -f /etc/zsh/zshrc ] && . /etc/zsh/zshrc
+# Source locale.conf if it exists
+[ -f /etc/locale.conf ] && . /etc/locale.conf
 EOF
 
     # /etc/fstab
@@ -330,6 +649,9 @@ main() {
     copy_system_utils
     copy_networking
     copy_libraries
+    copy_terminfo
+    copy_locale_data
+    copy_timezone_data
     create_configs
 
     echo ""

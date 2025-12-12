@@ -169,6 +169,59 @@ build_usb_creator() {
 }
 
 # =============================================================================
+# Build WiFi tools (Go)
+# =============================================================================
+build_wifi_tools() {
+    log_step "Building WiFi tools..."
+
+    # Build wifi TUI
+    local wifi_tui_dir="${PROJECT_ROOT}/tools/raven-wifi-tui"
+    if [[ -d "${wifi_tui_dir}" ]]; then
+        if ! command -v go &>/dev/null; then
+            log_warn "Go not found, skipping wifi TUI build"
+        else
+            cd "${wifi_tui_dir}"
+            go mod tidy 2>/dev/null || true
+
+            if CGO_ENABLED=0 go build -o wifi . 2>&1 | tee "${LOGS_DIR}/wifi-tui.log"; then
+                mkdir -p "${PACKAGES_DIR}/bin" "${SYSROOT_DIR}/bin"
+                cp wifi "${PACKAGES_DIR}/bin/"
+                cp wifi "${SYSROOT_DIR}/bin/"
+                log_success "wifi (TUI) built"
+            else
+                log_warn "Failed to build wifi TUI"
+            fi
+            cd "${PROJECT_ROOT}"
+        fi
+    else
+        log_warn "WiFi TUI source not found at ${wifi_tui_dir}"
+    fi
+
+    # Build raven-wifi GUI
+    local wifi_gui_dir="${PROJECT_ROOT}/tools/raven-wifi"
+    if [[ -d "${wifi_gui_dir}" ]]; then
+        if ! command -v go &>/dev/null; then
+            log_warn "Go not found, skipping raven-wifi GUI build"
+        else
+            cd "${wifi_gui_dir}"
+            go mod tidy 2>/dev/null || true
+
+            if CGO_ENABLED=1 go build -o raven-wifi . 2>&1 | tee "${LOGS_DIR}/wifi-gui.log"; then
+                mkdir -p "${PACKAGES_DIR}/bin" "${SYSROOT_DIR}/bin"
+                cp raven-wifi "${PACKAGES_DIR}/bin/"
+                cp raven-wifi "${SYSROOT_DIR}/bin/"
+                log_success "raven-wifi (GUI) built"
+            else
+                log_warn "Failed to build raven-wifi GUI"
+            fi
+            cd "${PROJECT_ROOT}"
+        fi
+    else
+        log_warn "WiFi GUI source not found at ${wifi_gui_dir}"
+    fi
+}
+
+# =============================================================================
 # Build RavenBoot bootloader (Rust UEFI)
 # =============================================================================
 build_bootloader() {
@@ -256,6 +309,7 @@ main() {
     build_rvn
     build_installer
     build_usb_creator
+    build_wifi_tools
     build_bootloader
 
     print_summary
