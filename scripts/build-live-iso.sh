@@ -192,7 +192,7 @@ copy_raven_packages() {
     local packages_bin="${RAVEN_BUILD}/packages/bin"
 
     if [[ -d "${packages_bin}" ]]; then
-        for pkg in vem carrion ivaldi raven-installer rvn; do
+        for pkg in vem carrion ivaldi raven-installer rvn raven-dhcp; do
             if [[ -f "${packages_bin}/${pkg}" ]]; then
                 cp "${packages_bin}/${pkg}" "${LIVE_ROOT}/bin/${pkg}"
                 log_info "  Added ${pkg}"
@@ -468,12 +468,26 @@ if [ -x /sbin/udevd ]; then
     udevadm settle
 fi
 
-# Configure networking (try DHCP)
-if command -v dhcpcd &>/dev/null; then
-    for iface in /sys/class/net/e*; do
-        [ -d "$iface" ] && dhcpcd "$(basename "$iface")" 2>/dev/null &
-    done
-fi
+# Configure networking (try DHCP on ethernet)
+for sysiface in /sys/class/net/e*; do
+    [ -d "$sysiface" ] || continue
+    iface="$(basename "$sysiface")"
+
+    if command -v raven-dhcp &>/dev/null; then
+        raven-dhcp -q -i "$iface" 2>/dev/null || true
+        continue
+    fi
+
+    if command -v dhcpcd &>/dev/null; then
+        dhcpcd "$iface" 2>/dev/null || true
+        continue
+    fi
+
+    if command -v udhcpc &>/dev/null; then
+        udhcpc -i "$iface" -n -q 2>/dev/null || true
+        continue
+    fi
+done
 
 # Clear screen and show welcome
 clear 2>/dev/null || printf '\033[2J\033[H'

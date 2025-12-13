@@ -12,6 +12,7 @@
 #   ivaldi     Build Ivaldi VCS
 #   installer  Build Raven Installer
 #   rvn        Build rvn package manager
+#   dhcp       Build raven-dhcp DHCP client
 #   usb        Build USB creator tool
 #   bootloader Build RavenBoot bootloader
 #   all        Build all packages (default)
@@ -31,6 +32,10 @@ export RAVEN_ROOT="$PROJECT_ROOT"
 export RAVEN_BUILD="${PROJECT_ROOT}/build"
 SOURCES_DIR="${RAVEN_BUILD}/sources"
 OUTPUT_DIR="${RAVEN_BUILD}/packages"
+
+# Avoid relying on ~/.cache in restricted environments
+export GOCACHE="${GOCACHE:-${RAVEN_BUILD}/.gocache}"
+mkdir -p "${GOCACHE}" 2>/dev/null || true
 
 # Source shared logging library
 source "${SCRIPT_DIR}/lib/logging.sh"
@@ -57,6 +62,29 @@ check_dependencies() {
     fi
 
     log_success "All dependencies found (Go $(go version | awk '{print $3}'))"
+}
+
+build_raven_dhcp() {
+    log_section "Building raven-dhcp DHCP Client"
+
+    local dhcp_dir="${PROJECT_ROOT}/tools/raven-dhcp"
+
+    if [ -d "$dhcp_dir" ]; then
+        cd "$dhcp_dir"
+
+        log_info "Compiling raven-dhcp..."
+        if run_logged env CGO_ENABLED=0 go build -o raven-dhcp .; then
+            mkdir -p "${OUTPUT_DIR}/bin"
+            cp raven-dhcp "${OUTPUT_DIR}/bin/"
+            log_success "raven-dhcp built -> ${OUTPUT_DIR}/bin/raven-dhcp"
+        else
+            log_error "Failed to build raven-dhcp"
+        fi
+
+        cd "${PROJECT_ROOT}"
+    else
+        log_warn "raven-dhcp source not found, skipping"
+    fi
 }
 
 # Build a Go package from GitHub
@@ -332,6 +360,7 @@ build_all() {
     build_ivaldi
     build_installer
     build_rvn
+    build_raven_dhcp
     build_usb_creator
     build_wifi_tools
     build_bootloader
@@ -374,13 +403,13 @@ main() {
                 export RAVEN_NO_LOG=1
                 shift
                 ;;
-            vem|carrion|ivaldi|installer|rvn|usb|bootloader|all)
+            vem|carrion|ivaldi|installer|rvn|dhcp|usb|bootloader|all)
                 target="$1"
                 shift
                 ;;
             *)
                 log_error "Unknown package or option: $1"
-                echo "Usage: $0 [--no-log] [vem|carrion|ivaldi|installer|rvn|usb|bootloader|all]"
+                echo "Usage: $0 [--no-log] [vem|carrion|ivaldi|installer|rvn|dhcp|usb|bootloader|all]"
                 exit 1
                 ;;
         esac
@@ -417,6 +446,9 @@ main() {
             ;;
         rvn)
             build_rvn
+            ;;
+        dhcp)
+            build_raven_dhcp
             ;;
         usb)
             build_usb_creator

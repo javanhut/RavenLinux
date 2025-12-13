@@ -402,6 +402,12 @@ func (wm *WiFiManager) requestDHCP() {
 	// Try udhcpc (busybox)
 	if _, err := exec.LookPath("udhcpc"); err == nil {
 		exec.Command("udhcpc", "-i", wm.iface, "-n", "-q").Run()
+		return
+	}
+
+	// Try raven-dhcp (built-in)
+	if _, err := exec.LookPath("raven-dhcp"); err == nil {
+		exec.Command("raven-dhcp", "-i", wm.iface).Run()
 	}
 }
 

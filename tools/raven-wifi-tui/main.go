@@ -684,6 +684,7 @@ func requestDHCP(iface string) {
 	// Kill any existing DHCP clients
 	exec.Command("killall", "dhcpcd").Run()
 	exec.Command("killall", "dhclient").Run()
+	exec.Command("killall", "udhcpc").Run()
 
 	// Try dhcpcd first
 	if _, err := exec.LookPath("dhcpcd"); err == nil {
@@ -700,6 +701,12 @@ func requestDHCP(iface string) {
 	// Try udhcpc
 	if _, err := exec.LookPath("udhcpc"); err == nil {
 		exec.Command("udhcpc", "-i", iface, "-n", "-q").Run()
+		return
+	}
+
+	// Try raven-dhcp (built-in)
+	if _, err := exec.LookPath("raven-dhcp"); err == nil {
+		exec.Command("raven-dhcp", "-i", iface).Run()
 	}
 }
 

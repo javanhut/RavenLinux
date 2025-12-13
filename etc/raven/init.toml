@@ -82,10 +82,10 @@ critical = false
 [[services]]
 name = "network"
 description = "Network management"
-exec = "/sbin/dhcpcd"
-args = ["-B", "-q"]
+exec = "/bin/raven-dhcp"
+args = ["--all", "-q"]
 restart = false
-enabled = false  # Enable when dhcpcd is installed
+enabled = true
 critical = false
 
 

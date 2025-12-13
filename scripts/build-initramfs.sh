@@ -143,7 +143,7 @@ copy_binaries() {
     local PACKAGES_BIN="${RAVEN_BUILD}/packages/bin"
     if [[ -d "${PACKAGES_BIN}" ]]; then
         log_info "Copying RavenLinux custom packages..."
-        for pkg in vem carrion ivaldi; do
+        for pkg in vem carrion ivaldi raven-dhcp; do
             if [[ -f "${PACKAGES_BIN}/${pkg}" ]]; then
                 cp "${PACKAGES_BIN}/${pkg}" "${INITRAMFS_DIR}/bin/${pkg}"
                 log_info "  Added ${pkg}"
