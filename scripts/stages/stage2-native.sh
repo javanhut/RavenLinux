@@ -103,6 +103,8 @@ copy_system_utils() {
         clear reset stty tput tset
         # Locale and timezone
         locale localedef localectl timedatectl hwclock date
+        # D-Bus (needed by iwd/iwctl and many GUI apps)
+        dbus-daemon dbus-launch dbus-send dbus-uuidgen
         # Systemd tools (if available, for compatibility)
         journalctl systemctl
     )
@@ -584,6 +586,21 @@ export RAVEN_LINUX=1
 # Source locale.conf if it exists
 [ -f /etc/locale.conf ] && . /etc/locale.conf
 EOF
+
+    # D-Bus configuration (needed by iwctl/iwd and many GUI apps)
+    if [[ -d /usr/share/dbus-1 ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share/dbus-1"
+        cp -r /usr/share/dbus-1/* "${SYSROOT_DIR}/usr/share/dbus-1/" 2>/dev/null || true
+    fi
+    if [[ -d /etc/dbus-1 ]]; then
+        mkdir -p "${SYSROOT_DIR}/etc/dbus-1"
+        cp -r /etc/dbus-1/* "${SYSROOT_DIR}/etc/dbus-1/" 2>/dev/null || true
+    fi
+
+    # Machine ID (required by D-Bus); regenerated on install as needed
+    if [[ ! -s "${SYSROOT_DIR}/etc/machine-id" ]] && [[ -r /proc/sys/kernel/random/uuid ]]; then
+        cat /proc/sys/kernel/random/uuid | tr -d '-' > "${SYSROOT_DIR}/etc/machine-id" 2>/dev/null || true
+    fi
 
     # /etc/fstab
     cat > "${SYSROOT_DIR}/etc/fstab" << 'EOF'

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"image/color"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -31,6 +32,18 @@ type WiFiApp struct {
 }
 
 func main() {
+	if os.Geteuid() != 0 {
+		fmt.Fprintln(os.Stderr, "This tool requires root privileges. Please run with sudo:")
+		fmt.Fprintln(os.Stderr, "  sudo raven-wifi")
+		os.Exit(1)
+	}
+
+	if os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
+		fmt.Fprintln(os.Stderr, "No graphical session detected (DISPLAY/WAYLAND_DISPLAY not set).")
+		fmt.Fprintln(os.Stderr, "Use `wifi` for the TUI version, or start the desktop environment first.")
+		os.Exit(1)
+	}
+
 	a := app.New()
 	a.Settings().SetTheme(&ravenTheme{})
 
@@ -183,11 +196,11 @@ func (wa *WiFiApp) updateNetworkItem(id widget.ListItemID, obj fyne.CanvasObject
 
 func (wa *WiFiApp) getSignalColor(signal int) color.Color {
 	if signal >= 70 {
-		return color.NRGBA{R: 76, G: 175, B: 80, A: 255}  // Green
+		return color.NRGBA{R: 76, G: 175, B: 80, A: 255} // Green
 	} else if signal >= 40 {
-		return color.NRGBA{R: 255, G: 193, B: 7, A: 255}  // Yellow
+		return color.NRGBA{R: 255, G: 193, B: 7, A: 255} // Yellow
 	}
-	return color.NRGBA{R: 244, G: 67, B: 54, A: 255}      // Red
+	return color.NRGBA{R: 244, G: 67, B: 54, A: 255} // Red
 }
 
 func (wa *WiFiApp) refreshNetworks() {
@@ -383,7 +396,7 @@ func (t *ravenTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) 
 	case theme.ColorNameForeground:
 		return color.NRGBA{R: 230, G: 230, B: 230, A: 255}
 	case theme.ColorNamePrimary:
-		return color.NRGBA{R: 0, G: 150, B: 136, A: 255}  // Teal
+		return color.NRGBA{R: 0, G: 150, B: 136, A: 255} // Teal
 	case theme.ColorNameButton:
 		return color.NRGBA{R: 50, G: 50, B: 55, A: 255}
 	case theme.ColorNameInputBackground:

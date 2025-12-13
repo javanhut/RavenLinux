@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -89,6 +90,7 @@ type model struct {
 
 // Messages
 type scanDoneMsg struct {
+	iface    string
 	networks []Network
 	err      error
 }
@@ -114,9 +116,10 @@ func main() {
 }
 
 func initialModel() model {
+	iface := detectInterface()
 	m := model{
 		state: stateScanning,
-		iface: detectInterface(),
+		iface: iface,
 	}
 	return m
 }
@@ -136,6 +139,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = msg.err.Error()
 			return m, nil
 		}
+		m.iface = msg.iface
 		m.networks = msg.networks
 		m.state = stateList
 		return m, nil
@@ -368,25 +372,51 @@ func detectInterface() string {
 		}
 	}
 
-	return "wlan0"
+	return ""
 }
 
 func scanNetworks(iface string) tea.Cmd {
 	return func() tea.Msg {
+		if iface == "" {
+			iface = detectInterface()
+			if iface == "" {
+				return scanDoneMsg{
+					err: errors.New(
+						"no wireless interfaces detected.\n\n" +
+							"If you're running in QEMU/VM, Wi-Fi is usually not available.\n" +
+							"Use Ethernet (virtio/e1000) or pass through a USB Wi-Fi adapter.",
+					),
+				}
+			}
+		}
+
 		// Ensure interface is up
 		exec.Command("ip", "link", "set", iface, "up").Run()
 		exec.Command("rfkill", "unblock", "wifi").Run()
 
 		var networks []Network
+		var iwdErr error
+		var iwErr error
 
 		// Try iwd first
 		if _, err := exec.LookPath("iwctl"); err == nil {
-			networks, _ = scanWithIWD(iface)
+			networks, iwdErr = scanWithIWD(iface)
 		}
 
 		// Fallback to raw iw scan
 		if len(networks) == 0 {
-			networks, _ = scanWithIW(iface)
+			networks, iwErr = scanWithIW(iface)
+		}
+
+		if len(networks) == 0 && (iwdErr != nil || iwErr != nil) {
+			msg := "Wi-Fi scan failed."
+			if iwdErr != nil {
+				msg += "\n\niwctl error:\n" + iwdErr.Error()
+			}
+			if iwErr != nil {
+				msg += "\n\niw error:\n" + iwErr.Error()
+			}
+			return scanDoneMsg{iface: iface, err: errors.New(msg)}
 		}
 
 		// Get current connection
@@ -417,20 +447,22 @@ func scanNetworks(iface string) tea.Cmd {
 			}
 		}
 
-		return scanDoneMsg{networks: unique}
+		return scanDoneMsg{iface: iface, networks: unique}
 	}
 }
 
 func scanWithIWD(iface string) ([]Network, error) {
 	// Trigger scan
-	exec.Command("iwctl", "station", iface, "scan").Run()
+	if out, err := exec.Command("iwctl", "station", iface, "scan").CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
 	time.Sleep(3 * time.Second)
 
 	// Get networks
 	cmd := exec.Command("iwctl", "station", iface, "get-networks")
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(string(output)))
 	}
 
 	var networks []Network
@@ -490,9 +522,9 @@ func scanWithIWD(iface string) ([]Network, error) {
 
 func scanWithIW(iface string) ([]Network, error) {
 	cmd := exec.Command("iw", "dev", iface, "scan")
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(string(output)))
 	}
 
 	var networks []Network
@@ -544,17 +576,35 @@ func getCurrentSSID(iface string) string {
 
 func connectToNetwork(iface, ssid, password string) tea.Cmd {
 	return func() tea.Msg {
-		var err error
+		if iface == "" {
+			iface = detectInterface()
+			if iface == "" {
+				return connectDoneMsg{success: false, err: errors.New("no wireless interfaces detected")}
+			}
+		}
+
+		var errs []string
 
 		// Try iwd first
 		if _, e := exec.LookPath("iwctl"); e == nil {
-			err = connectWithIWD(iface, ssid, password)
-		} else {
-			err = connectWithWPA(iface, ssid, password)
+			if err := connectWithIWD(iface, ssid, password); err == nil {
+				errs = nil
+			} else {
+				errs = append(errs, "iwctl: "+err.Error())
+			}
 		}
 
-		if err != nil {
-			return connectDoneMsg{success: false, err: err}
+		// Fall back to wpa_supplicant if iwd didn't work / isn't available
+		if len(errs) > 0 || func() bool { _, e := exec.LookPath("iwctl"); return e != nil }() {
+			if err := connectWithWPA(iface, ssid, password); err == nil {
+				errs = nil
+			} else {
+				errs = append(errs, "wpa_supplicant: "+err.Error())
+			}
+		}
+
+		if len(errs) > 0 {
+			return connectDoneMsg{success: false, err: errors.New(strings.Join(errs, "\n"))}
 		}
 
 		// Wait for connection
@@ -655,10 +705,11 @@ func requestDHCP(iface string) {
 
 func disconnect(iface string) {
 	if _, err := exec.LookPath("iwctl"); err == nil {
-		exec.Command("iwctl", "station", iface, "disconnect").Run()
-	} else {
-		exec.Command("wpa_cli", "-i", iface, "disconnect").Run()
+		if exec.Command("iwctl", "station", iface, "disconnect").Run() == nil {
+			return
+		}
 	}
+	exec.Command("wpa_cli", "-i", iface, "disconnect").Run()
 }
 
 func isKnownNetwork(ssid string) bool {
