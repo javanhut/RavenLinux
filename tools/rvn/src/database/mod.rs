@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use std::path::Path;
 
+use crate::repository::RepoPackage;
+
 pub struct Database {
     conn: Connection,
 }
@@ -200,5 +202,43 @@ impl Database {
             .collect();
 
         Ok(results)
+    }
+
+    pub fn clear_repo_packages(&self, repo: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM repository_packages WHERE repo = ?",
+            params![repo],
+        )?;
+        Ok(())
+    }
+
+    pub fn replace_repo_packages(&self, repo: &str, packages: &[RepoPackage]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+
+        tx.execute(
+            "DELETE FROM repository_packages WHERE repo = ?",
+            params![repo],
+        )?;
+
+        for pkg in packages {
+            tx.execute(
+                "INSERT OR REPLACE INTO repository_packages
+                 (repo, name, version, description, download_size, installed_size, filename, sha256)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    repo,
+                    pkg.name,
+                    pkg.version,
+                    pkg.description,
+                    pkg.download_size,
+                    pkg.installed_size,
+                    pkg.filename,
+                    pkg.sha256
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
     }
 }

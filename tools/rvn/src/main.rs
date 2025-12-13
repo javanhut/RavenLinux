@@ -106,6 +106,10 @@ enum Commands {
         all: bool,
     },
 
+    /// Repository maintenance commands
+    #[command(subcommand)]
+    Repo(RepoCommands),
+
     /// Build a package from source
     Build {
         /// Path to package definition or package name
@@ -128,6 +132,23 @@ enum Commands {
     /// System management commands
     #[command(subcommand)]
     System(SystemCommands),
+}
+
+#[derive(Subcommand)]
+enum RepoCommands {
+    /// Generate index.json for a repository directory (expects ./packages/*.rvn)
+    Index {
+        /// Repository root directory (must contain a ./packages directory)
+        repo_root: String,
+
+        /// Repository name written into index.json
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Output path (defaults to <repo_root>/index.json)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -292,6 +313,17 @@ async fn main() -> Result<()> {
         }
         Commands::Sync { force } => commands::sync::run(force).await,
         Commands::Clean { all } => commands::clean::run(all).await,
+        Commands::Repo(cmd) => match cmd {
+            RepoCommands::Index {
+                repo_root,
+                name,
+                output,
+            } => {
+                let output = output.as_deref().map(std::path::Path::new);
+                commands::repo::index(std::path::Path::new(&repo_root), name.as_deref(), output)
+                    .await
+            }
+        },
         Commands::Build { package, install } => commands::build::run(&package, install).await,
         Commands::Workspace(cmd) => commands::workspace::run(cmd).await,
         Commands::Dev(cmd) => commands::dev::run(cmd).await,

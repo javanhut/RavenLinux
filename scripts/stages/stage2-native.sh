@@ -197,6 +197,39 @@ copy_networking() {
 }
 
 # =============================================================================
+# Copy CA certificates (for HTTPS)
+# =============================================================================
+copy_ca_certificates() {
+    log_info "Copying CA certificates..."
+
+    mkdir -p "${SYSROOT_DIR}/etc/ssl/certs" "${SYSROOT_DIR}/etc/pki/tls/certs"
+
+    local src=""
+    for candidate in \
+        /etc/ssl/certs/ca-certificates.crt \
+        /etc/ssl/cert.pem \
+        /etc/pki/tls/certs/ca-bundle.crt \
+        /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem; do
+        if [[ -f "$candidate" ]]; then
+            src="$candidate"
+            break
+        fi
+    done
+
+    if [[ -z "$src" ]]; then
+        log_warn "No CA bundle found on host; HTTPS may fail in the target system"
+        return 0
+    fi
+
+    cp -L "$src" "${SYSROOT_DIR}/etc/ssl/certs/ca-certificates.crt" 2>/dev/null || true
+    ln -sf /etc/ssl/certs/ca-certificates.crt "${SYSROOT_DIR}/etc/ssl/cert.pem" 2>/dev/null || true
+    cp -L "${SYSROOT_DIR}/etc/ssl/certs/ca-certificates.crt" "${SYSROOT_DIR}/etc/pki/tls/certs/ca-bundle.crt" 2>/dev/null || true
+
+    log_info "  Added CA bundle from ${src}"
+    log_success "CA certificates installed"
+}
+
+# =============================================================================
 # Copy required libraries for all binaries
 # =============================================================================
 copy_libraries() {
@@ -575,6 +608,35 @@ root ALL=(ALL:ALL) ALL
 EOF
     chmod 0440 "${SYSROOT_DIR}/etc/sudoers" 2>/dev/null || true
 
+    # rvn package manager config
+    mkdir -p "${SYSROOT_DIR}/etc/rvn"
+    cat > "${SYSROOT_DIR}/etc/rvn/config.toml" << 'EOF'
+[general]
+cache_dir = "/var/cache/rvn"
+database_dir = "/var/lib/rvn"
+log_dir = "/var/log/rvn"
+parallel_downloads = 5
+check_signatures = true
+
+[[repositories]]
+name = "raven"
+url = "https://repo.theravenlinux.org/raven_linux_v0.1.0"
+enabled = true
+priority = 1
+
+[[repositories]]
+name = "community-github"
+url = "https://raw.githubusercontent.com/javanhut/CommunityReposRL/main/raven_linux_v0.1.0"
+enabled = false
+priority = 10
+type = "github"
+
+[build]
+jobs = 4
+ccache = true
+build_dir = "/tmp/rvn-build"
+EOF
+
     # /bin/whoami (standalone, does not depend on uutils multicall behavior)
     rm -f "${SYSROOT_DIR}/bin/whoami" 2>/dev/null || true
     cat > "${SYSROOT_DIR}/bin/whoami" << 'EOF'
@@ -744,6 +806,7 @@ main() {
     copy_shells
     copy_system_utils
     copy_networking
+    copy_ca_certificates
     copy_libraries
     copy_terminfo
     copy_locale_data

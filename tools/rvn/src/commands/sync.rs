@@ -9,9 +9,16 @@ pub async fn run(force: bool) -> Result<()> {
         println!("{} Forcing full refresh", "::".bright_blue());
     }
 
-    // TODO: Fetch repository metadata
+    let config = crate::config::Config::load().unwrap_or_default();
+    let db = crate::database::Database::open_default()?;
 
-    let repos = vec!["core", "extra", "community"];
+    let mut repos = config.repositories.clone();
+    repos.sort_by_key(|r| r.priority);
+    let repos: Vec<_> = repos.into_iter().filter(|r| r.enabled).collect();
+    if repos.is_empty() {
+        println!("{}", "No repositories enabled in config".yellow());
+        return Ok(());
+    }
 
     let pb = ProgressBar::new(repos.len() as u64);
     pb.set_style(
@@ -21,17 +28,54 @@ pub async fn run(force: bool) -> Result<()> {
             .progress_chars("━━─"),
     );
 
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+
     for repo in repos {
-        pb.set_message(format!("Syncing {}", repo));
-        // TODO: Actually fetch repository data
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        pb.set_message(format!("Syncing {}", repo.name));
+
+        let client = crate::repository::client::RepoClient::new(
+            repo.name.clone(),
+            repo.url.clone(),
+            repo.repo_type.clone(),
+        );
+
+        match client.fetch_index().await {
+            Ok(index) => {
+                if force {
+                    db.clear_repo_packages(&repo.name)?;
+                }
+                db.replace_repo_packages(&repo.name, &index.packages)?;
+                ok += 1;
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!(
+                    "Warning: Failed to sync {} ({}): {}",
+                    repo.name, repo.url, e
+                );
+            }
+        }
+
         pb.inc(1);
     }
 
     pb.finish_with_message("Sync complete");
 
     println!();
-    println!("{} Package database is up to date", "✓".bright_green());
+    if ok == 0 {
+        anyhow::bail!("Failed to sync any repositories");
+    }
+    if failed == 0 {
+        println!("{} Package database is up to date", "✓".bright_green());
+    } else {
+        println!(
+            "{} Synced {} repos ({} failed)",
+            "✓".bright_green(),
+            ok,
+            failed
+        );
+    }
 
     Ok(())
 }

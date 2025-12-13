@@ -26,15 +26,18 @@ pub async fn run(packages: &[String], _build_only: bool, dry_run: bool) -> Resul
     // Open package database
     let db = Database::open_default()?;
 
-    // Create repository client
+    // Create repository client (priority order)
     let mut repo_client = MultiRepoClient::new();
-    for repo in &config.repositories {
+    let mut repos = config.repositories.clone();
+    repos.sort_by_key(|r| r.priority);
+    for repo in &repos {
         if repo.enabled {
-            repo_client.add_repo(repo.name.clone(), repo.url.clone());
+            repo_client.add_repo(repo.name.clone(), repo.url.clone(), repo.repo_type.clone());
         }
     }
+    repo_client.preload_indexes().await;
 
-    // Fallback sources (used only when not found in Raven repos)
+    // Fallback sources (used only when not found in configured repos)
     let mut alpine = AlpineClient::new();
     let static_client = StaticClient::new();
 
@@ -432,7 +435,12 @@ fn install_rvn_package(
 ) -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
     let archive = PackageArchive::extract(package_path, temp_dir.path())?;
-    let installed_files = install_tree(temp_dir.path(), root)?;
+    let data_root = temp_dir.path().join("data");
+    let installed_files = if data_root.exists() {
+        install_tree(&data_root, root)?
+    } else {
+        install_tree(temp_dir.path(), root)?
+    };
     record_install(
         db,
         &archive.metadata.name,

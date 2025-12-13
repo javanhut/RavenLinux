@@ -299,6 +299,7 @@ copy_package_manager() {
         # Build rvn
         if run_logged cargo build --release 2>/dev/null; then
             cp target/release/rvn "${LIVE_ROOT}/bin/rvn"
+            ln -sf rvn "${LIVE_ROOT}/bin/run" 2>/dev/null || true
             log_success "Package manager (rvn) installed"
         else
             log_warn "Failed to build rvn, skipping"
@@ -327,6 +328,36 @@ copy_networking_tools() {
     echo "nameserver 1.1.1.1" >> "${LIVE_ROOT}/etc/resolv.conf"
 
     log_success "Networking tools installed"
+}
+
+copy_ca_certificates() {
+    log_step "Copying CA certificates (HTTPS trust store)..."
+
+    mkdir -p "${LIVE_ROOT}/etc/ssl/certs" "${LIVE_ROOT}/etc/pki/tls/certs"
+
+    local src=""
+    for candidate in \
+        /etc/ssl/certs/ca-certificates.crt \
+        /etc/ssl/cert.pem \
+        /etc/pki/tls/certs/ca-bundle.crt \
+        /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem; do
+        if [[ -f "$candidate" ]]; then
+            src="$candidate"
+            break
+        fi
+    done
+
+    if [[ -z "$src" ]]; then
+        log_warn "No CA bundle found on host; HTTPS may fail in the live environment"
+        return 0
+    fi
+
+    cp -L "$src" "${LIVE_ROOT}/etc/ssl/certs/ca-certificates.crt" 2>/dev/null || true
+    ln -sf /etc/ssl/certs/ca-certificates.crt "${LIVE_ROOT}/etc/ssl/cert.pem" 2>/dev/null || true
+    cp -L "${LIVE_ROOT}/etc/ssl/certs/ca-certificates.crt" "${LIVE_ROOT}/etc/pki/tls/certs/ca-bundle.crt" 2>/dev/null || true
+
+    log_info "  Added CA bundle from ${src}"
+    log_success "CA certificates installed"
 }
 
 copy_libraries() {
@@ -457,6 +488,35 @@ root ALL=(ALL:ALL) ALL
 %wheel ALL=(ALL:ALL) ALL
 EOF
     chmod 0440 "${LIVE_ROOT}/etc/sudoers" 2>/dev/null || true
+
+    # rvn package manager config
+    mkdir -p "${LIVE_ROOT}/etc/rvn"
+    cat > "${LIVE_ROOT}/etc/rvn/config.toml" << 'EOF'
+[general]
+cache_dir = "/var/cache/rvn"
+database_dir = "/var/lib/rvn"
+log_dir = "/var/log/rvn"
+parallel_downloads = 5
+check_signatures = true
+
+[[repositories]]
+name = "raven"
+url = "https://repo.theravenlinux.org/raven_linux_v0.1.0"
+enabled = true
+priority = 1
+
+[[repositories]]
+name = "community-github"
+url = "https://raw.githubusercontent.com/javanhut/CommunityReposRL/main/raven_linux_v0.1.0"
+enabled = false
+priority = 10
+type = "github"
+
+[build]
+jobs = 4
+ccache = true
+build_dir = "/tmp/rvn-build"
+EOF
 
     # /etc/profile
     cat > "${LIVE_ROOT}/etc/profile" << 'EOF'
@@ -855,6 +915,7 @@ main() {
     copy_raven_packages
     copy_package_manager
     copy_networking_tools
+    copy_ca_certificates
     copy_libraries
     create_config_files
     create_init_system

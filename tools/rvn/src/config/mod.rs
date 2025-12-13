@@ -24,6 +24,8 @@ pub struct Repository {
     pub url: String,
     pub enabled: bool,
     pub priority: i32,
+    #[serde(default, rename = "type")]
+    pub repo_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,22 +47,19 @@ impl Default for Config {
             },
             repositories: vec![
                 Repository {
-                    name: "core".to_string(),
-                    url: "https://repo.theravenlinux.org/core".to_string(),
+                    name: "raven".to_string(),
+                    url: "https://repo.theravenlinux.org/raven_linux_v0.1.0".to_string(),
                     enabled: true,
                     priority: 1,
+                    repo_type: None,
                 },
+                // GitHub-backed community repo (index.json + .rvn packages via Git LFS redirects)
                 Repository {
-                    name: "extra".to_string(),
-                    url: "https://repo.theravenlinux.org/extra".to_string(),
-                    enabled: true,
-                    priority: 2,
-                },
-                Repository {
-                    name: "community".to_string(),
-                    url: "https://repo.theravenlinux.org/community".to_string(),
-                    enabled: true,
-                    priority: 3,
+                    name: "community-github".to_string(),
+                    url: "https://raw.githubusercontent.com/javanhut/CommunityReposRL/main/raven_linux_v0.1.0".to_string(),
+                    enabled: false,
+                    priority: 10,
+                    repo_type: Some("github".to_string()),
                 },
             ],
             build: BuildOptions {

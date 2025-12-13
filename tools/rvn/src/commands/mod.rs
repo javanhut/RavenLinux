@@ -5,6 +5,7 @@ pub mod info;
 pub mod install;
 pub mod list;
 pub mod remove;
+pub mod repo;
 pub mod search;
 pub mod sync;
 pub mod system;

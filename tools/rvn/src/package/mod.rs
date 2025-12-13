@@ -47,6 +47,7 @@ pub enum BuildSystem {
 
 /// Build configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct BuildConfig {
     pub system: BuildSystem,
     pub configure_flags: Vec<String>,

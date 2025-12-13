@@ -193,6 +193,12 @@ rvn install rust nodejs python
 # Search packages
 rvn search editor
 
+# Sync repository metadata (required for fast/offline search)
+rvn sync
+
+# Generate an index.json for a repo directory (expects ./packages/*.rvn)
+rvn repo index /path/to/raven_linux_v0.1.0
+
 # Developer tools
 rvn dev rust           # Set up Rust toolchain
 rvn dev node 20        # Set up Node.js 20
