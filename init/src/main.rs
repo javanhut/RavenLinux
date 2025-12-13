@@ -206,7 +206,7 @@ fn setup_environment() -> Result<()> {
             log::info!("Hostname set to: {}", hostname);
         }
     } else {
-        nix::unistd::sethostname("raven").ok();
+        nix::unistd::sethostname("raven-linux").ok();
     }
 
     // Set PATH

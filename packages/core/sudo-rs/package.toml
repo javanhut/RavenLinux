@@ -1,0 +1,35 @@
+[package]
+name = "sudo-rs"
+version = "0.2.10"
+description = "Memory-safe implementation of sudo and su"
+license = "Apache-2.0 OR MIT"
+homepage = "https://github.com/trifectatechfoundation/sudo-rs"
+repository = "https://github.com/trifectatechfoundation/sudo-rs"
+maintainers = ["RavenLinux Team"]
+categories = ["core", "security", "utilities"]
+
+[source]
+type = "git"
+url = "https://github.com/trifectatechfoundation/sudo-rs.git"
+commit = "11af1a320d5c447e2c36ad9a0c14c6c7c638d3fc"
+
+[build]
+system = "cargo"
+build_flags = ["--release"]
+
+[dependencies]
+runtime = []
+build = ["rust"]
+
+[install]
+files = [
+    { src = "target/release/sudo", dest = "/usr/bin/sudo", mode = 755 },
+    { src = "target/release/su", dest = "/usr/bin/su", mode = 755 },
+    { src = "target/release/visudo", dest = "/usr/bin/visudo", mode = 755 }
+]
+
+symlinks = [
+    { target = "/usr/bin/sudo", link = "/bin/sudo" },
+    { target = "/usr/bin/su", link = "/bin/su" },
+    { target = "/usr/bin/visudo", link = "/bin/visudo" }
+]

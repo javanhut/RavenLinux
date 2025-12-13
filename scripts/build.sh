@@ -110,6 +110,54 @@ extract_source() {
     esac
 }
 
+# Build sudo-rs (sudo/su/visudo) into build/bin/
+build_sudo_rs() {
+    log_section "Building sudo-rs"
+
+    if [[ -f "${RAVEN_BUILD}/bin/sudo" ]] && [[ -f "${RAVEN_BUILD}/bin/su" ]]; then
+        log_info "sudo-rs already built, skipping"
+        return 0
+    fi
+
+    if ! command -v cargo &>/dev/null; then
+        log_warn "Cargo not found, skipping sudo-rs build"
+        return 0
+    fi
+    if ! command -v git &>/dev/null; then
+        log_warn "git not found, skipping sudo-rs build"
+        return 0
+    fi
+
+    local repo="https://github.com/trifectatechfoundation/sudo-rs.git"
+    local src_dir="${SOURCES_DIR}/sudo-rs"
+    local commit="11af1a320d5c447e2c36ad9a0c14c6c7c638d3fc"
+
+    mkdir -p "${SOURCES_DIR}" "${RAVEN_BUILD}/bin"
+
+    if [[ -d "${src_dir}/.git" ]]; then
+        log_step "Updating sudo-rs source..."
+        (cd "${src_dir}" && run_logged git fetch --depth 1 origin "${commit}" && run_logged git reset --hard "${commit}")
+    else
+        log_step "Cloning sudo-rs source..."
+        rm -rf "${src_dir}"
+        run_logged git clone --depth 1 "${repo}" "${src_dir}"
+        (cd "${src_dir}" && run_logged git fetch --depth 1 origin "${commit}" && run_logged git reset --hard "${commit}")
+    fi
+
+    log_step "Compiling sudo-rs (release)..."
+    (cd "${src_dir}" && run_logged cargo build --release)
+
+    for bin in sudo su visudo; do
+        if [[ -f "${src_dir}/target/release/${bin}" ]]; then
+            cp "${src_dir}/target/release/${bin}" "${RAVEN_BUILD}/bin/${bin}"
+            chmod +x "${RAVEN_BUILD}/bin/${bin}"
+            log_info "  Built ${RAVEN_BUILD}/bin/${bin}"
+        else
+            log_warn "Expected sudo-rs binary missing: ${bin}"
+        fi
+    done
+}
+
 # Stage 0: Build cross-compilation toolchain
 build_stage0() {
     log_section "Stage 0: Building Cross Toolchain"
@@ -127,6 +175,7 @@ build_stage1() {
     log_section "Stage 1: Building Base System (Cross)"
 
     if [[ -f "${RAVEN_ROOT}/scripts/stages/stage1-base.sh" ]]; then
+        build_sudo_rs
         run_logged source "${RAVEN_ROOT}/scripts/stages/stage1-base.sh"
     else
         log_warn "Stage 1 script not found, skipping"

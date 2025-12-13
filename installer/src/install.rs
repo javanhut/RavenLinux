@@ -4,6 +4,7 @@ use crate::config::{InstallConfig, InstallProfile};
 use crate::disk;
 use anyhow::{Context, Result};
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -220,8 +221,11 @@ fn create_user(target: &str, username: &str, password: &str, full_name: &str) ->
     child.wait()?;
 
     // Enable sudo for wheel group
-    let sudoers_path = format!("{}/etc/sudoers.d/wheel", target);
+    let sudoers_dir = format!("{}/etc/sudoers.d", target);
+    std::fs::create_dir_all(&sudoers_dir)?;
+    let sudoers_path = format!("{}/wheel", sudoers_dir);
     std::fs::write(&sudoers_path, "%wheel ALL=(ALL:ALL) ALL\n")?;
+    std::fs::set_permissions(&sudoers_path, std::fs::Permissions::from_mode(0o440))?;
 
     Ok(())
 }

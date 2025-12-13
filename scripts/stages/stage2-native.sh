@@ -94,7 +94,7 @@ copy_system_utils() {
         # System info
         dmesg lspci lsusb free uptime uname hostname hostnamectl
         # User management
-        su sudo passwd login chpasswd useradd usermod groupadd
+        passwd login chpasswd useradd usermod groupadd
         # Archiving
         tar gzip gunzip bzip2 xz zstd unzip zip
         # Editors (fallback)
@@ -135,6 +135,22 @@ copy_system_utils() {
             cp "$src" "$dest" 2>/dev/null && log_info "  Added ${util}" || true
         fi
     done
+
+    # Prefer sudo-rs (built in stage1) over host sudo/su
+    for bin in sudo su visudo; do
+        if [[ -f "${BUILD_DIR}/bin/${bin}" ]]; then
+            cp "${BUILD_DIR}/bin/${bin}" "${SYSROOT_DIR}/bin/${bin}" 2>/dev/null || true
+        fi
+    done
+    if [[ -f "${SYSROOT_DIR}/bin/sudo" ]]; then
+        chmod 4755 "${SYSROOT_DIR}/bin/sudo" 2>/dev/null || chmod 755 "${SYSROOT_DIR}/bin/sudo" || true
+    fi
+    if [[ -f "${SYSROOT_DIR}/bin/su" ]]; then
+        chmod 4755 "${SYSROOT_DIR}/bin/su" 2>/dev/null || chmod 755 "${SYSROOT_DIR}/bin/su" || true
+    fi
+    if [[ -f "${SYSROOT_DIR}/bin/visudo" ]]; then
+        chmod 755 "${SYSROOT_DIR}/bin/visudo" 2>/dev/null || true
+    fi
 
     log_success "System utilities installed"
 }
@@ -505,13 +521,13 @@ UNAMESCRIPT
     chmod +x "${SYSROOT_DIR}/bin/uname"
 
     # /etc/hostname
-    echo "raven" > "${SYSROOT_DIR}/etc/hostname"
+    echo "raven-linux" > "${SYSROOT_DIR}/etc/hostname"
 
     # /etc/hosts
     cat > "${SYSROOT_DIR}/etc/hosts" << 'EOF'
 127.0.0.1   localhost
 ::1         localhost
-127.0.1.1   raven.localdomain raven
+127.0.1.1   raven-linux.localdomain raven-linux
 EOF
 
     # /etc/passwd
@@ -547,6 +563,69 @@ EOF
 /bin/bash
 /bin/zsh
 EOF
+
+    # /etc/sudoers (wheel group allowed by default)
+    mkdir -p "${SYSROOT_DIR}/etc/sudoers.d"
+    cat > "${SYSROOT_DIR}/etc/sudoers" << 'EOF'
+Defaults env_reset
+Defaults lecture=never
+
+root ALL=(ALL:ALL) ALL
+%wheel ALL=(ALL:ALL) ALL
+EOF
+    chmod 0440 "${SYSROOT_DIR}/etc/sudoers" 2>/dev/null || true
+
+    # /bin/whoami (standalone, does not depend on uutils multicall behavior)
+    rm -f "${SYSROOT_DIR}/bin/whoami" 2>/dev/null || true
+    cat > "${SYSROOT_DIR}/bin/whoami" << 'EOF'
+#!/bin/sh
+
+uid=""
+if command -v id >/dev/null 2>&1; then
+    uid="$(id -u 2>/dev/null || true)"
+fi
+
+case "$uid" in
+    ''|*[!0-9]*) uid="" ;;
+esac
+
+if [ -z "$uid" ] && [ -r /proc/self/status ]; then
+    while IFS= read -r line; do
+        case "$line" in
+            Uid:*)
+                set -- $line
+                uid="$2"
+                break
+                ;;
+        esac
+    done < /proc/self/status
+fi
+
+case "$uid" in
+    ''|*[!0-9]*) uid="" ;;
+esac
+
+if [ -z "$uid" ]; then
+    uid="${UID:-}"
+fi
+
+name=""
+if [ -n "$uid" ] && [ -r /etc/passwd ]; then
+    while IFS=: read -r pw_name _ pw_uid _ _ _ _; do
+        if [ "$pw_uid" = "$uid" ]; then
+            name="$pw_name"
+            break
+        fi
+    done < /etc/passwd
+fi
+
+if [ -z "$name" ]; then
+    name="${USER:-${LOGNAME:-unknown}}"
+fi
+
+printf '%s\n' "$name"
+EOF
+    chmod 755 "${SYSROOT_DIR}/bin/whoami" 2>/dev/null || true
 
     # /etc/profile
     cat > "${SYSROOT_DIR}/etc/profile" << 'EOF'
@@ -628,7 +707,7 @@ setopt SHARE_HISTORY HIST_IGNORE_DUPS
 autoload -Uz compinit && compinit
 autoload -Uz promptinit && promptinit
 
-PROMPT='%F{cyan}[raven%f:%F{blue}%~%f]%# '
+    PROMPT='[%n@raven-linux]# '
 
 alias ls='ls --color=auto'
 alias ll='ls -la'

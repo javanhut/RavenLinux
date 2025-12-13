@@ -149,6 +149,86 @@ copy_coreutils() {
     fi
 }
 
+copy_sudo_rs() {
+    log_step "Installing sudo-rs..."
+
+    if [[ -f "${RAVEN_BUILD}/bin/sudo" ]]; then
+        cp "${RAVEN_BUILD}/bin/sudo" "${LIVE_ROOT}/bin/sudo"
+        chmod 4755 "${LIVE_ROOT}/bin/sudo" 2>/dev/null || chmod 755 "${LIVE_ROOT}/bin/sudo" || true
+    else
+        log_warn "sudo-rs not found at ${RAVEN_BUILD}/bin/sudo (run ./scripts/build.sh stage1)"
+        return 0
+    fi
+
+    if [[ -f "${RAVEN_BUILD}/bin/su" ]]; then
+        cp "${RAVEN_BUILD}/bin/su" "${LIVE_ROOT}/bin/su"
+        chmod 4755 "${LIVE_ROOT}/bin/su" 2>/dev/null || chmod 755 "${LIVE_ROOT}/bin/su" || true
+    fi
+
+    if [[ -f "${RAVEN_BUILD}/bin/visudo" ]]; then
+        cp "${RAVEN_BUILD}/bin/visudo" "${LIVE_ROOT}/bin/visudo"
+        chmod 755 "${LIVE_ROOT}/bin/visudo" 2>/dev/null || true
+    fi
+
+    log_success "sudo-rs installed"
+}
+
+install_whoami() {
+    log_step "Installing whoami..."
+
+    rm -f "${LIVE_ROOT}/bin/whoami" 2>/dev/null || true
+    cat > "${LIVE_ROOT}/bin/whoami" << 'EOF'
+#!/bin/sh
+
+uid=""
+if command -v id >/dev/null 2>&1; then
+    uid="$(id -u 2>/dev/null || true)"
+fi
+
+case "$uid" in
+    ''|*[!0-9]*) uid="" ;;
+esac
+
+if [ -z "$uid" ] && [ -r /proc/self/status ]; then
+    while IFS= read -r line; do
+        case "$line" in
+            Uid:*)
+                set -- $line
+                uid="$2"
+                break
+                ;;
+        esac
+    done < /proc/self/status
+fi
+
+case "$uid" in
+    ''|*[!0-9]*) uid="" ;;
+esac
+
+if [ -z "$uid" ]; then
+    uid="${UID:-}"
+fi
+
+name=""
+if [ -n "$uid" ] && [ -r /etc/passwd ]; then
+    while IFS=: read -r pw_name _ pw_uid _ _ _ _; do
+        if [ "$pw_uid" = "$uid" ]; then
+            name="$pw_name"
+            break
+        fi
+    done < /etc/passwd
+fi
+
+if [ -z "$name" ]; then
+    name="${USER:-${LOGNAME:-unknown}}"
+fi
+
+printf '%s\n' "$name"
+EOF
+    chmod 755 "${LIVE_ROOT}/bin/whoami" 2>/dev/null || true
+    log_success "whoami installed"
+}
+
 copy_shells() {
     log_step "Copying shells..."
 
@@ -325,13 +405,13 @@ LOGO=raven-logo
 EOF
 
     # /etc/hostname
-    echo "raven" > "${LIVE_ROOT}/etc/hostname"
+    echo "raven-linux" > "${LIVE_ROOT}/etc/hostname"
 
     # /etc/hosts
     cat > "${LIVE_ROOT}/etc/hosts" << EOF
 127.0.0.1   localhost
 ::1         localhost
-127.0.1.1   raven.localdomain raven
+127.0.1.1   raven-linux.localdomain raven-linux
 EOF
 
     # /etc/passwd
@@ -366,6 +446,17 @@ EOF
 /bin/bash
 /bin/zsh
 EOF
+
+    # /etc/sudoers (wheel group allowed by default)
+    mkdir -p "${LIVE_ROOT}/etc/sudoers.d"
+    cat > "${LIVE_ROOT}/etc/sudoers" << 'EOF'
+Defaults env_reset
+Defaults lecture=never
+
+root ALL=(ALL:ALL) ALL
+%wheel ALL=(ALL:ALL) ALL
+EOF
+    chmod 0440 "${LIVE_ROOT}/etc/sudoers" 2>/dev/null || true
 
     # /etc/profile
     cat > "${LIVE_ROOT}/etc/profile" << 'EOF'
@@ -404,7 +495,7 @@ autoload -Uz promptinit
 promptinit
 
 # Custom prompt
-PROMPT='%F{cyan}[raven%f:%F{blue}%~%f]%# '
+PROMPT='[%n@raven-linux]# '
 
 # Aliases
 alias ls='ls --color=auto'
@@ -459,7 +550,7 @@ mount -t tmpfs tmpfs /tmp
 mount -t tmpfs tmpfs /run
 
 # Set hostname
-hostname raven
+hostname raven-linux
 
 # Start udevd if available
 if [ -x /sbin/udevd ]; then
@@ -758,6 +849,8 @@ main() {
     copy_kernel
     copy_initramfs
     copy_coreutils
+    copy_sudo_rs
+    install_whoami
     copy_shells
     copy_raven_packages
     copy_package_manager

@@ -192,6 +192,20 @@ setup_sysroot() {
         done
     fi
 
+    # Install sudo-rs (sudo/su/visudo)
+    if [[ -f "${BUILD_DIR}/bin/sudo" ]]; then
+        cp "${BUILD_DIR}/bin/sudo" "${SYSROOT_DIR}/bin/sudo"
+        chmod 4755 "${SYSROOT_DIR}/bin/sudo" 2>/dev/null || chmod 755 "${SYSROOT_DIR}/bin/sudo"
+    fi
+    if [[ -f "${BUILD_DIR}/bin/su" ]]; then
+        cp "${BUILD_DIR}/bin/su" "${SYSROOT_DIR}/bin/su"
+        chmod 4755 "${SYSROOT_DIR}/bin/su" 2>/dev/null || chmod 755 "${SYSROOT_DIR}/bin/su"
+    fi
+    if [[ -f "${BUILD_DIR}/bin/visudo" ]]; then
+        cp "${BUILD_DIR}/bin/visudo" "${SYSROOT_DIR}/bin/visudo"
+        chmod 755 "${SYSROOT_DIR}/bin/visudo" 2>/dev/null || true
+    fi
+
     log_success "Sysroot setup complete"
 }
 

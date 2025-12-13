@@ -98,7 +98,7 @@ export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export HOME=/root
 export TERM=linux
 export LANG=en_US.UTF-8
-export PS1='[raven:\w]# '
+export PS1='[\u@raven-linux]# '
 
 # Mount essential filesystems if not already mounted
 mountpoint -q /proc || mount -t proc proc /proc
@@ -111,7 +111,7 @@ mountpoint -q /tmp || mount -t tmpfs tmpfs /tmp
 mountpoint -q /run || mount -t tmpfs tmpfs /run
 
 # Set hostname
-hostname raven 2>/dev/null || true
+hostname raven-linux 2>/dev/null || true
 
 # Suppress kernel messages
 dmesg -n 1 2>/dev/null || true

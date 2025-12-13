@@ -94,7 +94,7 @@ impl Default for SystemConfig {
 }
 
 fn default_hostname() -> String {
-    "raven".to_string()
+    "raven-linux".to_string()
 }
 
 fn default_runlevel() -> String {

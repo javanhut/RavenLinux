@@ -3,7 +3,7 @@
 
 [system]
 # System hostname (can be overridden by /etc/hostname)
-hostname = "raven"
+hostname = "raven-linux"
 
 # Default runlevel/target
 default_runlevel = "default"

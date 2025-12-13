@@ -37,7 +37,7 @@ autoload -Uz vcs_info
 precmd() { vcs_info }
 zstyle ':vcs_info:git:*' formats ' %F{cyan}(%b)%f'
 setopt prompt_subst
-PROMPT='%F{blue}%n%f@%F{green}%m%f %F{yellow}%~%f${vcs_info_msg_0_} %# '
+PROMPT='[%n@raven-linux]# '
 
 # Aliases
 alias ls='ls --color=auto'

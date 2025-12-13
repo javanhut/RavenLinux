@@ -117,6 +117,58 @@ copy_binaries() {
         ln -sf coreutils "${INITRAMFS_DIR}/bin/${util}"
     done
 
+    # whoami: uutils multicall in this tree expects "coreutils whoami", so provide a standalone shim
+    rm -f "${INITRAMFS_DIR}/bin/whoami" 2>/dev/null || true
+    cat > "${INITRAMFS_DIR}/bin/whoami" << 'EOF'
+#!/bin/sh
+
+uid=""
+if command -v id >/dev/null 2>&1; then
+    uid="$(id -u 2>/dev/null || true)"
+fi
+
+case "$uid" in
+    ''|*[!0-9]*) uid="" ;;
+esac
+
+if [ -z "$uid" ] && [ -r /proc/self/status ]; then
+    while IFS= read -r line; do
+        case "$line" in
+            Uid:*)
+                set -- $line
+                uid="$2"
+                break
+                ;;
+        esac
+    done < /proc/self/status
+fi
+
+case "$uid" in
+    ''|*[!0-9]*) uid="" ;;
+esac
+
+if [ -z "$uid" ]; then
+    uid="${UID:-}"
+fi
+
+name=""
+if [ -n "$uid" ] && [ -r /etc/passwd ]; then
+    while IFS=: read -r pw_name _ pw_uid _ _ _ _; do
+        if [ "$pw_uid" = "$uid" ]; then
+            name="$pw_name"
+            break
+        fi
+    done < /etc/passwd
+fi
+
+if [ -z "$name" ]; then
+    name="${USER:-${LOGNAME:-unknown}}"
+fi
+
+printf '%s\n' "$name"
+EOF
+    chmod 755 "${INITRAMFS_DIR}/bin/whoami" 2>/dev/null || true
+
     # These need to come from host (not in uutils or need special handling)
     # Include switch_root for live boot
     local host_bins=(mount umount dmesg clear reset ps kill free grep sed awk find xargs poweroff reboot switch_root losetup blkid)
@@ -213,7 +265,7 @@ create_config_files() {
     cp "${RAVEN_ROOT}/etc/os-release" "${INITRAMFS_DIR}/etc/os-release"
 
     # /etc/hostname
-    echo "raven" > "${INITRAMFS_DIR}/etc/hostname"
+    echo "raven-linux" > "${INITRAMFS_DIR}/etc/hostname"
 
     # /etc/passwd
     cat > "${INITRAMFS_DIR}/etc/passwd" <<'PASSWD'
@@ -247,7 +299,7 @@ SHELLS
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export HOME=/root
 export TERM=linux
-export PS1='[raven:\w]# '
+export PS1='[\u@raven-linux]# '
 export RAVEN_LINUX=1
 alias ls='ls --color=auto'
 alias ll='ls -la'
@@ -260,7 +312,7 @@ export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export HOME=/root
 export TERM=linux
 export RAVEN_LINUX=1
-PROMPT='[raven:%~]# '
+PROMPT='[%n@raven-linux]# '
 alias ls='ls --color=auto'
 alias ll='ls -la'
 ZSHRC
