@@ -52,10 +52,7 @@ impl Workspace {
         script.push_str(&format!("# Workspace: {}\n\n", self.name));
 
         // Set workspace-specific PATH
-        script.push_str(&format!(
-            "export RAVEN_WORKSPACE=\"{}\"\n",
-            self.name
-        ));
+        script.push_str(&format!("export RAVEN_WORKSPACE=\"{}\"\n", self.name));
         script.push_str(&format!(
             "export RAVEN_WORKSPACE_PATH=\"{}\"\n",
             self.path.display()

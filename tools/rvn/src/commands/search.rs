@@ -9,7 +9,10 @@ pub async fn run(query: &str, search_description: bool) -> Result<()> {
     );
 
     if search_description {
-        println!("{} Including package descriptions in search", "::".bright_blue());
+        println!(
+            "{} Including package descriptions in search",
+            "::".bright_blue()
+        );
     }
 
     // TODO: Search package database

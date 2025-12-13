@@ -5,6 +5,7 @@ use colored::Colorize;
 mod commands;
 mod config;
 mod database;
+mod fallback;
 mod package;
 mod repository;
 mod resolver;
@@ -283,35 +284,17 @@ async fn main() -> Result<()> {
         Commands::Remove { packages, purge } => {
             commands::remove::run(&packages, purge, cli.dry_run).await
         }
-        Commands::Upgrade { packages } => {
-            commands::upgrade::run(&packages, cli.dry_run).await
-        }
-        Commands::Search { query, description } => {
-            commands::search::run(&query, description).await
-        }
-        Commands::Info { package, versions } => {
-            commands::info::run(&package, versions).await
-        }
+        Commands::Upgrade { packages } => commands::upgrade::run(&packages, cli.dry_run).await,
+        Commands::Search { query, description } => commands::search::run(&query, description).await,
+        Commands::Info { package, versions } => commands::info::run(&package, versions).await,
         Commands::List { pattern, explicit } => {
             commands::list::run(pattern.as_deref(), explicit).await
         }
-        Commands::Sync { force } => {
-            commands::sync::run(force).await
-        }
-        Commands::Clean { all } => {
-            commands::clean::run(all).await
-        }
-        Commands::Build { package, install } => {
-            commands::build::run(&package, install).await
-        }
-        Commands::Workspace(cmd) => {
-            commands::workspace::run(cmd).await
-        }
-        Commands::Dev(cmd) => {
-            commands::dev::run(cmd).await
-        }
-        Commands::System(cmd) => {
-            commands::system::run(cmd).await
-        }
+        Commands::Sync { force } => commands::sync::run(force).await,
+        Commands::Clean { all } => commands::clean::run(all).await,
+        Commands::Build { package, install } => commands::build::run(&package, install).await,
+        Commands::Workspace(cmd) => commands::workspace::run(cmd).await,
+        Commands::Dev(cmd) => commands::dev::run(cmd).await,
+        Commands::System(cmd) => commands::system::run(cmd).await,
     }
 }

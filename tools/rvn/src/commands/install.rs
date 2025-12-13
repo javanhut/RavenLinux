@@ -3,10 +3,14 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::PathBuf;
+use std::{fs, path::Path};
 
 use crate::config::Config;
 use crate::database::Database;
+use crate::fallback::alpine::AlpineClient;
+use crate::fallback::static_bin::{StaticClient, StaticPackage};
 use crate::package::archive::PackageArchive;
 use crate::repository::client::MultiRepoClient;
 
@@ -29,6 +33,10 @@ pub async fn run(packages: &[String], _build_only: bool, dry_run: bool) -> Resul
             repo_client.add_repo(repo.name.clone(), repo.url.clone());
         }
     }
+
+    // Fallback sources (used only when not found in Raven repos)
+    let mut alpine = AlpineClient::new();
+    let static_client = StaticClient::new();
 
     println!(
         "{} Resolving dependencies for {} package(s)...",
@@ -64,7 +72,8 @@ pub async fn run(packages: &[String], _build_only: bool, dry_run: bool) -> Resul
     }
 
     // Resolve dependencies for packages to install
-    let resolved = resolve_dependencies(&to_install, &db, &repo_client).await?;
+    let resolved =
+        resolve_dependencies(&to_install, &db, &repo_client, &mut alpine, &static_client).await?;
 
     println!();
     println!(
@@ -136,7 +145,8 @@ pub async fn run(packages: &[String], _build_only: bool, dry_run: bool) -> Resul
         pb.set_message(format!("Downloading {}", pkg.name));
 
         // Try to find and download the package
-        let package_path = download_package(pkg, &cache_dir, &repo_client).await?;
+        let package_path =
+            download_package(pkg, &cache_dir, &repo_client, &mut alpine, &static_client).await?;
         downloaded_packages.push((pkg.clone(), package_path));
 
         pb.inc(1);
@@ -161,7 +171,7 @@ pub async fn run(packages: &[String], _build_only: bool, dry_run: bool) -> Resul
         pb.set_message(format!("Installing {}", pkg.name));
 
         // Extract and install package
-        install_package(package_path, &root, &db, !pkg.is_dependency)?;
+        install_any_package(pkg, package_path, &root, &db, !pkg.is_dependency)?;
 
         pb.inc(1);
     }
@@ -182,17 +192,33 @@ pub async fn run(packages: &[String], _build_only: bool, dry_run: bool) -> Resul
 struct PackageToInstall {
     name: String,
     version: String,
+    description: String,
     download_size: u64,
     install_size: u64,
     is_dependency: bool,
-    filename: String,
-    sha256: String,
+    source: PackageSource,
+}
+
+#[derive(Debug, Clone)]
+enum PackageSource {
+    Raven {
+        filename: String,
+        sha256: String,
+    },
+    Alpine {
+        pkg: crate::fallback::alpine::AlpinePackage,
+    },
+    Static {
+        pkg: StaticPackage,
+    },
 }
 
 async fn resolve_dependencies(
     packages: &[String],
     db: &Database,
     repo_client: &MultiRepoClient,
+    alpine: &mut AlpineClient,
+    static_client: &StaticClient,
 ) -> Result<Vec<PackageToInstall>> {
     // First, get set of installed packages (sync operation)
     let installed: std::collections::HashSet<String> = db
@@ -205,7 +231,17 @@ async fn resolve_dependencies(
     let mut seen = std::collections::HashSet::new();
 
     for pkg_name in packages {
-        resolve_package_async(pkg_name, false, &installed, repo_client, &mut resolved, &mut seen).await?;
+        resolve_package_async(
+            pkg_name,
+            false,
+            &installed,
+            repo_client,
+            alpine,
+            static_client,
+            &mut resolved,
+            &mut seen,
+        )
+        .await?;
     }
 
     Ok(resolved)
@@ -216,103 +252,264 @@ async fn resolve_package_async(
     is_dependency: bool,
     installed: &std::collections::HashSet<String>,
     repo_client: &MultiRepoClient,
+    alpine: &mut AlpineClient,
+    static_client: &StaticClient,
     resolved: &mut Vec<PackageToInstall>,
     seen: &mut std::collections::HashSet<String>,
 ) -> Result<()> {
     if seen.contains(name) || installed.contains(name) {
         return Ok(());
     }
-    seen.insert(name.to_string());
 
     // Find package in repositories
     if let Some((_repo, pkg)) = repo_client.find_package(name).await? {
+        seen.insert(name.to_string());
         // Resolve dependencies first (use Box::pin for recursive async)
         for dep in &pkg.dependencies {
-            Box::pin(resolve_package_async(dep, true, installed, repo_client, resolved, seen)).await?;
+            Box::pin(resolve_package_async(
+                dep,
+                true,
+                installed,
+                repo_client,
+                alpine,
+                static_client,
+                resolved,
+                seen,
+            ))
+            .await?;
         }
 
         // Add this package
         resolved.push(PackageToInstall {
             name: pkg.name,
             version: pkg.version,
+            description: pkg.description,
             download_size: pkg.download_size,
             install_size: pkg.installed_size,
             is_dependency,
-            filename: pkg.filename,
-            sha256: pkg.sha256,
+            source: PackageSource::Raven {
+                filename: pkg.filename,
+                sha256: pkg.sha256,
+            },
         });
-    } else {
-        anyhow::bail!("Package '{}' not found in any repository", name);
+        return Ok(());
     }
 
-    Ok(())
+    // Fallback: Alpine APK (musl) repos
+    match alpine.find(name).await {
+        Ok(Some(_pkg)) => {
+            let chain = alpine.resolve_with_deps(name).await?;
+            for (i, p) in chain.iter().enumerate() {
+                if seen.contains(&p.name) || installed.contains(&p.name) {
+                    continue;
+                }
+                seen.insert(p.name.clone());
+                let dep_flag = if is_dependency {
+                    true
+                } else {
+                    i + 1 != chain.len()
+                };
+                resolved.push(PackageToInstall {
+                    name: p.name.clone(),
+                    version: p.version.clone(),
+                    description: p.description.clone(),
+                    download_size: p.download_size,
+                    install_size: p.installed_size,
+                    is_dependency: dep_flag,
+                    source: PackageSource::Alpine { pkg: p.clone() },
+                });
+            }
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("Warning: Alpine fallback failed: {e}");
+        }
+    }
+
+    // Fallback: static musl binaries (limited set)
+    if let Some(p) = static_client.find(name) {
+        seen.insert(name.to_string());
+        resolved.push(PackageToInstall {
+            name: p.name.clone(),
+            version: p.version.clone(),
+            description: p.description.clone(),
+            download_size: p.download_size,
+            install_size: p.installed_size,
+            is_dependency,
+            source: PackageSource::Static { pkg: p },
+        });
+        return Ok(());
+    }
+
+    anyhow::bail!("Package '{}' not found in Raven repos or fallbacks", name)
 }
 
 async fn download_package(
     pkg: &PackageToInstall,
     cache_dir: &PathBuf,
     repo_client: &MultiRepoClient,
+    alpine: &mut AlpineClient,
+    static_client: &StaticClient,
 ) -> Result<PathBuf> {
-    let package_path = cache_dir.join(&pkg.filename);
+    match &pkg.source {
+        PackageSource::Raven { filename, sha256 } => {
+            let package_path = cache_dir.join(filename);
 
-    // Check if already cached
-    if package_path.exists() {
-        let hash = crate::package::archive::hash_file(&package_path)?;
-        if hash == pkg.sha256 {
-            return Ok(package_path);
+            // Check if already cached
+            if package_path.exists() {
+                let hash = crate::package::archive::hash_file(&package_path)?;
+                if hash == *sha256 {
+                    return Ok(package_path);
+                }
+                // Hash mismatch, redownload
+                std::fs::remove_file(&package_path)?;
+            }
+
+            // Find package in repos and download
+            if let Some((repo, repo_pkg)) = repo_client.find_package(&pkg.name).await? {
+                repo.download_package(&repo_pkg, cache_dir, false).await?;
+                return Ok(package_path);
+            }
+
+            anyhow::bail!("Failed to download package: {}", pkg.name)
         }
-        // Hash mismatch, redownload
-        std::fs::remove_file(&package_path)?;
+        PackageSource::Alpine { pkg: alpine_pkg } => {
+            let alpine_cache = cache_dir.join("alpine");
+            alpine.ensure_loaded().await?;
+            alpine.download(alpine_pkg, &alpine_cache).await
+        }
+        PackageSource::Static { pkg: static_pkg } => {
+            let static_cache = cache_dir.join("static");
+            static_client.download(static_pkg, &static_cache).await
+        }
     }
-
-    // Find package in repos and download
-    if let Some((repo, repo_pkg)) = repo_client.find_package(&pkg.name).await? {
-        repo.download_package(&repo_pkg, cache_dir, false).await?;
-        return Ok(package_path);
-    }
-
-    anyhow::bail!("Failed to download package: {}", pkg.name)
 }
 
-fn install_package(
+fn install_any_package(
+    pkg: &PackageToInstall,
+    downloaded: &PathBuf,
+    root: &PathBuf,
+    db: &Database,
+    explicit: bool,
+) -> Result<()> {
+    match &pkg.source {
+        PackageSource::Raven { .. } => install_rvn_package(downloaded, root, db, explicit),
+        PackageSource::Alpine { pkg: alpine_pkg } => {
+            let temp_dir = tempfile::tempdir()?;
+            AlpineClient::extract_data_tar_gz(downloaded, temp_dir.path())?;
+            let installed_files = install_tree(temp_dir.path(), root)?;
+            record_install(
+                db,
+                &alpine_pkg.name,
+                &alpine_pkg.version,
+                &alpine_pkg.description,
+                explicit,
+                &installed_files,
+            )
+        }
+        PackageSource::Static { pkg: static_pkg } => {
+            let temp_dir = tempfile::tempdir()?;
+            StaticClient::extract_to_staging(static_pkg, downloaded, temp_dir.path())?;
+            let installed_files = install_tree(temp_dir.path(), root)?;
+            record_install(
+                db,
+                &static_pkg.name,
+                &static_pkg.version,
+                &static_pkg.description,
+                explicit,
+                &installed_files,
+            )
+        }
+    }
+}
+
+fn install_rvn_package(
     package_path: &PathBuf,
     root: &PathBuf,
     db: &Database,
     explicit: bool,
 ) -> Result<()> {
-    // Extract package to a temp directory
     let temp_dir = tempfile::tempdir()?;
     let archive = PackageArchive::extract(package_path, temp_dir.path())?;
+    let installed_files = install_tree(temp_dir.path(), root)?;
+    record_install(
+        db,
+        &archive.metadata.name,
+        &archive.metadata.version.to_string(),
+        &archive.metadata.description,
+        explicit,
+        &installed_files,
+    )
+}
 
-    // Copy files to destination
+fn record_install(
+    db: &Database,
+    name: &str,
+    version: &str,
+    description: &str,
+    explicit: bool,
+    installed_files: &[String],
+) -> Result<()> {
+    let file_refs: Vec<&str> = installed_files.iter().map(|s| s.as_str()).collect();
+    db.record_installation(name, version, Some(description), explicit, &file_refs)?;
+    Ok(())
+}
+
+fn validate_relative_path(rel: &Path) -> Result<()> {
+    if rel.is_absolute() {
+        anyhow::bail!("Refusing to install absolute path: {}", rel.display());
+    }
+    for component in rel.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            anyhow::bail!("Refusing to install path with '..': {}", rel.display());
+        }
+    }
+    Ok(())
+}
+
+fn install_tree(src_root: &Path, dst_root: &Path) -> Result<Vec<String>> {
     let mut installed_files = Vec::new();
 
-    for entry in walkdir::WalkDir::new(temp_dir.path()) {
+    for entry in walkdir::WalkDir::new(src_root).follow_links(false) {
         let entry = entry?;
-        if entry.file_type().is_file() {
-            let relative = entry.path().strip_prefix(temp_dir.path())?;
-            let dest = root.join(relative);
+        let rel = entry.path().strip_prefix(src_root)?;
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        validate_relative_path(rel)?;
 
+        let dest = dst_root.join(rel);
+        let ft = entry.file_type();
+
+        if ft.is_dir() {
+            fs::create_dir_all(&dest)?;
+            continue;
+        }
+
+        if ft.is_symlink() {
             if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
+                fs::create_dir_all(parent)?;
             }
+            let target = fs::read_link(entry.path())?;
+            let _ = fs::remove_file(&dest);
+            symlink(&target, &dest)?;
+            installed_files.push(dest.to_string_lossy().to_string());
+            continue;
+        }
 
-            std::fs::copy(entry.path(), &dest)?;
+        if ft.is_file() {
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(entry.path(), &dest)?;
+            let mode = fs::symlink_metadata(entry.path())?.permissions().mode();
+            let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(mode));
             installed_files.push(dest.to_string_lossy().to_string());
         }
     }
 
-    // Record installation in database
-    let file_refs: Vec<&str> = installed_files.iter().map(|s| s.as_str()).collect();
-    db.record_installation(
-        &archive.metadata.name,
-        &archive.metadata.version.to_string(),
-        Some(&archive.metadata.description),
-        explicit,
-        &file_refs,
-    )?;
-
-    Ok(())
+    Ok(installed_files)
 }
 
 fn confirm_action(message: &str) -> Result<bool> {

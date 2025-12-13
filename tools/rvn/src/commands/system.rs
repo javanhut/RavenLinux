@@ -25,9 +25,17 @@ async fn create_snapshot(name: Option<&str>) -> Result<()> {
     // TODO: Create btrfs/zfs snapshot or package state snapshot
     // TODO: Record installed packages and their versions
 
-    println!("{} Snapshot '{}' created", "✓".bright_green(), snapshot_name);
+    println!(
+        "{} Snapshot '{}' created",
+        "✓".bright_green(),
+        snapshot_name
+    );
     println!();
-    println!("Rollback with: {} system rollback {}", "rvn".bright_white(), snapshot_name);
+    println!(
+        "Rollback with: {} system rollback {}",
+        "rvn".bright_white(),
+        snapshot_name
+    );
 
     Ok(())
 }
@@ -87,7 +95,10 @@ async fn rollback(snapshot: &str) -> Result<()> {
 
     println!("{} Rollback complete", "✓".bright_green());
     println!();
-    println!("{}", "Please reboot your system to complete the rollback.".yellow());
+    println!(
+        "{}",
+        "Please reboot your system to complete the rollback.".yellow()
+    );
 
     Ok(())
 }
@@ -125,7 +136,10 @@ async fn check_health() -> Result<()> {
     println!("{} System health check complete", "✓".bright_green());
     println!();
     println!("To remove orphaned packages:");
-    println!("  {} remove --purge $(rvn query --orphans)", "rvn".bright_white());
+    println!(
+        "  {} remove --purge $(rvn query --orphans)",
+        "rvn".bright_white()
+    );
 
     Ok(())
 }

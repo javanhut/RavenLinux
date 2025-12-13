@@ -1,5 +1,5 @@
-use anyhow::Result;
-use rusqlite::{Connection, params};
+use anyhow::{Context, Result};
+use rusqlite::{params, Connection};
 use std::path::Path;
 
 pub struct Database {
@@ -8,7 +8,15 @@ pub struct Database {
 
 impl Database {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let conn = Connection::open(path)?;
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create database directory: {}", parent.display())
+            })?;
+        }
+
+        let conn = Connection::open(path)
+            .with_context(|| format!("Failed to open database file: {}", path.display()))?;
         let db = Database { conn };
         db.init_schema()?;
         Ok(db)
@@ -68,7 +76,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
             CREATE INDEX IF NOT EXISTS idx_files_package ON files(package_id);
             CREATE INDEX IF NOT EXISTS idx_repo_name ON repository_packages(name);
-            "
+            ",
         )?;
         Ok(())
     }
@@ -137,22 +145,25 @@ impl Database {
         )?;
 
         // Get files to remove
-        let mut stmt = self.conn.prepare("SELECT path FROM files WHERE package_id = ?")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM files WHERE package_id = ?")?;
         let files: Vec<String> = stmt
             .query_map(params![package_id], |row| row.get(0))?
             .filter_map(|r| r.ok())
             .collect();
 
         // Delete package (cascades to files and dependencies)
-        self.conn.execute("DELETE FROM packages WHERE id = ?", params![package_id])?;
+        self.conn
+            .execute("DELETE FROM packages WHERE id = ?", params![package_id])?;
 
         Ok(files)
     }
 
     pub fn list_installed(&self) -> Result<Vec<(String, String, bool)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT name, version, explicit FROM packages ORDER BY name"
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, version, explicit FROM packages ORDER BY name")?;
 
         let packages = stmt
             .query_map([], |row| {
@@ -174,7 +185,7 @@ impl Database {
             "SELECT name, version, COALESCE(description, '')
              FROM repository_packages
              WHERE name LIKE ? OR description LIKE ?
-             ORDER BY name"
+             ORDER BY name",
         )?;
 
         let results = stmt

@@ -14,7 +14,11 @@ pub async fn run(package: &str, install_after: bool) -> Result<()> {
     let is_path = Path::new(package).exists();
 
     if is_path {
-        println!("{} Building from local path: {}", "::".bright_blue(), package);
+        println!(
+            "{} Building from local path: {}",
+            "::".bright_blue(),
+            package
+        );
     } else {
         println!("{} Fetching package definition...", "::".bright_blue());
     }
@@ -49,11 +53,7 @@ pub async fn run(package: &str, install_after: bool) -> Result<()> {
     pb.finish_with_message("Build complete");
 
     println!();
-    println!(
-        "{} Package built: {}.rvn",
-        "✓".bright_green(),
-        package
-    );
+    println!("{} Package built: {}.rvn", "✓".bright_green(), package);
 
     if install_after {
         println!();

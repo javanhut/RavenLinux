@@ -14,19 +14,51 @@ pub async fn run(package: &str, show_versions: bool) -> Result<()> {
     println!();
     println!("{}: {}", "Name".bright_white(), package);
     println!("{}: {}", "Version".bright_white(), "1.75.0");
-    println!("{}: {}", "Description".bright_white(), "The Rust programming language");
+    println!(
+        "{}: {}",
+        "Description".bright_white(),
+        "The Rust programming language"
+    );
     println!("{}: {}", "License".bright_white(), "Apache-2.0 / MIT");
-    println!("{}: {}", "Homepage".bright_white(), "https://www.rust-lang.org/");
-    println!("{}: {}", "Repository".bright_white(), "https://github.com/rust-lang/rust");
+    println!(
+        "{}: {}",
+        "Homepage".bright_white(),
+        "https://www.rust-lang.org/"
+    );
+    println!(
+        "{}: {}",
+        "Repository".bright_white(),
+        "https://github.com/rust-lang/rust"
+    );
     println!("{}: {}", "Installed Size".bright_white(), "850 MiB");
     println!("{}: {}", "Download Size".bright_white(), "125 MiB");
     println!();
-    println!("{}: {}", "Dependencies".bright_white(), "libc, llvm, openssl");
-    println!("{}: {}", "Build Deps".bright_white(), "cmake, python, ninja");
+    println!(
+        "{}: {}",
+        "Dependencies".bright_white(),
+        "libc, llvm, openssl"
+    );
+    println!(
+        "{}: {}",
+        "Build Deps".bright_white(),
+        "cmake, python, ninja"
+    );
     println!();
-    println!("{}: {}", "Status".bright_white(), "Installed".bright_green());
-    println!("{}: {}", "Install Date".bright_white(), "2025-12-01 14:30:00");
-    println!("{}: {}", "Install Reason".bright_white(), "Explicitly installed");
+    println!(
+        "{}: {}",
+        "Status".bright_white(),
+        "Installed".bright_green()
+    );
+    println!(
+        "{}: {}",
+        "Install Date".bright_white(),
+        "2025-12-01 14:30:00"
+    );
+    println!(
+        "{}: {}",
+        "Install Reason".bright_white(),
+        "Explicitly installed"
+    );
 
     if show_versions {
         println!();

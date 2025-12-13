@@ -17,10 +17,7 @@ pub async fn run(packages: &[String], dry_run: bool) -> Result<()> {
     // TODO: Compare installed versions with repository versions
 
     // Placeholder - simulate finding updates
-    let updates = vec![
-        ("gcc", "14.1.0", "14.2.0"),
-        ("rustc", "1.74.0", "1.75.0"),
-    ];
+    let updates = vec![("gcc", "14.1.0", "14.2.0"), ("rustc", "1.74.0", "1.75.0")];
 
     if updates.is_empty() {
         println!("{} System is up to date", "✓".bright_green());

@@ -4,9 +4,11 @@ use colored::Colorize;
 
 pub async fn run(cmd: WorkspaceCommands) -> Result<()> {
     match cmd {
-        WorkspaceCommands::Create { name, lang, template } => {
-            create_workspace(&name, &lang, template.as_deref()).await
-        }
+        WorkspaceCommands::Create {
+            name,
+            lang,
+            template,
+        } => create_workspace(&name, &lang, template.as_deref()).await,
         WorkspaceCommands::Enter { name } => enter_workspace(&name).await,
         WorkspaceCommands::List => list_workspaces().await,
         WorkspaceCommands::Delete { name, force } => delete_workspace(&name, force).await,
@@ -25,7 +27,11 @@ async fn create_workspace(name: &str, languages: &[String], template: Option<&st
 
     // Create workspace directory structure
     let workspace_dir = format!("~/.local/share/rvn/workspaces/{}", name);
-    println!("{} Workspace directory: {}", "::".bright_blue(), workspace_dir);
+    println!(
+        "{} Workspace directory: {}",
+        "::".bright_blue(),
+        workspace_dir
+    );
 
     if !languages.is_empty() {
         println!("{} Languages: {}", "::".bright_blue(), languages.join(", "));

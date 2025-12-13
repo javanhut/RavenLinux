@@ -174,7 +174,7 @@ fn confirm_action(message: &str) -> Result<bool> {
 
     Confirm::new()
         .with_prompt(message)
-        .default(false)  // Default to No for removal
+        .default(false) // Default to No for removal
         .interact()
         .context("Failed to read user input")
 }

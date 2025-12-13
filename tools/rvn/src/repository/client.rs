@@ -63,8 +63,7 @@ impl RepoClient {
             .into_iter()
             .filter(|pkg| {
                 pkg.name.to_lowercase().contains(&query_lower)
-                    || (search_description
-                        && pkg.description.to_lowercase().contains(&query_lower))
+                    || (search_description && pkg.description.to_lowercase().contains(&query_lower))
             })
             .collect();
 
@@ -163,7 +162,11 @@ impl MultiRepoClient {
     }
 
     /// Search all repositories
-    pub async fn search(&self, query: &str, search_description: bool) -> Result<Vec<(String, RepoPackage)>> {
+    pub async fn search(
+        &self,
+        query: &str,
+        search_description: bool,
+    ) -> Result<Vec<(String, RepoPackage)>> {
         let mut results = Vec::new();
         for repo in &self.repos {
             match repo.search(query, search_description).await {

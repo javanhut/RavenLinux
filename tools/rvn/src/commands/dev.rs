@@ -122,7 +122,11 @@ async fn setup_go(version: Option<&str>) -> Result<()> {
 async fn setup_docker(podman: bool) -> Result<()> {
     let runtime = if podman { "Podman" } else { "Docker" };
 
-    println!("{} Setting up {}...", "::".bright_blue(), runtime.bright_white());
+    println!(
+        "{} Setting up {}...",
+        "::".bright_blue(),
+        runtime.bright_white()
+    );
 
     if podman {
         // TODO: Install podman, buildah, skopeo
@@ -144,7 +148,10 @@ async fn setup_docker(podman: bool) -> Result<()> {
 }
 
 async fn setup_containers() -> Result<()> {
-    println!("{} Setting up container development environment...", "::".bright_blue());
+    println!(
+        "{} Setting up container development environment...",
+        "::".bright_blue()
+    );
 
     // Install container tools
     let tools = vec![
@@ -156,7 +163,12 @@ async fn setup_containers() -> Result<()> {
     ];
 
     for (tool, desc) in &tools {
-        println!("   {} {} - {}", "+".bright_green(), tool.bright_white(), desc);
+        println!(
+            "   {} {} - {}",
+            "+".bright_green(),
+            tool.bright_white(),
+            desc
+        );
     }
 
     println!();
@@ -166,7 +178,10 @@ async fn setup_containers() -> Result<()> {
 }
 
 async fn setup_vm() -> Result<()> {
-    println!("{} Setting up virtual machine support...", "::".bright_blue());
+    println!(
+        "{} Setting up virtual machine support...",
+        "::".bright_blue()
+    );
 
     // Check KVM support
     println!("{} Checking KVM support...", "::".bright_blue());
@@ -180,7 +195,12 @@ async fn setup_vm() -> Result<()> {
     ];
 
     for (tool, desc) in &tools {
-        println!("   {} {} - {}", "+".bright_green(), tool.bright_white(), desc);
+        println!(
+            "   {} {} - {}",
+            "+".bright_green(),
+            tool.bright_white(),
+            desc
+        );
     }
 
     println!();
@@ -197,16 +217,37 @@ async fn list_dev_tools() -> Result<()> {
     println!();
 
     println!("{}", "Languages:".bright_white());
-    println!("  {} rust [version]   - Rust toolchain (stable, nightly, x.y.z)", "rvn dev".bright_blue());
-    println!("  {} node [version]   - Node.js (lts, 20, 21)", "rvn dev".bright_blue());
-    println!("  {} python [version] - Python (3.11, 3.12)", "rvn dev".bright_blue());
-    println!("  {} go [version]     - Go toolchain", "rvn dev".bright_blue());
+    println!(
+        "  {} rust [version]   - Rust toolchain (stable, nightly, x.y.z)",
+        "rvn dev".bright_blue()
+    );
+    println!(
+        "  {} node [version]   - Node.js (lts, 20, 21)",
+        "rvn dev".bright_blue()
+    );
+    println!(
+        "  {} python [version] - Python (3.11, 3.12)",
+        "rvn dev".bright_blue()
+    );
+    println!(
+        "  {} go [version]     - Go toolchain",
+        "rvn dev".bright_blue()
+    );
 
     println!();
     println!("{}", "Infrastructure:".bright_white());
-    println!("  {} docker [--podman] - Container runtime", "rvn dev".bright_blue());
-    println!("  {} containers        - Full container tooling", "rvn dev".bright_blue());
-    println!("  {} vm                - Virtual machine support", "rvn dev".bright_blue());
+    println!(
+        "  {} docker [--podman] - Container runtime",
+        "rvn dev".bright_blue()
+    );
+    println!(
+        "  {} containers        - Full container tooling",
+        "rvn dev".bright_blue()
+    );
+    println!(
+        "  {} vm                - Virtual machine support",
+        "rvn dev".bright_blue()
+    );
 
     Ok(())
 }

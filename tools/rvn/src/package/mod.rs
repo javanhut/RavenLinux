@@ -1,6 +1,6 @@
+pub mod archive;
 pub mod definition;
 pub mod manifest;
-pub mod archive;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
