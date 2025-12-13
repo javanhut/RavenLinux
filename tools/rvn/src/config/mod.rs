@@ -46,19 +46,19 @@ impl Default for Config {
             repositories: vec![
                 Repository {
                     name: "core".to_string(),
-                    url: "https://repo.ravenlinux.org/core".to_string(),
+                    url: "https://repo.theravenlinux.org/core".to_string(),
                     enabled: true,
                     priority: 1,
                 },
                 Repository {
                     name: "extra".to_string(),
-                    url: "https://repo.ravenlinux.org/extra".to_string(),
+                    url: "https://repo.theravenlinux.org/extra".to_string(),
                     enabled: true,
                     priority: 2,
                 },
                 Repository {
                     name: "community".to_string(),
-                    url: "https://repo.ravenlinux.org/community".to_string(),
+                    url: "https://repo.theravenlinux.org/community".to_string(),
                     enabled: true,
                     priority: 3,
                 },
