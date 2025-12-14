@@ -221,13 +221,13 @@ The custom UEFI bootloader supports:
 - Multi-boot with other operating systems
 - Auto-detection of Windows, other Linux distros
 - Keyboard navigation and configurable timeout
-- Configuration via `/EFI/raven/boot.conf`
+- Configuration via `/EFI/raven/boot.cfg` (preferred) or `/EFI/raven/boot.conf`
 - Recovery mode boot option
 
 ### Boot Configuration
 
 ```conf
-# /EFI/raven/boot.conf
+# /EFI/raven/boot.cfg
 timeout = 5
 default = 0
 

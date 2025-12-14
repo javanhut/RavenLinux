@@ -8,6 +8,7 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use core::fmt::Write;
 use uefi::prelude::*;
 use uefi::proto::console::text::{Color, Key, ScanCode};
@@ -104,7 +105,9 @@ fn display_menu_with_table(
     system_table: &mut SystemTable<Boot>,
     config: &BootConfig,
 ) -> usize {
-    let mut selected: usize = config.default;
+    let mut selected: usize = config
+        .default
+        .min(config.entries.len().saturating_sub(1));
     let mut timeout = config.timeout;
     let mut countdown_active = true;
 
@@ -123,7 +126,7 @@ fn display_menu_with_table(
             const MENU_WIDTH: usize = 56;
 
             // Draw entries with full-line highlight
-            for (i, entry) in config.entries.iter().take(config.entry_count).enumerate() {
+            for (i, entry) in config.entries.iter().enumerate() {
                 if i == selected {
                     // Selected entry - full line highlighted
                     let _ = stdout.set_color(Color::White, Color::Cyan);
@@ -167,7 +170,7 @@ fn display_menu_with_table(
                             return selected;
                         }
                     }
-                    selected = handle_key(key, selected, config.entry_count);
+                    selected = handle_key(key, selected, config.entries.len());
                 }
                 None => {
                     timeout -= 1;
@@ -189,7 +192,7 @@ fn display_menu_with_table(
                     // Shutdown - just loop for now
                 }
                 _ => {
-                    selected = handle_key(key, selected, config.entry_count);
+                    selected = handle_key(key, selected, config.entries.len());
                 }
             }
         }
@@ -265,19 +268,18 @@ fn load_config(boot_services: &BootServices, image_handle: Handle) -> Result<Boo
 
     let mut root = fs.open_volume().map_err(|_| ())?;
 
-    // Try to load config from known paths
+    // Try to load config from known paths, falling back to defaults.
+    let mut config: BootConfig = BootConfig::default();
     for config_path in CONFIG_PATHS {
         if let Ok(config_data) = read_file_from_root(&mut root, config_path) {
             if let Ok(parsed) = BootConfig::parse(&config_data) {
-                // Config loaded successfully - we have owned strings but need static refs
-                // For now, fall back to defaults since we need &'static str in BootEntry
-                // A full implementation would use a different structure for runtime
+                config = parsed;
+                break;
             }
         }
     }
 
-    // Try to detect other operating systems and add them to the default config
-    let mut config = BootConfig::default();
+    // Try to detect other operating systems and add them to the config
     detect_other_os(&mut root, &mut config);
 
     Ok(config)
@@ -342,15 +344,14 @@ fn detect_other_os(root: &mut uefi::proto::media::file::Directory, config: &mut 
     for bootloader in KNOWN_BOOTLOADERS {
         if file_exists(root, bootloader.path) {
             // Found another OS, add it to the config
-            if config.entry_count < config::MAX_ENTRIES {
-                config.entries[config.entry_count] = BootEntry {
-                    name: bootloader.name,
-                    kernel: bootloader.path,
+            if config.entries.len() < config::MAX_ENTRIES {
+                config.entries.push(BootEntry {
+                    name: bootloader.name.into(),
+                    kernel: bootloader.path.into(),
                     initrd: None,
-                    cmdline: "",
+                    cmdline: String::new(),
                     entry_type: bootloader.entry_type,
-                };
-                config.entry_count += 1;
+                });
             }
         }
     }
@@ -367,14 +368,14 @@ fn boot_entry(
             boot_efi_stub(
                 boot_services,
                 image_handle,
-                entry.kernel,
-                entry.initrd,
-                entry.cmdline,
+                entry.kernel.as_str(),
+                entry.initrd.as_deref(),
+                entry.cmdline.as_str(),
             )
         }
         EntryType::Windows | EntryType::Chainload | EntryType::EfiApp => {
             // Chainload another EFI application
-            chainload_efi(boot_services, image_handle, entry.kernel)
+            chainload_efi(boot_services, image_handle, entry.kernel.as_str())
         }
         EntryType::LinuxLegacy => {
             // Traditional Linux boot - not implemented

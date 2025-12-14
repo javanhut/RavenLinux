@@ -12,16 +12,6 @@ pub const MAX_ENTRIES: usize = 16;
 /// A single boot entry
 #[derive(Clone)]
 pub struct BootEntry {
-    pub name: &'static str,
-    pub kernel: &'static str,
-    pub initrd: Option<&'static str>,
-    pub cmdline: &'static str,
-    pub entry_type: EntryType,
-}
-
-/// Boot entry with owned strings (for parsed config)
-#[derive(Clone)]
-pub struct OwnedBootEntry {
     pub name: String,
     pub kernel: String,
     pub initrd: Option<String>,
@@ -46,8 +36,7 @@ pub enum EntryType {
 
 /// Boot configuration
 pub struct BootConfig {
-    pub entries: [BootEntry; MAX_ENTRIES],
-    pub entry_count: usize,
+    pub entries: Vec<BootEntry>,
     pub default: usize,
     pub timeout: u32,
 }
@@ -55,10 +44,10 @@ pub struct BootConfig {
 impl Default for BootEntry {
     fn default() -> Self {
         Self {
-            name: "",
-            kernel: "",
+            name: String::new(),
+            kernel: String::new(),
             initrd: None,
-            cmdline: "",
+            cmdline: String::new(),
             entry_type: EntryType::LinuxEfi,
         }
     }
@@ -66,61 +55,68 @@ impl Default for BootEntry {
 
 impl Default for BootConfig {
     fn default() -> Self {
-        // Create default boot configuration
-        let mut entries: [BootEntry; MAX_ENTRIES] = core::array::from_fn(|_| BootEntry::default());
+        // Create default boot configuration.
+        // Note: On the live ISO we expect a boot.cfg/boot.conf to override this.
+        let mut entries: Vec<BootEntry> = Vec::new();
 
         // Default RavenLinux entry
-        entries[0] = BootEntry {
-            name: "RavenLinux",
-            kernel: "\\EFI\\raven\\vmlinuz",
-            initrd: Some("\\EFI\\raven\\initramfs.img"),
-            cmdline: "root=LABEL=RAVEN_ROOT rw quiet splash",
+        entries.push(BootEntry {
+            name: String::from("RavenLinux"),
+            kernel: String::from("\\EFI\\raven\\vmlinuz"),
+            initrd: Some(String::from("\\EFI\\raven\\initramfs.img")),
+            cmdline: String::from("root=LABEL=RAVEN_ROOT rw quiet splash"),
             entry_type: EntryType::LinuxEfi,
-        };
+        });
 
         // Wayland graphics mode
-        entries[1] = BootEntry {
-            name: "RavenLinux (Wayland)",
-            kernel: "\\EFI\\raven\\vmlinuz",
-            initrd: Some("\\EFI\\raven\\initramfs.img"),
-            cmdline: "root=LABEL=RAVEN_ROOT rw quiet splash raven.graphics=wayland",
+        entries.push(BootEntry {
+            name: String::from("RavenLinux (Wayland)"),
+            kernel: String::from("\\EFI\\raven\\vmlinuz"),
+            initrd: Some(String::from("\\EFI\\raven\\initramfs.img")),
+            cmdline: String::from("root=LABEL=RAVEN_ROOT rw quiet splash raven.graphics=wayland"),
             entry_type: EntryType::LinuxEfi,
-        };
+        });
+
+        // Wayland (Hyprland)
+        entries.push(BootEntry {
+            name: String::from("RavenLinux (Wayland - Hyprland)"),
+            kernel: String::from("\\EFI\\raven\\vmlinuz"),
+            initrd: Some(String::from("\\EFI\\raven\\initramfs.img")),
+            cmdline: String::from(
+                "root=LABEL=RAVEN_ROOT rw quiet splash raven.graphics=wayland raven.wayland=hyprland",
+            ),
+            entry_type: EntryType::LinuxEfi,
+        });
+
+        // X11 graphics mode
+        entries.push(BootEntry {
+            name: String::from("RavenLinux (X11)"),
+            kernel: String::from("\\EFI\\raven\\vmlinuz"),
+            initrd: Some(String::from("\\EFI\\raven\\initramfs.img")),
+            cmdline: String::from("root=LABEL=RAVEN_ROOT rw quiet splash raven.graphics=x11"),
+            entry_type: EntryType::LinuxEfi,
+        });
 
         // Recovery mode
-        entries[2] = BootEntry {
-            name: "RavenLinux (Recovery)",
-            kernel: "\\EFI\\raven\\vmlinuz",
-            initrd: Some("\\EFI\\raven\\initramfs.img"),
-            cmdline: "root=LABEL=RAVEN_ROOT rw single",
+        entries.push(BootEntry {
+            name: String::from("RavenLinux (Recovery)"),
+            kernel: String::from("\\EFI\\raven\\vmlinuz"),
+            initrd: Some(String::from("\\EFI\\raven\\initramfs.img")),
+            cmdline: String::from("root=LABEL=RAVEN_ROOT rw single"),
             entry_type: EntryType::LinuxEfi,
-        };
-
-        // Auto-detect other operating systems would go here
-        // In a full implementation, we'd scan for:
-        // - \\EFI\\Microsoft\\Boot\\bootmgfw.efi (Windows)
-        // - \\EFI\\*\\grubx64.efi (Other Linux)
-        // - \\EFI\\*\\shimx64.efi (Secure Boot Linux)
+        });
 
         Self {
             entries,
-            entry_count: 3,
             default: 0,
             timeout: 5,
         }
     }
 }
 
-/// Parsed boot configuration with owned strings
-pub struct ParsedBootConfig {
-    pub entries: Vec<OwnedBootEntry>,
-    pub default: usize,
-    pub timeout: u32,
-}
-
 impl BootConfig {
     /// Parse configuration from file contents
-    pub fn parse(data: &[u8]) -> Result<ParsedBootConfig, ()> {
+    pub fn parse(data: &[u8]) -> Result<BootConfig, ()> {
         // Configuration file format (boot.conf):
         //
         // timeout = 5
@@ -140,12 +136,12 @@ impl BootConfig {
 
         let text = str::from_utf8(data).map_err(|_| ())?;
 
-        let mut entries: Vec<OwnedBootEntry> = Vec::new();
+        let mut entries: Vec<BootEntry> = Vec::new();
         let mut default: usize = 0;
         let mut timeout: u32 = 5;
 
         // Current entry being parsed
-        let mut current_entry: Option<OwnedBootEntry> = None;
+        let mut current_entry: Option<BootEntry> = None;
 
         for line in text.lines() {
             let line = line.trim();
@@ -159,12 +155,15 @@ impl BootConfig {
             if line == "[entry]" {
                 // Save previous entry if exists
                 if let Some(entry) = current_entry.take() {
-                    if !entry.name.is_empty() && !entry.kernel.is_empty() {
+                    if !entry.name.is_empty()
+                        && !entry.kernel.is_empty()
+                        && entries.len() < MAX_ENTRIES
+                    {
                         entries.push(entry);
                     }
                 }
                 // Start new entry
-                current_entry = Some(OwnedBootEntry {
+                current_entry = Some(BootEntry {
                     name: String::new(),
                     kernel: String::new(),
                     initrd: None,
@@ -215,7 +214,7 @@ impl BootConfig {
 
         // Save final entry
         if let Some(entry) = current_entry {
-            if !entry.name.is_empty() && !entry.kernel.is_empty() {
+            if !entry.name.is_empty() && !entry.kernel.is_empty() && entries.len() < MAX_ENTRIES {
                 entries.push(entry);
             }
         }
@@ -230,7 +229,7 @@ impl BootConfig {
             default = 0;
         }
 
-        Ok(ParsedBootConfig {
+        Ok(BootConfig {
             entries,
             default,
             timeout,
@@ -339,7 +338,11 @@ pub const KNOWN_BOOTLOADERS: &[KnownBootloader] = &[
 
 /// Configuration file paths to try
 pub const CONFIG_PATHS: &[&str] = &[
+    // Prefer 8.3-safe names first (some firmware FAT drivers don't support LFN/VFAT).
+    "\\EFI\\raven\\boot.cfg",
     "\\EFI\\raven\\boot.conf",
+    "\\EFI\\BOOT\\raven.cfg",
     "\\EFI\\BOOT\\raven.conf",
+    "\\raven\\boot.cfg",
     "\\raven\\boot.conf",
 ];

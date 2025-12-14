@@ -80,8 +80,14 @@ build_coreutils() {
 build_kernel() {
     log_info "Building Linux kernel..."
 
-    if [[ -f "${BUILD_DIR}/kernel/boot/vmlinuz-raven" ]]; then
-        log_info "Kernel already built, skipping"
+    local kernel_out="${BUILD_DIR}/kernel/boot/vmlinuz-raven"
+    if [[ -f "${kernel_out}" ]]; then
+        if find "${PROJECT_ROOT}/scripts/build-kernel.sh" "${PROJECT_ROOT}/configs/kernel" \
+            -type f -newer "${kernel_out}" -print -quit 2>/dev/null | grep -q .; then
+            log_warn "Kernel already built but older than build scripts/config; rebuild with: ./scripts/build-kernel.sh --clean"
+        else
+            log_info "Kernel already built, skipping"
+        fi
         return 0
     fi
 

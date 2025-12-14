@@ -346,13 +346,75 @@ copy_wayland_tools() {
         cp "$(which weston)" "${LIVE_ROOT}/bin/"
         log_info "  Added weston"
 
-        # Copy weston backends
-        local weston_lib="/usr/lib/weston"
-        if [[ -d "$weston_lib" ]]; then
-            mkdir -p "${LIVE_ROOT}/usr/lib/weston"
-            cp -r "$weston_lib"/* "${LIVE_ROOT}/usr/lib/weston/" 2>/dev/null || true
-            log_info "  Added weston backends"
+        # Copy weston runtime modules/backends (weston 14 uses libweston-$major)
+        for d in /usr/lib/weston /usr/lib64/weston /usr/share/weston \
+            /usr/lib/libweston-* /usr/lib64/libweston-*; do
+            [[ -d "$d" ]] || continue
+            mkdir -p "${LIVE_ROOT}${d}"
+            cp -a "${d}/." "${LIVE_ROOT}${d}/" 2>/dev/null || true
+            log_info "  Copied $(basename "$d") runtime data"
+        done
+    fi
+
+    # X11/Xwayland support (for legacy apps under Wayland, or optional Xorg)
+    if command -v Xwayland &>/dev/null; then
+        cp "$(which Xwayland)" "${LIVE_ROOT}/bin/"
+        log_info "  Added Xwayland"
+    fi
+    if command -v Xorg &>/dev/null; then
+        cp "$(which Xorg)" "${LIVE_ROOT}/bin/"
+        log_info "  Added Xorg"
+        # Xorg wrapper expects /usr/lib/Xorg or /usr/lib/Xorg.wrap
+        if [[ -x "/usr/lib/Xorg" ]]; then
+            mkdir -p "${LIVE_ROOT}/usr/lib"
+            cp -L "/usr/lib/Xorg" "${LIVE_ROOT}/usr/lib/Xorg" 2>/dev/null || true
         fi
+        if [[ -x "/usr/lib/Xorg.wrap" ]]; then
+            mkdir -p "${LIVE_ROOT}/usr/lib"
+            cp -L "/usr/lib/Xorg.wrap" "${LIVE_ROOT}/usr/lib/Xorg.wrap" 2>/dev/null || true
+            chmod 4755 "${LIVE_ROOT}/usr/lib/Xorg.wrap" 2>/dev/null || true
+        fi
+    fi
+    for xorg_dir in /usr/lib/xorg /usr/lib64/xorg /usr/lib/x86_64-linux-gnu/xorg; do
+        [[ -d "${xorg_dir}" ]] || continue
+        mkdir -p "${LIVE_ROOT}${xorg_dir}"
+        cp -a "${xorg_dir}/." "${LIVE_ROOT}${xorg_dir}/" 2>/dev/null || true
+        log_info "  Copied ${xorg_dir}"
+    done
+    for xorg_conf_dir in /usr/share/X11/xorg.conf.d /etc/X11/xorg.conf.d; do
+        [[ -d "${xorg_conf_dir}" ]] || continue
+        mkdir -p "${LIVE_ROOT}${xorg_conf_dir}"
+        cp -a "${xorg_conf_dir}/." "${LIVE_ROOT}${xorg_conf_dir}/" 2>/dev/null || true
+        log_info "  Copied $(basename "${xorg_conf_dir}")"
+    done
+
+    # Optional X11 helpers/clients for a usable Xorg session.
+    for tool in xinit startx xterm xclock xsetroot twm; do
+        if command -v "${tool}" &>/dev/null; then
+            cp "$(which "${tool}")" "${LIVE_ROOT}/bin/" 2>/dev/null || true
+            log_info "  Added ${tool}"
+        fi
+    done
+
+    # Hyprland (optional)
+    if command -v Hyprland &>/dev/null; then
+        cp "$(which Hyprland)" "${LIVE_ROOT}/bin/"
+        log_info "  Added Hyprland"
+    fi
+    if command -v hyprctl &>/dev/null; then
+        cp "$(which hyprctl)" "${LIVE_ROOT}/bin/"
+        log_info "  Added hyprctl"
+    fi
+    for hypr_dir in /usr/share/hyprland /usr/share/hypr; do
+        [[ -d "${hypr_dir}" ]] || continue
+        mkdir -p "${LIVE_ROOT}${hypr_dir}"
+        cp -a "${hypr_dir}/." "${LIVE_ROOT}${hypr_dir}/" 2>/dev/null || true
+        log_info "  Copied ${hypr_dir}"
+    done
+    if [[ -f "/usr/share/wayland-sessions/hyprland.desktop" ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share/wayland-sessions"
+        cp -a "/usr/share/wayland-sessions/hyprland.desktop" "${LIVE_ROOT}/usr/share/wayland-sessions/" 2>/dev/null || true
+        log_info "  Copied hyprland.desktop"
     fi
 
     # openvt for starting compositor on VT
@@ -406,6 +468,14 @@ copy_wayland_tools() {
         log_info "  Added DRI drivers"
     fi
 
+    # Copy Mesa GBM loader module(s) (needed for EGL/GBM compositors)
+    for gbm_dir in /usr/lib/gbm /usr/lib64/gbm /usr/lib/x86_64-linux-gnu/gbm; do
+        [[ -d "${gbm_dir}" ]] || continue
+        mkdir -p "${LIVE_ROOT}${gbm_dir}"
+        cp -a "${gbm_dir}/." "${LIVE_ROOT}${gbm_dir}/" 2>/dev/null || true
+        log_info "  Added GBM modules ($(basename "${gbm_dir}"))"
+    done
+
     # Create video group for seatd
     if ! grep -q "^video:" "${LIVE_ROOT}/etc/group" 2>/dev/null; then
         echo "video:x:12:raven,root" >> "${LIVE_ROOT}/etc/group"
@@ -417,9 +487,18 @@ copy_wayland_tools() {
     fi
 
     # Copy xkeyboard-config for keyboard layouts
-    if [[ -d "/usr/share/X11/xkb" ]]; then
+    # xkbcommon looks for /usr/share/xkeyboard-config-2 or /usr/share/X11/xkb
+    if [[ -d "/usr/share/xkeyboard-config-2" ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share"
+        cp -r /usr/share/xkeyboard-config-2 "${LIVE_ROOT}/usr/share/" 2>/dev/null || true
+        mkdir -p "${LIVE_ROOT}/usr/share/X11"
+        ln -sf ../xkeyboard-config-2 "${LIVE_ROOT}/usr/share/X11/xkb" 2>/dev/null || true
+        log_info "  Added xkeyboard-config-2"
+    elif [[ -d "/usr/share/X11/xkb" ]]; then
         mkdir -p "${LIVE_ROOT}/usr/share/X11"
         cp -r /usr/share/X11/xkb "${LIVE_ROOT}/usr/share/X11/"
+        # Also create symlink that xkbcommon expects
+        ln -sf X11/xkb "${LIVE_ROOT}/usr/share/xkeyboard-config-2" 2>/dev/null || true
         log_info "  Added xkeyboard-config"
     fi
 
@@ -427,6 +506,7 @@ copy_wayland_tools() {
     if [[ -d "/usr/share/xkeyboard-config" ]]; then
         mkdir -p "${LIVE_ROOT}/usr/share"
         cp -r /usr/share/xkeyboard-config "${LIVE_ROOT}/usr/share/"
+        ln -sf xkeyboard-config "${LIVE_ROOT}/usr/share/xkeyboard-config-2" 2>/dev/null || true
         log_info "  Added xkeyboard-config (alt location)"
     fi
 
@@ -491,6 +571,47 @@ copy_libraries() {
                 cp -L "$lib" "$dest" 2>/dev/null || true
             fi
         done
+    done
+
+    # Copy deps for dlopened modules (e.g. Weston backends, Mesa GBM/DRI modules).
+    for so in \
+        "${LIVE_ROOT}"/usr/lib/libweston-*/*.so \
+        "${LIVE_ROOT}"/usr/lib64/libweston-*/*.so \
+        "${LIVE_ROOT}"/usr/lib/weston/*.so \
+        "${LIVE_ROOT}"/usr/lib64/weston/*.so \
+        "${LIVE_ROOT}"/usr/lib/gbm/*.so \
+        "${LIVE_ROOT}"/usr/lib64/gbm/*.so \
+        "${LIVE_ROOT}"/usr/lib/x86_64-linux-gnu/gbm/*.so \
+        "${LIVE_ROOT}"/usr/lib/dri/*.so \
+        "${LIVE_ROOT}"/usr/lib64/dri/*.so \
+        "${LIVE_ROOT}"/usr/lib/x86_64-linux-gnu/dri/*.so; do
+        [[ -f "$so" && ! -L "$so" ]] || continue
+        timeout 2 ldd "$so" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
+            [[ -z "$lib" || ! -f "$lib" ]] && continue
+            local dest="${LIVE_ROOT}${lib}"
+            if [[ ! -f "$dest" ]]; then
+                mkdir -p "$(dirname "$dest")"
+                cp -L "$lib" "$dest" 2>/dev/null || true
+            fi
+        done || true
+    done
+
+    # Xorg/Xwayland modules are also dlopened at runtime.
+    for modules_dir in \
+        "${LIVE_ROOT}/usr/lib/xorg/modules" \
+        "${LIVE_ROOT}/usr/lib64/xorg/modules" \
+        "${LIVE_ROOT}/usr/lib/x86_64-linux-gnu/xorg/modules"; do
+        [[ -d "${modules_dir}" ]] || continue
+        while IFS= read -r -d '' so; do
+            timeout 2 ldd "$so" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
+                [[ -z "$lib" || ! -f "$lib" ]] && continue
+                local dest="${LIVE_ROOT}${lib}"
+                if [[ ! -f "$dest" ]]; then
+                    mkdir -p "$(dirname "$dest")"
+                    cp -L "$lib" "$dest" 2>/dev/null || true
+                fi
+            done || true
+        done < <(find "${modules_dir}" -type f -name '*.so' -print0 2>/dev/null) || true
     done
 
     # Copy dynamic linker - CRITICAL for all dynamically linked binaries

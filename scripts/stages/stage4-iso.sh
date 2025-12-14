@@ -113,6 +113,23 @@ mountpoint -q /run || mount -t tmpfs tmpfs /run
 # Set hostname
 hostname raven-linux 2>/dev/null || true
 
+# Start udevd if available (helps libinput/Xorg enumerate devices)
+if [ -x /sbin/udevd ]; then
+    /sbin/udevd --daemon 2>/dev/null || true
+elif [ -x /usr/lib/systemd/systemd-udevd ]; then
+    /usr/lib/systemd/systemd-udevd --daemon 2>/dev/null || true
+fi
+
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm trigger --action=add 2>/dev/null || udevadm trigger 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
+fi
+
+# Try to load common GPU drivers (helps VMs where the driver is modular).
+if command -v modprobe >/dev/null 2>&1; then
+    modprobe -a virtio_gpu vmwgfx vboxvideo qxl bochs cirrus_qemu i915 amdgpu nouveau simpledrm 2>/dev/null || true
+fi
+
 # Suppress kernel messages
 dmesg -n 1 2>/dev/null || true
 
@@ -177,7 +194,12 @@ if echo "$cmdline" | grep -qE '(^| )raven\.graphics=wayland($| )'; then
     echo ""
     echo "Starting Wayland graphics..."
 
-    if [ -x /bin/raven-wayland-session ]; then
+    if [ ! -d /dev/dri ]; then
+        echo "No /dev/dri found; DRM/KMS not available. Skipping Wayland."
+        echo "Hint: QEMU needs a KMS-capable GPU (e.g. -device virtio-gpu-pci -display gtk,gl=on)."
+        echo "Hint: VirtualBox should use 'VMSVGA' graphics controller."
+        dmesg 2>/dev/null | grep -iE 'drm|kms|gpu|i915|amdgpu|nouveau|virtio|vmwgfx|vbox|qxl|bochs|cirrus|simpledrm|framebuffer' | tail -n 200 || true
+    elif [ -x /bin/raven-wayland-session ]; then
         if command -v openvt >/dev/null 2>&1; then
             if openvt -c 1 -s -f -- /bin/raven-wayland-session; then
                 :
@@ -191,6 +213,32 @@ if echo "$cmdline" | grep -qE '(^| )raven\.graphics=wayland($| )'; then
         fi
     else
         echo "raven-wayland-session not found; falling back to shell."
+    fi
+fi
+
+if echo "$cmdline" | grep -qE '(^| )raven\.graphics=x11($| )'; then
+    echo ""
+    echo "Starting X11 graphics..."
+
+    if [ ! -d /dev/dri ]; then
+        echo "No /dev/dri found; DRM/KMS not available. Skipping X11."
+        echo "Hint: QEMU needs a KMS-capable GPU (e.g. -device virtio-gpu-pci -display gtk,gl=on)."
+        echo "Hint: VirtualBox should use 'VMSVGA' graphics controller."
+        dmesg 2>/dev/null | grep -iE 'drm|kms|gpu|i915|amdgpu|nouveau|virtio|vmwgfx|vbox|qxl|bochs|cirrus|simpledrm|framebuffer' | tail -n 200 || true
+    elif [ -x /bin/raven-x11-session ]; then
+        if command -v openvt >/dev/null 2>&1; then
+            if openvt -c 1 -s -f -- /bin/raven-x11-session; then
+                :
+            else
+                echo "X11 session exited; falling back to shell."
+            fi
+        elif /bin/raven-x11-session; then
+            :
+        else
+            echo "X11 session exited; falling back to shell."
+        fi
+    else
+        echo "raven-x11-session not found; falling back to shell."
     fi
 fi
 
@@ -241,6 +289,37 @@ copy_boot_files() {
 }
 
 # =============================================================================
+# Copy kernel modules into sysroot (needed for DRM/input/network drivers)
+# =============================================================================
+copy_kernel_modules() {
+    log_step "Copying kernel modules..."
+
+    local modules_root="${BUILD_DIR}/kernel/lib/modules"
+    if [[ ! -d "${modules_root}" ]]; then
+        log_warn "Kernel modules not found at ${modules_root}; skipping"
+        return 0
+    fi
+
+    local release
+    release="$(find "${modules_root}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort -V | tail -n 1)"
+    if [[ -z "${release}" ]]; then
+        log_warn "No kernel module directories found in ${modules_root}; skipping"
+        return 0
+    fi
+
+    mkdir -p "${SYSROOT_DIR}/lib/modules"
+    rm -rf "${SYSROOT_DIR}/lib/modules/${release}" 2>/dev/null || true
+    cp -a "${modules_root}/${release}" "${SYSROOT_DIR}/lib/modules/" 2>/dev/null || true
+
+    if [[ -d "${SYSROOT_DIR}/lib/modules/${release}" ]]; then
+        log_info "  Copied /lib/modules/${release}"
+        log_success "Kernel modules copied"
+    else
+        log_warn "Failed to copy kernel modules into sysroot"
+    fi
+}
+
+# =============================================================================
 # Install packages to sysroot
 # =============================================================================
 install_packages_to_sysroot() {
@@ -276,6 +355,10 @@ install_packages_to_sysroot() {
     if [[ -f "${PROJECT_ROOT}/configs/raven-wayland-session" ]]; then
         cp "${PROJECT_ROOT}/configs/raven-wayland-session" "${SYSROOT_DIR}/bin/raven-wayland-session" 2>/dev/null || true
         chmod +x "${SYSROOT_DIR}/bin/raven-wayland-session" 2>/dev/null || true
+    fi
+    if [[ -f "${PROJECT_ROOT}/configs/raven-x11-session" ]]; then
+        cp "${PROJECT_ROOT}/configs/raven-x11-session" "${SYSROOT_DIR}/bin/raven-x11-session" 2>/dev/null || true
+        chmod +x "${SYSROOT_DIR}/bin/raven-x11-session" 2>/dev/null || true
     fi
 
     # Ensure shared library dependencies for newly installed binaries are present.
@@ -329,13 +412,24 @@ setup_ravenboot() {
     local ravenboot="${PACKAGES_DIR}/boot/raven-boot.efi"
 
     if [[ -f "${ravenboot}" ]]; then
+        # Helpful warning when stage4 is run without rebuilding stage3.
+        if [[ -d "${PROJECT_ROOT}/bootloader" ]]; then
+            if find "${PROJECT_ROOT}/bootloader/src" \
+                "${PROJECT_ROOT}/bootloader/Cargo.toml" \
+                "${PROJECT_ROOT}/bootloader/Cargo.lock" \
+                -type f -newer "${ravenboot}" -print -quit 2>/dev/null | grep -q .; then
+                log_warn "RavenBoot binary is older than bootloader sources; run stage3 to rebuild it."
+            fi
+        fi
+
         # Copy RavenBoot as primary bootloader
         cp "${ravenboot}" "${ISO_ROOT}/EFI/BOOT/BOOTX64.EFI"
         mkdir -p "${ISO_ROOT}/EFI/raven"
         cp "${ravenboot}" "${ISO_ROOT}/EFI/raven/raven-boot.efi"
 
-        # Create RavenBoot config
-        cat > "${ISO_ROOT}/EFI/raven/boot.conf" << EOF
+        # Create RavenBoot config.
+        # Prefer .cfg (8.3-safe) to maximize compatibility with firmware FAT drivers.
+        cat > "${ISO_ROOT}/EFI/raven/boot.cfg" << EOF
 # RavenBoot Configuration
 timeout = 5
 default = 0
@@ -343,38 +437,54 @@ default = 0
 [entry]
 name = "Raven Linux Live"
 kernel = "\\EFI\\raven\\vmlinuz"
-initrd = "\\EFI\\raven\\initramfs.img"
+initrd = "\\EFI\\raven\\initrd.img"
 cmdline = "rdinit=/init quiet loglevel=3 console=tty0 console=ttyS0,115200"
 type = linux-efi
 
 [entry]
 name = "Raven Linux Live (Wayland)"
 kernel = "\\EFI\\raven\\vmlinuz"
-initrd = "\\EFI\\raven\\initramfs.img"
+initrd = "\\EFI\\raven\\initrd.img"
 cmdline = "rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=weston console=tty0 console=ttyS0,115200"
 type = linux-efi
 
 [entry]
 name = "Raven Linux Live (Wayland - Raven Compositor WIP)"
 kernel = "\\EFI\\raven\\vmlinuz"
-initrd = "\\EFI\\raven\\initramfs.img"
+initrd = "\\EFI\\raven\\initrd.img"
 cmdline = "rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=tty0 console=ttyS0,115200"
+type = linux-efi
+
+[entry]
+name = "Raven Linux Live (Wayland - Hyprland)"
+kernel = "\\EFI\\raven\\vmlinuz"
+initrd = "\\EFI\\raven\\initrd.img"
+cmdline = "rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=hyprland console=tty0 console=ttyS0,115200"
+type = linux-efi
+
+[entry]
+name = "Raven Linux Live (X11)"
+kernel = "\\EFI\\raven\\vmlinuz"
+initrd = "\\EFI\\raven\\initrd.img"
+cmdline = "rdinit=/init quiet loglevel=3 raven.graphics=x11 console=tty0 console=ttyS0,115200"
 type = linux-efi
 
 [entry]
 name = "Raven Linux Live (Verbose)"
 kernel = "\\EFI\\raven\\vmlinuz"
-initrd = "\\EFI\\raven\\initramfs.img"
+initrd = "\\EFI\\raven\\initrd.img"
 cmdline = "rdinit=/init console=tty0 console=ttyS0,115200"
 type = linux-efi
 
 [entry]
 name = "Raven Linux (Recovery)"
 kernel = "\\EFI\\raven\\vmlinuz"
-initrd = "\\EFI\\raven\\initramfs.img"
+initrd = "\\EFI\\raven\\initrd.img"
 cmdline = "rdinit=/init single console=tty0 console=ttyS0,115200"
 type = linux-efi
 EOF
+        # Backward-compatible copy for older RavenBoot builds/docs.
+        cp "${ISO_ROOT}/EFI/raven/boot.cfg" "${ISO_ROOT}/EFI/raven/boot.conf" 2>/dev/null || true
 
         log_success "RavenBoot configured"
         return 0
@@ -416,6 +526,16 @@ menuentry "Raven Linux Live (Wayland)" --class raven {
 
 menuentry "Raven Linux Live (Wayland - Raven Compositor WIP)" --class raven {
     linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=tty0 console=ttyS0,115200
+    initrd /boot/initramfs.img
+}
+
+menuentry "Raven Linux Live (Wayland - Hyprland)" --class raven {
+    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=hyprland console=tty0 console=ttyS0,115200
+    initrd /boot/initramfs.img
+}
+
+menuentry "Raven Linux Live (X11)" --class raven {
+    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=x11 console=tty0 console=ttyS0,115200
     initrd /boot/initramfs.img
 }
 
@@ -500,9 +620,13 @@ create_efi_image() {
         log_info "  Copied EFI bootloader"
 
         # Copy RavenBoot config if present
+        if [[ -f "${ISO_ROOT}/EFI/raven/boot.cfg" ]]; then
+            mcopy -i "${efi_img}" "${ISO_ROOT}/EFI/raven/boot.cfg" ::/EFI/raven/ 2>/dev/null || true
+            log_info "  Copied RavenBoot config (boot.cfg)"
+        fi
         if [[ -f "${ISO_ROOT}/EFI/raven/boot.conf" ]]; then
             mcopy -i "${efi_img}" "${ISO_ROOT}/EFI/raven/boot.conf" ::/EFI/raven/ 2>/dev/null || true
-            log_info "  Copied RavenBoot config"
+            log_info "  Copied RavenBoot config (boot.conf)"
         fi
 
         # Copy GRUB config as fallback
@@ -516,8 +640,9 @@ create_efi_image() {
             log_info "  Copied kernel to EFI image"
         fi
         if [[ -f "${ISO_ROOT}/boot/initramfs.img" ]]; then
-            mcopy -i "${efi_img}" "${ISO_ROOT}/boot/initramfs.img" ::/EFI/raven/ 2>/dev/null || true
-            log_info "  Copied initramfs to EFI image"
+            # Use an 8.3-safe initrd filename for broad firmware compatibility.
+            mcopy -i "${efi_img}" "${ISO_ROOT}/boot/initramfs.img" ::/EFI/raven/initrd.img 2>/dev/null || true
+            log_info "  Copied initrd.img to EFI image"
         fi
 
         log_success "EFI image created"
@@ -623,6 +748,8 @@ print_summary() {
     echo ""
     echo "  Test in QEMU (UEFI):"
     echo "    qemu-system-x86_64 -cdrom ${ISO_OUTPUT} -m 4G \\"
+    echo "      -device virtio-gpu-pci -display gtk,gl=on \\"
+    echo "      -serial stdio \\"
     echo "      -bios /usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd -enable-kvm"
     echo ""
     echo "  Test in QEMU (BIOS):"
@@ -649,6 +776,7 @@ main() {
     setup_iso_structure
     create_live_init
     copy_boot_files
+    copy_kernel_modules
     create_squashfs
     setup_ravenboot || true  # Continue even if RavenBoot not available
     setup_grub  # GRUB as fallback for BIOS

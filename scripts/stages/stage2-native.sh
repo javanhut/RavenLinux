@@ -115,10 +115,16 @@ copy_system_utils() {
         dbus-daemon dbus-launch dbus-send dbus-uuidgen
         # Seat management (Wayland compositors)
         seatd
+        # Kernel module utilities (needed for auto-loading GPU/input drivers)
+        modprobe insmod rmmod lsmod depmod modinfo kmod
         # Reference compositor (optional)
         weston
+        # Alternative compositor (optional)
+        Hyprland hyprctl
+        # X11/Xwayland (optional, for legacy app support)
+        Xorg Xwayland xinit startx xterm xclock xsetroot twm
         # Systemd tools (if available, for compatibility)
-        journalctl systemctl
+        journalctl systemctl udevadm
     )
 
     for util in "${utils[@]}"; do
@@ -183,13 +189,91 @@ copy_system_utils() {
 
     # If weston is available on the build host, copy its runtime data/plugins.
     if [[ -x "${SYSROOT_DIR}/bin/weston" ]]; then
-        for d in /usr/lib/weston /usr/lib64/weston /usr/share/weston; do
+        for d in /usr/lib/weston /usr/lib64/weston /usr/share/weston \
+            /usr/lib/libweston-* /usr/lib64/libweston-*; do
             if [[ -d "$d" ]]; then
                 mkdir -p "${SYSROOT_DIR}${d}"
                 cp -a "${d}/." "${SYSROOT_DIR}${d}/" 2>/dev/null || true
                 log_info "  Copied $(basename "$d") runtime data"
             fi
         done
+    fi
+
+    # Copy xkeyboard-config data for libxkbcommon (keyboard layouts).
+    # Different distros use different install prefixes; Raven's libxkbcommon is
+    # typically built to look in /usr/share/xkeyboard-config-2.
+    log_info "Copying xkeyboard-config (XKB) data..."
+    if [[ -d "/usr/share/xkeyboard-config-2" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share" "${SYSROOT_DIR}/usr/share/X11"
+        cp -a "/usr/share/xkeyboard-config-2" "${SYSROOT_DIR}/usr/share/" 2>/dev/null || true
+        ln -sf ../xkeyboard-config-2 "${SYSROOT_DIR}/usr/share/X11/xkb" 2>/dev/null || true
+        log_info "  Copied /usr/share/xkeyboard-config-2"
+    elif [[ -d "/usr/share/X11/xkb" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share/X11"
+        cp -a "/usr/share/X11/xkb" "${SYSROOT_DIR}/usr/share/X11/" 2>/dev/null || true
+        ln -sf X11/xkb "${SYSROOT_DIR}/usr/share/xkeyboard-config-2" 2>/dev/null || true
+        log_info "  Copied /usr/share/X11/xkb"
+    elif [[ -d "/usr/share/xkeyboard-config" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share"
+        cp -a "/usr/share/xkeyboard-config" "${SYSROOT_DIR}/usr/share/" 2>/dev/null || true
+        ln -sf xkeyboard-config "${SYSROOT_DIR}/usr/share/xkeyboard-config-2" 2>/dev/null || true
+        log_info "  Copied /usr/share/xkeyboard-config"
+    else
+        log_warn "  No xkeyboard-config data found on host; keyboard layouts may be missing"
+    fi
+
+    # Copy libinput data files (quirks) used to classify input devices.
+    log_info "Copying libinput data..."
+    if [[ -d "/usr/share/libinput" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share"
+        cp -a "/usr/share/libinput" "${SYSROOT_DIR}/usr/share/" 2>/dev/null || true
+        log_info "  Copied /usr/share/libinput"
+    else
+        log_warn "  No /usr/share/libinput found on host; input devices may not be detected correctly"
+    fi
+
+    # Copy udev runtime data (rules/hwdb) and daemon (for device enumeration).
+    log_info "Copying udev runtime data..."
+    if [[ -d "/usr/lib/udev" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/lib"
+        cp -a "/usr/lib/udev" "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
+        log_info "  Copied /usr/lib/udev"
+    fi
+    if [[ -d "/etc/udev" ]]; then
+        mkdir -p "${SYSROOT_DIR}/etc"
+        cp -a "/etc/udev" "${SYSROOT_DIR}/etc/" 2>/dev/null || true
+        log_info "  Copied /etc/udev"
+    fi
+
+    # systemd-udevd is often located outside PATH; copy it if present.
+    if [[ -e "/usr/lib/systemd/systemd-udevd" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/lib/systemd"
+        cp -L "/usr/lib/systemd/systemd-udevd" "${SYSROOT_DIR}/usr/lib/systemd/systemd-udevd" 2>/dev/null || true
+        chmod +x "${SYSROOT_DIR}/usr/lib/systemd/systemd-udevd" 2>/dev/null || true
+        log_info "  Copied /usr/lib/systemd/systemd-udevd"
+    fi
+
+    # Some distros ship udevd in /sbin; copy it too if available.
+    for udevd in /sbin/udevd /usr/sbin/udevd /usr/lib/udev/udevd; do
+        if [[ -e "${udevd}" ]]; then
+            mkdir -p "${SYSROOT_DIR}/sbin"
+            cp -L "${udevd}" "${SYSROOT_DIR}/sbin/udevd" 2>/dev/null || true
+            chmod +x "${SYSROOT_DIR}/sbin/udevd" 2>/dev/null || true
+            log_info "  Copied ${udevd} -> /sbin/udevd"
+            break
+        fi
+    done
+
+    # Provide /sbin/udevd symlink if we only have systemd-udevd.
+    if [[ ! -e "${SYSROOT_DIR}/sbin/udevd" ]] && [[ -e "${SYSROOT_DIR}/usr/lib/systemd/systemd-udevd" ]]; then
+        mkdir -p "${SYSROOT_DIR}/sbin"
+        ln -sf /usr/lib/systemd/systemd-udevd "${SYSROOT_DIR}/sbin/udevd" 2>/dev/null || true
+    fi
+
+    # Some udev/module loaders expect modprobe in /sbin.
+    if [[ -x "${SYSROOT_DIR}/bin/modprobe" ]] && [[ ! -e "${SYSROOT_DIR}/sbin/modprobe" ]]; then
+        mkdir -p "${SYSROOT_DIR}/sbin"
+        ln -sf /bin/modprobe "${SYSROOT_DIR}/sbin/modprobe" 2>/dev/null || true
     fi
 
     log_success "System utilities installed"
@@ -296,6 +380,25 @@ copy_libraries() {
         done || true
     done
 
+    # Some components dlopen modules at runtime (not visible via `ldd` on the
+    # main executable). Copy deps for common module locations we ship.
+    log_info "Copying runtime libraries for dlopened modules..."
+    for so in \
+        "${SYSROOT_DIR}"/usr/lib/libweston-*/*.so \
+        "${SYSROOT_DIR}"/usr/lib64/libweston-*/*.so \
+        "${SYSROOT_DIR}"/usr/lib/weston/*.so \
+        "${SYSROOT_DIR}"/usr/lib64/weston/*.so; do
+        [[ -f "$so" ]] || continue
+        timeout 2 ldd "$so" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
+            [[ -z "$lib" || ! -f "$lib" ]] && continue
+            local dest="${SYSROOT_DIR}${lib}"
+            if [[ ! -f "$dest" ]]; then
+                mkdir -p "$(dirname "$dest")"
+                cp -L "$lib" "$dest" 2>/dev/null || true
+            fi
+        done || true
+    done
+
     # Setup lib directories - use real directories, not symlinks
     mkdir -p "${SYSROOT_DIR}/lib"
     mkdir -p "${SYSROOT_DIR}/lib64"
@@ -371,6 +474,60 @@ copy_libraries() {
         fi
     done
 
+    # GBM DRI loader module(s) (Mesa)
+    # Needed for EGL/GBM compositors (Weston, wlroots, etc.).
+    for gbm_dir in /usr/lib/gbm /usr/lib64/gbm /usr/lib/x86_64-linux-gnu/gbm; do
+        if [[ -d "${gbm_dir}" ]]; then
+            mkdir -p "${SYSROOT_DIR}${gbm_dir}"
+            cp -a "${gbm_dir}/." "${SYSROOT_DIR}${gbm_dir}/" 2>/dev/null || true
+            log_info "  Copied ${gbm_dir} modules"
+        fi
+    done
+
+    # Xorg / Xwayland runtime data (modules, config snippets)
+    log_info "Copying Xorg/Xwayland runtime data..."
+    if [[ -x "/usr/lib/Xorg" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/lib"
+        cp -L "/usr/lib/Xorg" "${SYSROOT_DIR}/usr/lib/Xorg" 2>/dev/null || true
+        log_info "  Copied /usr/lib/Xorg"
+    fi
+    if [[ -x "/usr/lib/Xorg.wrap" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/lib"
+        cp -L "/usr/lib/Xorg.wrap" "${SYSROOT_DIR}/usr/lib/Xorg.wrap" 2>/dev/null || true
+        chmod 4755 "${SYSROOT_DIR}/usr/lib/Xorg.wrap" 2>/dev/null || true
+        log_info "  Copied /usr/lib/Xorg.wrap"
+    fi
+
+    for xorg_dir in /usr/lib/xorg /usr/lib64/xorg /usr/lib/x86_64-linux-gnu/xorg; do
+        if [[ -d "${xorg_dir}" ]]; then
+            mkdir -p "${SYSROOT_DIR}${xorg_dir}"
+            cp -a "${xorg_dir}/." "${SYSROOT_DIR}${xorg_dir}/" 2>/dev/null || true
+            log_info "  Copied ${xorg_dir}"
+        fi
+    done
+    for xorg_conf_dir in /usr/share/X11/xorg.conf.d /etc/X11/xorg.conf.d; do
+        if [[ -d "${xorg_conf_dir}" ]]; then
+            mkdir -p "${SYSROOT_DIR}${xorg_conf_dir}"
+            cp -a "${xorg_conf_dir}/." "${SYSROOT_DIR}${xorg_conf_dir}/" 2>/dev/null || true
+            log_info "  Copied $(basename "${xorg_conf_dir}")"
+        fi
+    done
+
+    # Hyprland runtime data (if installed on host)
+    log_info "Copying Hyprland runtime data..."
+    for hypr_dir in /usr/share/hyprland /usr/share/hypr; do
+        if [[ -d "${hypr_dir}" ]]; then
+            mkdir -p "${SYSROOT_DIR}${hypr_dir}"
+            cp -a "${hypr_dir}/." "${SYSROOT_DIR}${hypr_dir}/" 2>/dev/null || true
+            log_info "  Copied ${hypr_dir}"
+        fi
+    done
+    if [[ -f "/usr/share/wayland-sessions/hyprland.desktop" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share/wayland-sessions"
+        cp -a "/usr/share/wayland-sessions/hyprland.desktop" "${SYSROOT_DIR}/usr/share/wayland-sessions/" 2>/dev/null || true
+        log_info "  Copied hyprland.desktop"
+    fi
+
     # EGL vendor JSONs (GLVND)
     for egl_dir in /usr/share/glvnd/egl_vendor.d /etc/glvnd/egl_vendor.d; do
         if [[ -d "${egl_dir}" ]]; then
@@ -387,6 +544,85 @@ copy_libraries() {
             cp -a "${drirc}" "${SYSROOT_DIR}${drirc}" 2>/dev/null || true
         fi
     done
+
+    # Ensure we also ship shared libraries required by Mesa dlopened modules.
+    log_info "Copying runtime libraries for Mesa dlopened modules..."
+    for so in \
+        "${SYSROOT_DIR}"/usr/lib/gbm/*.so \
+        "${SYSROOT_DIR}"/usr/lib64/gbm/*.so \
+        "${SYSROOT_DIR}"/usr/lib/x86_64-linux-gnu/gbm/*.so \
+        "${SYSROOT_DIR}"/usr/lib/dri/*.so \
+        "${SYSROOT_DIR}"/usr/lib64/dri/*.so \
+        "${SYSROOT_DIR}"/usr/lib/x86_64-linux-gnu/dri/*.so; do
+        [[ -f "$so" && ! -L "$so" ]] || continue
+        timeout 2 ldd "$so" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
+            [[ -z "$lib" || ! -f "$lib" ]] && continue
+            local dest="${SYSROOT_DIR}${lib}"
+            if [[ ! -f "$dest" ]]; then
+                mkdir -p "$(dirname "$dest")"
+                cp -L "$lib" "$dest" 2>/dev/null || true
+            fi
+        done || true
+    done
+
+    # Ensure we ship shared libraries required by Xorg/Xwayland dlopened modules.
+    log_info "Copying runtime libraries for Xorg/Xwayland modules..."
+    for modules_dir in \
+        "${SYSROOT_DIR}/usr/lib/xorg/modules" \
+        "${SYSROOT_DIR}/usr/lib64/xorg/modules" \
+        "${SYSROOT_DIR}/usr/lib/x86_64-linux-gnu/xorg/modules"; do
+        [[ -d "${modules_dir}" ]] || continue
+        while IFS= read -r -d '' so; do
+            timeout 2 ldd "$so" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
+                [[ -z "$lib" || ! -f "$lib" ]] && continue
+                local dest="${SYSROOT_DIR}${lib}"
+                if [[ ! -f "$dest" ]]; then
+                    mkdir -p "$(dirname "$dest")"
+                    cp -L "$lib" "$dest" 2>/dev/null || true
+                fi
+            done || true
+        done < <(find "${modules_dir}" -type f -name '*.so' -print0 2>/dev/null) || true
+    done
+
+    # Mesa is C++ (libgallium), so ensure libstdc++/libgcc_s in the sysroot are
+    # at least as new as the host copies we pulled Mesa from.
+    sync_runtime_lib() {
+        local libname="$1"
+        local src=""
+        for candidate in "/usr/lib/${libname}" "/lib/${libname}" "/usr/lib64/${libname}" "/lib64/${libname}"; do
+            if [[ -e "${candidate}" ]]; then
+                src="${candidate}"
+                break
+            fi
+        done
+        [[ -n "${src}" ]] || return 0
+
+        local src_real
+        src_real="$(readlink -f "${src}" 2>/dev/null || true)"
+        [[ -n "${src_real}" && -e "${src_real}" ]] || src_real="${src}"
+
+        local dest_dir="${SYSROOT_DIR}$(dirname "${src}")"
+        mkdir -p "${dest_dir}"
+
+        local base
+        base="$(basename "${src_real}")"
+
+        # Copy the real file into the sysroot.
+        if [[ "${base}" == "${libname}" ]]; then
+            cp -L "${src_real}" "${SYSROOT_DIR}${src}" 2>/dev/null || true
+            log_info "  Updated ${src}"
+            return 0
+        fi
+
+        cp -L "${src_real}" "${dest_dir}/${base}" 2>/dev/null || true
+        rm -f "${SYSROOT_DIR}${src}" 2>/dev/null || true
+        ln -sf "${base}" "${SYSROOT_DIR}${src}" 2>/dev/null || true
+        log_info "  Updated ${src} -> ${base}"
+    }
+
+    log_info "Ensuring GCC runtime libraries (libstdc++/libgcc_s)..."
+    sync_runtime_lib "libstdc++.so.6"
+    sync_runtime_lib "libgcc_s.so.1"
 
     log_success "Libraries copied"
 }

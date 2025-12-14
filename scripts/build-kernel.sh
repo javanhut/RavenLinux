@@ -357,6 +357,14 @@ generate_config() {
     $config_script --enable DRM_NOUVEAU     # NVIDIA (open source)
     $config_script --enable DRM_SIMPLEDRM   # Simple framebuffer
 
+    # VM/virtual GPU drivers (VirtualBox/VMware/QEMU)
+    $config_script --enable DRM_VMWGFX      # VMware + VirtualBox VMSVGA
+    $config_script --enable DRM_VBOXVIDEO   # VirtualBox VBoxVGA/VBoxSVGA
+    $config_script --enable DRM_QXL         # QEMU/SPICE
+    $config_script --enable DRM_BOCHS       # QEMU stdvga
+    $config_script --enable DRM_CIRRUS_QEMU # Legacy QEMU cirrus
+    $config_script --enable DRM_VESADRM     # VESA fallback (BIOS/CSM)
+
     # ==========================================================================
     # Network support
     # ==========================================================================

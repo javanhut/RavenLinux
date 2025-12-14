@@ -1,0 +1,103 @@
+#!/bin/sh
+set -eu
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+LOGFILE="/run/raven-x11-session.log"
+SERIAL="/dev/ttyS0"
+mkdir -p /run 2>/dev/null || true
+printf '' >"$LOGFILE" 2>/dev/null || true
+
+log() {
+    printf '%s\n' "$*" | tee -a "$LOGFILE"
+    [ -c "$SERIAL" ] && printf '%s\n' "$*" > "$SERIAL" 2>/dev/null || true
+}
+
+wait_for_x_socket() {
+    pid="$1"
+    sock="/tmp/.X11-unix/X0"
+    i=0
+    while [ "$i" -lt 80 ]; do
+        [ -S "$sock" ] && return 0
+        kill -0 "$pid" 2>/dev/null || return 1
+        i=$((i + 1))
+        sleep 0.1
+    done
+    return 1
+}
+
+if [ ! -d /dev/dri ]; then
+    log "No /dev/dri found; DRM/KMS not available for Xorg."
+    log "Kernel: $(uname -a 2>/dev/null || true)"
+    log "cmdline: $(cat /proc/cmdline 2>/dev/null || true)"
+    log "Mounts:"
+    mount 2>/dev/null | tee -a "$LOGFILE" || true
+    log "Devices under /dev:"
+    ls -la /dev 2>&1 | tee -a "$LOGFILE" || true
+    log "DRM sysfs (/sys/class/drm):"
+    ls -la /sys/class/drm 2>&1 | tee -a "$LOGFILE" || true
+    log "dmesg (DRM/GPU):"
+    dmesg 2>/dev/null | grep -iE 'drm|kms|gpu|i915|amdgpu|nouveau|virtio|vmwgfx|vbox|qxl|bochs|cirrus|simpledrm|framebuffer' | tail -n 200 | tee -a "$LOGFILE" || true
+    exit 1
+fi
+
+if ! command -v Xorg >/dev/null 2>&1; then
+    log "Xorg not found (expected 'Xorg' in PATH)."
+    exit 127
+fi
+
+mkdir -p /tmp/.X11-unix 2>/dev/null || true
+chmod 1777 /tmp /tmp/.X11-unix 2>/dev/null || true
+rm -f /tmp/.X11-unix/X0 2>/dev/null || true
+
+log "Starting Xorg..."
+if [ -c "$SERIAL" ]; then
+    Xorg :0 vt1 -keeptty -nolisten tcp -noreset -logfile /run/Xorg.0.log 2>&1 | tee -a "$LOGFILE" "$SERIAL" &
+else
+    Xorg :0 vt1 -keeptty -nolisten tcp -noreset -logfile /run/Xorg.0.log >>"$LOGFILE" 2>&1 &
+fi
+xpid=$!
+
+if ! wait_for_x_socket "$xpid"; then
+    if ! kill -0 "$xpid" 2>/dev/null; then
+        wait "$xpid" || rc=$?
+        rc="${rc:-0}"
+        log "Xorg exited early (rc=${rc}); see $LOGFILE"
+        exit 1
+    fi
+    log "Xorg did not create /tmp/.X11-unix/X0 (see $LOGFILE)"
+    kill "$xpid" 2>/dev/null || true
+    wait "$xpid" 2>/dev/null || true
+    exit 1
+fi
+
+log "Xorg started (X socket ready)"
+export DISPLAY=":0"
+
+client=""
+for c in xterm xclock; do
+    if command -v "$c" >/dev/null 2>&1; then
+        client="$c"
+        break
+    fi
+done
+
+if [ -z "$client" ]; then
+    log "No X11 client found (tried: xterm, xclock)."
+    log "Install an X client or boot Wayland with Xwayland support."
+    kill "$xpid" 2>/dev/null || true
+    wait "$xpid" 2>/dev/null || true
+    exit 127
+fi
+
+log "Starting X client: $client"
+if [ -c "$SERIAL" ]; then
+    "$client" 2>&1 | tee -a "$LOGFILE" "$SERIAL" || true
+else
+    "$client" >>"$LOGFILE" 2>&1 || true
+fi
+
+log "X client exited; stopping Xorg..."
+kill "$xpid" 2>/dev/null || true
+wait "$xpid" 2>/dev/null || true
+exit 0

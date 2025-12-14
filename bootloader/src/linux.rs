@@ -23,6 +23,9 @@ const EFI_LOAD_FILE2_PROTOCOL_GUID: Guid = guid!("4006c0c1-fcb3-403e-996d-4a6c87
 #[derive(Debug, Clone, Copy)]
 pub enum KernelError {
     NotFound,
+    KernelNotFound,
+    InitrdNotFound,
+    EfiAppNotFound,
     InvalidFormat,
     NotImplemented,
     MemoryAllocation,
@@ -212,11 +215,17 @@ pub fn boot_efi_stub(
     let mut root = fs.open_volume().map_err(|_| KernelError::FileSystemError)?;
 
     // Read the kernel file into memory
-    let kernel_data = read_file(&mut root, kernel_path)?;
+    let kernel_data = read_file(&mut root, kernel_path).map_err(|err| match err {
+        KernelError::NotFound => KernelError::KernelNotFound,
+        other => other,
+    })?;
 
     // Read initrd if specified and set up the protocol
     if let Some(initrd) = initrd_path {
-        let initrd_data = read_file(&mut root, initrd)?;
+        let initrd_data = read_file(&mut root, initrd).map_err(|err| match err {
+            KernelError::NotFound => KernelError::InitrdNotFound,
+            other => other,
+        })?;
         let initrd_len = initrd_data.len();
 
         // Allocate persistent memory for initrd (won't be freed)
@@ -409,7 +418,10 @@ pub fn chainload_efi(
     let mut root = fs.open_volume().map_err(|_| KernelError::FileSystemError)?;
 
     // Read the EFI application
-    let efi_data = read_file(&mut root, efi_path)?;
+    let efi_data = read_file(&mut root, efi_path).map_err(|err| match err {
+        KernelError::NotFound => KernelError::EfiAppNotFound,
+        other => other,
+    })?;
 
     // Drop handles before loading
     drop(fs);
