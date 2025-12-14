@@ -58,14 +58,7 @@ fn main() {
 fn init_logging() {
     // Simple stderr logging for early boot
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format(|buf, record| {
-            writeln!(
-                buf,
-                "[raven-init] {}: {}",
-                record.level(),
-                record.args()
-            )
-        })
+        .format(|buf, record| writeln!(buf, "[raven-init] {}: {}", record.level(), record.args()))
         .init();
 }
 
@@ -80,7 +73,8 @@ fn run_init() -> Result<()> {
 
     // Phase 3: Load configuration
     log::info!("Phase 3: Loading configuration");
-    let config = load_config()?;
+    let mut config = load_config()?;
+    apply_kernel_cmdline_overrides(&mut config)?;
 
     // Phase 4: Setup signal handlers
     log::info!("Phase 4: Setting up signal handlers");
@@ -117,6 +111,100 @@ fn run_init() -> Result<()> {
     Ok(())
 }
 
+fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
+    let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let graphics = cmdline
+        .split_whitespace()
+        .find_map(|arg| arg.strip_prefix("raven.graphics="));
+    let wayland_choice = cmdline
+        .split_whitespace()
+        .find_map(|arg| arg.strip_prefix("raven.wayland="));
+
+    if graphics != Some("wayland") {
+        return Ok(());
+    }
+
+    log::info!("Kernel cmdline requested Wayland graphics");
+
+    // Disable tty1 getty by default to avoid fighting for the tty.
+    for svc in &mut config.services {
+        if svc.name == "getty-tty1" {
+            svc.enabled = false;
+        }
+    }
+
+    // Ensure runtime dirs for root session exist.
+    fs::create_dir_all("/run/user/0").ok();
+    let _ = fs::set_permissions("/run/user/0", fs::Permissions::from_mode(0o700));
+
+    ensure_service(
+        &mut config.services,
+        ServiceConfig {
+            name: "seatd".to_string(),
+            description: "Seat management daemon".to_string(),
+            exec: "/bin/seatd".to_string(),
+            args: vec!["-g".to_string(), "video".to_string()],
+            restart: true,
+            enabled: true,
+            critical: false,
+            environment: HashMap::new(),
+        },
+    );
+
+    let mut compositor_env = HashMap::new();
+    compositor_env.insert("XDG_RUNTIME_DIR".to_string(), "/run/user/0".to_string());
+    compositor_env.insert("LIBSEAT_BACKEND".to_string(), "seatd".to_string());
+
+    match wayland_choice {
+        Some("weston") => ensure_service(
+            &mut config.services,
+            ServiceConfig {
+                name: "weston".to_string(),
+                description: "Weston Wayland compositor".to_string(),
+                exec: "/bin/weston".to_string(),
+                args: vec![
+                    "--backend=drm-backend.so".to_string(),
+                    "--tty=1".to_string(),
+                ],
+                restart: true,
+                enabled: true,
+                critical: false,
+                environment: compositor_env,
+            },
+        ),
+        _ => ensure_service(
+            &mut config.services,
+            ServiceConfig {
+                name: "raven-compositor".to_string(),
+                description: "Raven Wayland compositor".to_string(),
+                exec: "/bin/raven-compositor".to_string(),
+                args: Vec::new(),
+                restart: true,
+                enabled: true,
+                critical: false,
+                environment: compositor_env,
+            },
+        ),
+    };
+
+    Ok(())
+}
+
+fn ensure_service(services: &mut Vec<ServiceConfig>, desired: ServiceConfig) {
+    let Some(existing) = services.iter_mut().find(|s| s.name == desired.name) else {
+        services.push(desired);
+        return;
+    };
+
+    existing.description = desired.description;
+    existing.exec = desired.exec;
+    existing.args = desired.args;
+    existing.restart = desired.restart;
+    existing.enabled = desired.enabled;
+    existing.critical = desired.critical;
+    existing.environment = desired.environment;
+}
+
 fn mount_essential_filesystems() -> Result<()> {
     // Mount /proc
     mount_fs("proc", "/proc", "proc", MsFlags::empty(), "")?;
@@ -132,7 +220,13 @@ fn mount_essential_filesystems() -> Result<()> {
     fs::create_dir_all("/dev/shm").ok();
 
     // Mount /dev/pts
-    mount_fs("devpts", "/dev/pts", "devpts", MsFlags::empty(), "gid=5,mode=620")?;
+    mount_fs(
+        "devpts",
+        "/dev/pts",
+        "devpts",
+        MsFlags::empty(),
+        "gid=5,mode=620",
+    )?;
 
     // Mount /dev/shm
     mount_fs("tmpfs", "/dev/shm", "tmpfs", MsFlags::empty(), "mode=1777")?;
@@ -153,13 +247,7 @@ fn mount_essential_filesystems() -> Result<()> {
     Ok(())
 }
 
-fn mount_fs(
-    source: &str,
-    target: &str,
-    fstype: &str,
-    flags: MsFlags,
-    data: &str,
-) -> Result<()> {
+fn mount_fs(source: &str, target: &str, fstype: &str, flags: MsFlags, data: &str) -> Result<()> {
     // Create mount point if it doesn't exist
     fs::create_dir_all(target).ok();
 
@@ -171,14 +259,8 @@ fn mount_fs(
 
     let data_opt: Option<&str> = if data.is_empty() { None } else { Some(data) };
 
-    mount(
-        Some(source),
-        target,
-        Some(fstype),
-        flags,
-        data_opt,
-    )
-    .with_context(|| format!("Failed to mount {} on {}", fstype, target))?;
+    mount(Some(source), target, Some(fstype), flags, data_opt)
+        .with_context(|| format!("Failed to mount {} on {}", fstype, target))?;
 
     log::debug!("Mounted {} on {}", fstype, target);
     Ok(())
@@ -210,7 +292,10 @@ fn setup_environment() -> Result<()> {
     }
 
     // Set PATH
-    std::env::set_var("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+    std::env::set_var(
+        "PATH",
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    );
 
     // Set TERM
     std::env::set_var("TERM", "linux");
@@ -252,10 +337,7 @@ fn set_system_clock() {
 }
 
 fn load_config() -> Result<InitConfig> {
-    let config_paths = [
-        "/etc/raven/init.toml",
-        "/etc/init.toml",
-    ];
+    let config_paths = ["/etc/raven/init.toml", "/etc/init.toml"];
 
     for path in &config_paths {
         if Path::new(path).exists() {
@@ -300,7 +382,8 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
                 Err(e) => {
                     log::error!("Failed to start {}: {}", svc_config.name, e);
                     if svc_config.critical {
-                        return Err(e).context(format!("Critical service {} failed", svc_config.name));
+                        return Err(e)
+                            .context(format!("Critical service {} failed", svc_config.name));
                     }
                 }
             }
@@ -313,7 +396,11 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
             name: "getty-tty1".to_string(),
             description: "Getty on tty1".to_string(),
             exec: "/sbin/agetty".to_string(),
-            args: vec!["--noclear".to_string(), "tty1".to_string(), "linux".to_string()],
+            args: vec![
+                "--noclear".to_string(),
+                "tty1".to_string(),
+                "linux".to_string(),
+            ],
             restart: true,
             enabled: true,
             critical: false,
@@ -472,7 +559,9 @@ fn shutdown_services(services: &mut HashMap<String, Service>) -> Result<()> {
     while start.elapsed() < timeout {
         reap_zombies(services);
 
-        let all_stopped = services.values().all(|s| s.state() != ServiceState::Running);
+        let all_stopped = services
+            .values()
+            .all(|s| s.state() != ServiceState::Running);
         if all_stopped {
             break;
         }

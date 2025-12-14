@@ -1,6 +1,7 @@
 //! Compositor state management
 
 use crate::config::Config;
+use crate::native;
 use crate::workspace::WorkspaceManager;
 use anyhow::Result;
 use tracing::info;
@@ -41,28 +42,12 @@ impl RavenState {
 
         info!("Nested mode not yet implemented");
         info!("To test, use: WAYLAND_DISPLAY=wayland-1 ./raven-compositor");
-
-        // Placeholder event loop
-        while self.running {
-            std::thread::sleep(std::time::Duration::from_millis(16));
-        }
-
-        Ok(())
+        anyhow::bail!("nested backend not implemented yet")
     }
 
     fn run_native(&mut self) -> Result<()> {
-        // TODO: Initialize DRM/libinput backend for native hardware
-        // This runs directly on the GPU/display hardware
-
-        info!("Native mode not yet implemented");
-        info!("Requires running from a TTY without another compositor");
-
-        // Placeholder event loop
-        while self.running {
-            std::thread::sleep(std::time::Duration::from_millis(16));
-        }
-
-        Ok(())
+        info!("Starting native backend (DRM/KMS)");
+        native::run_native(&self.config)
     }
 
     pub fn quit(&mut self) {

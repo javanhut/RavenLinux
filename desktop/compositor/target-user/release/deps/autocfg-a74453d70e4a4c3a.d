@@ -1,0 +1,10 @@
+/home/javanstorm/Development/CustomLinux/RavenLinux/desktop/compositor/target-user/release/deps/autocfg-a74453d70e4a4c3a.d: /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/autocfg/src/lib.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/autocfg/src/error.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/autocfg/src/rustc.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/autocfg/src/version.rs
+
+/home/javanstorm/Development/CustomLinux/RavenLinux/desktop/compositor/target-user/release/deps/libautocfg-a74453d70e4a4c3a.rlib: /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/autocfg/src/lib.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/autocfg/src/error.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/autocfg/src/rustc.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/autocfg/src/version.rs
+
+/home/javanstorm/Development/CustomLinux/RavenLinux/desktop/compositor/target-user/release/deps/libautocfg-a74453d70e4a4c3a.rmeta: /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/autocfg/src/lib.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/autocfg/src/error.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/autocfg/src/rustc.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/autocfg/src/version.rs
+
+/home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/autocfg/src/lib.rs:
+/home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/autocfg/src/error.rs:
+/home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/autocfg/src/rustc.rs:
+/home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/autocfg/src/version.rs:

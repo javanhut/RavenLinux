@@ -39,6 +39,7 @@ export RAVEN_VERSION="2025.12"
 export RAVEN_ARCH="${RAVEN_ARCH:-x86_64}"
 export RAVEN_TARGET="${RAVEN_ARCH}-raven-linux-musl"
 export RAVEN_JOBS="${RAVEN_JOBS:-$(nproc)}"
+export RAVEN_REQUIRE_COMPOSITOR="${RAVEN_REQUIRE_COMPOSITOR:-1}"
 
 # Directory structure
 TOOLCHAIN_DIR="${RAVEN_BUILD}/toolchain"
@@ -241,6 +242,7 @@ Environment Variables:
     RAVEN_JOBS      Number of parallel build jobs
     RAVEN_VERSION   Distribution version string
     RAVEN_NO_LOG    Set to "1" to disable logging
+    RAVEN_REQUIRE_COMPOSITOR  Set to "0" to continue if raven-compositor fails to build
 
 Log Files:
     Build logs are saved to: ${RAVEN_BUILD}/logs/

@@ -1,0 +1,155 @@
+#!/bin/sh
+set -eu
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+LOGFILE="/run/raven-wayland-session.log"
+mkdir -p /run 2>/dev/null || true
+printf '' >"$LOGFILE" 2>/dev/null || true
+
+log() {
+    printf '%s\n' "$*" | tee -a "$LOGFILE"
+}
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/0}"
+_old_umask="$(umask)"
+umask 077
+mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
+umask "$_old_umask"
+
+export LIBSEAT_BACKEND="${LIBSEAT_BACKEND:-seatd}"
+export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+
+cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
+wayland_choice="$(printf '%s\n' "$cmdline" | tr ' ' '\n' | sed -n 's/^raven\\.wayland=//p' | head -n 1)"
+
+start_seatd() {
+    # Check if seatd is already running
+    if [ -S /run/seatd.sock ]; then
+        log "seatd already running"
+        return 0
+    fi
+
+    if command -v seatd >/dev/null 2>&1; then
+        log "Starting seatd..."
+        # Run seatd with video group access
+        seatd -g video >>"$LOGFILE" 2>&1 &
+        seatd_pid=$!
+
+        # Wait for the socket to appear (up to 5 seconds)
+        i=0
+        while [ "$i" -lt 100 ]; do
+            if [ -S /run/seatd.sock ]; then
+                log "seatd socket ready"
+                return 0
+            fi
+            # Check if seatd died
+            if ! kill -0 "$seatd_pid" 2>/dev/null; then
+                log "seatd exited unexpectedly"
+                return 1
+            fi
+            i=$((i + 1))
+            sleep 0.05
+        done
+        log "seatd socket timeout"
+        return 1
+    fi
+    log "seatd not found"
+    return 1
+}
+
+wait_for_wayland_socket() {
+    pid="$1"
+    sock="${XDG_RUNTIME_DIR}/wayland-0"
+    i=0
+    while [ "$i" -lt 50 ]; do
+        [ -S "$sock" ] && return 0
+        kill -0 "$pid" 2>/dev/null || return 1
+        i=$((i + 1))
+        sleep 0.1
+    done
+    return 1
+}
+
+start_compositor() {
+    name="$1"
+    shift
+    log "Starting ${name}..."
+    "$@" >>"$LOGFILE" 2>&1 &
+    pid=$!
+
+    if wait_for_wayland_socket "$pid"; then
+        log "${name} started (wayland socket ready)"
+        wait "$pid"
+        return $?
+    fi
+
+    if ! kill -0 "$pid" 2>/dev/null; then
+        wait "$pid" || rc=$?
+        rc="${rc:-0}"
+        log "${name} exited early (rc=${rc}); see $LOGFILE"
+        return 1
+    fi
+
+    log "${name} did not create a Wayland socket (see $LOGFILE)"
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || rc=$?
+    rc="${rc:-0}"
+    log "${name} stopped (rc=${rc})"
+    return 1
+}
+
+if [ ! -d /dev/dri ]; then
+    log "No /dev/dri found; DRM/KMS not available for a TTY Wayland compositor."
+    log "In QEMU, try virtio-gpu + GL (e.g. -device virtio-gpu-pci -display gtk,gl=on)."
+    exit 1
+fi
+
+start_seatd || true
+
+preferred="${RAVEN_WAYLAND_COMPOSITOR:-}"
+if [ -z "$preferred" ]; then
+    if [ -n "${wayland_choice:-}" ]; then
+        preferred="$wayland_choice"
+    elif command -v raven-compositor >/dev/null 2>&1; then
+        # Prefer raven-compositor when available
+        preferred="raven-compositor"
+    elif command -v weston >/dev/null 2>&1; then
+        preferred="weston"
+    else
+        preferred="raven-compositor"
+    fi
+fi
+
+log "Preferred compositor: $preferred"
+log "Available DRM devices:"
+ls -la /dev/dri/ 2>&1 | tee -a "$LOGFILE" || true
+
+tried_weston=0
+tried_raven=0
+
+case "$preferred" in
+    weston)
+        if command -v weston >/dev/null 2>&1; then
+            tried_weston=1
+            start_compositor "weston" weston --backend=drm-backend.so --tty=1 && exit 0
+        fi
+        ;;
+    raven-compositor|raven)
+        if command -v raven-compositor >/dev/null 2>&1; then
+            tried_raven=1
+            start_compositor "raven-compositor" raven-compositor && exit 0
+        fi
+        ;;
+esac
+
+# Fallback order
+if [ "$tried_weston" -eq 0 ] && command -v weston >/dev/null 2>&1; then
+    start_compositor "weston" weston --backend=drm-backend.so --tty=1 && exit 0
+fi
+if [ "$tried_raven" -eq 0 ] && command -v raven-compositor >/dev/null 2>&1; then
+    start_compositor "raven-compositor" raven-compositor && exit 0
+fi
+
+log "No Wayland compositor found (expected 'raven-compositor' or 'weston')."
+exit 127

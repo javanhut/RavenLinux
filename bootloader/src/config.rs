@@ -78,8 +78,17 @@ impl Default for BootConfig {
             entry_type: EntryType::LinuxEfi,
         };
 
-        // Recovery mode
+        // Wayland graphics mode
         entries[1] = BootEntry {
+            name: "RavenLinux (Wayland)",
+            kernel: "\\EFI\\raven\\vmlinuz",
+            initrd: Some("\\EFI\\raven\\initramfs.img"),
+            cmdline: "root=LABEL=RAVEN_ROOT rw quiet splash raven.graphics=wayland",
+            entry_type: EntryType::LinuxEfi,
+        };
+
+        // Recovery mode
+        entries[2] = BootEntry {
             name: "RavenLinux (Recovery)",
             kernel: "\\EFI\\raven\\vmlinuz",
             initrd: Some("\\EFI\\raven\\initramfs.img"),
@@ -95,7 +104,7 @@ impl Default for BootConfig {
 
         Self {
             entries,
-            entry_count: 2,
+            entry_count: 3,
             default: 0,
             timeout: 5,
         }

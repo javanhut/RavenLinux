@@ -330,6 +330,117 @@ copy_networking_tools() {
     log_success "Networking tools installed"
 }
 
+copy_wayland_tools() {
+    log_step "Copying Wayland/graphics tools..."
+
+    # seatd is required for proper DRM master management
+    if command -v seatd &>/dev/null; then
+        cp "$(which seatd)" "${LIVE_ROOT}/bin/"
+        log_info "  Added seatd"
+    else
+        log_warn "seatd not found - install with: sudo pacman -S seatd"
+    fi
+
+    # weston as fallback compositor
+    if command -v weston &>/dev/null; then
+        cp "$(which weston)" "${LIVE_ROOT}/bin/"
+        log_info "  Added weston"
+
+        # Copy weston backends
+        local weston_lib="/usr/lib/weston"
+        if [[ -d "$weston_lib" ]]; then
+            mkdir -p "${LIVE_ROOT}/usr/lib/weston"
+            cp -r "$weston_lib"/* "${LIVE_ROOT}/usr/lib/weston/" 2>/dev/null || true
+            log_info "  Added weston backends"
+        fi
+    fi
+
+    # openvt for starting compositor on VT
+    if command -v openvt &>/dev/null; then
+        cp "$(which openvt)" "${LIVE_ROOT}/bin/"
+        log_info "  Added openvt"
+    fi
+
+    # Copy wayland session script
+    if [[ -f "${PROJECT_ROOT}/configs/raven-wayland-session" ]]; then
+        cp "${PROJECT_ROOT}/configs/raven-wayland-session" "${LIVE_ROOT}/bin/"
+        chmod +x "${LIVE_ROOT}/bin/raven-wayland-session"
+        log_info "  Added raven-wayland-session"
+    fi
+
+    # Copy raven-compositor if built
+    if [[ -f "${RAVEN_BUILD}/packages/bin/raven-compositor" ]]; then
+        cp "${RAVEN_BUILD}/packages/bin/raven-compositor" "${LIVE_ROOT}/bin/"
+        chmod +x "${LIVE_ROOT}/bin/raven-compositor"
+        log_info "  Added raven-compositor"
+    fi
+
+    # Copy libseat library
+    for lib in /usr/lib/libseat.so* /lib/libseat.so*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            mkdir -p "${LIVE_ROOT}/usr/lib"
+            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy libinput library
+    for lib in /usr/lib/libinput.so* /lib/libinput.so*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            mkdir -p "${LIVE_ROOT}/usr/lib"
+            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy EGL/Mesa libraries for GPU rendering
+    for lib in /usr/lib/libEGL.so* /usr/lib/libGLESv2.so* /usr/lib/libgbm.so* /usr/lib/libdrm.so* /usr/lib/libwayland-*.so*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            mkdir -p "${LIVE_ROOT}/usr/lib"
+            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy Mesa DRI drivers
+    if [[ -d "/usr/lib/dri" ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/lib/dri"
+        cp /usr/lib/dri/*.so "${LIVE_ROOT}/usr/lib/dri/" 2>/dev/null || true
+        log_info "  Added DRI drivers"
+    fi
+
+    # Create video group for seatd
+    if ! grep -q "^video:" "${LIVE_ROOT}/etc/group" 2>/dev/null; then
+        echo "video:x:12:raven,root" >> "${LIVE_ROOT}/etc/group"
+    fi
+
+    # Create seat group
+    if ! grep -q "^seat:" "${LIVE_ROOT}/etc/group" 2>/dev/null; then
+        echo "seat:x:13:raven,root" >> "${LIVE_ROOT}/etc/group"
+    fi
+
+    # Copy xkeyboard-config for keyboard layouts
+    if [[ -d "/usr/share/X11/xkb" ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share/X11"
+        cp -r /usr/share/X11/xkb "${LIVE_ROOT}/usr/share/X11/"
+        log_info "  Added xkeyboard-config"
+    fi
+
+    # Also check alternative location
+    if [[ -d "/usr/share/xkeyboard-config" ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share"
+        cp -r /usr/share/xkeyboard-config "${LIVE_ROOT}/usr/share/"
+        log_info "  Added xkeyboard-config (alt location)"
+    fi
+
+    # Copy libxkbcommon
+    for lib in /usr/lib/libxkbcommon*.so*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            mkdir -p "${LIVE_ROOT}/usr/lib"
+            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    log_success "Wayland tools installed"
+}
+
 copy_ca_certificates() {
     log_step "Copying CA certificates (HTTPS trust store)..."
 
@@ -769,6 +880,16 @@ menuentry "Raven Linux Live" --class raven {
     initrd /boot/initramfs.img
 }
 
+menuentry "Raven Linux Live (Wayland)" --class raven {
+    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=weston
+    initrd /boot/initramfs.img
+}
+
+menuentry "Raven Linux Live (Wayland - Raven Compositor WIP)" --class raven {
+    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven
+    initrd /boot/initramfs.img
+}
+
 menuentry "Raven Linux Live (Verbose)" --class raven {
     linux /boot/vmlinuz rdinit=/init
     initrd /boot/initramfs.img
@@ -915,6 +1036,7 @@ main() {
     copy_raven_packages
     copy_package_manager
     copy_networking_tools
+    copy_wayland_tools
     copy_ca_certificates
     copy_libraries
     create_config_files

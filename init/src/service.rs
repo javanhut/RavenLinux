@@ -91,11 +91,7 @@ impl Service {
         self.exit_status = None;
         self.exit_signal = None;
 
-        log::debug!(
-            "Service {} started with PID {}",
-            self.config.name,
-            pid
-        );
+        log::debug!("Service {} started with PID {}", self.config.name, pid);
 
         Ok(())
     }
@@ -150,11 +146,7 @@ impl Service {
         self.pid = None;
         self.child = None;
 
-        log::info!(
-            "Service {} exited with status {}",
-            self.config.name,
-            status
-        );
+        log::info!("Service {} exited with status {}", self.config.name, status);
     }
 
     /// Mark service as killed by signal
@@ -164,11 +156,7 @@ impl Service {
         self.pid = None;
         self.child = None;
 
-        log::info!(
-            "Service {} killed by signal {:?}",
-            self.config.name,
-            signal
-        );
+        log::info!("Service {} killed by signal {:?}", self.config.name, signal);
     }
 
     /// Restart the service

@@ -1,0 +1,1 @@
+cargo:rustc-env=GBM_SYS_BINDINGS_PATH=linux/x86_64

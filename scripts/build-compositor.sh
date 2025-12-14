@@ -53,9 +53,9 @@ log_info "Required: wayland libinput udev libgbm libdrm seatd libxkbcommon"
 cd "$COMPOSITOR_DIR"
 
 log_info "Building compositor..."
-if cargo build --release 2>&1; then
+if CARGO_TARGET_DIR=target-user cargo build --release 2>&1; then
     mkdir -p "$OUTPUT_DIR"
-    cp target/release/raven-compositor "$OUTPUT_DIR/"
+    cp target-user/release/raven-compositor "$OUTPUT_DIR/"
     log_success "Compositor built -> ${OUTPUT_DIR}/raven-compositor"
 else
     log_error "Build failed"

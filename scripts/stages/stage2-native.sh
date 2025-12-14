@@ -78,6 +78,12 @@ copy_shells() {
 copy_system_utils() {
     log_info "Copying system utilities..."
 
+    local coreutils_bin="${SYSROOT_DIR}/bin/coreutils"
+    local coreutils_list=""
+    if [[ -x "${coreutils_bin}" ]]; then
+        coreutils_list="$("${coreutils_bin}" --list 2>/dev/null || true)"
+    fi
+
     local utils=(
         # Basic coreutils (essential!)
         ls cat cp mv rm mkdir rmdir touch chmod chown ln
@@ -101,10 +107,16 @@ copy_system_utils() {
         vi nano
         # Terminal utilities
         clear reset stty tput tset
+        # Virtual terminal helpers (Wayland KMS compositors often need a VT)
+        openvt chvt
         # Locale and timezone
         locale localedef localectl timedatectl hwclock date
         # D-Bus (needed by iwd/iwctl and many GUI apps)
         dbus-daemon dbus-launch dbus-send dbus-uuidgen
+        # Seat management (Wayland compositors)
+        seatd
+        # Reference compositor (optional)
+        weston
         # Systemd tools (if available, for compatibility)
         journalctl systemctl
     )
@@ -128,8 +140,18 @@ copy_system_utils() {
 
             # Avoid overwriting symlink targets (e.g. uutils coreutils multi-call setup)
             if [[ -L "$dest" ]]; then
-                log_info "  Skipping ${util} (destination is a symlink)"
-                continue
+                link_target="$(readlink "$dest" 2>/dev/null || true)"
+                if [[ -n "${coreutils_list}" ]] && [[ "${link_target}" == "coreutils" ]]; then
+                    if printf '%s\n' "${coreutils_list}" | grep -qx "${util}"; then
+                        log_info "  Keeping ${util} (provided by coreutils)"
+                        continue
+                    fi
+                    log_info "  Replacing ${util} symlink (not provided by coreutils)"
+                    rm -f "$dest" 2>/dev/null || true
+                else
+                    log_info "  Skipping ${util} (destination is a symlink)"
+                    continue
+                fi
             fi
 
             cp "$src" "$dest" 2>/dev/null && log_info "  Added ${util}" || true
@@ -150,6 +172,24 @@ copy_system_utils() {
     fi
     if [[ -f "${SYSROOT_DIR}/bin/visudo" ]]; then
         chmod 755 "${SYSROOT_DIR}/bin/visudo" 2>/dev/null || true
+    fi
+
+    # Raven Wayland session launcher (optional, used when booting with raven.graphics=wayland)
+    if [[ -f "${PROJECT_ROOT}/configs/raven-wayland-session" ]]; then
+        cp "${PROJECT_ROOT}/configs/raven-wayland-session" "${SYSROOT_DIR}/bin/raven-wayland-session" 2>/dev/null || true
+        chmod +x "${SYSROOT_DIR}/bin/raven-wayland-session" 2>/dev/null || true
+        log_info "  Added raven-wayland-session"
+    fi
+
+    # If weston is available on the build host, copy its runtime data/plugins.
+    if [[ -x "${SYSROOT_DIR}/bin/weston" ]]; then
+        for d in /usr/lib/weston /usr/lib64/weston /usr/share/weston; do
+            if [[ -d "$d" ]]; then
+                mkdir -p "${SYSROOT_DIR}${d}"
+                cp -a "${d}/." "${SYSROOT_DIR}${d}/" 2>/dev/null || true
+                log_info "  Copied $(basename "$d") runtime data"
+            fi
+        done
     fi
 
     log_success "System utilities installed"
@@ -316,6 +356,36 @@ copy_libraries() {
                 break
             fi
         done
+    done
+
+    # Mesa/GLVND driver files are dlopened at runtime (not shown in `ldd`),
+    # but are required for EGL/GBM/DRM compositors like raven-compositor.
+    log_info "Copying Mesa/GLVND driver data..."
+
+    # DRI drivers (e.g. virgl/virtio, radeonsi, iris, swrast)
+    for dri_dir in /usr/lib/dri /usr/lib64/dri /usr/lib/x86_64-linux-gnu/dri; do
+        if [[ -d "${dri_dir}" ]]; then
+            mkdir -p "${SYSROOT_DIR}${dri_dir}"
+            cp -a "${dri_dir}/." "${SYSROOT_DIR}${dri_dir}/" 2>/dev/null || true
+            log_info "  Copied $(basename "$(dirname "${dri_dir}")")/dri drivers"
+        fi
+    done
+
+    # EGL vendor JSONs (GLVND)
+    for egl_dir in /usr/share/glvnd/egl_vendor.d /etc/glvnd/egl_vendor.d; do
+        if [[ -d "${egl_dir}" ]]; then
+            mkdir -p "${SYSROOT_DIR}${egl_dir}"
+            cp -a "${egl_dir}/." "${SYSROOT_DIR}${egl_dir}/" 2>/dev/null || true
+            log_info "  Copied EGL vendor config"
+        fi
+    done
+
+    # Mesa drirc config (optional but harmless)
+    for drirc in /usr/share/drirc /usr/share/drirc.d; do
+        if [[ -e "${drirc}" ]]; then
+            mkdir -p "${SYSROOT_DIR}$(dirname "${drirc}")"
+            cp -a "${drirc}" "${SYSROOT_DIR}${drirc}" 2>/dev/null || true
+        fi
     done
 
     log_success "Libraries copied"

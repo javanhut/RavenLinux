@@ -1,0 +1,10 @@
+/home/javanstorm/Development/CustomLinux/RavenLinux/desktop/compositor/target-user/release/deps/libseat-ef0ac0f29a3a99fb.d: /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/libseat/src/lib.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/libseat/src/ffi_seat_listener.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/libseat/src/log.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/libseat/src/log_handler.rs
+
+/home/javanstorm/Development/CustomLinux/RavenLinux/desktop/compositor/target-user/release/deps/liblibseat-ef0ac0f29a3a99fb.rlib: /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/libseat/src/lib.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/libseat/src/ffi_seat_listener.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/libseat/src/log.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/libseat/src/log_handler.rs
+
+/home/javanstorm/Development/CustomLinux/RavenLinux/desktop/compositor/target-user/release/deps/liblibseat-ef0ac0f29a3a99fb.rmeta: /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/libseat/src/lib.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/libseat/src/ffi_seat_listener.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/libseat/src/log.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/libseat/src/log_handler.rs
+
+/home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/libseat/src/lib.rs:
+/home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/libseat/src/ffi_seat_listener.rs:
+/home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/libseat/src/log.rs:
+/home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/libseat/src/log_handler.rs:

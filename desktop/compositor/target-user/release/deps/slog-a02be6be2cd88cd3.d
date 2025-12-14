@@ -1,0 +1,10 @@
+/home/javanstorm/Development/CustomLinux/RavenLinux/desktop/compositor/target-user/release/deps/slog-a02be6be2cd88cd3.d: /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/slog/src/lib.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/slog/src/key/mod.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/slog/src/key/static.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/slog/src/prelude.rs
+
+/home/javanstorm/Development/CustomLinux/RavenLinux/desktop/compositor/target-user/release/deps/libslog-a02be6be2cd88cd3.rlib: /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/slog/src/lib.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/slog/src/key/mod.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/slog/src/key/static.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/slog/src/prelude.rs
+
+/home/javanstorm/Development/CustomLinux/RavenLinux/desktop/compositor/target-user/release/deps/libslog-a02be6be2cd88cd3.rmeta: /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/slog/src/lib.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/slog/src/key/mod.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/slog/src/key/static.rs /home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/slog/src/prelude.rs
+
+/home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/slog/src/lib.rs:
+/home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/slog/src/key/mod.rs:
+/home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/slog/src/key/static.rs:
+/home/javanstorm/Development/CustomLinux/RavenLinux/build/vendor/raven-compositor/slog/src/prelude.rs:

@@ -99,7 +99,9 @@ fn send_command(cmd: &str) {
         use nix::sys::reboot::{reboot, RebootMode};
 
         // Sync filesystems first
-        unsafe { libc::sync(); }
+        unsafe {
+            libc::sync();
+        }
 
         let mode = if cmd == "reboot" {
             RebootMode::RB_AUTOBOOT

@@ -8,6 +8,7 @@ use tracing_subscriber::FmtSubscriber;
 
 mod config;
 mod input;
+mod native;
 mod render;
 mod shell;
 mod state;

@@ -154,23 +154,47 @@ echo "  Type 'poweroff' to shutdown, 'reboot' to restart"
 printf '\033[0m'
 echo ""
 
-# Start an interactive shell loop
-# This keeps init running and respawns the shell if it exits
-cd /root
-while true; do
-    # Try bash first (most feature-rich)
-    if [ -x /bin/bash ]; then
-        /bin/bash --login -i
-    elif [ -x /bin/sh ]; then
-        /bin/sh -l
-    else
-        echo "No shell available! Sleeping..."
-        sleep 10
-    fi
+cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
+
+start_shell_loop() {
+    cd /root
+    while true; do
+        if [ -x /bin/bash ]; then
+            /bin/bash --login -i
+        elif [ -x /bin/sh ]; then
+            /bin/sh -l
+        else
+            echo "No shell available! Sleeping..."
+            sleep 10
+        fi
+        echo ""
+        echo "Shell exited. Restarting..."
+        sleep 1
+    done
+}
+
+if echo "$cmdline" | grep -qE '(^| )raven\.graphics=wayland($| )'; then
     echo ""
-    echo "Shell exited. Restarting..."
-    sleep 1
-done
+    echo "Starting Wayland graphics..."
+
+    if [ -x /bin/raven-wayland-session ]; then
+        if command -v openvt >/dev/null 2>&1; then
+            if openvt -c 1 -s -f -- /bin/raven-wayland-session; then
+                :
+            else
+                echo "Wayland session exited; falling back to shell."
+            fi
+        elif /bin/raven-wayland-session; then
+            :
+        else
+            echo "Wayland session exited; falling back to shell."
+        fi
+    else
+        echo "raven-wayland-session not found; falling back to shell."
+    fi
+fi
+
+start_shell_loop
 INIT
     chmod +x "${SYSROOT_DIR}/init"
 
@@ -248,6 +272,29 @@ install_packages_to_sysroot() {
         cp "${PROJECT_ROOT}/configs/desktop"/*.desktop "${SYSROOT_DIR}/usr/share/applications/" 2>/dev/null || true
     fi
 
+    # Copy session helper scripts
+    if [[ -f "${PROJECT_ROOT}/configs/raven-wayland-session" ]]; then
+        cp "${PROJECT_ROOT}/configs/raven-wayland-session" "${SYSROOT_DIR}/bin/raven-wayland-session" 2>/dev/null || true
+        chmod +x "${SYSROOT_DIR}/bin/raven-wayland-session" 2>/dev/null || true
+    fi
+
+    # Ensure shared library dependencies for newly installed binaries are present.
+    log_info "Copying runtime libraries for sysroot binaries..."
+    for bin in "${SYSROOT_DIR}"/bin/* "${SYSROOT_DIR}"/sbin/*; do
+        [[ -f "$bin" && -x "$bin" && ! -L "$bin" ]] || continue
+        if file "$bin" 2>/dev/null | grep -q "statically linked"; then
+            continue
+        fi
+        timeout 2 ldd "$bin" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
+            [[ -z "$lib" || ! -f "$lib" ]] && continue
+            dest="${SYSROOT_DIR}${lib}"
+            if [[ ! -f "$dest" ]]; then
+                mkdir -p "$(dirname "$dest")"
+                cp -L "$lib" "$dest" 2>/dev/null || true
+            fi
+        done || true
+    done
+
     log_success "Packages installed to sysroot"
 }
 
@@ -301,6 +348,20 @@ cmdline = "rdinit=/init quiet loglevel=3 console=tty0 console=ttyS0,115200"
 type = linux-efi
 
 [entry]
+name = "Raven Linux Live (Wayland)"
+kernel = "\\EFI\\raven\\vmlinuz"
+initrd = "\\EFI\\raven\\initramfs.img"
+cmdline = "rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=weston console=tty0 console=ttyS0,115200"
+type = linux-efi
+
+[entry]
+name = "Raven Linux Live (Wayland - Raven Compositor WIP)"
+kernel = "\\EFI\\raven\\vmlinuz"
+initrd = "\\EFI\\raven\\initramfs.img"
+cmdline = "rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=tty0 console=ttyS0,115200"
+type = linux-efi
+
+[entry]
 name = "Raven Linux Live (Verbose)"
 kernel = "\\EFI\\raven\\vmlinuz"
 initrd = "\\EFI\\raven\\initramfs.img"
@@ -345,6 +406,16 @@ set color_highlight=white/blue
 
 menuentry "Raven Linux Live" --class raven {
     linux /boot/vmlinuz rdinit=/init quiet loglevel=3 console=tty0 console=ttyS0,115200
+    initrd /boot/initramfs.img
+}
+
+menuentry "Raven Linux Live (Wayland)" --class raven {
+    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=weston console=tty0 console=ttyS0,115200
+    initrd /boot/initramfs.img
+}
+
+menuentry "Raven Linux Live (Wayland - Raven Compositor WIP)" --class raven {
+    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=tty0 console=ttyS0,115200
     initrd /boot/initramfs.img
 }
 
