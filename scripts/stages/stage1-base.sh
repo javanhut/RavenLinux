@@ -110,11 +110,7 @@ build_kernel() {
 build_initramfs() {
     log_info "Building initramfs..."
 
-    if [[ -f "${BUILD_DIR}/initramfs-raven.img" ]]; then
-        log_info "Initramfs already built, skipping"
-        return 0
-    fi
-
+    # Always rebuild initramfs to pick up any init script changes
     if [[ -x "${PROJECT_ROOT}/scripts/build-initramfs.sh" ]]; then
         "${PROJECT_ROOT}/scripts/build-initramfs.sh" 2>&1 | tee "${LOGS_DIR}/initramfs.log"
     else

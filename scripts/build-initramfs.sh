@@ -214,19 +214,20 @@ copy_libraries() {
         [[ -f "$bin" && -x "$bin" && ! -L "$bin" ]] || continue
 
         # Skip statically linked binaries (vem, carrion, ivaldi are static Go binaries)
-        if file "$bin" | grep -q "statically linked"; then
+        if file "$bin" 2>/dev/null | grep -q "statically linked"; then
             continue
         fi
 
         # Use timeout to avoid hanging on problematic binaries
-        timeout 2 ldd "$bin" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
+        # Use process substitution to avoid subshell issues with pipefail
+        while read -r lib; do
             [[ -z "$lib" || ! -f "$lib" ]] && continue
             local dest="${INITRAMFS_DIR}${lib}"
             if [[ ! -f "$dest" ]]; then
                 mkdir -p "$(dirname "$dest")"
                 cp -L "$lib" "$dest" 2>/dev/null || true
             fi
-        done
+        done < <(timeout 2 ldd "$bin" 2>/dev/null | grep -o '/[^ ]*' || true)
     done
 
     # Copy dynamic linker

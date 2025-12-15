@@ -822,104 +822,14 @@ EOF
 create_init_system() {
     log_step "Creating init system..."
 
-    # Create a proper init script for the live environment
-    cat > "${LIVE_ROOT}/init" << 'INIT'
-#!/bin/bash
-# RavenLinux Live Init
-
-export PATH=/bin:/sbin:/usr/bin:/usr/sbin
-
-echo "Starting Raven Linux Live..."
-
-# Mount essential filesystems
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
-mkdir -p /dev/pts /dev/shm
-mount -t devpts devpts /dev/pts
-mount -t tmpfs tmpfs /dev/shm
-mount -t tmpfs tmpfs /tmp
-mount -t tmpfs tmpfs /run
-
-# Set hostname
-hostname raven-linux
-
-# Start udevd if available
-if [ -x /sbin/udevd ]; then
-    /sbin/udevd --daemon
-    udevadm trigger
-    udevadm settle
-fi
-
-# Configure networking (try DHCP on ethernet)
-for sysiface in /sys/class/net/e*; do
-    [ -d "$sysiface" ] || continue
-    iface="$(basename "$sysiface")"
-
-    if command -v raven-dhcp &>/dev/null; then
-        raven-dhcp -q -i "$iface" 2>/dev/null || true
-        continue
+    # Use the properly designed init from sysroot (has shell loop to prevent PID 1 exit)
+    if [[ -f "${RAVEN_BUILD}/sysroot/init" ]]; then
+        cp "${RAVEN_BUILD}/sysroot/init" "${LIVE_ROOT}/init"
+        chmod +x "${LIVE_ROOT}/init"
+        log_success "Init system installed from sysroot"
+    else
+        log_fatal "Init script not found at ${RAVEN_BUILD}/sysroot/init"
     fi
-
-    if command -v dhcpcd &>/dev/null; then
-        dhcpcd "$iface" 2>/dev/null || true
-        continue
-    fi
-
-    if command -v udhcpc &>/dev/null; then
-        udhcpc -i "$iface" -n -q 2>/dev/null || true
-        continue
-    fi
-done
-
-# Clear screen and show welcome
-clear 2>/dev/null || printf '\033[2J\033[H'
-printf '\033[1;36m'
-cat << 'BANNER'
-
-  ╔═══════════════════════════════════════════════════════════════════════════╗
-  ║                                                                           ║
-  ║    ██████╗  █████╗ ██╗   ██╗███████╗███╗   ██╗    ██╗     ██╗███╗   ██╗   ║
-  ║    ██╔══██╗██╔══██╗██║   ██║██╔════╝████╗  ██║    ██║     ██║████╗  ██║   ║
-  ║    ██████╔╝███████║██║   ██║█████╗  ██╔██╗ ██║    ██║     ██║██╔██╗ ██║   ║
-  ║    ██╔══██╗██╔══██║╚██╗ ██╔╝██╔══╝  ██║╚██╗██║    ██║     ██║██║╚██╗██║   ║
-  ║    ██║  ██║██║  ██║ ╚████╔╝ ███████╗██║ ╚████║    ███████╗██║██║ ╚████║   ║
-  ║    ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝    ╚══════╝╚═╝╚═╝  ╚═══╝   ║
-  ║                                                                           ║
-  ║                    A Developer-Focused Linux Distribution                 ║
-  ║                                                                           ║
-  ╚═══════════════════════════════════════════════════════════════════════════╝
-
-BANNER
-printf '\033[0m'
-printf '\033[1;33m'
-echo "                              Version 2025.12"
-printf '\033[0m'
-echo ""
-printf '\033[1;37m'
-echo "  ┌─────────────────────────────────────────────────────────────────────────┐"
-echo "  │  BUILT-IN TOOLS:                                                        │"
-echo "  │    vem        - Text editor           wifi       - WiFi manager         │"
-echo "  │    carrion    - Programming language  rvn        - Package manager      │"
-echo "  │    ivaldi     - Version control       raven-install - System installer  │"
-echo "  └─────────────────────────────────────────────────────────────────────────┘"
-printf '\033[0m'
-echo ""
-printf '\033[0;32m'
-echo "  Type 'poweroff' to shutdown, 'reboot' to restart"
-printf '\033[0m'
-echo ""
-
-# Start login shell
-if [ -x /bin/zsh ]; then
-    exec /bin/zsh -l
-else
-    exec /bin/bash -l
-fi
-INIT
-    chmod +x "${LIVE_ROOT}/init"
-
-    log_success "Init system created"
 }
 
 create_installer_stub() {
