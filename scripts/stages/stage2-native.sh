@@ -427,8 +427,13 @@ copy_libraries() {
         libOpenGL.so libOpenGL.so.0
         # EGL
         libEGL.so libEGL.so.1
+        # Mesa GLVND vendor libraries (required by /usr/share/glvnd/egl_vendor.d/*)
+        libEGL_mesa.so.0
         # GLX
         libglapi.so libglapi.so.0
+        # Mesa GLX vendor libraries (used by GLVND/libGLX on most distros)
+        libGLX_mesa.so.0
+        libGLX_indirect.so.0
         # Mesa
         libgbm.so libgbm.so.1
         # Wayland
@@ -548,6 +553,8 @@ copy_libraries() {
     # Ensure we also ship shared libraries required by Mesa dlopened modules.
     log_info "Copying runtime libraries for Mesa dlopened modules..."
     for so in \
+        "${SYSROOT_DIR}"/usr/lib/libEGL_mesa.so.0 \
+        "${SYSROOT_DIR}"/usr/lib/libGLX_mesa.so.0 \
         "${SYSROOT_DIR}"/usr/lib/gbm/*.so \
         "${SYSROOT_DIR}"/usr/lib64/gbm/*.so \
         "${SYSROOT_DIR}"/usr/lib/x86_64-linux-gnu/gbm/*.so \
@@ -1107,6 +1114,26 @@ main() {
     echo ""
 
     mkdir -p "${LOGS_DIR}"
+
+    # Stage 2 is a rebuild of the sysroot. Ensure we can overwrite files even if
+    # a previous build ran as root (root-owned files are not writable).
+    if command -v mountpoint &>/dev/null; then
+        if mountpoint -q "${SYSROOT_DIR}" 2>/dev/null; then
+            log_fatal "${SYSROOT_DIR} is a mountpoint; unmount it before running stage2."
+        fi
+    fi
+    if [[ -d "${SYSROOT_DIR}" ]]; then
+        log_info "Resetting sysroot contents..."
+        shopt -s dotglob nullglob
+        rm -rf "${SYSROOT_DIR:?}/"* 2>/dev/null || true
+        shopt -u dotglob nullglob
+
+        # If anything remains that we can't write to, it was likely created by
+        # a previous root-run build. Fail early with a clear fix.
+        if find "${SYSROOT_DIR}" -mindepth 1 ! -writable -print -quit 2>/dev/null | grep -q .; then
+            log_fatal "Sysroot contains non-writable paths. Fix with: sudo chown -R \"$(id -un 2>/dev/null || echo root)\":\"$(id -gn 2>/dev/null || echo root)\" \"${SYSROOT_DIR}\""
+        fi
+    fi
     mkdir -p "${SYSROOT_DIR}"/{bin,sbin,lib,lib64,usr/{bin,sbin,lib,share},etc,home,root}
 
     copy_shells

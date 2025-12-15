@@ -196,7 +196,7 @@ if echo "$cmdline" | grep -qE '(^| )raven\.graphics=wayland($| )'; then
 
     if [ ! -d /dev/dri ]; then
         echo "No /dev/dri found; DRM/KMS not available. Skipping Wayland."
-        echo "Hint: QEMU needs a KMS-capable GPU (e.g. -device virtio-gpu-pci -display gtk,gl=on)."
+        echo "Hint: QEMU needs a KMS-capable GPU (e.g. -device virtio-vga-gl -display gtk,gl=on)."
         echo "Hint: VirtualBox should use 'VMSVGA' graphics controller."
         dmesg 2>/dev/null | grep -iE 'drm|kms|gpu|i915|amdgpu|nouveau|virtio|vmwgfx|vbox|qxl|bochs|cirrus|simpledrm|framebuffer' | tail -n 200 || true
     elif [ -x /bin/raven-wayland-session ]; then
@@ -222,7 +222,7 @@ if echo "$cmdline" | grep -qE '(^| )raven\.graphics=x11($| )'; then
 
     if [ ! -d /dev/dri ]; then
         echo "No /dev/dri found; DRM/KMS not available. Skipping X11."
-        echo "Hint: QEMU needs a KMS-capable GPU (e.g. -device virtio-gpu-pci -display gtk,gl=on)."
+        echo "Hint: QEMU needs a KMS-capable GPU (e.g. -device virtio-vga-gl -display gtk,gl=on)."
         echo "Hint: VirtualBox should use 'VMSVGA' graphics controller."
         dmesg 2>/dev/null | grep -iE 'drm|kms|gpu|i915|amdgpu|nouveau|virtio|vmwgfx|vbox|qxl|bochs|cirrus|simpledrm|framebuffer' | tail -n 200 || true
     elif [ -x /bin/raven-x11-session ]; then
@@ -748,7 +748,7 @@ print_summary() {
     echo ""
     echo "  Test in QEMU (UEFI):"
     echo "    qemu-system-x86_64 -cdrom ${ISO_OUTPUT} -m 4G \\"
-    echo "      -device virtio-gpu-pci -display gtk,gl=on \\"
+    echo "      -device virtio-vga-gl -display gtk,gl=on \\"
     echo "      -serial stdio \\"
     echo "      -bios /usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd -enable-kvm"
     echo ""

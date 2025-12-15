@@ -134,7 +134,7 @@ if [ ! -d /dev/dri ]; then
     ls -la /sys/class/drm 2>&1 | tee -a "$LOGFILE" || true
     log "dmesg (DRM/GPU):"
     dmesg 2>/dev/null | grep -iE 'drm|kms|gpu|i915|amdgpu|nouveau|virtio|vmwgfx|vbox|qxl|bochs|cirrus|simpledrm|framebuffer' | tail -n 200 | tee -a "$LOGFILE" || true
-    log "In QEMU, try virtio-gpu + GL (e.g. -device virtio-gpu-pci -display gtk,gl=on)."
+    log "In QEMU, try a KMS GPU (e.g. -device virtio-vga-gl -display gtk,gl=on)."
     exit 1
 fi
 
@@ -157,6 +157,26 @@ fi
 log "Preferred compositor: $preferred"
 log "Available DRM devices:"
 ls -la /dev/dri/ 2>&1 | tee -a "$LOGFILE" || true
+if [ -d /sys/class/drm ]; then
+    log "DRM connector status:"
+    found_connector=0
+    have_connected=0
+    for status in /sys/class/drm/*/status; do
+        [ -f "$status" ] || continue
+        connector="$(basename "$(dirname "$status")")"
+        case "$connector" in
+            card*|renderD*) continue ;;
+        esac
+        found_connector=1
+        state="$(cat "$status" 2>/dev/null || true)"
+        log "  ${connector}: ${state}"
+        [ "$state" = "connected" ] && have_connected=1
+    done
+    if [ "$found_connector" -eq 1 ] && [ "$have_connected" -eq 0 ]; then
+        log "No connected DRM outputs detected; DRM compositors won't have display modes."
+        log "In QEMU, avoid -nographic/-display none, or use VNC/SPICE. Example: -device virtio-vga-gl -display gtk,gl=on"
+    fi
+fi
 
 tried_hypr=0
 tried_weston=0
