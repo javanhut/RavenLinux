@@ -170,8 +170,8 @@ EOF
     chmod 755 "${INITRAMFS_DIR}/bin/whoami" 2>/dev/null || true
 
     # These need to come from host (not in uutils or need special handling)
-    # Include switch_root for live boot
-    local host_bins=(mount umount dmesg clear reset ps kill free grep sed awk find xargs poweroff reboot switch_root losetup blkid)
+    # Include switch_root for live boot, udevadm for device enumeration
+    local host_bins=(mount umount dmesg clear reset ps kill free grep sed awk find xargs poweroff reboot switch_root losetup blkid udevadm)
     for bin in "${host_bins[@]}"; do
         if command -v "$bin" &>/dev/null; then
             cp "$(which "$bin")" "${INITRAMFS_DIR}/bin/" 2>/dev/null || true
@@ -340,7 +340,14 @@ rescue_shell() {
     echo "  You can try to fix the problem manually."
     echo "  Type 'reboot' to restart, 'poweroff' to shut down."
     echo ""
-    exec /bin/bash
+    # Run shell in a loop to prevent kernel panic if user exits
+    while true; do
+        /bin/bash --login -i || true
+        echo ""
+        err "Shell exited. Restarting rescue shell..."
+        err "(Type 'reboot' or 'poweroff' to exit properly)"
+        sleep 1
+    done
 }
 
 msg "Starting Raven Linux..."
@@ -360,20 +367,28 @@ mkdir -p /mnt/cdrom /mnt/squashfs /mnt/root /mnt/overlay /mnt/work
 # Suppress kernel messages for cleaner output
 dmesg -n 1 2>/dev/null || true
 
-# Wait for devices to settle (CD-ROM may take a moment)
+# Wait for devices to settle (USB drives may take longer to enumerate)
 msg "Waiting for devices..."
-sleep 2
+sleep 3
 
-# Find the boot device (CD-ROM with our live filesystem)
+# Trigger udev if available to help enumerate devices
+if command -v udevadm &>/dev/null; then
+    udevadm trigger 2>/dev/null || true
+    udevadm settle --timeout=5 2>/dev/null || true
+fi
+
+# Find the boot device (CD-ROM, USB, NVMe, etc. with our live filesystem)
 BOOT_DEVICE=""
 ISO_LABEL="RAVEN_LIVE"
 
 msg "Searching for boot device..."
 
-# Method 1: Look for device with our label using blkid
+# Method 1: Look for device with our label using blkid (most reliable)
 if command -v blkid &>/dev/null; then
-    for dev in /dev/sr0 /dev/sr1 /dev/cdrom /dev/dvd; do
-        if [ -b "$dev" ]; then
+    # Search ALL block devices for our label
+    while IFS= read -r line; do
+        dev="${line%%:*}"
+        if [ -b "$dev" ] 2>/dev/null; then
             label=$(blkid -o value -s LABEL "$dev" 2>/dev/null)
             if [ "$label" = "$ISO_LABEL" ]; then
                 BOOT_DEVICE="$dev"
@@ -381,21 +396,58 @@ if command -v blkid &>/dev/null; then
                 break
             fi
         fi
+    done < <(blkid 2>/dev/null)
+fi
+
+# Method 2: Scan common device paths for our label
+if [ -z "$BOOT_DEVICE" ] && command -v blkid &>/dev/null; then
+    for pattern in /dev/sr* /dev/sd* /dev/nvme*n*p* /dev/vd* /dev/mmcblk*p* /dev/loop*; do
+        for dev in $pattern; do
+            [ -b "$dev" ] 2>/dev/null || continue
+            label=$(blkid -o value -s LABEL "$dev" 2>/dev/null)
+            if [ "$label" = "$ISO_LABEL" ]; then
+                BOOT_DEVICE="$dev"
+                msg "Found boot device by label scan: $BOOT_DEVICE"
+                break 2
+            fi
+        done
     done
 fi
 
-# Method 2: Try common CD-ROM devices
+# Method 3: If not found by label, try to find any ISO9660 filesystem
+if [ -z "$BOOT_DEVICE" ] && command -v blkid &>/dev/null; then
+    msg "Label not found, searching for ISO9660 filesystems..."
+    for pattern in /dev/sr* /dev/sd* /dev/nvme*n*p* /dev/vd* /dev/mmcblk*p* /dev/loop*; do
+        for dev in $pattern; do
+            [ -b "$dev" ] 2>/dev/null || continue
+            fstype=$(blkid -o value -s TYPE "$dev" 2>/dev/null)
+            if [ "$fstype" = "iso9660" ]; then
+                BOOT_DEVICE="$dev"
+                msg "Found ISO9660 device: $BOOT_DEVICE"
+                break 2
+            fi
+        done
+    done
+fi
+
+# Method 4: Fallback to common CD-ROM devices
 if [ -z "$BOOT_DEVICE" ]; then
     for dev in /dev/sr0 /dev/sr1 /dev/cdrom /dev/loop0; do
         if [ -b "$dev" ]; then
             BOOT_DEVICE="$dev"
-            msg "Using device: $BOOT_DEVICE"
+            msg "Using fallback device: $BOOT_DEVICE"
             break
         fi
     done
 fi
 
+# Debug: show available block devices if still not found
 if [ -z "$BOOT_DEVICE" ]; then
+    err "Could not find boot device!"
+    err "Available block devices:"
+    ls -la /dev/sd* /dev/sr* /dev/nvme* /dev/vd* /dev/mmcblk* 2>/dev/null || true
+    err "blkid output:"
+    blkid 2>/dev/null || true
     rescue_shell "No boot device found"
 fi
 

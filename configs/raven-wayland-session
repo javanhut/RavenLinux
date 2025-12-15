@@ -175,6 +175,26 @@ if [ -d /sys/class/drm ]; then
     if [ "$found_connector" -eq 1 ] && [ "$have_connected" -eq 0 ]; then
         log "No connected DRM outputs detected; DRM compositors won't have display modes."
         log "In QEMU, avoid -nographic/-display none, or use VNC/SPICE. Example: -device virtio-vga-gl -display gtk,gl=on"
+
+        # Auto-set RAVEN_FORCE_MODE for VM environments without connected displays
+        if [ -z "${RAVEN_FORCE_MODE:-}" ]; then
+            # Check if running in a VM
+            is_vm=0
+            [ -d /sys/hypervisor ] && is_vm=1
+            if [ -f /sys/class/dmi/id/sys_vendor ]; then
+                vendor="$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+                case "$vendor" in
+                    *qemu*|*kvm*|*vmware*|*virtualbox*|*xen*|*microsoft*) is_vm=1 ;;
+                esac
+            fi
+            grep -q "hypervisor" /proc/cpuinfo 2>/dev/null && is_vm=1
+
+            if [ "$is_vm" -eq 1 ]; then
+                export RAVEN_FORCE_MODE="1024x768"
+                log "VM detected with no connected display. Setting RAVEN_FORCE_MODE=1024x768"
+                log "Set RAVEN_FORCE_MODE=WxH to use a different resolution."
+            fi
+        fi
     fi
 fi
 

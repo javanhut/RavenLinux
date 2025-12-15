@@ -26,6 +26,9 @@ libseat = "0.1"
 libc = "0.2"
 udev = "0.6"
 
+# DRM mode info for synthetic display modes (matches smithay's version)
+drm-ffi = "0.2"
+
 # Configuration
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"

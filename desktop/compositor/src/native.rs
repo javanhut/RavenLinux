@@ -3,6 +3,13 @@
 //! This implementation uses libseat for proper session management,
 //! allowing the compositor to run without root privileges when
 //! seatd or systemd-logind is available.
+//!
+//! ## VM Support
+//!
+//! When running in a VM without a connected display, set `RAVEN_FORCE_MODE=WxH`
+//! (e.g., `RAVEN_FORCE_MODE=1024x768`) to create a synthetic display mode.
+//! This is useful for testing in headless VMs or when QEMU isn't configured
+//! with a proper display device.
 
 use crate::config::Config;
 use anyhow::{anyhow, Context, Result};
@@ -15,7 +22,7 @@ use smithay::{
     },
     reexports::{
         calloop::{generic::Generic, EventLoop, Interest, Mode, PostAction},
-        drm::control::{connector::State as ConnectorState, Device as ControlDevice},
+        drm::control::{connector::State as ConnectorState, Device as ControlDevice, Mode as DrmMode},
         input::Libinput,
         nix::fcntl::OFlag,
         wayland_server::{protocol::wl_output, Display},
@@ -39,6 +46,85 @@ use std::{
     time::Duration,
 };
 use tracing::{debug, error, info, warn};
+
+/// Check if we're running in a virtual machine
+fn is_virtual_machine() -> bool {
+    // Check for hypervisor via sysfs
+    if Path::new("/sys/hypervisor").exists() {
+        return true;
+    }
+    // Check for common VM indicators in DMI
+    if let Ok(vendor) = fs::read_to_string("/sys/class/dmi/id/sys_vendor") {
+        let vendor = vendor.to_lowercase();
+        if vendor.contains("qemu") || vendor.contains("kvm") ||
+           vendor.contains("vmware") || vendor.contains("virtualbox") ||
+           vendor.contains("xen") || vendor.contains("microsoft") {
+            return true;
+        }
+    }
+    // Check for VM-specific CPU flags
+    if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
+        if cpuinfo.contains("hypervisor") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Parse RAVEN_FORCE_MODE environment variable (e.g., "1024x768")
+fn parse_forced_mode() -> Option<(u16, u16)> {
+    env::var("RAVEN_FORCE_MODE").ok().and_then(|mode| {
+        let parts: Vec<&str> = mode.split('x').collect();
+        if parts.len() == 2 {
+            let width = parts[0].parse::<u16>().ok()?;
+            let height = parts[1].parse::<u16>().ok()?;
+            if width >= 640 && height >= 480 && width <= 4096 && height <= 4096 {
+                return Some((width, height));
+            }
+        }
+        warn!("Invalid RAVEN_FORCE_MODE format: '{}', expected 'WxH' (e.g., '1024x768')", mode);
+        None
+    })
+}
+
+/// Create a synthetic DRM mode for VMs without connected displays
+fn create_synthetic_mode(width: u16, height: u16) -> DrmMode {
+    use drm_ffi::drm_mode_modeinfo;
+
+    // Create a mode similar to what DRM drivers generate
+    // Using standard CVT timing for 60Hz refresh
+    let htotal = width + 160;  // Approximate horizontal blanking
+    let vtotal = height + 36;  // Approximate vertical blanking
+    let clock = (htotal as u32 * vtotal as u32 * 60) / 1000; // Pixel clock in kHz
+
+    // Build mode name (e.g., "1024x768") - needs to be [c_char; 32]
+    let mut name: [libc::c_char; 32] = [0; 32];
+    let name_str = format!("{}x{}", width, height);
+    let name_bytes = name_str.as_bytes();
+    for (i, &byte) in name_bytes.iter().take(31).enumerate() {
+        name[i] = byte as libc::c_char;
+    }
+
+    let modeinfo = drm_mode_modeinfo {
+        clock,
+        hdisplay: width,
+        hsync_start: width + 48,
+        hsync_end: width + 112,
+        htotal,
+        hskew: 0,
+        vdisplay: height,
+        vsync_start: height + 3,
+        vsync_end: height + 9,
+        vtotal,
+        vscan: 0,
+        vrefresh: 60,
+        flags: 0,
+        type_: 0x40, // DRM_MODE_TYPE_USERDEF
+        name,
+    };
+
+    DrmMode::from(modeinfo)
+}
 
 fn ensure_runtime_dir() -> Result<()> {
     if env::var_os("XDG_RUNTIME_DIR").is_some() {
@@ -228,11 +314,53 @@ pub fn run_native(_config: &Config) -> Result<()> {
         .ok_or_else(|| anyhow!("No CRTC available"))?;
 
     // Get first available mode (usually the native resolution)
+    // If no modes are available and we're in a VM, try to create a synthetic mode
     let mode = connector_info
         .modes()
         .first()
         .copied()
-        .ok_or_else(|| anyhow!("No display modes available"))?;
+        .or_else(|| {
+            // Check for forced mode via environment variable
+            if let Some((width, height)) = parse_forced_mode() {
+                info!("Using forced mode from RAVEN_FORCE_MODE: {}x{}", width, height);
+                return Some(create_synthetic_mode(width, height));
+            }
+
+            // Check if we're in a VM and can use a default synthetic mode
+            let is_vm = is_virtual_machine();
+            let is_virtual_connector = matches!(
+                connector_info.interface(),
+                smithay::reexports::drm::control::connector::Interface::Virtual
+            );
+
+            if is_vm || is_virtual_connector {
+                warn!("No display modes available, but running in VM environment");
+                warn!("Creating synthetic 1024x768@60Hz mode for testing");
+                warn!("Tip: Set RAVEN_FORCE_MODE=WxH for custom resolution");
+                warn!("Tip: For proper display, use QEMU with: -device virtio-vga-gl -display gtk,gl=on");
+                return Some(create_synthetic_mode(1024, 768));
+            }
+
+            None
+        })
+        .ok_or_else(|| {
+            // Provide helpful error message based on environment
+            if is_virtual_machine() {
+                anyhow!(
+                    "No display modes available.\n\
+                    You appear to be in a VM. Try one of:\n\
+                    1. Set RAVEN_FORCE_MODE=1024x768 environment variable\n\
+                    2. Use proper QEMU display: -device virtio-vga-gl -display gtk,gl=on\n\
+                    3. Use VNC/SPICE: -device qxl-vga -vnc :0"
+                )
+            } else {
+                anyhow!(
+                    "No display modes available.\n\
+                    Check that your display is connected and detected by the kernel.\n\
+                    Run 'cat /sys/class/drm/*/status' to see connector states."
+                )
+            }
+        })?;
 
     let (width, height) = mode.size();
     let refresh = mode.vrefresh();

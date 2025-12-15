@@ -93,6 +93,11 @@ type AppState struct {
 	startOverBtn widget.Clickable
 	deviceClicks []widget.Clickable
 	confirmCheck widget.Bool
+
+	// Scroll states for pages
+	confirmScroll widget.List
+	writingScroll widget.List
+	completeScroll widget.List
 }
 
 func main() {
@@ -122,6 +127,9 @@ func run(w *app.Window) error {
 		currentPage: PageSelectUSB,
 		selectedUSB: -1,
 		isRoot:      os.Geteuid() == 0,
+		confirmScroll: widget.List{List: layout.List{Axis: layout.Vertical}},
+		writingScroll: widget.List{List: layout.List{Axis: layout.Vertical}},
+		completeScroll: widget.List{List: layout.List{Axis: layout.Vertical}},
 	}
 
 	// Check command line for ISO path
@@ -625,34 +633,35 @@ func drawInfoBox(gtx layout.Context, th *material.Theme, title, content string) 
 	})
 }
 
-// Page 4: Confirm
+// Page 4: Confirm (scrollable for smaller windows)
 func drawPageConfirm(gtx layout.Context, th *material.Theme, state *AppState) layout.Dimensions {
 	dev := state.devices[state.selectedUSB]
 	estimatedTime := estimateWriteTime(state.isoSize)
 
-	return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			icon := material.H2(th, "!")
+	// Define the content items for the scrollable list
+	items := []layout.Widget{
+		func(gtx layout.Context) layout.Dimensions {
+			icon := material.H2(th, "⚠")
 			icon.Color = colorWarning
 			icon.Alignment = text.Middle
 			return icon.Layout(gtx)
-		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		},
+		layout.Spacer{Height: unit.Dp(10)}.Layout,
+		func(gtx layout.Context) layout.Dimensions {
 			title := material.H6(th, "Confirm Write Operation")
 			title.Color = colorWarning
 			title.Alignment = text.Middle
 			return title.Layout(gtx)
-		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(20)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		},
+		layout.Spacer{Height: unit.Dp(20)}.Layout,
+		func(gtx layout.Context) layout.Dimensions {
 			warn := material.Body1(th, fmt.Sprintf("All data on %s will be permanently erased!", dev.Path))
 			warn.Color = colorDanger
 			warn.Alignment = text.Middle
 			return warn.Layout(gtx)
-		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(20)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		},
+		layout.Spacer{Height: unit.Dp(20)}.Layout,
+		func(gtx layout.Context) layout.Dimensions {
 			return drawInfoBox(gtx, th, "Summary", fmt.Sprintf(
 				"USB: %s %s (%s)\nISO: %s (%s)\nFormat: %s\nEstimated time: %s",
 				dev.Vendor, dev.Model, formatSize(dev.Size),
@@ -660,14 +669,20 @@ func drawPageConfirm(gtx layout.Context, th *material.Theme, state *AppState) la
 				yesNo(state.formatUSBOpt),
 				estimatedTime,
 			))
-		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(25)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		},
+		layout.Spacer{Height: unit.Dp(25)}.Layout,
+		func(gtx layout.Context) layout.Dimensions {
 			cb := material.CheckBox(th, &state.confirmCheck, "I understand and want to proceed")
 			cb.Color = colorText
-			return cb.Layout(gtx)
-		}),
-	)
+			return layout.Center.Layout(gtx, cb.Layout)
+		},
+		layout.Spacer{Height: unit.Dp(20)}.Layout,
+	}
+
+	// Use material.List for scrolling
+	return material.List(th, &state.confirmScroll).Layout(gtx, len(items), func(gtx layout.Context, i int) layout.Dimensions {
+		return layout.Center.Layout(gtx, items[i])
+	})
 }
 
 // Page 5: Writing
