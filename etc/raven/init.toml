@@ -98,6 +98,26 @@ restart = false
 enabled = true
 critical = false
 
+# SSH daemon
+[[services]]
+name = "sshd"
+description = "OpenSSH server daemon"
+exec = "/usr/bin/sshd"
+args = ["-D"]
+restart = true
+enabled = true
+critical = false
+
+# SSH agent (user session, disabled by default)
+[[services]]
+name = "ssh-agent"
+description = "SSH authentication agent"
+exec = "/usr/bin/ssh-agent"
+args = ["-D"]
+restart = false
+enabled = false
+critical = false
+
 
 # =============================================================================
 # Additional mount points (beyond the essential ones)

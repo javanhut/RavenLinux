@@ -2,10 +2,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 
+mod aur;
 mod commands;
 mod config;
 mod database;
-mod fallback;
 mod package;
 mod repository;
 mod resolver;

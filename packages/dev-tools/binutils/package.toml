@@ -1,0 +1,54 @@
+[package]
+name = "binutils"
+version = "2.42"
+description = "GNU binary utilities (as, ld, ar, objdump, etc.)"
+license = "GPL-3.0"
+homepage = "https://www.gnu.org/software/binutils/"
+repository = "https://sourceware.org/git/binutils-gdb.git"
+maintainers = ["RavenLinux Team"]
+categories = ["dev-tools", "toolchain"]
+
+[source]
+type = "tarball"
+url = "https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "autotools"
+configure_flags = [
+    "--prefix=/usr",
+    "--enable-gold",
+    "--enable-ld=default",
+    "--enable-plugins",
+    "--enable-shared",
+    "--disable-werror",
+    "--enable-64-bit-bfd",
+    "--with-system-zlib"
+]
+build_flags = ["-j$(nproc)"]
+env = {}
+pre_build = []
+post_build = []
+pre_install = []
+post_install = []
+
+[dependencies]
+runtime = ["zlib"]
+build = ["zlib", "flex", "bison", "texinfo"]
+
+[install]
+files = [
+    { src = "binutils/ar", dest = "/usr/bin/ar", mode = 755 },
+    { src = "binutils/nm-new", dest = "/usr/bin/nm", mode = 755 },
+    { src = "binutils/objcopy", dest = "/usr/bin/objcopy", mode = 755 },
+    { src = "binutils/objdump", dest = "/usr/bin/objdump", mode = 755 },
+    { src = "binutils/ranlib", dest = "/usr/bin/ranlib", mode = 755 },
+    { src = "binutils/readelf", dest = "/usr/bin/readelf", mode = 755 },
+    { src = "binutils/size", dest = "/usr/bin/size", mode = 755 },
+    { src = "binutils/strings", dest = "/usr/bin/strings", mode = 755 },
+    { src = "binutils/strip-new", dest = "/usr/bin/strip", mode = 755 },
+    { src = "gas/as-new", dest = "/usr/bin/as", mode = 755 },
+    { src = "ld/ld-new", dest = "/usr/bin/ld", mode = 755 }
+]
+symlinks = []
+directories = ["/usr/lib/bfd-plugins"]

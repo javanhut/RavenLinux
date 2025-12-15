@@ -7,10 +7,9 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::PathBuf;
 use std::{fs, path::Path};
 
+use crate::aur::{AurClient, AurPackage};
 use crate::config::Config;
 use crate::database::Database;
-use crate::fallback::alpine::AlpineClient;
-use crate::fallback::static_bin::{StaticClient, StaticPackage};
 use crate::package::archive::PackageArchive;
 use crate::repository::client::MultiRepoClient;
 
@@ -37,9 +36,8 @@ pub async fn run(packages: &[String], _build_only: bool, dry_run: bool) -> Resul
     }
     repo_client.preload_indexes().await;
 
-    // Fallback sources (used only when not found in configured repos)
-    let mut alpine = AlpineClient::new();
-    let static_client = StaticClient::new();
+    // AUR fallback client (used when not found in configured repos)
+    let aur_client = AurClient::with_config(config.aur.clone());
 
     println!(
         "{} Resolving dependencies for {} package(s)...",
@@ -75,8 +73,7 @@ pub async fn run(packages: &[String], _build_only: bool, dry_run: bool) -> Resul
     }
 
     // Resolve dependencies for packages to install
-    let resolved =
-        resolve_dependencies(&to_install, &db, &repo_client, &mut alpine, &static_client).await?;
+    let resolved = resolve_dependencies(&to_install, &db, &repo_client, &aur_client).await?;
 
     println!();
     println!(
@@ -89,10 +86,15 @@ pub async fn run(packages: &[String], _build_only: bool, dry_run: bool) -> Resul
     let mut total_install_size = 0u64;
 
     for pkg in &resolved {
+        let source_tag = match &pkg.source {
+            PackageSource::Raven { .. } => "(raven)".bright_green(),
+            PackageSource::Aur { .. } => "(aur)".bright_yellow(),
+        };
         println!(
-            "   {} {} {}",
+            "   {} {} {} {}",
             pkg.name.bright_white(),
             pkg.version.bright_cyan(),
+            source_tag,
             if pkg.is_dependency {
                 "(dependency)".dimmed()
             } else {
@@ -148,8 +150,7 @@ pub async fn run(packages: &[String], _build_only: bool, dry_run: bool) -> Resul
         pb.set_message(format!("Downloading {}", pkg.name));
 
         // Try to find and download the package
-        let package_path =
-            download_package(pkg, &cache_dir, &repo_client, &mut alpine, &static_client).await?;
+        let package_path = download_package(pkg, &cache_dir, &repo_client, &aur_client).await?;
         downloaded_packages.push((pkg.clone(), package_path));
 
         pb.inc(1);
@@ -204,24 +205,15 @@ struct PackageToInstall {
 
 #[derive(Debug, Clone)]
 enum PackageSource {
-    Raven {
-        filename: String,
-        sha256: String,
-    },
-    Alpine {
-        pkg: crate::fallback::alpine::AlpinePackage,
-    },
-    Static {
-        pkg: StaticPackage,
-    },
+    Raven { filename: String, sha256: String },
+    Aur { pkg: AurPackage },
 }
 
 async fn resolve_dependencies(
     packages: &[String],
     db: &Database,
     repo_client: &MultiRepoClient,
-    alpine: &mut AlpineClient,
-    static_client: &StaticClient,
+    aur_client: &AurClient,
 ) -> Result<Vec<PackageToInstall>> {
     // First, get set of installed packages (sync operation)
     let installed: std::collections::HashSet<String> = db
@@ -239,8 +231,7 @@ async fn resolve_dependencies(
             false,
             &installed,
             repo_client,
-            alpine,
-            static_client,
+            aur_client,
             &mut resolved,
             &mut seen,
         )
@@ -255,8 +246,7 @@ async fn resolve_package_async(
     is_dependency: bool,
     installed: &std::collections::HashSet<String>,
     repo_client: &MultiRepoClient,
-    alpine: &mut AlpineClient,
-    static_client: &StaticClient,
+    aur_client: &AurClient,
     resolved: &mut Vec<PackageToInstall>,
     seen: &mut std::collections::HashSet<String>,
 ) -> Result<()> {
@@ -264,7 +254,7 @@ async fn resolve_package_async(
         return Ok(());
     }
 
-    // Find package in repositories
+    // First, try to find in Raven repositories
     if let Some((_repo, pkg)) = repo_client.find_package(name).await? {
         seen.insert(name.to_string());
         // Resolve dependencies first (use Box::pin for recursive async)
@@ -274,8 +264,7 @@ async fn resolve_package_async(
                 true,
                 installed,
                 repo_client,
-                alpine,
-                static_client,
+                aur_client,
                 resolved,
                 seen,
             ))
@@ -298,62 +287,57 @@ async fn resolve_package_async(
         return Ok(());
     }
 
-    // Fallback: Alpine APK (musl) repos
-    match alpine.find(name).await {
-        Ok(Some(_pkg)) => {
-            let chain = alpine.resolve_with_deps(name).await?;
-            for (i, p) in chain.iter().enumerate() {
-                if seen.contains(&p.name) || installed.contains(&p.name) {
-                    continue;
+    // Fallback: AUR (Arch User Repository)
+    if aur_client.is_enabled() {
+        match aur_client.find(name).await {
+            Ok(Some(aur_pkg)) => {
+                seen.insert(name.to_string());
+
+                // Resolve AUR dependencies
+                for dep in aur_pkg.all_dependencies() {
+                    let dep_name = AurPackage::parse_dep_name(&dep);
+                    Box::pin(resolve_package_async(
+                        &dep_name,
+                        true,
+                        installed,
+                        repo_client,
+                        aur_client,
+                        resolved,
+                        seen,
+                    ))
+                    .await
+                    .ok(); // Best effort for AUR deps - they might be in Raven or need mapping
                 }
-                seen.insert(p.name.clone());
-                let dep_flag = if is_dependency {
-                    true
-                } else {
-                    i + 1 != chain.len()
-                };
+
                 resolved.push(PackageToInstall {
-                    name: p.name.clone(),
-                    version: p.version.clone(),
-                    description: p.description.clone(),
-                    download_size: p.download_size,
-                    install_size: p.installed_size,
-                    is_dependency: dep_flag,
-                    source: PackageSource::Alpine { pkg: p.clone() },
+                    name: aur_pkg.name.clone(),
+                    version: aur_pkg.version.clone(),
+                    description: aur_pkg.description.clone().unwrap_or_default(),
+                    download_size: aur_pkg.estimated_download_size(),
+                    install_size: aur_pkg.estimated_install_size(),
+                    is_dependency,
+                    source: PackageSource::Aur { pkg: aur_pkg },
                 });
+                return Ok(());
             }
-            return Ok(());
-        }
-        Ok(None) => {}
-        Err(e) => {
-            eprintln!("Warning: Alpine fallback failed: {e}");
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("Warning: AUR lookup failed for '{}': {}", name, e);
+            }
         }
     }
 
-    // Fallback: static musl binaries (limited set)
-    if let Some(p) = static_client.find(name) {
-        seen.insert(name.to_string());
-        resolved.push(PackageToInstall {
-            name: p.name.clone(),
-            version: p.version.clone(),
-            description: p.description.clone(),
-            download_size: p.download_size,
-            install_size: p.installed_size,
-            is_dependency,
-            source: PackageSource::Static { pkg: p },
-        });
-        return Ok(());
-    }
-
-    anyhow::bail!("Package '{}' not found in Raven repos or fallbacks", name)
+    anyhow::bail!(
+        "Package '{}' not found in Raven repos (theravenlinux.org) or AUR",
+        name
+    )
 }
 
 async fn download_package(
     pkg: &PackageToInstall,
     cache_dir: &PathBuf,
     repo_client: &MultiRepoClient,
-    alpine: &mut AlpineClient,
-    static_client: &StaticClient,
+    aur_client: &AurClient,
 ) -> Result<PathBuf> {
     match &pkg.source {
         PackageSource::Raven { filename, sha256 } => {
@@ -377,14 +361,33 @@ async fn download_package(
 
             anyhow::bail!("Failed to download package: {}", pkg.name)
         }
-        PackageSource::Alpine { pkg: alpine_pkg } => {
-            let alpine_cache = cache_dir.join("alpine");
-            alpine.ensure_loaded().await?;
-            alpine.download(alpine_pkg, &alpine_cache).await
-        }
-        PackageSource::Static { pkg: static_pkg } => {
-            let static_cache = cache_dir.join("static");
-            static_client.download(static_pkg, &static_cache).await
+        PackageSource::Aur { pkg: aur_pkg } => {
+            // Download and build AUR package
+            let aur_cache = cache_dir.join("aur");
+            std::fs::create_dir_all(&aur_cache)?;
+
+            // Download source
+            println!(
+                "   {} Fetching AUR source for {}...",
+                "->".bright_blue(),
+                aur_pkg.name
+            );
+            let source_dir = aur_client.download_source(aur_pkg, &aur_cache).await?;
+
+            // Build package
+            let build_dir = cache_dir.join("aur-build");
+            std::fs::create_dir_all(&build_dir)?;
+
+            println!(
+                "   {} Building {} from AUR...",
+                "->".bright_blue(),
+                aur_pkg.name
+            );
+            let built_pkg = aur_client
+                .build_package(aur_pkg, &source_dir, &build_dir)
+                .await?;
+
+            Ok(built_pkg)
         }
     }
 }
@@ -398,31 +401,31 @@ fn install_any_package(
 ) -> Result<()> {
     match &pkg.source {
         PackageSource::Raven { .. } => install_rvn_package(downloaded, root, db, explicit),
-        PackageSource::Alpine { pkg: alpine_pkg } => {
-            let temp_dir = tempfile::tempdir()?;
-            AlpineClient::extract_data_tar_gz(downloaded, temp_dir.path())?;
-            let installed_files = install_tree(temp_dir.path(), root)?;
-            record_install(
-                db,
-                &alpine_pkg.name,
-                &alpine_pkg.version,
-                &alpine_pkg.description,
-                explicit,
-                &installed_files,
-            )
-        }
-        PackageSource::Static { pkg: static_pkg } => {
-            let temp_dir = tempfile::tempdir()?;
-            StaticClient::extract_to_staging(static_pkg, downloaded, temp_dir.path())?;
-            let installed_files = install_tree(temp_dir.path(), root)?;
-            record_install(
-                db,
-                &static_pkg.name,
-                &static_pkg.version,
-                &static_pkg.description,
-                explicit,
-                &installed_files,
-            )
+        PackageSource::Aur { pkg: aur_pkg } => {
+            // AUR packages are built into .rvn format, so same install process
+            if downloaded.extension().map(|e| e == "rvn").unwrap_or(false) {
+                install_rvn_package(downloaded, root, db, explicit)
+            } else {
+                // Fallback: extract built package directly
+                let temp_dir = tempfile::tempdir()?;
+                let status = std::process::Command::new("tar")
+                    .args(["-xf", downloaded.to_str().unwrap(), "-C", temp_dir.path().to_str().unwrap()])
+                    .status()?;
+
+                if !status.success() {
+                    anyhow::bail!("Failed to extract AUR package");
+                }
+
+                let installed_files = install_tree(temp_dir.path(), root)?;
+                record_install(
+                    db,
+                    &aur_pkg.name,
+                    &aur_pkg.version,
+                    aur_pkg.description.as_deref().unwrap_or(""),
+                    explicit,
+                    &installed_files,
+                )
+            }
         }
     }
 }

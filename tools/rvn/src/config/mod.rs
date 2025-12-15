@@ -2,11 +2,15 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::aur::AurConfig;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub general: GeneralConfig,
     pub repositories: Vec<Repository>,
     pub build: BuildOptions,
+    #[serde(default)]
+    pub aur: AurConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,10 +67,11 @@ impl Default for Config {
                 },
             ],
             build: BuildOptions {
-                jobs: num_cpus::get(),
+                jobs: num_cpus(),
                 ccache: true,
                 build_dir: PathBuf::from("/tmp/rvn-build"),
             },
+            aur: AurConfig::default(),
         }
     }
 }

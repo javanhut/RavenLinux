@@ -1,0 +1,45 @@
+[package]
+name = "luajit"
+version = "2.1.0"
+description = "Just-In-Time Compiler for Lua (required by Neovim)"
+license = "MIT"
+homepage = "https://luajit.org"
+repository = "https://github.com/LuaJIT/LuaJIT"
+maintainers = ["RavenLinux Team"]
+categories = ["dev-tools", "interpreters", "languages"]
+
+[source]
+type = "git"
+url = "https://github.com/LuaJIT/LuaJIT"
+ref = "v2.1"
+
+[build]
+system = "make"
+configure_flags = []
+build_flags = ["PREFIX=/usr", "-j$(nproc)"]
+env = { "CFLAGS" = "-fPIC" }
+pre_build = []
+post_build = []
+pre_install = [
+    "make PREFIX=/usr DESTDIR=$DESTDIR install"
+]
+post_install = [
+    "ln -sf luajit-2.1 /usr/bin/luajit"
+]
+
+[dependencies]
+runtime = []
+build = ["gcc"]
+
+[install]
+files = [
+    { src = "src/luajit", dest = "/usr/bin/luajit-2.1", mode = 755 }
+]
+symlinks = [
+    { target = "/usr/bin/luajit-2.1", link = "/usr/bin/luajit" }
+]
+directories = [
+    "/usr/include/luajit-2.1",
+    "/usr/lib/lua",
+    "/usr/share/luajit-2.1"
+]

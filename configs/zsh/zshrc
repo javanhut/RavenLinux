@@ -56,5 +56,41 @@ alias raven-update='rvn upgrade'
 export EDITOR="${EDITOR:-raven-editor}"
 export VISUAL="${VISUAL:-raven-editor}"
 
+# fzf integration (if installed)
+[[ -f /usr/share/fzf/key-bindings.zsh ]] && source /usr/share/fzf/key-bindings.zsh
+[[ -f /usr/share/fzf/completion.zsh ]] && source /usr/share/fzf/completion.zsh
+
+# Ranger cd integration - use 'rcd' to cd to last ranger directory
+rcd() {
+    local tempfile=$(mktemp -t ranger_cd.XXXXXX)
+    ranger --choosedir="$tempfile" "$@"
+    if [[ -f "$tempfile" ]]; then
+        local dir=$(cat "$tempfile")
+        if [[ -d "$dir" && "$dir" != "$(pwd)" ]]; then
+            cd "$dir"
+        fi
+    fi
+    rm -f "$tempfile"
+}
+
+# Fuzzy find file and open in editor
+fe() {
+    local file
+    file=$(fzf --preview 'head -100 {}' 2>/dev/null)
+    [[ -n "$file" ]] && $EDITOR "$file"
+}
+
+# Fuzzy cd to directory
+fcd() {
+    local dir
+    dir=$(find . -type d 2>/dev/null | fzf)
+    [[ -n "$dir" ]] && cd "$dir"
+}
+
+# Fuzzy search history
+fh() {
+    print -z $(fc -l 1 | fzf +s --tac | sed 's/ *[0-9]* *//')
+}
+
 # Load local config if exists
 [[ -f ~/.zshrc.local ]] && source ~/.zshrc.local

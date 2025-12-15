@@ -1,0 +1,44 @@
+[package]
+name = "lua"
+version = "5.4.6"
+description = "Powerful, efficient, lightweight, embeddable scripting language"
+license = "MIT"
+homepage = "https://www.lua.org"
+maintainers = ["RavenLinux Team"]
+categories = ["dev-tools", "interpreters", "languages"]
+
+[source]
+type = "tarball"
+url = "https://www.lua.org/ftp/lua-5.4.6.tar.gz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "make"
+configure_flags = []
+build_flags = ["linux-readline", "-j$(nproc)"]
+env = { "MYCFLAGS" = "-fPIC" }
+pre_build = []
+post_build = []
+pre_install = [
+    "make INSTALL_TOP=/usr install"
+]
+post_install = []
+
+[dependencies]
+runtime = ["readline", "ncurses"]
+build = ["readline", "ncurses"]
+
+[install]
+files = [
+    { src = "src/lua", dest = "/usr/bin/lua", mode = 755 },
+    { src = "src/luac", dest = "/usr/bin/luac", mode = 755 }
+]
+symlinks = [
+    { target = "/usr/bin/lua", link = "/usr/bin/lua5.4" },
+    { target = "/usr/bin/luac", link = "/usr/bin/luac5.4" }
+]
+directories = [
+    "/usr/include/lua5.4",
+    "/usr/lib/lua/5.4",
+    "/usr/share/lua/5.4"
+]

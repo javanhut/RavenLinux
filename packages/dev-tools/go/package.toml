@@ -1,0 +1,45 @@
+[package]
+name = "go"
+version = "1.22.0"
+description = "The Go programming language"
+license = "BSD-3-Clause"
+homepage = "https://go.dev"
+repository = "https://github.com/golang/go"
+maintainers = ["RavenLinux Team"]
+categories = ["dev-tools", "compilers", "languages"]
+
+[source]
+type = "tarball"
+url = "https://go.dev/dl/go1.22.0.src.tar.gz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "custom"
+configure_flags = []
+build_flags = []
+env = { "GOROOT_BOOTSTRAP" = "/usr/lib/go", "GOOS" = "linux", "GOARCH" = "amd64" }
+pre_build = [
+    "cd src && ./make.bash"
+]
+post_build = []
+pre_install = []
+post_install = [
+    "mkdir -p /etc/profile.d",
+    "echo 'export GOPATH=$HOME/go' > /etc/profile.d/go.sh",
+    "echo 'export PATH=$PATH:/usr/lib/go/bin:$GOPATH/bin' >> /etc/profile.d/go.sh"
+]
+
+[dependencies]
+runtime = ["glibc"]
+build = ["go-bootstrap", "bash"]
+
+[install]
+directories = ["/usr/lib/go", "/usr/lib/go/bin"]
+files = [
+    { src = "bin/go", dest = "/usr/lib/go/bin/go", mode = 755 },
+    { src = "bin/gofmt", dest = "/usr/lib/go/bin/gofmt", mode = 755 }
+]
+symlinks = [
+    { target = "/usr/lib/go/bin/go", link = "/usr/bin/go" },
+    { target = "/usr/lib/go/bin/gofmt", link = "/usr/bin/gofmt" }
+]

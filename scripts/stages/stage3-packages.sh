@@ -384,6 +384,542 @@ build_bootloader() {
 }
 
 # =============================================================================
+# Build Development Tools (GCC, Go, Python, Rust, etc.)
+# =============================================================================
+build_dev_tools() {
+    log_step "Building development tools..."
+
+    local sources_dir="${BUILD_DIR}/sources"
+    local dev_build_dir="${BUILD_DIR}/dev-tools"
+    mkdir -p "${sources_dir}" "${dev_build_dir}"
+
+    # Check for pre-built binaries first
+    local prebuilt_dir="${PROJECT_ROOT}/prebuilt"
+    if [[ -d "${prebuilt_dir}" ]]; then
+        log_info "Checking for prebuilt binaries..."
+        for tool in gcc g++ go python vim nvim ssh; do
+            if [[ -f "${prebuilt_dir}/bin/${tool}" ]]; then
+                log_info "Using prebuilt ${tool}"
+                cp "${prebuilt_dir}/bin/${tool}" "${SYSROOT_DIR}/usr/bin/"
+            fi
+        done
+    fi
+
+    # Build GCC if not prebuilt
+    if [[ ! -f "${SYSROOT_DIR}/usr/bin/gcc" ]]; then
+        build_gcc
+    fi
+
+    # Build Go if not prebuilt
+    if [[ ! -f "${SYSROOT_DIR}/usr/bin/go" ]]; then
+        build_golang
+    fi
+
+    # Build Python if not prebuilt
+    if [[ ! -f "${SYSROOT_DIR}/usr/bin/python3" ]]; then
+        build_python
+    fi
+
+    # Rust is typically installed via rustup during first boot
+    # but we include the package definition for rvn
+
+    mkdir -p "${SYSROOT_DIR}/etc/raven"
+    log_success "Development tools built"
+}
+
+# Build GCC from source
+build_gcc() {
+    log_info "Building GCC toolchain..."
+
+    local gcc_ver="13.2.0"
+    local binutils_ver="2.42"
+    local gmp_ver="6.3.0"
+    local mpfr_ver="4.2.1"
+    local mpc_ver="1.3.1"
+
+    local build_dir="${BUILD_DIR}/dev-tools/gcc-build"
+    mkdir -p "${build_dir}"
+
+    # Check if host has GCC (needed to bootstrap)
+    if ! command -v gcc &>/dev/null; then
+        log_warn "Host GCC not found - cannot build GCC from source"
+        log_info "GCC will be available via rvn install gcc"
+        return 0
+    fi
+
+    # For a full bootstrap, we'd download and build:
+    # 1. binutils
+    # 2. gmp, mpfr, mpc (GCC dependencies)
+    # 3. GCC itself
+    # This is a lengthy process - for now, we check for system GCC
+
+    # If system GCC exists, copy it to sysroot
+    local host_gcc=$(command -v gcc)
+    local host_gpp=$(command -v g++)
+
+    if [[ -x "${host_gcc}" ]]; then
+        # Create wrapper scripts that use host toolchain
+        mkdir -p "${SYSROOT_DIR}/usr/bin"
+
+        cat > "${SYSROOT_DIR}/usr/bin/gcc" << 'GCCWRAP'
+#!/bin/bash
+# GCC wrapper for RavenLinux
+exec /usr/bin/gcc "$@"
+GCCWRAP
+        chmod 755 "${SYSROOT_DIR}/usr/bin/gcc"
+
+        cat > "${SYSROOT_DIR}/usr/bin/g++" << 'GPPWRAP'
+#!/bin/bash
+# G++ wrapper for RavenLinux
+exec /usr/bin/g++ "$@"
+GPPWRAP
+        chmod 755 "${SYSROOT_DIR}/usr/bin/g++"
+
+        # Symlinks
+        ln -sf gcc "${SYSROOT_DIR}/usr/bin/cc"
+        ln -sf g++ "${SYSROOT_DIR}/usr/bin/c++"
+
+        log_success "GCC wrapper installed"
+    fi
+}
+
+# Build Go from source or download binary
+build_golang() {
+    log_info "Installing Go..."
+
+    local go_ver="1.22.0"
+    local arch="amd64"
+    [[ "$(uname -m)" == "aarch64" ]] && arch="arm64"
+
+    local go_tarball="go${go_ver}.linux-${arch}.tar.gz"
+    local go_url="https://go.dev/dl/${go_tarball}"
+    local cache_dir="${BUILD_DIR}/sources"
+
+    mkdir -p "${cache_dir}"
+
+    # Download if not cached
+    if [[ ! -f "${cache_dir}/${go_tarball}" ]]; then
+        log_info "Downloading Go ${go_ver}..."
+        if curl -fsSL -o "${cache_dir}/${go_tarball}" "${go_url}"; then
+            log_info "Downloaded Go"
+        else
+            log_warn "Failed to download Go - will be available via rvn install go"
+            return 0
+        fi
+    fi
+
+    # Extract to sysroot
+    log_info "Installing Go to sysroot..."
+    mkdir -p "${SYSROOT_DIR}/usr/lib"
+    tar -xzf "${cache_dir}/${go_tarball}" -C "${SYSROOT_DIR}/usr/lib"
+
+    # Create symlinks
+    mkdir -p "${SYSROOT_DIR}/usr/bin"
+    ln -sf ../lib/go/bin/go "${SYSROOT_DIR}/usr/bin/go"
+    ln -sf ../lib/go/bin/gofmt "${SYSROOT_DIR}/usr/bin/gofmt"
+
+    # Create profile script
+    mkdir -p "${SYSROOT_DIR}/etc/profile.d"
+    cat > "${SYSROOT_DIR}/etc/profile.d/go.sh" << 'GOPROFILE'
+# Go environment
+export GOROOT=/usr/lib/go
+export GOPATH=$HOME/go
+export PATH=$PATH:$GOROOT/bin:$GOPATH/bin
+GOPROFILE
+
+    log_success "Go ${go_ver} installed"
+}
+
+# Build Python from source or use system Python
+build_python() {
+    log_info "Installing Python..."
+
+    local py_ver="3.12.1"
+
+    # Check for host Python
+    if command -v python3 &>/dev/null; then
+        local host_py=$(command -v python3)
+        local host_ver=$(python3 --version 2>&1 | cut -d' ' -f2)
+
+        log_info "Using host Python ${host_ver}"
+
+        # Create wrapper
+        mkdir -p "${SYSROOT_DIR}/usr/bin"
+        cat > "${SYSROOT_DIR}/usr/bin/python3" << 'PYWRAP'
+#!/bin/bash
+# Python wrapper for RavenLinux
+exec /usr/bin/python3 "$@"
+PYWRAP
+        chmod 755 "${SYSROOT_DIR}/usr/bin/python3"
+        ln -sf python3 "${SYSROOT_DIR}/usr/bin/python"
+
+        # pip wrapper
+        if command -v pip3 &>/dev/null; then
+            cat > "${SYSROOT_DIR}/usr/bin/pip3" << 'PIPWRAP'
+#!/bin/bash
+exec /usr/bin/pip3 "$@"
+PIPWRAP
+            chmod 755 "${SYSROOT_DIR}/usr/bin/pip3"
+            ln -sf pip3 "${SYSROOT_DIR}/usr/bin/pip"
+        fi
+
+        log_success "Python wrapper installed"
+    else
+        log_warn "Host Python not found - will be available via rvn install python"
+    fi
+}
+
+# =============================================================================
+# Build Editors (Vim, Neovim)
+# =============================================================================
+build_editors() {
+    log_step "Building editors..."
+
+    mkdir -p "${SYSROOT_DIR}/etc/xdg/nvim"
+    mkdir -p "${SYSROOT_DIR}/etc/vim"
+
+    # Build Vim if not present
+    if [[ ! -f "${SYSROOT_DIR}/usr/bin/vim" ]]; then
+        build_vim
+    fi
+
+    # Build Neovim if not present
+    if [[ ! -f "${SYSROOT_DIR}/usr/bin/nvim" ]]; then
+        build_neovim
+    fi
+
+    # Copy Neovim config if exists
+    local nvim_config="${PROJECT_ROOT}/configs/nvim/init.lua"
+    if [[ -f "${nvim_config}" ]]; then
+        cp "${nvim_config}" "${SYSROOT_DIR}/etc/xdg/nvim/init.lua"
+        log_info "Installed Neovim default config"
+    fi
+
+    # Create basic vimrc
+    cat > "${SYSROOT_DIR}/etc/vim/vimrc" << 'EOF'
+" RavenLinux default vimrc
+set nocompatible
+syntax on
+filetype plugin indent on
+set number
+set relativenumber
+set expandtab
+set tabstop=4
+set shiftwidth=4
+set smartindent
+set autoindent
+set hlsearch
+set incsearch
+set ignorecase
+set smartcase
+set cursorline
+set mouse=a
+set clipboard=unnamedplus
+set wildmenu
+set showcmd
+set laststatus=2
+set ruler
+
+" Key mappings
+let mapleader = " "
+nnoremap <leader>w :w<CR>
+nnoremap <leader>q :q<CR>
+nnoremap <C-h> <C-w>h
+nnoremap <C-j> <C-w>j
+nnoremap <C-k> <C-w>k
+nnoremap <C-l> <C-w>l
+EOF
+
+    log_info "Installed Vim default config"
+    log_success "Editors built and configured"
+}
+
+# Build Vim from source or use AppImage
+build_vim() {
+    log_info "Building Vim..."
+
+    local vim_ver="9.1.0"
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Try to download Vim AppImage for quick setup
+    local vim_appimage="vim-${vim_ver}.appimage"
+    local vim_url="https://github.com/vim/vim-appimage/releases/download/v${vim_ver}/GVim-v${vim_ver}.glibc2.29-x86_64.AppImage"
+
+    # Check for system vim first
+    if command -v vim &>/dev/null; then
+        log_info "Using host Vim"
+        mkdir -p "${SYSROOT_DIR}/usr/bin"
+
+        cat > "${SYSROOT_DIR}/usr/bin/vim" << 'VIMWRAP'
+#!/bin/bash
+exec /usr/bin/vim "$@"
+VIMWRAP
+        chmod 755 "${SYSROOT_DIR}/usr/bin/vim"
+        ln -sf vim "${SYSROOT_DIR}/usr/bin/vi"
+
+        log_success "Vim wrapper installed"
+        return 0
+    fi
+
+    # Try to build from source
+    local vim_src="${cache_dir}/vim-${vim_ver}"
+    if [[ ! -d "${vim_src}" ]]; then
+        log_info "Downloading Vim source..."
+        if git clone --depth=1 --branch v${vim_ver} https://github.com/vim/vim.git "${vim_src}" 2>/dev/null; then
+            log_info "Downloaded Vim source"
+        else
+            log_warn "Failed to download Vim source"
+            return 0
+        fi
+    fi
+
+    cd "${vim_src}"
+    if ./configure --prefix=/usr --with-features=huge --enable-multibyte --disable-gui --without-x && \
+       make -j$(nproc) && \
+       make DESTDIR="${SYSROOT_DIR}" install; then
+        log_success "Vim ${vim_ver} built and installed"
+    else
+        log_warn "Vim build failed - will be available via rvn install vim"
+    fi
+    cd "${PROJECT_ROOT}"
+}
+
+# Build Neovim from source or download release
+build_neovim() {
+    log_info "Building Neovim..."
+
+    local nvim_ver="0.9.5"
+    local arch="linux64"
+    [[ "$(uname -m)" == "aarch64" ]] && arch="linux-arm64"
+
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Download prebuilt release (much faster than building)
+    local nvim_tarball="nvim-${arch}.tar.gz"
+    local nvim_url="https://github.com/neovim/neovim/releases/download/v${nvim_ver}/${nvim_tarball}"
+
+    if [[ ! -f "${cache_dir}/${nvim_tarball}" ]]; then
+        log_info "Downloading Neovim ${nvim_ver}..."
+        if curl -fsSL -o "${cache_dir}/${nvim_tarball}" "${nvim_url}"; then
+            log_info "Downloaded Neovim"
+        else
+            # Try alternative URL format
+            nvim_tarball="nvim-linux64.tar.gz"
+            nvim_url="https://github.com/neovim/neovim/releases/download/stable/${nvim_tarball}"
+            if curl -fsSL -o "${cache_dir}/${nvim_tarball}" "${nvim_url}"; then
+                log_info "Downloaded Neovim (stable)"
+            else
+                log_warn "Failed to download Neovim"
+                return 0
+            fi
+        fi
+    fi
+
+    # Extract to sysroot
+    log_info "Installing Neovim to sysroot..."
+    local nvim_extract="${cache_dir}/nvim-extract"
+    mkdir -p "${nvim_extract}"
+    tar -xzf "${cache_dir}/${nvim_tarball}" -C "${nvim_extract}" --strip-components=1
+
+    # Copy to sysroot
+    mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/usr/share"
+    cp "${nvim_extract}/bin/nvim" "${SYSROOT_DIR}/usr/bin/"
+    chmod 755 "${SYSROOT_DIR}/usr/bin/nvim"
+
+    if [[ -d "${nvim_extract}/share/nvim" ]]; then
+        cp -r "${nvim_extract}/share/nvim" "${SYSROOT_DIR}/usr/share/"
+    fi
+
+    # Create neovim symlink
+    ln -sf nvim "${SYSROOT_DIR}/usr/bin/neovim"
+
+    log_success "Neovim ${nvim_ver} installed"
+}
+
+# =============================================================================
+# Build SSH Support (OpenSSH)
+# =============================================================================
+build_ssh() {
+    log_step "Building SSH support..."
+
+    mkdir -p "${SYSROOT_DIR}/etc/ssh"
+    mkdir -p "${SYSROOT_DIR}/var/lib/sshd"
+    chmod 700 "${SYSROOT_DIR}/var/lib/sshd"
+
+    # Build OpenSSH if not present
+    if [[ ! -f "${SYSROOT_DIR}/usr/bin/ssh" ]]; then
+        build_openssh
+    fi
+
+    # Copy SSH configs
+    local ssh_config_dir="${PROJECT_ROOT}/configs/ssh"
+    if [[ -d "${ssh_config_dir}" ]]; then
+        if [[ -f "${ssh_config_dir}/sshd_config" ]]; then
+            cp "${ssh_config_dir}/sshd_config" "${SYSROOT_DIR}/etc/ssh/"
+            log_info "Installed sshd_config"
+        fi
+        if [[ -f "${ssh_config_dir}/ssh_config" ]]; then
+            cp "${ssh_config_dir}/ssh_config" "${SYSROOT_DIR}/etc/ssh/"
+            log_info "Installed ssh_config"
+        fi
+    fi
+
+    log_success "SSH support built and configured"
+}
+
+# Build OpenSSH from source or use system binaries
+build_openssh() {
+    log_info "Building OpenSSH..."
+
+    local ssh_ver="9.6p1"
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Check for system SSH first
+    if command -v ssh &>/dev/null && command -v sshd &>/dev/null; then
+        log_info "Using host OpenSSH"
+        mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/usr/lib/ssh"
+
+        # Copy SSH binaries
+        for bin in ssh scp sftp ssh-keygen ssh-keyscan ssh-add ssh-agent; do
+            if [[ -x "/usr/bin/${bin}" ]]; then
+                cp "/usr/bin/${bin}" "${SYSROOT_DIR}/usr/bin/"
+                log_info "  Copied ${bin}"
+            fi
+        done
+
+        # Copy sshd
+        if [[ -x "/usr/sbin/sshd" ]]; then
+            cp "/usr/sbin/sshd" "${SYSROOT_DIR}/usr/bin/"
+        elif [[ -x "/usr/bin/sshd" ]]; then
+            cp "/usr/bin/sshd" "${SYSROOT_DIR}/usr/bin/"
+        fi
+
+        # Copy helper programs
+        for helper in sftp-server ssh-keysign; do
+            for path in /usr/lib/ssh /usr/libexec/openssh /usr/lib/openssh; do
+                if [[ -x "${path}/${helper}" ]]; then
+                    mkdir -p "${SYSROOT_DIR}/usr/lib/ssh"
+                    cp "${path}/${helper}" "${SYSROOT_DIR}/usr/lib/ssh/"
+                    break
+                fi
+            done
+        done
+
+        log_success "OpenSSH binaries installed"
+        return 0
+    fi
+
+    # Download and build from source
+    local ssh_tarball="openssh-${ssh_ver}.tar.gz"
+    local ssh_url="https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/${ssh_tarball}"
+
+    if [[ ! -f "${cache_dir}/${ssh_tarball}" ]]; then
+        log_info "Downloading OpenSSH ${ssh_ver}..."
+        if curl -fsSL -o "${cache_dir}/${ssh_tarball}" "${ssh_url}"; then
+            log_info "Downloaded OpenSSH"
+        else
+            log_warn "Failed to download OpenSSH"
+            return 0
+        fi
+    fi
+
+    # Extract and build
+    local ssh_src="${cache_dir}/openssh-${ssh_ver}"
+    if [[ ! -d "${ssh_src}" ]]; then
+        tar -xzf "${cache_dir}/${ssh_tarball}" -C "${cache_dir}"
+    fi
+
+    cd "${ssh_src}"
+    if ./configure --prefix=/usr --sysconfdir=/etc/ssh --with-privsep-path=/var/lib/sshd && \
+       make -j$(nproc) && \
+       make DESTDIR="${SYSROOT_DIR}" install; then
+        log_success "OpenSSH ${ssh_ver} built and installed"
+    else
+        log_warn "OpenSSH build failed - will be available via rvn install openssh"
+    fi
+    cd "${PROJECT_ROOT}"
+}
+
+# =============================================================================
+# Install Shell Tools
+# =============================================================================
+install_shell_tools() {
+    log_step "Installing shell tools..."
+
+    local shell_tools_dir="${PROJECT_ROOT}/tools/raven-shell-tools"
+
+    if [[ -d "${shell_tools_dir}" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/bin"
+
+        if [[ -f "${shell_tools_dir}/switch-shell" ]]; then
+            cp "${shell_tools_dir}/switch-shell" "${SYSROOT_DIR}/usr/bin/"
+            chmod 755 "${SYSROOT_DIR}/usr/bin/switch-shell"
+            log_info "Installed switch-shell"
+        fi
+
+        if [[ -f "${shell_tools_dir}/shell-reload" ]]; then
+            cp "${shell_tools_dir}/shell-reload" "${SYSROOT_DIR}/usr/bin/"
+            chmod 755 "${SYSROOT_DIR}/usr/bin/shell-reload"
+            log_info "Installed shell-reload"
+        fi
+    fi
+
+    # Copy shell configurations
+    local configs_dir="${PROJECT_ROOT}/configs"
+
+    # zsh
+    if [[ -d "${configs_dir}/zsh" ]]; then
+        mkdir -p "${SYSROOT_DIR}/etc/zsh"
+        cp "${configs_dir}/zsh/"* "${SYSROOT_DIR}/etc/zsh/" 2>/dev/null || true
+        log_info "Installed zsh configs"
+    fi
+
+    # bash
+    if [[ -d "${configs_dir}/bash" ]]; then
+        mkdir -p "${SYSROOT_DIR}/etc/bash"
+        cp "${configs_dir}/bash/"* "${SYSROOT_DIR}/etc/bash/" 2>/dev/null || true
+        # Also copy to /etc for compatibility
+        cp "${configs_dir}/bash/bashrc" "${SYSROOT_DIR}/etc/bashrc" 2>/dev/null || true
+        log_info "Installed bash configs"
+    fi
+
+    # fish
+    if [[ -d "${configs_dir}/fish" ]]; then
+        mkdir -p "${SYSROOT_DIR}/etc/fish"
+        cp "${configs_dir}/fish/"* "${SYSROOT_DIR}/etc/fish/" 2>/dev/null || true
+        log_info "Installed fish configs"
+    fi
+
+    # shells.conf
+    if [[ -f "${configs_dir}/shells.conf" ]]; then
+        # Extract just the shell paths (ignore comments)
+        grep "^/" "${configs_dir}/shells.conf" > "${SYSROOT_DIR}/etc/shells"
+        log_info "Installed /etc/shells"
+    fi
+
+    log_success "Shell tools installed"
+}
+
+# =============================================================================
+# Install File Navigation Tools (ranger, fzf)
+# =============================================================================
+install_file_tools() {
+    log_step "Installing file navigation tools..."
+
+    # Add to default packages list
+    cat > "${SYSROOT_DIR}/etc/raven/file-tools.list" << EOF
+# RavenLinux File Navigation Tools
+ranger
+fzf
+EOF
+
+    log_success "File navigation tools configured"
+}
+
+# =============================================================================
 # Summary
 # =============================================================================
 print_summary() {
@@ -393,14 +929,25 @@ print_summary() {
     echo "==========================================${NC}"
     echo ""
 
-    local packages=(vem carrion ivaldi rvn raven-compositor raven-installer raven-usb)
+    local packages=(vem carrion ivaldi rvn raven-compositor raven-installer raven-usb wifi)
     for pkg in "${packages[@]}"; do
-        if [[ -f "${SYSROOT_DIR}/bin/${pkg}" ]]; then
+        if [[ -f "${SYSROOT_DIR}/bin/${pkg}" ]] || [[ -f "${SYSROOT_DIR}/usr/bin/${pkg}" ]]; then
+            local bin_path="${SYSROOT_DIR}/bin/${pkg}"
+            [[ ! -f "${bin_path}" ]] && bin_path="${SYSROOT_DIR}/usr/bin/${pkg}"
             local size
-            size=$(du -h "${SYSROOT_DIR}/bin/${pkg}" | cut -f1)
+            size=$(du -h "${bin_path}" | cut -f1)
             echo -e "  ${GREEN}[OK]${NC} ${pkg} (${size})"
         else
             echo -e "  ${YELLOW}[--]${NC} ${pkg} (not built)"
+        fi
+    done
+
+    # Shell tools
+    for tool in switch-shell shell-reload; do
+        if [[ -f "${SYSROOT_DIR}/usr/bin/${tool}" ]]; then
+            echo -e "  ${GREEN}[OK]${NC} ${tool}"
+        else
+            echo -e "  ${YELLOW}[--]${NC} ${tool}"
         fi
     done
 
@@ -412,6 +959,12 @@ print_summary() {
         echo -e "  ${YELLOW}[--]${NC} raven-boot.efi (not built)"
     fi
 
+    echo ""
+    echo -e "${CYAN}Configuration Files:${NC}"
+    [[ -f "${SYSROOT_DIR}/etc/ssh/sshd_config" ]] && echo -e "  ${GREEN}[OK]${NC} SSH config"
+    [[ -f "${SYSROOT_DIR}/etc/xdg/nvim/init.lua" ]] && echo -e "  ${GREEN}[OK]${NC} Neovim config"
+    [[ -f "${SYSROOT_DIR}/etc/vim/vimrc" ]] && echo -e "  ${GREEN}[OK]${NC} Vim config"
+    [[ -f "${SYSROOT_DIR}/etc/shells" ]] && echo -e "  ${GREEN}[OK]${NC} /etc/shells"
     echo ""
 }
 
@@ -427,6 +980,7 @@ main() {
 
     mkdir -p "${LOGS_DIR}" "${PACKAGES_DIR}/bin" "${PACKAGES_DIR}/boot"
 
+    # Build custom RavenLinux tools
     build_go_packages
     build_rvn
     build_compositor
@@ -434,6 +988,13 @@ main() {
     build_usb_creator
     build_wifi_tools
     build_bootloader
+
+    # Build and install development tools, editors, SSH
+    build_dev_tools
+    build_editors
+    build_ssh
+    install_shell_tools
+    install_file_tools
 
     print_summary
 

@@ -1,0 +1,43 @@
+[package]
+name = "ranger"
+version = "1.9.3"
+description = "Console file manager with vi key bindings"
+license = "GPL-3.0"
+homepage = "https://ranger.github.io"
+repository = "https://github.com/ranger/ranger"
+maintainers = ["RavenLinux Team"]
+categories = ["dev-tools", "file-managers", "utilities"]
+
+[source]
+type = "tarball"
+url = "https://github.com/ranger/ranger/archive/refs/tags/v1.9.3.tar.gz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "python"
+configure_flags = []
+build_flags = []
+env = {}
+pre_build = []
+post_build = []
+pre_install = [
+    "python setup.py install --prefix=/usr --root=$DESTDIR"
+]
+post_install = [
+    "mkdir -p /etc/ranger",
+    "ranger --copy-config=all --confdir=/etc/ranger || true"
+]
+
+[dependencies]
+runtime = ["python"]
+build = ["python"]
+
+[install]
+files = [
+    { src = "ranger.py", dest = "/usr/bin/ranger", mode = 755 }
+]
+symlinks = []
+directories = [
+    "/usr/share/ranger",
+    "/etc/ranger"
+]

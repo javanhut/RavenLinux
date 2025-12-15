@@ -1,0 +1,76 @@
+[package]
+name = "gcc"
+version = "13.2.0"
+description = "GNU Compiler Collection (C, C++, Fortran compilers)"
+license = "GPL-3.0"
+homepage = "https://gcc.gnu.org"
+repository = "https://gcc.gnu.org/git/gcc.git"
+maintainers = ["RavenLinux Team"]
+categories = ["dev-tools", "compilers", "toolchain"]
+
+[source]
+type = "tarball"
+url = "https://ftp.gnu.org/gnu/gcc/gcc-13.2.0/gcc-13.2.0.tar.xz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "autotools"
+configure_flags = [
+    "--prefix=/usr",
+    "--libdir=/usr/lib",
+    "--libexecdir=/usr/lib",
+    "--enable-languages=c,c++",
+    "--enable-shared",
+    "--enable-threads=posix",
+    "--enable-__cxa_atexit",
+    "--enable-clocale=gnu",
+    "--enable-gnu-indirect-function",
+    "--enable-plugin",
+    "--enable-lto",
+    "--enable-default-pie",
+    "--enable-default-ssp",
+    "--disable-multilib",
+    "--disable-bootstrap",
+    "--disable-werror",
+    "--with-system-zlib",
+    "--with-isl",
+    "--with-linker-hash-style=gnu"
+]
+build_flags = ["-j$(nproc)"]
+env = {}
+pre_build = [
+    "mkdir -p build && cd build",
+    "../configure $CONFIGURE_FLAGS"
+]
+post_build = []
+pre_install = []
+post_install = [
+    "ln -sf gcc /usr/bin/cc",
+    "ln -sf g++ /usr/bin/c++"
+]
+
+[dependencies]
+runtime = ["gmp", "mpfr", "mpc", "isl", "zlib", "binutils"]
+build = ["gmp", "mpfr", "mpc", "isl", "zlib", "binutils", "flex", "bison"]
+
+[install]
+files = [
+    { src = "build/gcc/xgcc", dest = "/usr/bin/gcc", mode = 755 },
+    { src = "build/gcc/xg++", dest = "/usr/bin/g++", mode = 755 },
+    { src = "build/gcc/cpp", dest = "/usr/bin/cpp", mode = 755 },
+    { src = "build/gcc/gcov", dest = "/usr/bin/gcov", mode = 755 },
+    { src = "build/gcc/gcov-tool", dest = "/usr/bin/gcov-tool", mode = 755 },
+    { src = "build/gcc/gcov-dump", dest = "/usr/bin/gcov-dump", mode = 755 }
+]
+symlinks = [
+    { target = "/usr/bin/gcc", link = "/usr/bin/cc" },
+    { target = "/usr/bin/g++", link = "/usr/bin/c++" },
+    { target = "/usr/bin/gcc", link = "/bin/gcc" },
+    { target = "/usr/bin/g++", link = "/bin/g++" },
+    { target = "/usr/bin/cpp", link = "/bin/cpp" }
+]
+directories = [
+    "/usr/lib/gcc",
+    "/usr/include/c++",
+    "/usr/libexec/gcc"
+]

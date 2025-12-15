@@ -1,0 +1,48 @@
+[package]
+name = "fish"
+version = "3.7.0"
+description = "Friendly interactive shell"
+license = "GPL-2.0"
+homepage = "https://fishshell.com"
+repository = "https://github.com/fish-shell/fish-shell"
+maintainers = ["RavenLinux Team"]
+categories = ["base", "shell"]
+
+[source]
+type = "tarball"
+url = "https://github.com/fish-shell/fish-shell/releases/download/3.7.0/fish-3.7.0.tar.xz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "cmake"
+configure_flags = [
+    "-DCMAKE_INSTALL_PREFIX=/usr",
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DBUILD_DOCS=OFF"
+]
+build_flags = ["-j$(nproc)"]
+env = {}
+pre_build = []
+post_build = []
+pre_install = []
+post_install = []
+
+[dependencies]
+runtime = ["ncurses", "pcre2", "gettext"]
+build = ["ncurses", "pcre2", "gettext", "cmake"]
+
+[install]
+files = [
+    { src = "fish", dest = "/usr/bin/fish", mode = 755 },
+    { src = "fish_indent", dest = "/usr/bin/fish_indent", mode = 755 },
+    { src = "fish_key_reader", dest = "/usr/bin/fish_key_reader", mode = 755 }
+]
+symlinks = [
+    { target = "/usr/bin/fish", link = "/bin/fish" }
+]
+directories = [
+    "/usr/share/fish",
+    "/usr/share/fish/completions",
+    "/usr/share/fish/functions",
+    "/etc/fish"
+]

@@ -1,0 +1,66 @@
+[package]
+name = "neovim"
+version = "0.9.5"
+description = "Vim-fork focused on extensibility and usability"
+license = "Apache-2.0"
+homepage = "https://neovim.io"
+repository = "https://github.com/neovim/neovim"
+maintainers = ["RavenLinux Team"]
+categories = ["dev-tools", "editors"]
+
+[source]
+type = "tarball"
+url = "https://github.com/neovim/neovim/archive/refs/tags/v0.9.5.tar.gz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "cmake"
+configure_flags = [
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DCMAKE_INSTALL_PREFIX=/usr",
+    "-DUSE_BUNDLED=ON",
+    "-DUSE_BUNDLED_LUAJIT=OFF",
+    "-DUSE_BUNDLED_LUV=ON",
+    "-DUSE_BUNDLED_LIBUV=ON",
+    "-DUSE_BUNDLED_MSGPACK=ON",
+    "-DUSE_BUNDLED_LPEG=ON",
+    "-DUSE_BUNDLED_TREESITTER=ON"
+]
+build_flags = ["-j$(nproc)"]
+env = {}
+pre_build = [
+    "mkdir -p build && cd build",
+    "cmake .. $CMAKE_FLAGS"
+]
+post_build = []
+pre_install = []
+post_install = [
+    "mkdir -p /etc/xdg/nvim",
+    "echo '\" RavenLinux Neovim defaults' > /etc/xdg/nvim/sysinit.vim",
+    "echo 'set number' >> /etc/xdg/nvim/sysinit.vim",
+    "echo 'set relativenumber' >> /etc/xdg/nvim/sysinit.vim",
+    "echo 'set expandtab' >> /etc/xdg/nvim/sysinit.vim",
+    "echo 'set tabstop=4' >> /etc/xdg/nvim/sysinit.vim",
+    "echo 'set shiftwidth=4' >> /etc/xdg/nvim/sysinit.vim",
+    "echo 'set mouse=a' >> /etc/xdg/nvim/sysinit.vim",
+    "echo 'set termguicolors' >> /etc/xdg/nvim/sysinit.vim",
+    "echo 'syntax on' >> /etc/xdg/nvim/sysinit.vim",
+    "echo 'filetype plugin indent on' >> /etc/xdg/nvim/sysinit.vim"
+]
+
+[dependencies]
+runtime = ["luajit", "msgpack-c", "unibilium", "libtermkey", "libvterm", "tree-sitter"]
+build = ["cmake", "luajit", "gettext", "pkg-config"]
+
+[install]
+files = [
+    { src = "build/bin/nvim", dest = "/usr/bin/nvim", mode = 755 }
+]
+symlinks = [
+    { target = "/usr/bin/nvim", link = "/usr/bin/neovim" }
+]
+directories = [
+    "/usr/share/nvim",
+    "/usr/share/nvim/runtime",
+    "/etc/xdg/nvim"
+]

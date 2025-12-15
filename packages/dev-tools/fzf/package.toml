@@ -1,0 +1,44 @@
+[package]
+name = "fzf"
+version = "0.46.0"
+description = "Command-line fuzzy finder"
+license = "MIT"
+homepage = "https://github.com/junegunn/fzf"
+repository = "https://github.com/junegunn/fzf"
+maintainers = ["RavenLinux Team"]
+categories = ["dev-tools", "utilities", "search"]
+
+[source]
+type = "tarball"
+url = "https://github.com/junegunn/fzf/archive/refs/tags/0.46.0.tar.gz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "go"
+configure_flags = []
+build_flags = []
+env = { "CGO_ENABLED" = "0" }
+pre_build = []
+post_build = []
+pre_install = []
+post_install = [
+    "mkdir -p /usr/share/fzf",
+    "cp shell/completion.bash /usr/share/fzf/",
+    "cp shell/completion.zsh /usr/share/fzf/",
+    "cp shell/key-bindings.bash /usr/share/fzf/",
+    "cp shell/key-bindings.zsh /usr/share/fzf/",
+    "cp shell/key-bindings.fish /usr/share/fzf/"
+]
+
+[dependencies]
+runtime = []
+build = ["go"]
+
+[install]
+files = [
+    { src = "target/fzf", dest = "/usr/bin/fzf", mode = 755 }
+]
+symlinks = []
+directories = [
+    "/usr/share/fzf"
+]

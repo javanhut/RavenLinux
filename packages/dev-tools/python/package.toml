@@ -1,0 +1,51 @@
+[package]
+name = "python"
+version = "3.12.1"
+description = "Python programming language interpreter"
+license = "PSF-2.0"
+homepage = "https://www.python.org"
+repository = "https://github.com/python/cpython"
+maintainers = ["RavenLinux Team"]
+categories = ["dev-tools", "interpreters", "languages"]
+
+[source]
+type = "tarball"
+url = "https://www.python.org/ftp/python/3.12.1/Python-3.12.1.tar.xz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "autotools"
+configure_flags = [
+    "--prefix=/usr",
+    "--enable-shared",
+    "--enable-optimizations",
+    "--with-lto",
+    "--with-system-expat",
+    "--with-system-ffi",
+    "--enable-loadable-sqlite-extensions",
+    "--without-ensurepip"
+]
+build_flags = ["-j$(nproc)"]
+env = {}
+pre_build = []
+post_build = []
+pre_install = []
+post_install = [
+    "ln -sf /usr/bin/python3 /usr/bin/python",
+    "curl -sS https://bootstrap.pypa.io/get-pip.py | python3"
+]
+
+[dependencies]
+runtime = ["openssl", "zlib", "libffi", "expat", "sqlite", "ncurses", "readline", "bzip2", "xz"]
+build = ["openssl", "zlib", "libffi", "expat", "sqlite", "ncurses", "readline", "bzip2", "xz"]
+
+[install]
+directories = ["/usr/lib/python3.12"]
+files = [
+    { src = "python", dest = "/usr/bin/python3", mode = 755 }
+]
+symlinks = [
+    { target = "/usr/bin/python3", link = "/usr/bin/python" },
+    { target = "/usr/bin/python3", link = "/bin/python3" },
+    { target = "/usr/bin/python3", link = "/bin/python" }
+]

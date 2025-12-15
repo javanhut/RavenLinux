@@ -1,0 +1,47 @@
+[package]
+name = "vim"
+version = "9.1.0"
+description = "Vi IMproved - highly configurable text editor"
+license = "Vim"
+homepage = "https://www.vim.org"
+repository = "https://github.com/vim/vim"
+maintainers = ["RavenLinux Team"]
+categories = ["dev-tools", "editors"]
+
+[source]
+type = "git"
+url = "https://github.com/vim/vim"
+ref = "v9.1.0"
+
+[build]
+system = "autotools"
+configure_flags = [
+    "--prefix=/usr",
+    "--with-features=huge",
+    "--enable-multibyte",
+    "--enable-python3interp=yes",
+    "--with-python3-command=python3",
+    "--enable-cscope",
+    "--disable-gui",
+    "--without-x"
+]
+build_flags = ["-j$(nproc)"]
+env = {}
+pre_build = []
+post_build = []
+pre_install = []
+post_install = []
+
+[dependencies]
+runtime = ["ncurses", "python"]
+build = ["ncurses", "python"]
+
+[install]
+files = [
+    { src = "src/vim", dest = "/usr/bin/vim", mode = 755 }
+]
+symlinks = [
+    { target = "/usr/bin/vim", link = "/usr/bin/vi" },
+    { target = "/usr/bin/vim", link = "/bin/vi" },
+    { target = "/usr/bin/vim", link = "/bin/vim" }
+]

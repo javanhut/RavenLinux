@@ -1,0 +1,143 @@
+#!/bin/bash
+# shell-reload - Reload the current shell's configuration
+# Usage: shell-reload
+# This reloads ~/.zshrc, ~/.bashrc, or ~/.config/fish/config.fish
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Detect current shell
+CURRENT_SHELL=$(basename "$SHELL")
+
+# Also check $0 in case we're in a different shell than login shell
+RUNNING_SHELL=$(basename "$0" 2>/dev/null || echo "$CURRENT_SHELL")
+if [ "$RUNNING_SHELL" = "shell-reload" ] || [ "$RUNNING_SHELL" = "-bash" ] || [ "$RUNNING_SHELL" = "-zsh" ]; then
+    # Script is being executed, use $SHELL
+    RUNNING_SHELL=$CURRENT_SHELL
+fi
+
+reload_zsh() {
+    local config=""
+
+    # Check for config files in order of preference
+    if [ -f "$HOME/.zshrc" ]; then
+        config="$HOME/.zshrc"
+    elif [ -f "/etc/zsh/zshrc" ]; then
+        config="/etc/zsh/zshrc"
+    fi
+
+    if [ -n "$config" ]; then
+        echo -e "${BLUE}Reloading zsh configuration...${NC}"
+        echo -e "Source: ${GREEN}$config${NC}"
+        # For zsh, we need to use zsh to source the file
+        zsh -c "source '$config'" 2>/dev/null
+        echo -e "${GREEN}Done!${NC}"
+        echo ""
+        echo -e "${YELLOW}Note:${NC} For full effect, run: ${BLUE}source $config${NC}"
+        echo "Or restart your shell with: ${BLUE}exec zsh${NC}"
+    else
+        echo -e "${RED}No zsh configuration found${NC}"
+        return 1
+    fi
+}
+
+reload_bash() {
+    local config=""
+
+    # Check for config files in order of preference
+    if [ -f "$HOME/.bashrc" ]; then
+        config="$HOME/.bashrc"
+    elif [ -f "/etc/bash/bashrc" ]; then
+        config="/etc/bash/bashrc"
+    elif [ -f "/etc/bashrc" ]; then
+        config="/etc/bashrc"
+    fi
+
+    if [ -n "$config" ]; then
+        echo -e "${BLUE}Reloading bash configuration...${NC}"
+        echo -e "Source: ${GREEN}$config${NC}"
+        # Source in current context if we're in bash
+        if [ -n "$BASH_VERSION" ]; then
+            source "$config"
+            echo -e "${GREEN}Configuration reloaded!${NC}"
+        else
+            bash -c "source '$config'" 2>/dev/null
+            echo -e "${GREEN}Done!${NC}"
+            echo ""
+            echo -e "${YELLOW}Note:${NC} For full effect, run: ${BLUE}source $config${NC}"
+            echo "Or restart your shell with: ${BLUE}exec bash${NC}"
+        fi
+    else
+        echo -e "${RED}No bash configuration found${NC}"
+        return 1
+    fi
+}
+
+reload_fish() {
+    local config=""
+
+    # Check for config files in order of preference
+    if [ -f "$HOME/.config/fish/config.fish" ]; then
+        config="$HOME/.config/fish/config.fish"
+    elif [ -f "/etc/fish/config.fish" ]; then
+        config="/etc/fish/config.fish"
+    fi
+
+    if [ -n "$config" ]; then
+        echo -e "${BLUE}Reloading fish configuration...${NC}"
+        echo -e "Source: ${GREEN}$config${NC}"
+        fish -c "source '$config'" 2>/dev/null
+        echo -e "${GREEN}Done!${NC}"
+        echo ""
+        echo -e "${YELLOW}Note:${NC} For full effect, run in fish: ${BLUE}source $config${NC}"
+        echo "Or restart your shell with: ${BLUE}exec fish${NC}"
+    else
+        echo -e "${RED}No fish configuration found${NC}"
+        return 1
+    fi
+}
+
+print_usage() {
+    echo -e "${BLUE}shell-reload${NC} - Reload shell configuration"
+    echo ""
+    echo "Usage: shell-reload [shell]"
+    echo ""
+    echo "Without arguments, reloads the current shell's config."
+    echo "With an argument, reloads that shell's config."
+    echo ""
+    echo "Examples:"
+    echo "  shell-reload        # Reload current shell config"
+    echo "  shell-reload zsh    # Reload zsh config"
+    echo "  shell-reload bash   # Reload bash config"
+    echo "  shell-reload fish   # Reload fish config"
+    echo ""
+    echo -e "Current shell: ${GREEN}$CURRENT_SHELL${NC}"
+}
+
+# Handle arguments
+TARGET_SHELL=${1:-$CURRENT_SHELL}
+
+case $TARGET_SHELL in
+    -h|--help)
+        print_usage
+        exit 0
+        ;;
+    zsh)
+        reload_zsh
+        ;;
+    bash)
+        reload_bash
+        ;;
+    fish)
+        reload_fish
+        ;;
+    *)
+        echo -e "${RED}Unknown shell: $TARGET_SHELL${NC}"
+        echo "Supported shells: zsh, bash, fish"
+        exit 1
+        ;;
+esac

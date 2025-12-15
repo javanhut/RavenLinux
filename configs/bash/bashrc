@@ -1,0 +1,106 @@
+# RavenLinux default bashrc
+
+# If not running interactively, don't do anything
+case $- in
+    *i*) ;;
+      *) return;;
+esac
+
+# History
+HISTFILE=~/.bash_history
+HISTSIZE=10000
+HISTFILESIZE=20000
+HISTCONTROL=ignoreboth:erasedups
+shopt -s histappend
+
+# Update window size after each command
+shopt -s checkwinsize
+
+# Directory navigation
+shopt -s autocd 2>/dev/null
+shopt -s cdspell
+
+# Extended globbing
+shopt -s extglob
+shopt -s globstar 2>/dev/null
+
+# Prompt
+PS1='[\u@raven-linux]# '
+
+# Colors
+alias ls='ls --color=auto'
+alias ll='ls -lah'
+alias la='ls -A'
+alias l='ls -CF'
+alias grep='grep --color=auto'
+alias fgrep='fgrep --color=auto'
+alias egrep='egrep --color=auto'
+
+# Navigation
+alias ..='cd ..'
+alias ...='cd ../..'
+
+# RavenLinux specific
+alias rvn='rvn'
+alias raven-update='rvn upgrade'
+
+# Environment
+export RAVEN_LINUX=1
+export LANG="${LANG:-en_US.UTF-8}"
+export LC_ALL="${LC_ALL:-en_US.UTF-8}"
+
+# XDG directories
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+export XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+
+# Path
+export PATH="$HOME/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+
+# Editor
+export EDITOR="${EDITOR:-raven-editor}"
+export VISUAL="${VISUAL:-raven-editor}"
+
+# Enable programmable completion
+if ! shopt -oq posix; then
+    if [ -f /usr/share/bash-completion/bash_completion ]; then
+        . /usr/share/bash-completion/bash_completion
+    elif [ -f /etc/bash_completion ]; then
+        . /etc/bash_completion
+    fi
+fi
+
+# fzf integration (if installed)
+[ -f /usr/share/fzf/key-bindings.bash ] && source /usr/share/fzf/key-bindings.bash
+[ -f /usr/share/fzf/completion.bash ] && source /usr/share/fzf/completion.bash
+
+# Ranger cd integration - use 'rcd' to cd to last ranger directory
+rcd() {
+    local tempfile=$(mktemp -t ranger_cd.XXXXXX)
+    ranger --choosedir="$tempfile" "$@"
+    if [ -f "$tempfile" ]; then
+        local dir=$(cat "$tempfile")
+        if [ -d "$dir" ] && [ "$dir" != "$(pwd)" ]; then
+            cd "$dir"
+        fi
+    fi
+    rm -f "$tempfile"
+}
+
+# Fuzzy find file and open in editor
+fe() {
+    local file
+    file=$(fzf --preview 'head -100 {}' 2>/dev/null)
+    [ -n "$file" ] && $EDITOR "$file"
+}
+
+# Fuzzy cd to directory
+fcd() {
+    local dir
+    dir=$(find . -type d 2>/dev/null | fzf)
+    [ -n "$dir" ] && cd "$dir"
+}
+
+# Load local config if exists
+[ -f ~/.bashrc.local ] && source ~/.bashrc.local

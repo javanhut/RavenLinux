@@ -1,0 +1,67 @@
+[package]
+name = "openssh"
+version = "9.6p1"
+description = "OpenSSH connectivity tools (ssh, scp, sftp, sshd)"
+license = "BSD"
+homepage = "https://www.openssh.com"
+maintainers = ["RavenLinux Team"]
+categories = ["core", "networking", "security"]
+
+[source]
+type = "tarball"
+url = "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-9.6p1.tar.gz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "autotools"
+configure_flags = [
+    "--prefix=/usr",
+    "--sbindir=/usr/bin",
+    "--libexecdir=/usr/lib/ssh",
+    "--sysconfdir=/etc/ssh",
+    "--with-privsep-path=/var/lib/sshd",
+    "--with-privsep-user=sshd",
+    "--with-md5-passwords",
+    "--with-pam",
+    "--with-ssl-engine",
+    "--with-default-path=/usr/local/bin:/usr/bin:/bin",
+    "--without-zlib-version-check"
+]
+build_flags = ["-j$(nproc)"]
+env = {}
+pre_build = []
+post_build = []
+pre_install = [
+    "mkdir -p /var/lib/sshd",
+    "chmod 700 /var/lib/sshd"
+]
+post_install = [
+    "ssh-keygen -A || true",
+    "mkdir -p /etc/ssh",
+    "chmod 755 /etc/ssh"
+]
+
+[dependencies]
+runtime = ["openssl", "zlib", "pam"]
+build = ["openssl", "zlib", "pam"]
+
+[install]
+files = [
+    { src = "ssh", dest = "/usr/bin/ssh", mode = 755 },
+    { src = "scp", dest = "/usr/bin/scp", mode = 755 },
+    { src = "sftp", dest = "/usr/bin/sftp", mode = 755 },
+    { src = "ssh-keygen", dest = "/usr/bin/ssh-keygen", mode = 755 },
+    { src = "ssh-keyscan", dest = "/usr/bin/ssh-keyscan", mode = 755 },
+    { src = "ssh-add", dest = "/usr/bin/ssh-add", mode = 755 },
+    { src = "ssh-agent", dest = "/usr/bin/ssh-agent", mode = 755 },
+    { src = "ssh-copy-id", dest = "/usr/bin/ssh-copy-id", mode = 755 },
+    { src = "sshd", dest = "/usr/bin/sshd", mode = 755 },
+    { src = "sftp-server", dest = "/usr/lib/ssh/sftp-server", mode = 755 },
+    { src = "ssh-keysign", dest = "/usr/lib/ssh/ssh-keysign", mode = 4711 }
+]
+symlinks = []
+directories = [
+    "/etc/ssh",
+    "/usr/lib/ssh",
+    "/var/lib/sshd"
+]

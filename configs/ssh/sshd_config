@@ -1,0 +1,62 @@
+# RavenLinux OpenSSH Server Configuration
+# /etc/ssh/sshd_config
+
+# Network
+Port 22
+AddressFamily any
+ListenAddress 0.0.0.0
+ListenAddress ::
+
+# Host Keys
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_ed25519_key
+
+# Security
+PermitRootLogin prohibit-password
+StrictModes yes
+MaxAuthTries 6
+MaxSessions 10
+
+# Authentication
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+
+# Disable weak auth methods
+PasswordAuthentication yes
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+
+# Kerberos options
+KerberosAuthentication no
+
+# GSSAPI options
+GSSAPIAuthentication no
+
+# Environment
+AcceptEnv LANG LC_*
+UsePAM yes
+
+# Subsystems
+Subsystem sftp /usr/lib/ssh/sftp-server
+
+# Logging
+SyslogFacility AUTH
+LogLevel INFO
+
+# Keep alive
+ClientAliveInterval 120
+ClientAliveCountMax 3
+
+# X11 Forwarding (disabled by default for security)
+X11Forwarding no
+
+# Restrict to secure ciphers and algorithms
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512
+
+# Banner
+Banner none
+PrintMotd yes
+PrintLastLog yes

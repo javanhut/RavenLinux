@@ -1,0 +1,35 @@
+[package]
+name = "isl"
+version = "0.26"
+description = "Integer Set Library for polyhedral model"
+license = "MIT"
+homepage = "https://libisl.sourceforge.io"
+maintainers = ["RavenLinux Team"]
+categories = ["dev-tools", "libraries", "math"]
+
+[source]
+type = "tarball"
+url = "https://libisl.sourceforge.io/isl-0.26.tar.xz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "autotools"
+configure_flags = [
+    "--prefix=/usr",
+    "--enable-shared"
+]
+build_flags = ["-j$(nproc)"]
+env = {}
+pre_build = []
+post_build = []
+pre_install = []
+post_install = []
+
+[dependencies]
+runtime = ["gmp"]
+build = ["gmp"]
+
+[install]
+files = []
+symlinks = []
+directories = ["/usr/include", "/usr/lib"]

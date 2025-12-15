@@ -1,0 +1,43 @@
+[package]
+name = "openssl"
+version = "3.2.0"
+description = "Full-strength general-purpose cryptography library"
+license = "Apache-2.0"
+homepage = "https://www.openssl.org"
+repository = "https://github.com/openssl/openssl"
+maintainers = ["RavenLinux Team"]
+categories = ["core", "security", "libraries"]
+
+[source]
+type = "tarball"
+url = "https://www.openssl.org/source/openssl-3.2.0.tar.gz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "custom"
+configure_flags = []
+build_flags = []
+env = {}
+pre_build = [
+    "./Configure --prefix=/usr --openssldir=/etc/ssl --libdir=lib shared zlib-dynamic"
+]
+post_build = []
+pre_install = []
+post_install = []
+
+[dependencies]
+runtime = ["zlib"]
+build = ["zlib", "perl"]
+
+[install]
+files = [
+    { src = "apps/openssl", dest = "/usr/bin/openssl", mode = 755 }
+]
+symlinks = []
+directories = [
+    "/etc/ssl",
+    "/etc/ssl/certs",
+    "/etc/ssl/private",
+    "/usr/include/openssl",
+    "/usr/lib/ssl"
+]

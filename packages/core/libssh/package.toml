@@ -1,0 +1,42 @@
+[package]
+name = "libssh"
+version = "0.10.6"
+description = "SSH library for C applications"
+license = "LGPL-2.1"
+homepage = "https://www.libssh.org"
+repository = "https://git.libssh.org/projects/libssh.git"
+maintainers = ["RavenLinux Team"]
+categories = ["core", "libraries", "networking"]
+
+[source]
+type = "tarball"
+url = "https://www.libssh.org/files/0.10/libssh-0.10.6.tar.xz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "cmake"
+configure_flags = [
+    "-DCMAKE_INSTALL_PREFIX=/usr",
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DWITH_GSSAPI=OFF",
+    "-DWITH_GCRYPT=OFF",
+    "-DBUILD_SHARED_LIBS=ON"
+]
+build_flags = ["-j$(nproc)"]
+env = {}
+pre_build = []
+post_build = []
+pre_install = []
+post_install = []
+
+[dependencies]
+runtime = ["openssl", "zlib"]
+build = ["openssl", "zlib", "cmake"]
+
+[install]
+files = []
+symlinks = []
+directories = [
+    "/usr/include/libssh",
+    "/usr/lib"
+]

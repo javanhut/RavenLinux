@@ -1,0 +1,34 @@
+[package]
+name = "raven-shell-tools"
+version = "1.0.0"
+description = "RavenLinux shell management utilities (switch-shell, shell-reload)"
+license = "MIT"
+homepage = "https://ravenlinux.org"
+maintainers = ["RavenLinux Team"]
+categories = ["base", "shell", "utilities"]
+
+[source]
+type = "local"
+path = "tools/raven-shell-tools"
+
+[build]
+system = "custom"
+configure_flags = []
+build_flags = []
+env = {}
+pre_build = []
+post_build = []
+pre_install = []
+post_install = []
+
+[dependencies]
+runtime = ["bash", "coreutils"]
+build = []
+
+[install]
+files = [
+    { src = "switch-shell", dest = "/usr/bin/switch-shell", mode = 755 },
+    { src = "shell-reload", dest = "/usr/bin/shell-reload", mode = 755 }
+]
+symlinks = []
+directories = []

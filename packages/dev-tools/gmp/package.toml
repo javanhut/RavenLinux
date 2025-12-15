@@ -1,0 +1,36 @@
+[package]
+name = "gmp"
+version = "6.3.0"
+description = "GNU Multiple Precision Arithmetic Library"
+license = "LGPL-3.0"
+homepage = "https://gmplib.org"
+maintainers = ["RavenLinux Team"]
+categories = ["dev-tools", "libraries", "math"]
+
+[source]
+type = "tarball"
+url = "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "autotools"
+configure_flags = [
+    "--prefix=/usr",
+    "--enable-cxx",
+    "--enable-shared"
+]
+build_flags = ["-j$(nproc)"]
+env = {}
+pre_build = []
+post_build = []
+pre_install = []
+post_install = []
+
+[dependencies]
+runtime = []
+build = ["m4"]
+
+[install]
+files = []
+symlinks = []
+directories = ["/usr/include", "/usr/lib"]
