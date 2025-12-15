@@ -68,14 +68,24 @@ restart = true
 enabled = false  # Enable when klogd is installed
 critical = false
 
-# D-Bus system bus (for desktop)
+# D-Bus system bus (required for iwd/iwctl and many other services)
 [[services]]
 name = "dbus"
 description = "D-Bus system message bus"
 exec = "/usr/bin/dbus-daemon"
 args = ["--system", "--nofork", "--nopidfile"]
 restart = true
-enabled = false  # Enable when dbus is installed
+enabled = true
+critical = false
+
+# iwd - Modern wireless daemon (requires D-Bus)
+[[services]]
+name = "iwd"
+description = "iNet Wireless Daemon"
+exec = "/usr/libexec/iwd"
+args = []
+restart = true
+enabled = true
 critical = false
 
 # Network manager (when available)

@@ -386,10 +386,77 @@ generate_config() {
     $config_script --enable 8139TOO
     $config_script --enable R8169
 
-    # Wireless (basic)
+    # Wireless (basic stack)
     $config_script --enable WLAN
     $config_script --enable CFG80211
     $config_script --enable MAC80211
+    $config_script --enable RFKILL
+
+    # ==========================================================================
+    # WiFi Drivers (common hardware support)
+    # ==========================================================================
+
+    # Intel WiFi (most common on laptops - iwlwifi)
+    $config_script --enable IWLWIFI
+    $config_script --enable IWLMVM
+    $config_script --enable IWLDVM
+
+    # Intel legacy WiFi
+    $config_script --enable IWL4965
+    $config_script --enable IWL3945
+
+    # Atheros WiFi (common on desktops and older laptops)
+    $config_script --enable ATH9K
+    $config_script --enable ATH9K_PCI
+    $config_script --enable ATH9K_HTC
+    $config_script --enable ATH10K
+    $config_script --enable ATH10K_PCI
+    $config_script --enable ATH10K_USB
+    $config_script --enable ATH11K
+    $config_script --enable ATH11K_PCI
+
+    # Broadcom WiFi (common on MacBooks and some laptops)
+    $config_script --enable BRCMFMAC
+    $config_script --enable BRCMFMAC_PCIE
+    $config_script --enable BRCMFMAC_USB
+    $config_script --enable BRCMFMAC_SDIO
+    $config_script --enable BRCMSMAC
+
+    # Realtek WiFi (common USB dongles and some laptops)
+    $config_script --enable RTL8187
+    $config_script --enable RTL8192CU
+    $config_script --enable RTL8XXXU
+    $config_script --enable RTW88
+    $config_script --enable RTW88_8822BE
+    $config_script --enable RTW88_8822CE
+    $config_script --enable RTW88_8723DE
+    $config_script --enable RTW88_8821CE
+    $config_script --enable RTW88_PCI
+    $config_script --enable RTW88_USB
+    $config_script --enable RTW89
+    $config_script --enable RTW89_8852AE
+    $config_script --enable RTW89_8852BE
+    $config_script --enable RTW89_8852CE
+    $config_script --enable RTW89_PCI
+
+    # MediaTek WiFi (newer laptops and USB dongles)
+    $config_script --enable MT7601U
+    $config_script --enable MT76x0U
+    $config_script --enable MT76x2U
+    $config_script --enable MT7615E
+    $config_script --enable MT7663U
+    $config_script --enable MT7921E
+    $config_script --enable MT7921U
+
+    # Ralink (older USB WiFi dongles, now MediaTek)
+    $config_script --enable RT2X00
+    $config_script --enable RT2800USB
+    $config_script --enable RT2800PCI
+
+    # Marvell WiFi (some laptops and embedded)
+    $config_script --enable MWIFIEX
+    $config_script --enable MWIFIEX_PCIE
+    $config_script --enable MWIFIEX_USB
 
     # Virtio network (QEMU)
     $config_script --enable VIRTIO_NET

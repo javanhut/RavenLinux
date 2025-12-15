@@ -45,8 +45,8 @@ func NewWiFiManager() *WiFiManager {
 }
 
 func (wm *WiFiManager) detectBackend() {
-	// Prefer iwd if available
-	if _, err := exec.LookPath("iwctl"); err == nil {
+	// Prefer iwd if available AND daemon is running
+	if _, err := exec.LookPath("iwctl"); err == nil && isIWDRunning() && isDBusRunning() {
 		wm.backend = "iwd"
 		return
 	}
@@ -56,6 +56,34 @@ func (wm *WiFiManager) detectBackend() {
 		return
 	}
 	wm.backend = "none"
+}
+
+// isIWDRunning checks if the iwd daemon is running
+func isIWDRunning() bool {
+	// Check if iwd process is running
+	cmd := exec.Command("pgrep", "-x", "iwd")
+	if err := cmd.Run(); err == nil {
+		return true
+	}
+	// Alternative: check if iwd socket exists
+	if _, err := os.Stat("/run/iwd"); err == nil {
+		return true
+	}
+	return false
+}
+
+// isDBusRunning checks if D-Bus system bus is running
+func isDBusRunning() bool {
+	// Check if dbus-daemon process is running
+	cmd := exec.Command("pgrep", "-x", "dbus-daemon")
+	if err := cmd.Run(); err == nil {
+		return true
+	}
+	// Alternative: check if D-Bus system socket exists
+	if _, err := os.Stat("/run/dbus/system_bus_socket"); err == nil {
+		return true
+	}
+	return false
 }
 
 func (wm *WiFiManager) detectInterface() {
