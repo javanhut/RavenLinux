@@ -844,79 +844,566 @@ build_openssh() {
 }
 
 # =============================================================================
-# Install Shell Tools
+# Build Rust Toolchain
+# =============================================================================
+build_rust() {
+    log_step "Building Rust toolchain..."
+
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Check if Rust is already in sysroot
+    if [[ -f "${SYSROOT_DIR}/usr/bin/rustc" ]]; then
+        log_info "Rust already installed"
+        return 0
+    fi
+
+    local arch="x86_64-unknown-linux-gnu"
+    [[ "$(uname -m)" == "aarch64" ]] && arch="aarch64-unknown-linux-gnu"
+
+    # Download rustup-init
+    local rustup_url="https://static.rust-lang.org/rustup/dist/${arch}/rustup-init"
+    local rustup_init="${cache_dir}/rustup-init"
+
+    if [[ ! -f "${rustup_init}" ]]; then
+        log_info "Downloading rustup..."
+        if curl -fsSL -o "${rustup_init}" "${rustup_url}"; then
+            chmod +x "${rustup_init}"
+        else
+            log_warn "Failed to download rustup"
+            # Fallback: check for host rust
+            if command -v rustc &>/dev/null; then
+                log_info "Using host Rust toolchain"
+                mkdir -p "${SYSROOT_DIR}/usr/bin"
+                for bin in rustc cargo rustfmt clippy-driver rust-analyzer; do
+                    if command -v "${bin}" &>/dev/null; then
+                        local src=$(command -v "${bin}")
+                        cp "${src}" "${SYSROOT_DIR}/usr/bin/" 2>/dev/null || \
+                        ln -sf "${src}" "${SYSROOT_DIR}/usr/bin/${bin}"
+                    fi
+                done
+                log_success "Host Rust linked"
+                return 0
+            fi
+            return 0
+        fi
+    fi
+
+    # Install Rust to sysroot
+    log_info "Installing Rust toolchain..."
+    export RUSTUP_HOME="${SYSROOT_DIR}/usr/lib/rustup"
+    export CARGO_HOME="${SYSROOT_DIR}/usr/lib/cargo"
+    mkdir -p "${RUSTUP_HOME}" "${CARGO_HOME}"
+
+    "${rustup_init}" -y --no-modify-path --default-toolchain stable \
+        --profile minimal -c rustfmt -c clippy 2>&1 | tee "${LOGS_DIR}/rust-install.log" || true
+
+    # Create symlinks in /usr/bin
+    mkdir -p "${SYSROOT_DIR}/usr/bin"
+    for bin in rustc cargo rustfmt cargo-clippy clippy-driver rustup; do
+        if [[ -f "${CARGO_HOME}/bin/${bin}" ]]; then
+            ln -sf "../lib/cargo/bin/${bin}" "${SYSROOT_DIR}/usr/bin/${bin}"
+        fi
+    done
+
+    # Create profile script for Rust
+    mkdir -p "${SYSROOT_DIR}/etc/profile.d"
+    cat > "${SYSROOT_DIR}/etc/profile.d/rust.sh" << 'RUSTPROFILE'
+# Rust environment
+export RUSTUP_HOME=/usr/lib/rustup
+export CARGO_HOME=/usr/lib/cargo
+export PATH="$PATH:$CARGO_HOME/bin"
+RUSTPROFILE
+
+    log_success "Rust toolchain installed"
+}
+
+# =============================================================================
+# Build All Shells (zsh, fish, bash) with Dependencies
+# =============================================================================
+build_shells() {
+    log_step "Building shells..."
+
+    # Build/install zsh
+    build_zsh
+
+    # Build/install fish
+    build_fish
+
+    # Ensure bash is available (usually from base system)
+    build_bash
+
+    # Set zsh as default shell
+    set_default_shell
+
+    log_success "All shells built"
+}
+
+# Build zsh with dependencies
+build_zsh() {
+    log_info "Building zsh..."
+
+    local zsh_ver="5.9"
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Check if already installed
+    if [[ -f "${SYSROOT_DIR}/usr/bin/zsh" ]]; then
+        log_info "zsh already installed"
+        return 0
+    fi
+
+    # Try to copy from host first
+    if command -v zsh &>/dev/null; then
+        local host_zsh=$(command -v zsh)
+        log_info "Copying host zsh and dependencies..."
+
+        mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/bin"
+        mkdir -p "${SYSROOT_DIR}/usr/lib" "${SYSROOT_DIR}/usr/share/zsh"
+
+        # Copy zsh binary
+        cp "${host_zsh}" "${SYSROOT_DIR}/usr/bin/zsh"
+        chmod 755 "${SYSROOT_DIR}/usr/bin/zsh"
+        ln -sf ../usr/bin/zsh "${SYSROOT_DIR}/bin/zsh"
+
+        # Copy zsh libraries and completions
+        for dir in /usr/share/zsh /usr/lib/zsh; do
+            if [[ -d "${dir}" ]]; then
+                cp -r "${dir}"/* "${SYSROOT_DIR}${dir}/" 2>/dev/null || true
+            fi
+        done
+
+        # Copy required shared libraries
+        copy_binary_deps "${host_zsh}"
+
+        log_success "zsh ${zsh_ver} installed from host"
+        return 0
+    fi
+
+    # Download and build from source
+    local zsh_tarball="zsh-${zsh_ver}.tar.xz"
+    local zsh_url="https://sourceforge.net/projects/zsh/files/zsh/${zsh_ver}/${zsh_tarball}/download"
+
+    if [[ ! -f "${cache_dir}/${zsh_tarball}" ]]; then
+        log_info "Downloading zsh ${zsh_ver}..."
+        if curl -fsSL -o "${cache_dir}/${zsh_tarball}" -L "${zsh_url}"; then
+            log_info "Downloaded zsh"
+        else
+            log_warn "Failed to download zsh"
+            return 1
+        fi
+    fi
+
+    # Extract and build
+    local zsh_src="${cache_dir}/zsh-${zsh_ver}"
+    if [[ ! -d "${zsh_src}" ]]; then
+        tar -xJf "${cache_dir}/${zsh_tarball}" -C "${cache_dir}"
+    fi
+
+    cd "${zsh_src}"
+    if ./configure --prefix=/usr --enable-multibyte --enable-pcre --with-tcsetpgrp && \
+       make -j$(nproc) && \
+       make DESTDIR="${SYSROOT_DIR}" install; then
+        ln -sf ../usr/bin/zsh "${SYSROOT_DIR}/bin/zsh"
+        log_success "zsh ${zsh_ver} built and installed"
+    else
+        log_warn "zsh build failed"
+    fi
+    cd "${PROJECT_ROOT}"
+}
+
+# Build fish with dependencies
+build_fish() {
+    log_info "Building fish..."
+
+    local fish_ver="3.7.0"
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Check if already installed
+    if [[ -f "${SYSROOT_DIR}/usr/bin/fish" ]]; then
+        log_info "fish already installed"
+        return 0
+    fi
+
+    # Try to copy from host first
+    if command -v fish &>/dev/null; then
+        local host_fish=$(command -v fish)
+        log_info "Copying host fish and dependencies..."
+
+        mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/bin"
+        mkdir -p "${SYSROOT_DIR}/usr/share/fish"
+
+        # Copy fish binaries
+        cp "${host_fish}" "${SYSROOT_DIR}/usr/bin/fish"
+        chmod 755 "${SYSROOT_DIR}/usr/bin/fish"
+        ln -sf ../usr/bin/fish "${SYSROOT_DIR}/bin/fish"
+
+        # Copy fish_indent and fish_key_reader if available
+        for bin in fish_indent fish_key_reader; do
+            if command -v "${bin}" &>/dev/null; then
+                cp "$(command -v ${bin})" "${SYSROOT_DIR}/usr/bin/"
+            fi
+        done
+
+        # Copy fish data files
+        for dir in /usr/share/fish; do
+            if [[ -d "${dir}" ]]; then
+                cp -r "${dir}"/* "${SYSROOT_DIR}${dir}/" 2>/dev/null || true
+            fi
+        done
+
+        # Copy required shared libraries
+        copy_binary_deps "${host_fish}"
+
+        log_success "fish installed from host"
+        return 0
+    fi
+
+    # Download prebuilt or build from source
+    local fish_tarball="fish-${fish_ver}.tar.xz"
+    local fish_url="https://github.com/fish-shell/fish-shell/releases/download/${fish_ver}/${fish_tarball}"
+
+    if [[ ! -f "${cache_dir}/${fish_tarball}" ]]; then
+        log_info "Downloading fish ${fish_ver}..."
+        if curl -fsSL -o "${cache_dir}/${fish_tarball}" -L "${fish_url}"; then
+            log_info "Downloaded fish"
+        else
+            log_warn "Failed to download fish - fish will not be available"
+            return 1
+        fi
+    fi
+
+    # Extract and build
+    local fish_src="${cache_dir}/fish-${fish_ver}"
+    if [[ ! -d "${fish_src}" ]]; then
+        tar -xJf "${cache_dir}/${fish_tarball}" -C "${cache_dir}"
+    fi
+
+    cd "${fish_src}"
+    mkdir -p build && cd build
+    if cmake .. -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release && \
+       make -j$(nproc) && \
+       make DESTDIR="${SYSROOT_DIR}" install; then
+        ln -sf ../usr/bin/fish "${SYSROOT_DIR}/bin/fish"
+        log_success "fish ${fish_ver} built and installed"
+    else
+        log_warn "fish build failed"
+    fi
+    cd "${PROJECT_ROOT}"
+}
+
+# Ensure bash is available
+build_bash() {
+    log_info "Checking bash..."
+
+    # Check if already installed
+    if [[ -f "${SYSROOT_DIR}/usr/bin/bash" ]] || [[ -f "${SYSROOT_DIR}/bin/bash" ]]; then
+        log_info "bash already installed"
+        return 0
+    fi
+
+    # Copy from host
+    if command -v bash &>/dev/null; then
+        local host_bash=$(command -v bash)
+        mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/bin"
+
+        cp "${host_bash}" "${SYSROOT_DIR}/usr/bin/bash"
+        chmod 755 "${SYSROOT_DIR}/usr/bin/bash"
+        ln -sf ../usr/bin/bash "${SYSROOT_DIR}/bin/bash"
+        ln -sf bash "${SYSROOT_DIR}/bin/sh"
+        ln -sf ../usr/bin/bash "${SYSROOT_DIR}/usr/bin/sh"
+
+        # Copy required shared libraries
+        copy_binary_deps "${host_bash}"
+
+        log_success "bash installed from host"
+    fi
+}
+
+# Copy shared library dependencies for a binary
+copy_binary_deps() {
+    local binary="$1"
+    local libs
+
+    # Get list of required libraries
+    libs=$(ldd "${binary}" 2>/dev/null | grep "=>" | awk '{print $3}' | grep -v "^$" || true)
+
+    for lib in ${libs}; do
+        if [[ -f "${lib}" ]]; then
+            local lib_dir=$(dirname "${lib}")
+            mkdir -p "${SYSROOT_DIR}${lib_dir}"
+            if [[ ! -f "${SYSROOT_DIR}${lib}" ]]; then
+                cp -L "${lib}" "${SYSROOT_DIR}${lib}" 2>/dev/null || true
+            fi
+        fi
+    done
+
+    # Also copy the dynamic linker
+    local ld_linux=$(ldd "${binary}" 2>/dev/null | grep "ld-linux" | awk '{print $1}' || true)
+    if [[ -n "${ld_linux}" ]] && [[ -f "${ld_linux}" ]]; then
+        local ld_dir=$(dirname "${ld_linux}")
+        mkdir -p "${SYSROOT_DIR}${ld_dir}"
+        if [[ ! -f "${SYSROOT_DIR}${ld_linux}" ]]; then
+            cp -L "${ld_linux}" "${SYSROOT_DIR}${ld_linux}" 2>/dev/null || true
+        fi
+    fi
+}
+
+# Set zsh as the default shell
+set_default_shell() {
+    log_info "Setting zsh as default shell..."
+
+    # Create /etc/shells
+    mkdir -p "${SYSROOT_DIR}/etc"
+    cat > "${SYSROOT_DIR}/etc/shells" << 'SHELLS'
+# Valid login shells - RavenLinux
+# Default: zsh
+/bin/zsh
+/usr/bin/zsh
+/bin/bash
+/usr/bin/bash
+/bin/fish
+/usr/bin/fish
+/bin/sh
+/usr/bin/sh
+SHELLS
+
+    # Set default shell for root to zsh
+    if [[ -f "${SYSROOT_DIR}/etc/passwd" ]]; then
+        sed -i 's|root:.*:/bin/bash|root:x:0:0:root:/root:/bin/zsh|' "${SYSROOT_DIR}/etc/passwd" 2>/dev/null || true
+        sed -i 's|root:.*:/bin/sh|root:x:0:0:root:/root:/bin/zsh|' "${SYSROOT_DIR}/etc/passwd" 2>/dev/null || true
+    else
+        # Create passwd with zsh as default
+        cat > "${SYSROOT_DIR}/etc/passwd" << 'PASSWD'
+root:x:0:0:root:/root:/bin/zsh
+PASSWD
+    fi
+
+    # Create /etc/default/useradd to set zsh as default for new users
+    mkdir -p "${SYSROOT_DIR}/etc/default"
+    cat > "${SYSROOT_DIR}/etc/default/useradd" << 'USERADD'
+# Default values for useradd
+GROUP=100
+HOME=/home
+INACTIVE=-1
+EXPIRE=
+SHELL=/bin/zsh
+SKEL=/etc/skel
+CREATE_MAIL_SPOOL=yes
+USERADD
+
+    log_success "zsh set as default shell"
+}
+
+# =============================================================================
+# Install Shell Tools and Configs
 # =============================================================================
 install_shell_tools() {
     log_step "Installing shell tools..."
 
     local shell_tools_dir="${PROJECT_ROOT}/tools/raven-shell-tools"
+    mkdir -p "${SYSROOT_DIR}/usr/bin"
 
-    if [[ -d "${shell_tools_dir}" ]]; then
-        mkdir -p "${SYSROOT_DIR}/usr/bin"
+    # Install switch-shell
+    if [[ -f "${shell_tools_dir}/switch-shell" ]]; then
+        cp "${shell_tools_dir}/switch-shell" "${SYSROOT_DIR}/usr/bin/"
+        chmod 755 "${SYSROOT_DIR}/usr/bin/switch-shell"
+        log_info "Installed switch-shell"
+    else
+        log_warn "switch-shell not found at ${shell_tools_dir}/switch-shell"
+    fi
 
-        if [[ -f "${shell_tools_dir}/switch-shell" ]]; then
-            cp "${shell_tools_dir}/switch-shell" "${SYSROOT_DIR}/usr/bin/"
-            chmod 755 "${SYSROOT_DIR}/usr/bin/switch-shell"
-            log_info "Installed switch-shell"
-        fi
-
-        if [[ -f "${shell_tools_dir}/shell-reload" ]]; then
-            cp "${shell_tools_dir}/shell-reload" "${SYSROOT_DIR}/usr/bin/"
-            chmod 755 "${SYSROOT_DIR}/usr/bin/shell-reload"
-            log_info "Installed shell-reload"
-        fi
+    # Install shell-reload
+    if [[ -f "${shell_tools_dir}/shell-reload" ]]; then
+        cp "${shell_tools_dir}/shell-reload" "${SYSROOT_DIR}/usr/bin/"
+        chmod 755 "${SYSROOT_DIR}/usr/bin/shell-reload"
+        log_info "Installed shell-reload"
+    else
+        log_warn "shell-reload not found at ${shell_tools_dir}/shell-reload"
     fi
 
     # Copy shell configurations
     local configs_dir="${PROJECT_ROOT}/configs"
 
-    # zsh
+    # zsh configs
     if [[ -d "${configs_dir}/zsh" ]]; then
         mkdir -p "${SYSROOT_DIR}/etc/zsh"
         cp "${configs_dir}/zsh/"* "${SYSROOT_DIR}/etc/zsh/" 2>/dev/null || true
+        # Also create user skeleton
+        mkdir -p "${SYSROOT_DIR}/etc/skel"
+        cp "${configs_dir}/zsh/zshrc" "${SYSROOT_DIR}/etc/skel/.zshrc" 2>/dev/null || true
+        cp "${configs_dir}/zsh/zshenv" "${SYSROOT_DIR}/etc/skel/.zshenv" 2>/dev/null || true
+        # Copy to root home
+        mkdir -p "${SYSROOT_DIR}/root"
+        cp "${configs_dir}/zsh/zshrc" "${SYSROOT_DIR}/root/.zshrc" 2>/dev/null || true
+        cp "${configs_dir}/zsh/zshenv" "${SYSROOT_DIR}/root/.zshenv" 2>/dev/null || true
         log_info "Installed zsh configs"
     fi
 
-    # bash
+    # bash configs
     if [[ -d "${configs_dir}/bash" ]]; then
-        mkdir -p "${SYSROOT_DIR}/etc/bash"
+        mkdir -p "${SYSROOT_DIR}/etc/bash" "${SYSROOT_DIR}/etc"
         cp "${configs_dir}/bash/"* "${SYSROOT_DIR}/etc/bash/" 2>/dev/null || true
-        # Also copy to /etc for compatibility
         cp "${configs_dir}/bash/bashrc" "${SYSROOT_DIR}/etc/bashrc" 2>/dev/null || true
+        cp "${configs_dir}/bash/bash_profile" "${SYSROOT_DIR}/etc/profile" 2>/dev/null || true
+        # User skeleton
+        cp "${configs_dir}/bash/bashrc" "${SYSROOT_DIR}/etc/skel/.bashrc" 2>/dev/null || true
+        cp "${configs_dir}/bash/bash_profile" "${SYSROOT_DIR}/etc/skel/.bash_profile" 2>/dev/null || true
         log_info "Installed bash configs"
     fi
 
-    # fish
+    # fish configs
     if [[ -d "${configs_dir}/fish" ]]; then
         mkdir -p "${SYSROOT_DIR}/etc/fish"
         cp "${configs_dir}/fish/"* "${SYSROOT_DIR}/etc/fish/" 2>/dev/null || true
+        # User skeleton for fish
+        mkdir -p "${SYSROOT_DIR}/etc/skel/.config/fish"
+        cp "${configs_dir}/fish/config.fish" "${SYSROOT_DIR}/etc/skel/.config/fish/" 2>/dev/null || true
         log_info "Installed fish configs"
     fi
 
-    # shells.conf
-    if [[ -f "${configs_dir}/shells.conf" ]]; then
-        # Extract just the shell paths (ignore comments)
-        grep "^/" "${configs_dir}/shells.conf" > "${SYSROOT_DIR}/etc/shells"
-        log_info "Installed /etc/shells"
-    fi
-
-    log_success "Shell tools installed"
+    log_success "Shell tools and configs installed"
 }
 
 # =============================================================================
-# Install File Navigation Tools (ranger, fzf)
+# Build File Navigation Tools (ranger, fzf)
 # =============================================================================
-install_file_tools() {
-    log_step "Installing file navigation tools..."
+build_file_tools() {
+    log_step "Building file navigation tools..."
 
-    # Add to default packages list
-    cat > "${SYSROOT_DIR}/etc/raven/file-tools.list" << EOF
-# RavenLinux File Navigation Tools
-ranger
-fzf
-EOF
+    # Build fzf
+    build_fzf
 
-    log_success "File navigation tools configured"
+    # Build ranger
+    build_ranger
+
+    log_success "File navigation tools built"
+}
+
+# Build fzf
+build_fzf() {
+    log_info "Building fzf..."
+
+    local fzf_ver="0.46.0"
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Check if already installed
+    if [[ -f "${SYSROOT_DIR}/usr/bin/fzf" ]]; then
+        log_info "fzf already installed"
+        return 0
+    fi
+
+    # Download prebuilt binary (faster than building)
+    local arch="amd64"
+    [[ "$(uname -m)" == "aarch64" ]] && arch="arm64"
+
+    local fzf_tarball="fzf-${fzf_ver}-linux_${arch}.tar.gz"
+    local fzf_url="https://github.com/junegunn/fzf/releases/download/${fzf_ver}/${fzf_tarball}"
+
+    if [[ ! -f "${cache_dir}/${fzf_tarball}" ]]; then
+        log_info "Downloading fzf ${fzf_ver}..."
+        if curl -fsSL -o "${cache_dir}/${fzf_tarball}" -L "${fzf_url}"; then
+            log_info "Downloaded fzf"
+        else
+            log_warn "Failed to download fzf"
+            return 1
+        fi
+    fi
+
+    # Extract
+    mkdir -p "${SYSROOT_DIR}/usr/bin"
+    tar -xzf "${cache_dir}/${fzf_tarball}" -C "${SYSROOT_DIR}/usr/bin" fzf
+    chmod 755 "${SYSROOT_DIR}/usr/bin/fzf"
+
+    # Download shell integration scripts
+    mkdir -p "${SYSROOT_DIR}/usr/share/fzf"
+    for script in completion.bash completion.zsh key-bindings.bash key-bindings.zsh key-bindings.fish; do
+        local script_url="https://raw.githubusercontent.com/junegunn/fzf/${fzf_ver}/shell/${script}"
+        curl -fsSL -o "${SYSROOT_DIR}/usr/share/fzf/${script}" "${script_url}" 2>/dev/null || true
+    done
+
+    log_success "fzf ${fzf_ver} installed"
+}
+
+# Build ranger
+build_ranger() {
+    log_info "Building ranger..."
+
+    local ranger_ver="1.9.3"
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Check if already installed
+    if [[ -f "${SYSROOT_DIR}/usr/bin/ranger" ]]; then
+        log_info "ranger already installed"
+        return 0
+    fi
+
+    # Ranger requires Python - check if available
+    if [[ ! -f "${SYSROOT_DIR}/usr/bin/python3" ]] && ! command -v python3 &>/dev/null; then
+        log_warn "Python not available - skipping ranger"
+        return 1
+    fi
+
+    # Try to copy from host first
+    if command -v ranger &>/dev/null; then
+        local host_ranger=$(command -v ranger)
+        mkdir -p "${SYSROOT_DIR}/usr/bin"
+        cp "${host_ranger}" "${SYSROOT_DIR}/usr/bin/ranger"
+        chmod 755 "${SYSROOT_DIR}/usr/bin/ranger"
+
+        # Copy ranger library
+        if [[ -d "/usr/lib/python3/dist-packages/ranger" ]]; then
+            mkdir -p "${SYSROOT_DIR}/usr/lib/python3/dist-packages"
+            cp -r "/usr/lib/python3/dist-packages/ranger" "${SYSROOT_DIR}/usr/lib/python3/dist-packages/"
+        fi
+
+        log_success "ranger installed from host"
+        return 0
+    fi
+
+    # Download and install
+    local ranger_tarball="ranger-${ranger_ver}.tar.gz"
+    local ranger_url="https://github.com/ranger/ranger/archive/refs/tags/v${ranger_ver}.tar.gz"
+
+    if [[ ! -f "${cache_dir}/${ranger_tarball}" ]]; then
+        log_info "Downloading ranger ${ranger_ver}..."
+        if curl -fsSL -o "${cache_dir}/${ranger_tarball}" -L "${ranger_url}"; then
+            log_info "Downloaded ranger"
+        else
+            log_warn "Failed to download ranger"
+            return 1
+        fi
+    fi
+
+    # Extract and install
+    local ranger_src="${cache_dir}/ranger-${ranger_ver}"
+    if [[ ! -d "${ranger_src}" ]]; then
+        tar -xzf "${cache_dir}/${ranger_tarball}" -C "${cache_dir}"
+    fi
+
+    cd "${ranger_src}"
+    python3 setup.py install --prefix=/usr --root="${SYSROOT_DIR}" 2>/dev/null || \
+        pip3 install --target="${SYSROOT_DIR}/usr/lib/python3/dist-packages" . 2>/dev/null || \
+        log_warn "ranger installation failed"
+
+    # Create simple launcher if install failed
+    if [[ ! -f "${SYSROOT_DIR}/usr/bin/ranger" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/bin"
+        cat > "${SYSROOT_DIR}/usr/bin/ranger" << 'RANGER_LAUNCH'
+#!/usr/bin/env python3
+import sys
+sys.path.insert(0, '/usr/lib/python3/dist-packages')
+from ranger import main
+main()
+RANGER_LAUNCH
+        chmod 755 "${SYSROOT_DIR}/usr/bin/ranger"
+    fi
+
+    cd "${PROJECT_ROOT}"
+    log_success "ranger installed"
 }
 
 # =============================================================================
@@ -929,25 +1416,17 @@ print_summary() {
     echo "==========================================${NC}"
     echo ""
 
+    echo -e "${CYAN}RavenLinux Tools:${NC}"
     local packages=(vem carrion ivaldi rvn raven-compositor raven-installer raven-usb wifi)
     for pkg in "${packages[@]}"; do
         if [[ -f "${SYSROOT_DIR}/bin/${pkg}" ]] || [[ -f "${SYSROOT_DIR}/usr/bin/${pkg}" ]]; then
             local bin_path="${SYSROOT_DIR}/bin/${pkg}"
             [[ ! -f "${bin_path}" ]] && bin_path="${SYSROOT_DIR}/usr/bin/${pkg}"
             local size
-            size=$(du -h "${bin_path}" | cut -f1)
+            size=$(du -h "${bin_path}" 2>/dev/null | cut -f1)
             echo -e "  ${GREEN}[OK]${NC} ${pkg} (${size})"
         else
             echo -e "  ${YELLOW}[--]${NC} ${pkg} (not built)"
-        fi
-    done
-
-    # Shell tools
-    for tool in switch-shell shell-reload; do
-        if [[ -f "${SYSROOT_DIR}/usr/bin/${tool}" ]]; then
-            echo -e "  ${GREEN}[OK]${NC} ${tool}"
-        else
-            echo -e "  ${YELLOW}[--]${NC} ${tool}"
         fi
     done
 
@@ -960,11 +1439,82 @@ print_summary() {
     fi
 
     echo ""
+    echo -e "${CYAN}Shells:${NC}"
+    for shell in zsh bash fish; do
+        if [[ -f "${SYSROOT_DIR}/usr/bin/${shell}" ]] || [[ -f "${SYSROOT_DIR}/bin/${shell}" ]]; then
+            echo -e "  ${GREEN}[OK]${NC} ${shell}"
+        else
+            echo -e "  ${YELLOW}[--]${NC} ${shell}"
+        fi
+    done
+
+    echo ""
+    echo -e "${CYAN}Shell Tools:${NC}"
+    for tool in switch-shell shell-reload; do
+        if [[ -f "${SYSROOT_DIR}/usr/bin/${tool}" ]]; then
+            echo -e "  ${GREEN}[OK]${NC} ${tool}"
+        else
+            echo -e "  ${YELLOW}[--]${NC} ${tool}"
+        fi
+    done
+
+    echo ""
+    echo -e "${CYAN}Development Tools:${NC}"
+    for tool in gcc g++ go python3 rustc cargo; do
+        if [[ -f "${SYSROOT_DIR}/usr/bin/${tool}" ]] || [[ -L "${SYSROOT_DIR}/usr/bin/${tool}" ]]; then
+            echo -e "  ${GREEN}[OK]${NC} ${tool}"
+        else
+            echo -e "  ${YELLOW}[--]${NC} ${tool}"
+        fi
+    done
+
+    echo ""
+    echo -e "${CYAN}Editors:${NC}"
+    for editor in vim vi nvim neovim; do
+        if [[ -f "${SYSROOT_DIR}/usr/bin/${editor}" ]] || [[ -L "${SYSROOT_DIR}/usr/bin/${editor}" ]]; then
+            echo -e "  ${GREEN}[OK]${NC} ${editor}"
+        else
+            echo -e "  ${YELLOW}[--]${NC} ${editor}"
+        fi
+    done
+
+    echo ""
+    echo -e "${CYAN}Networking:${NC}"
+    for tool in ssh scp sshd sftp; do
+        if [[ -f "${SYSROOT_DIR}/usr/bin/${tool}" ]]; then
+            echo -e "  ${GREEN}[OK]${NC} ${tool}"
+        else
+            echo -e "  ${YELLOW}[--]${NC} ${tool}"
+        fi
+    done
+
+    echo ""
+    echo -e "${CYAN}File Navigation:${NC}"
+    for tool in fzf ranger; do
+        if [[ -f "${SYSROOT_DIR}/usr/bin/${tool}" ]]; then
+            echo -e "  ${GREEN}[OK]${NC} ${tool}"
+        else
+            echo -e "  ${YELLOW}[--]${NC} ${tool}"
+        fi
+    done
+
+    echo ""
     echo -e "${CYAN}Configuration Files:${NC}"
     [[ -f "${SYSROOT_DIR}/etc/ssh/sshd_config" ]] && echo -e "  ${GREEN}[OK]${NC} SSH config"
     [[ -f "${SYSROOT_DIR}/etc/xdg/nvim/init.lua" ]] && echo -e "  ${GREEN}[OK]${NC} Neovim config"
     [[ -f "${SYSROOT_DIR}/etc/vim/vimrc" ]] && echo -e "  ${GREEN}[OK]${NC} Vim config"
     [[ -f "${SYSROOT_DIR}/etc/shells" ]] && echo -e "  ${GREEN}[OK]${NC} /etc/shells"
+    [[ -f "${SYSROOT_DIR}/etc/zsh/zshrc" ]] && echo -e "  ${GREEN}[OK]${NC} zshrc"
+    [[ -f "${SYSROOT_DIR}/etc/fish/config.fish" ]] && echo -e "  ${GREEN}[OK]${NC} fish config"
+    [[ -f "${SYSROOT_DIR}/root/.zshrc" ]] && echo -e "  ${GREEN}[OK]${NC} root zshrc"
+
+    # Check default shell
+    echo ""
+    if grep -q "/bin/zsh" "${SYSROOT_DIR}/etc/passwd" 2>/dev/null; then
+        echo -e "  ${GREEN}[OK]${NC} Default shell: zsh"
+    else
+        echo -e "  ${YELLOW}[--]${NC} Default shell: not set to zsh"
+    fi
     echo ""
 }
 
@@ -989,12 +1539,24 @@ main() {
     build_wifi_tools
     build_bootloader
 
-    # Build and install development tools, editors, SSH
+    # Build shells (zsh, fish, bash) - MUST come early as default shell
+    build_shells
+
+    # Build and install development tools
     build_dev_tools
+    build_rust
+
+    # Build editors
     build_editors
+
+    # Build SSH support
     build_ssh
+
+    # Install shell tools and configs
     install_shell_tools
-    install_file_tools
+
+    # Build file navigation tools
+    build_file_tools
 
     print_summary
 

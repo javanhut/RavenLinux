@@ -2,14 +2,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 
-mod aur;
+// Use modules from library
+use rvn::{aur, config, database, package, repository, resolver, workspace};
+
+// Commands are binary-only
 mod commands;
-mod config;
-mod database;
-mod package;
-mod repository;
-mod resolver;
-mod workspace;
 
 #[derive(Parser)]
 #[command(name = "rvn")]

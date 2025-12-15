@@ -25,7 +25,9 @@ impl Database {
     }
 
     pub fn open_default() -> Result<Self> {
-        Self::open("/var/lib/rvn/packages.db")
+        let config = crate::config::Config::load().unwrap_or_default();
+        let db_path = config.database_dir().join("packages.db");
+        Self::open(&db_path)
     }
 
     fn init_schema(&self) -> Result<()> {

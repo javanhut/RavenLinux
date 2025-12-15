@@ -100,7 +100,7 @@ impl Default for AurConfig {
         Self {
             enabled: true,
             base_url: "https://aur.archlinux.org".to_string(),
-            rpc_url: "https://aur.archlinux.org/rpc/v5".to_string(),
+            rpc_url: "https://aur.archlinux.org/rpc/".to_string(),
             cache_dir: PathBuf::from("/var/cache/rvn/aur"),
             build_dir: PathBuf::from("/tmp/rvn-aur-build"),
             clean_build: true,

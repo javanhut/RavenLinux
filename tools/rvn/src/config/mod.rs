@@ -78,7 +78,10 @@ impl Default for Config {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let config_path = PathBuf::from("/etc/rvn/config.toml");
+        // Check for config path override via environment variable
+        let config_path = std::env::var("RVN_CONFIG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/etc/rvn/config.toml"));
 
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;

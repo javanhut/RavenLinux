@@ -7,6 +7,18 @@ description = "The Raven Linux Package Manager - Fast, declarative, developer-fo
 license = "MIT"
 repository = "https://github.com/ravenlinux/rvn"
 
+[lib]
+name = "rvn"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rvn"
+path = "src/main.rs"
+
+[[example]]
+name = "test_aur"
+path = "examples/test_aur.rs"
+
 [dependencies]
 # CLI
 clap = { version = "4.4", features = ["derive", "color"] }
