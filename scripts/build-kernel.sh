@@ -357,6 +357,10 @@ generate_config() {
     $config_script --enable DRM_NOUVEAU     # NVIDIA (open source)
     $config_script --enable DRM_SIMPLEDRM   # Simple framebuffer
 
+    # EFI/System framebuffer drivers (CRITICAL for real hardware boot)
+    $config_script --enable SYSFB_SIMPLEFB  # Simple framebuffer from firmware
+    $config_script --enable DRM_EFIDRM      # EFI GOP framebuffer driver
+
     # VM/virtual GPU drivers (VirtualBox/VMware/QEMU)
     $config_script --enable DRM_VMWGFX      # VMware + VirtualBox VMSVGA
     $config_script --enable DRM_VBOXVIDEO   # VirtualBox VBoxVGA/VBoxSVGA

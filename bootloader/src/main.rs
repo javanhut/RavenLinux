@@ -9,6 +9,7 @@
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt::Write;
 use uefi::prelude::*;
 use uefi::proto::console::text::{Color, Key, ScanCode};
@@ -21,8 +22,113 @@ mod config;
 mod linux;
 mod menu;
 
-use config::{BootConfig, BootEntry, EntryType, CONFIG_PATHS, KNOWN_BOOTLOADERS};
+use config::{BootConfig, BootEntry, EntryType, CONFIG_PATHS, KNOWN_BOOTLOADERS, MAX_SUBMENU_DEPTH};
 use linux::{boot_efi_stub, chainload_efi, KernelError};
+
+/// Menu navigation state
+struct MenuNav<'a> {
+    /// Stack of menu levels (indices into parent's children)
+    stack: [usize; MAX_SUBMENU_DEPTH],
+    /// Current depth (0 = root menu)
+    depth: usize,
+    /// Selected index at current level
+    selected: usize,
+    /// Reference to root config
+    config: &'a BootConfig,
+}
+
+impl<'a> MenuNav<'a> {
+    fn new(config: &'a BootConfig) -> Self {
+        Self {
+            stack: [0; MAX_SUBMENU_DEPTH],
+            depth: 0,
+            selected: config.default.min(config.entries.len().saturating_sub(1)),
+            config,
+        }
+    }
+
+    /// Get current menu entries
+    fn current_entries(&self) -> &[BootEntry] {
+        if self.depth == 0 {
+            &self.config.entries
+        } else {
+            // Navigate to current submenu
+            let mut entries = &self.config.entries;
+            for i in 0..self.depth {
+                let idx = self.stack[i];
+                if idx < entries.len() && entries[idx].entry_type == EntryType::Submenu {
+                    entries = &entries[idx].children;
+                }
+            }
+            entries
+        }
+    }
+
+    /// Get selected entry
+    fn selected_entry(&self) -> Option<&BootEntry> {
+        let entries = self.current_entries();
+        entries.get(self.selected)
+    }
+
+    /// Enter a submenu
+    fn enter_submenu(&mut self) {
+        if self.depth < MAX_SUBMENU_DEPTH - 1 {
+            self.stack[self.depth] = self.selected;
+            self.depth += 1;
+            self.selected = 0;
+        }
+    }
+
+    /// Go back to parent menu
+    fn go_back(&mut self) {
+        if self.depth > 0 {
+            self.depth -= 1;
+            self.selected = self.stack[self.depth];
+        }
+    }
+
+    /// Move selection up
+    fn move_up(&mut self) {
+        let len = self.current_entries().len();
+        if self.selected > 0 {
+            self.selected -= 1;
+        } else if len > 0 {
+            self.selected = len - 1;
+        }
+    }
+
+    /// Move selection down
+    fn move_down(&mut self) {
+        let len = self.current_entries().len();
+        if self.selected < len.saturating_sub(1) {
+            self.selected += 1;
+        } else {
+            self.selected = 0;
+        }
+    }
+
+    /// Get menu title for current level
+    fn menu_title(&self) -> &str {
+        if self.depth == 0 {
+            "Select an operating system to boot:"
+        } else {
+            // Get parent submenu name
+            let mut entries = &self.config.entries;
+            for i in 0..self.depth - 1 {
+                let idx = self.stack[i];
+                if idx < entries.len() {
+                    entries = &entries[idx].children;
+                }
+            }
+            let parent_idx = self.stack[self.depth - 1];
+            if parent_idx < entries.len() {
+                &entries[parent_idx].name
+            } else {
+                "Submenu"
+            }
+        }
+    }
+}
 
 /// Bootloader version
 const VERSION: &str = "0.1.0";
@@ -54,34 +160,92 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         }
     };
 
+    // Main menu loop with submenu support
+    let mut nav = MenuNav::new(&config);
+
     loop {
-        // Display boot menu and get selection
-        let selected = display_menu_with_table(&mut system_table, &config);
+        // Display boot menu and handle navigation
+        let action = display_menu_with_nav(&mut system_table, &mut nav);
 
-        // Get the selected entry
-        let entry = &config.entries[selected];
+        match action {
+            MenuAction::Boot(entry) => {
+                {
+                    let stdout = system_table.stdout();
+                    let _ = stdout.set_color(Color::White, Color::Black);
+                    let _ = writeln!(stdout, "\nBooting: {}", entry.name);
+                }
 
-        {
-            let stdout = system_table.stdout();
-            let _ = stdout.set_color(Color::White, Color::Black);
-            let _ = writeln!(stdout, "\nBooting: {}", entry.name);
+                // Boot the selected entry
+                let result = {
+                    let boot_services = system_table.boot_services();
+                    boot_entry(boot_services, image_handle, &entry)
+                };
+
+                // If we get here, boot failed
+                {
+                    let stdout = system_table.stdout();
+                    let _ = stdout.set_color(Color::Red, Color::Black);
+                    let _ = writeln!(stdout, "\nBoot failed: {:?}", result);
+                    let _ = writeln!(stdout, "Press any key to return to menu...");
+                }
+                wait_for_key(system_table.boot_services());
+            }
+            MenuAction::Reboot => {
+                let runtime_services = system_table.runtime_services();
+                runtime_services.reset(uefi::table::runtime::ResetType::COLD, Status::SUCCESS, None);
+            }
+            MenuAction::Shutdown => {
+                let runtime_services = system_table.runtime_services();
+                runtime_services.reset(uefi::table::runtime::ResetType::SHUTDOWN, Status::SUCCESS, None);
+            }
+            MenuAction::UefiShell => {
+                // Try to launch UEFI shell
+                let result = {
+                    let boot_services = system_table.boot_services();
+                    launch_uefi_shell(boot_services, image_handle)
+                };
+                if result.is_err() {
+                    let stdout = system_table.stdout();
+                    let _ = stdout.set_color(Color::Red, Color::Black);
+                    let _ = writeln!(stdout, "\nUEFI Shell not found.");
+                    let _ = writeln!(stdout, "Press any key to return to menu...");
+                    wait_for_key(system_table.boot_services());
+                }
+            }
+            MenuAction::Continue => {
+                // Navigation action, continue loop
+            }
         }
-
-        // Boot the selected entry
-        let result = {
-            let boot_services = system_table.boot_services();
-            boot_entry(boot_services, image_handle, entry)
-        };
-
-        // If we get here, boot failed
-        {
-            let stdout = system_table.stdout();
-            let _ = stdout.set_color(Color::Red, Color::Black);
-            let _ = writeln!(stdout, "\nBoot failed: {:?}", result);
-            let _ = writeln!(stdout, "Press any key to return to menu...");
-        }
-        wait_for_key(system_table.boot_services());
     }
+}
+
+/// Result of menu interaction
+enum MenuAction {
+    Boot(BootEntry),
+    Reboot,
+    Shutdown,
+    UefiShell,
+    Continue,
+}
+
+/// Try to launch UEFI shell from common locations
+fn launch_uefi_shell(boot_services: &BootServices, image_handle: Handle) -> Result<(), KernelError> {
+    // Common UEFI shell locations
+    let shell_paths = [
+        "\\EFI\\BOOT\\Shell.efi",
+        "\\EFI\\Shell.efi",
+        "\\Shell.efi",
+        "\\EFI\\tools\\Shell.efi",
+        "\\shellx64.efi",
+    ];
+
+    for path in shell_paths {
+        if let Ok(()) = chainload_efi(boot_services, image_handle, path) {
+            return Ok(());
+        }
+    }
+
+    Err(KernelError::EfiAppNotFound)
 }
 
 fn print_banner(stdout: &mut uefi::proto::console::text::Output) {
@@ -101,17 +265,16 @@ fn print_banner(stdout: &mut uefi::proto::console::text::Output) {
     let _ = writeln!(stdout, "");
 }
 
-fn display_menu_with_table(
+fn display_menu_with_nav(
     system_table: &mut SystemTable<Boot>,
-    config: &BootConfig,
-) -> usize {
-    let mut selected: usize = config
-        .default
-        .min(config.entries.len().saturating_sub(1));
-    let mut timeout = config.timeout;
-    let mut countdown_active = true;
+    nav: &mut MenuNav,
+) -> MenuAction {
+    let mut timeout = nav.config.timeout;
+    let mut countdown_active = nav.depth == 0; // Only countdown on root menu
 
     loop {
+        let entries = nav.current_entries();
+
         // Clear and redraw menu (scoped borrow of stdout)
         {
             let stdout = system_table.stdout();
@@ -119,15 +282,15 @@ fn display_menu_with_table(
             print_banner(stdout);
 
             let _ = stdout.set_color(Color::LightGray, Color::Black);
-            let _ = writeln!(stdout, "    Select an operating system to boot:");
+            let _ = writeln!(stdout, "    {}", nav.menu_title());
             let _ = writeln!(stdout, "");
 
             // Menu width for full-line highlight
             const MENU_WIDTH: usize = 56;
 
             // Draw entries with full-line highlight
-            for (i, entry) in config.entries.iter().enumerate() {
-                if i == selected {
+            for (i, entry) in entries.iter().enumerate() {
+                if i == nav.selected {
                     // Selected entry - full line highlighted
                     let _ = stdout.set_color(Color::White, Color::Cyan);
                     let _ = write!(stdout, "    ");
@@ -155,27 +318,37 @@ fn display_menu_with_table(
                 let _ = writeln!(stdout, "    Auto-boot in {} seconds...  Press any key to stop", timeout);
             } else {
                 let _ = stdout.set_color(Color::LightGray, Color::Black);
-                let _ = writeln!(stdout, "    [↑/↓] Select   [Enter] Boot   [r] Reboot   [s] Shutdown");
+                if nav.depth > 0 {
+                    let _ = writeln!(stdout, "    [↑/↓] Select   [Enter] Select   [Esc/Backspace] Back");
+                } else {
+                    let _ = writeln!(stdout, "    [↑/↓] Select   [Enter] Boot/Enter   [Esc] Exit");
+                }
             }
         }
 
-        // Wait for input or timeout (scoped borrow of boot_services)
+        // Wait for input or timeout
         if countdown_active && timeout > 0 {
             let key_result = wait_for_key_timeout(system_table.boot_services(), 1_000_000);
             match key_result {
                 Some(key) => {
                     countdown_active = false;
+                    // Handle enter key during countdown
                     if let Key::Printable(c) = key {
                         if c == uefi::Char16::try_from('\r').unwrap() {
-                            return selected;
+                            if let Some(entry) = nav.selected_entry() {
+                                return handle_entry_selection(nav, entry.clone());
+                            }
                         }
                     }
-                    selected = handle_key(key, selected, config.entries.len());
+                    handle_nav_key(key, nav);
                 }
                 None => {
                     timeout -= 1;
                     if timeout == 0 {
-                        return selected;
+                        // Auto-boot default entry
+                        if let Some(entry) = nav.selected_entry() {
+                            return handle_entry_selection(nav, entry.clone());
+                        }
                     }
                 }
             }
@@ -183,19 +356,51 @@ fn display_menu_with_table(
             let key = wait_for_key(system_table.boot_services());
             match key {
                 Key::Printable(c) if c == uefi::Char16::try_from('\r').unwrap() => {
-                    return selected;
+                    if let Some(entry) = nav.selected_entry() {
+                        return handle_entry_selection(nav, entry.clone());
+                    }
                 }
-                Key::Printable(c) if c == uefi::Char16::try_from('r').unwrap() || c == uefi::Char16::try_from('R').unwrap() => {
-                    // Reboot - just loop for now
+                Key::Special(ScanCode::ESCAPE) => {
+                    if nav.depth > 0 {
+                        nav.go_back();
+                    }
                 }
-                Key::Printable(c) if c == uefi::Char16::try_from('s').unwrap() || c == uefi::Char16::try_from('S').unwrap() => {
-                    // Shutdown - just loop for now
+                Key::Printable(c) if c == uefi::Char16::try_from('\x08').unwrap() => {
+                    // Backspace
+                    if nav.depth > 0 {
+                        nav.go_back();
+                    }
                 }
                 _ => {
-                    selected = handle_key(key, selected, config.entries.len());
+                    handle_nav_key(key, nav);
                 }
             }
         }
+    }
+}
+
+fn handle_entry_selection(nav: &mut MenuNav, entry: BootEntry) -> MenuAction {
+    match entry.entry_type {
+        EntryType::Submenu => {
+            nav.enter_submenu();
+            MenuAction::Continue
+        }
+        EntryType::Back => {
+            nav.go_back();
+            MenuAction::Continue
+        }
+        EntryType::Reboot => MenuAction::Reboot,
+        EntryType::Shutdown => MenuAction::Shutdown,
+        EntryType::UefiShell => MenuAction::UefiShell,
+        _ => MenuAction::Boot(entry),
+    }
+}
+
+fn handle_nav_key(key: Key, nav: &mut MenuNav) {
+    match key {
+        Key::Special(ScanCode::UP) => nav.move_up(),
+        Key::Special(ScanCode::DOWN) => nav.move_down(),
+        _ => {}
     }
 }
 
@@ -351,6 +556,7 @@ fn detect_other_os(root: &mut uefi::proto::media::file::Directory, config: &mut 
                     initrd: None,
                     cmdline: String::new(),
                     entry_type: bootloader.entry_type,
+                    children: Vec::new(),
                 });
             }
         }
@@ -379,6 +585,11 @@ fn boot_entry(
         }
         EntryType::LinuxLegacy => {
             // Traditional Linux boot - not implemented
+            Err(KernelError::NotImplemented)
+        }
+        // These entry types are handled by the menu system, not boot_entry
+        EntryType::Submenu | EntryType::Back | EntryType::Reboot |
+        EntryType::Shutdown | EntryType::UefiShell => {
             Err(KernelError::NotImplemented)
         }
     }

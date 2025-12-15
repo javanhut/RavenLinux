@@ -9,6 +9,9 @@ extern crate alloc;
 /// Maximum number of boot entries
 pub const MAX_ENTRIES: usize = 16;
 
+/// Maximum submenu depth
+pub const MAX_SUBMENU_DEPTH: usize = 3;
+
 /// A single boot entry
 #[derive(Clone)]
 pub struct BootEntry {
@@ -17,6 +20,8 @@ pub struct BootEntry {
     pub initrd: Option<String>,
     pub cmdline: String,
     pub entry_type: EntryType,
+    /// Child entries for submenu type
+    pub children: Vec<BootEntry>,
 }
 
 /// Type of boot entry
@@ -32,6 +37,16 @@ pub enum EntryType {
     Windows,
     /// Other OS via chainload
     Chainload,
+    /// Submenu containing other entries
+    Submenu,
+    /// UEFI Shell
+    UefiShell,
+    /// Back to parent menu
+    Back,
+    /// Reboot system
+    Reboot,
+    /// Shutdown system
+    Shutdown,
 }
 
 /// Boot configuration
@@ -49,62 +64,150 @@ impl Default for BootEntry {
             initrd: None,
             cmdline: String::new(),
             entry_type: EntryType::LinuxEfi,
+            children: Vec::new(),
+        }
+    }
+}
+
+impl BootEntry {
+    /// Create a new submenu entry
+    pub fn submenu(name: &str, children: Vec<BootEntry>) -> Self {
+        Self {
+            name: String::from(name),
+            kernel: String::new(),
+            initrd: None,
+            cmdline: String::new(),
+            entry_type: EntryType::Submenu,
+            children,
+        }
+    }
+
+    /// Create a back entry
+    pub fn back() -> Self {
+        Self {
+            name: String::from("< Back"),
+            kernel: String::new(),
+            initrd: None,
+            cmdline: String::new(),
+            entry_type: EntryType::Back,
+            children: Vec::new(),
+        }
+    }
+
+    /// Create a reboot entry
+    pub fn reboot() -> Self {
+        Self {
+            name: String::from("Reboot"),
+            kernel: String::new(),
+            initrd: None,
+            cmdline: String::new(),
+            entry_type: EntryType::Reboot,
+            children: Vec::new(),
+        }
+    }
+
+    /// Create a shutdown entry
+    pub fn shutdown() -> Self {
+        Self {
+            name: String::from("Shutdown"),
+            kernel: String::new(),
+            initrd: None,
+            cmdline: String::new(),
+            entry_type: EntryType::Shutdown,
+            children: Vec::new(),
+        }
+    }
+
+    /// Create a UEFI shell entry
+    pub fn uefi_shell() -> Self {
+        Self {
+            name: String::from("UEFI Shell"),
+            kernel: String::new(),
+            initrd: None,
+            cmdline: String::new(),
+            entry_type: EntryType::UefiShell,
+            children: Vec::new(),
         }
     }
 }
 
 impl Default for BootConfig {
     fn default() -> Self {
-        // Create default boot configuration.
+        // Create default boot configuration with submenus.
         // Note: On the live ISO we expect a boot.cfg/boot.conf to override this.
         let mut entries: Vec<BootEntry> = Vec::new();
 
-        // Default RavenLinux entry
+        // Default RavenLinux entry (terminal mode)
         entries.push(BootEntry {
-            name: String::from("RavenLinux"),
+            name: String::from("Raven Linux"),
             kernel: String::from("\\EFI\\raven\\vmlinuz"),
-            initrd: Some(String::from("\\EFI\\raven\\initramfs.img")),
-            cmdline: String::from("root=LABEL=RAVEN_ROOT rw quiet splash"),
+            initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
+            cmdline: String::from("rdinit=/init quiet loglevel=3 console=ttyS0,115200 console=tty0"),
             entry_type: EntryType::LinuxEfi,
+            children: Vec::new(),
         });
 
-        // Wayland graphics mode
-        entries.push(BootEntry {
-            name: String::from("RavenLinux (Wayland)"),
+        // Graphical submenu
+        let mut graphical_entries: Vec<BootEntry> = Vec::new();
+
+        graphical_entries.push(BootEntry {
+            name: String::from("Raven Compositor (Wayland)"),
             kernel: String::from("\\EFI\\raven\\vmlinuz"),
-            initrd: Some(String::from("\\EFI\\raven\\initramfs.img")),
-            cmdline: String::from("root=LABEL=RAVEN_ROOT rw quiet splash raven.graphics=wayland"),
+            initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
+            cmdline: String::from("rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=ttyS0,115200 console=tty0"),
             entry_type: EntryType::LinuxEfi,
+            children: Vec::new(),
         });
 
-        // Wayland (Hyprland)
-        entries.push(BootEntry {
-            name: String::from("RavenLinux (Wayland - Hyprland)"),
+        graphical_entries.push(BootEntry {
+            name: String::from("Hyprland (Wayland)"),
             kernel: String::from("\\EFI\\raven\\vmlinuz"),
-            initrd: Some(String::from("\\EFI\\raven\\initramfs.img")),
-            cmdline: String::from(
-                "root=LABEL=RAVEN_ROOT rw quiet splash raven.graphics=wayland raven.wayland=hyprland",
-            ),
+            initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
+            cmdline: String::from("rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=hyprland console=ttyS0,115200 console=tty0"),
             entry_type: EntryType::LinuxEfi,
+            children: Vec::new(),
         });
 
-        // X11 graphics mode
-        entries.push(BootEntry {
-            name: String::from("RavenLinux (X11)"),
+        graphical_entries.push(BootEntry {
+            name: String::from("Weston (Wayland)"),
             kernel: String::from("\\EFI\\raven\\vmlinuz"),
-            initrd: Some(String::from("\\EFI\\raven\\initramfs.img")),
-            cmdline: String::from("root=LABEL=RAVEN_ROOT rw quiet splash raven.graphics=x11"),
+            initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
+            cmdline: String::from("rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=weston console=ttyS0,115200 console=tty0"),
             entry_type: EntryType::LinuxEfi,
+            children: Vec::new(),
         });
+
+        graphical_entries.push(BootEntry {
+            name: String::from("X11"),
+            kernel: String::from("\\EFI\\raven\\vmlinuz"),
+            initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
+            cmdline: String::from("rdinit=/init quiet loglevel=3 raven.graphics=x11 console=ttyS0,115200 console=tty0"),
+            entry_type: EntryType::LinuxEfi,
+            children: Vec::new(),
+        });
+
+        graphical_entries.push(BootEntry::back());
+
+        entries.push(BootEntry::submenu("Raven Linux (Graphical) >", graphical_entries));
 
         // Recovery mode
         entries.push(BootEntry {
-            name: String::from("RavenLinux (Recovery)"),
+            name: String::from("Raven Linux (Recovery)"),
             kernel: String::from("\\EFI\\raven\\vmlinuz"),
-            initrd: Some(String::from("\\EFI\\raven\\initramfs.img")),
-            cmdline: String::from("root=LABEL=RAVEN_ROOT rw single"),
+            initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
+            cmdline: String::from("rdinit=/init single console=ttyS0,115200 console=tty0"),
             entry_type: EntryType::LinuxEfi,
+            children: Vec::new(),
         });
+
+        // System submenu
+        let mut system_entries: Vec<BootEntry> = Vec::new();
+        system_entries.push(BootEntry::uefi_shell());
+        system_entries.push(BootEntry::reboot());
+        system_entries.push(BootEntry::shutdown());
+        system_entries.push(BootEntry::back());
+
+        entries.push(BootEntry::submenu("System >", system_entries));
 
         Self {
             entries,
@@ -169,6 +272,7 @@ impl BootConfig {
                     initrd: None,
                     cmdline: String::new(),
                     entry_type: EntryType::LinuxEfi,
+                    children: Vec::new(),
                 });
                 continue;
             }
@@ -188,6 +292,11 @@ impl BootConfig {
                                 "linux-legacy" => EntryType::LinuxLegacy,
                                 "chainload" | "efi" => EntryType::Chainload,
                                 "windows" => EntryType::Windows,
+                                "submenu" => EntryType::Submenu,
+                                "uefi-shell" | "shell" => EntryType::UefiShell,
+                                "back" => EntryType::Back,
+                                "reboot" => EntryType::Reboot,
+                                "shutdown" | "poweroff" => EntryType::Shutdown,
                                 _ => EntryType::LinuxEfi,
                             };
                         }

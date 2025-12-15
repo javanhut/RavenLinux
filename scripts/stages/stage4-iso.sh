@@ -175,19 +175,46 @@ cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
 
 start_shell_loop() {
     cd /root
-    while true; do
-        if [ -x /bin/bash ]; then
-            /bin/bash --login -i
-        elif [ -x /bin/sh ]; then
-            /bin/sh -l
-        else
-            echo "No shell available! Sleeping..."
-            sleep 10
-        fi
-        echo ""
-        echo "Shell exited. Restarting..."
-        sleep 1
-    done
+
+    # Find first available TTY
+    local tty_dev="/dev/tty1"
+    if [ ! -c "$tty_dev" ]; then
+        tty_dev="/dev/console"
+    fi
+
+    # Switch to tty1 if openvt is available
+    if command -v openvt >/dev/null 2>&1; then
+        while true; do
+            if [ -x /bin/bash ]; then
+                # Use -- to separate openvt options from command arguments
+                openvt -c 1 -w -s -f -- /bin/bash --login || true
+            elif [ -x /bin/sh ]; then
+                openvt -c 1 -w -s -f -- /bin/sh -l || true
+            else
+                echo "No shell available! Sleeping..."
+                sleep 10
+            fi
+            echo "Shell exited. Restarting..."
+            sleep 1
+        done
+    else
+        # Fallback: redirect to TTY device directly
+        # Close inherited fds and reopen on the TTY
+        exec 0<>"$tty_dev" 1>&0 2>&0
+        while true; do
+            if [ -x /bin/bash ]; then
+                /bin/bash --login -i
+            elif [ -x /bin/sh ]; then
+                /bin/sh -l
+            else
+                echo "No shell available! Sleeping..."
+                sleep 10
+            fi
+            echo ""
+            echo "Shell exited. Restarting..."
+            sleep 1
+        done
+    fi
 }
 
 if echo "$cmdline" | grep -qE '(^| )raven\.graphics=wayland($| )'; then
@@ -427,64 +454,17 @@ setup_ravenboot() {
         mkdir -p "${ISO_ROOT}/EFI/raven"
         cp "${ravenboot}" "${ISO_ROOT}/EFI/raven/raven-boot.efi"
 
-        # Create RavenBoot config.
-        # Prefer .cfg (8.3-safe) to maximize compatibility with firmware FAT drivers.
-        cat > "${ISO_ROOT}/EFI/raven/boot.cfg" << EOF
-# RavenBoot Configuration
-timeout = 5
-default = 0
-
-[entry]
-name = "Raven Linux Live"
-kernel = "\\EFI\\raven\\vmlinuz"
-initrd = "\\EFI\\raven\\initrd.img"
-cmdline = "rdinit=/init quiet loglevel=3 console=tty0 console=ttyS0,115200"
-type = linux-efi
-
-[entry]
-name = "Raven Linux Live (Wayland)"
-kernel = "\\EFI\\raven\\vmlinuz"
-initrd = "\\EFI\\raven\\initrd.img"
-cmdline = "rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=weston console=tty0 console=ttyS0,115200"
-type = linux-efi
-
-[entry]
-name = "Raven Linux Live (Wayland - Raven Compositor WIP)"
-kernel = "\\EFI\\raven\\vmlinuz"
-initrd = "\\EFI\\raven\\initrd.img"
-cmdline = "rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=tty0 console=ttyS0,115200"
-type = linux-efi
-
-[entry]
-name = "Raven Linux Live (Wayland - Hyprland)"
-kernel = "\\EFI\\raven\\vmlinuz"
-initrd = "\\EFI\\raven\\initrd.img"
-cmdline = "rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=hyprland console=tty0 console=ttyS0,115200"
-type = linux-efi
-
-[entry]
-name = "Raven Linux Live (X11)"
-kernel = "\\EFI\\raven\\vmlinuz"
-initrd = "\\EFI\\raven\\initrd.img"
-cmdline = "rdinit=/init quiet loglevel=3 raven.graphics=x11 console=tty0 console=ttyS0,115200"
-type = linux-efi
-
-[entry]
-name = "Raven Linux Live (Verbose)"
-kernel = "\\EFI\\raven\\vmlinuz"
-initrd = "\\EFI\\raven\\initrd.img"
-cmdline = "rdinit=/init console=tty0 console=ttyS0,115200"
-type = linux-efi
-
-[entry]
-name = "Raven Linux (Recovery)"
-kernel = "\\EFI\\raven\\vmlinuz"
-initrd = "\\EFI\\raven\\initrd.img"
-cmdline = "rdinit=/init single console=tty0 console=ttyS0,115200"
-type = linux-efi
-EOF
-        # Backward-compatible copy for older RavenBoot builds/docs.
-        cp "${ISO_ROOT}/EFI/raven/boot.cfg" "${ISO_ROOT}/EFI/raven/boot.conf" 2>/dev/null || true
+        # RavenBoot now has built-in submenu support with sensible defaults.
+        # The bootloader will use its compiled-in menu structure which includes:
+        # - Raven Linux (terminal)
+        # - Raven Linux (Graphical) > submenu with compositor options
+        # - Raven Linux (Recovery)
+        # - System > submenu with UEFI Shell, Reboot, Shutdown
+        #
+        # No boot.cfg needed - the defaults are baked into the bootloader.
+        # If you want to customize, create boot.cfg with flat entries (submenus not yet
+        # supported in config file parsing).
+        log_info "  Using built-in boot menu with submenu support"
 
         log_success "RavenBoot configured"
         return 0
@@ -500,7 +480,7 @@ EOF
 setup_grub() {
     log_step "Setting up GRUB bootloader..."
 
-    # Create GRUB config
+    # Create GRUB config with submenus
     cat > "${ISO_ROOT}/boot/grub/grub.cfg" << 'EOF'
 set default=0
 set timeout=5
@@ -514,47 +494,54 @@ set gfxpayload=keep
 set color_normal=cyan/black
 set color_highlight=white/blue
 
-menuentry "Raven Linux Live" --class raven {
-    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 console=tty0 console=ttyS0,115200
+menuentry "Raven Linux" --class raven {
+    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 console=ttyS0,115200 console=tty0
     initrd /boot/initramfs.img
 }
 
-menuentry "Raven Linux Live (Wayland)" --class raven {
-    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=weston console=tty0 console=ttyS0,115200
-    initrd /boot/initramfs.img
-}
+submenu "Raven Linux (Graphical) >" --class raven {
+    menuentry "Raven Compositor (Wayland)" --class raven {
+        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=ttyS0,115200 console=tty0
+        initrd /boot/initramfs.img
+    }
 
-menuentry "Raven Linux Live (Wayland - Raven Compositor WIP)" --class raven {
-    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=tty0 console=ttyS0,115200
-    initrd /boot/initramfs.img
-}
+    menuentry "Hyprland (Wayland)" --class raven {
+        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=hyprland console=ttyS0,115200 console=tty0
+        initrd /boot/initramfs.img
+    }
 
-menuentry "Raven Linux Live (Wayland - Hyprland)" --class raven {
-    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=hyprland console=tty0 console=ttyS0,115200
-    initrd /boot/initramfs.img
-}
+    menuentry "Weston (Wayland)" --class raven {
+        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=weston console=ttyS0,115200 console=tty0
+        initrd /boot/initramfs.img
+    }
 
-menuentry "Raven Linux Live (X11)" --class raven {
-    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=x11 console=tty0 console=ttyS0,115200
-    initrd /boot/initramfs.img
-}
+    menuentry "X11" --class raven {
+        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=x11 console=ttyS0,115200 console=tty0
+        initrd /boot/initramfs.img
+    }
 
-menuentry "Raven Linux Live (Verbose)" --class raven {
-    linux /boot/vmlinuz rdinit=/init console=tty0 console=ttyS0,115200
-    initrd /boot/initramfs.img
+    menuentry "< Back" --class raven {
+        configfile /boot/grub/grub.cfg
+    }
 }
 
 menuentry "Raven Linux (Recovery)" --class raven {
-    linux /boot/vmlinuz rdinit=/init single console=tty0 console=ttyS0,115200
+    linux /boot/vmlinuz rdinit=/init single console=ttyS0,115200 console=tty0
     initrd /boot/initramfs.img
 }
 
-menuentry "Reboot" --class restart {
-    reboot
-}
+submenu "System >" --class raven {
+    menuentry "Reboot" --class restart {
+        reboot
+    }
 
-menuentry "Shutdown" --class shutdown {
-    halt
+    menuentry "Shutdown" --class shutdown {
+        halt
+    }
+
+    menuentry "< Back" --class raven {
+        configfile /boot/grub/grub.cfg
+    }
 }
 EOF
 
