@@ -188,6 +188,40 @@ copy_system_utils() {
         log_info "  Added raven-wayland-session"
     fi
 
+    # Fontconfig + fonts + cursor themes for "fast desktop" sessions.
+    # Weston terminal/shell uses fontconfig; missing config/themes causes noisy warnings.
+    log_info "Copying fontconfig, fonts, and cursor themes..."
+    if [[ -d "/etc/fonts" ]]; then
+        mkdir -p "${SYSROOT_DIR}/etc/fonts"
+        cp -a "/etc/fonts/." "${SYSROOT_DIR}/etc/fonts/" 2>/dev/null || true
+        log_info "  Copied /etc/fonts"
+    elif [[ -f "${PROJECT_ROOT}/configs/fontconfig/fonts.conf" ]]; then
+        mkdir -p "${SYSROOT_DIR}/etc/fonts"
+        cp "${PROJECT_ROOT}/configs/fontconfig/fonts.conf" "${SYSROOT_DIR}/etc/fonts/fonts.conf" 2>/dev/null || true
+        log_info "  Added minimal /etc/fonts/fonts.conf"
+    fi
+    if [[ -d "/usr/share/fontconfig" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share/fontconfig"
+        cp -a "/usr/share/fontconfig/." "${SYSROOT_DIR}/usr/share/fontconfig/" 2>/dev/null || true
+        log_info "  Copied /usr/share/fontconfig"
+    fi
+    if [[ -d "/usr/share/fonts" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share/fonts"
+        cp -a "/usr/share/fonts/." "${SYSROOT_DIR}/usr/share/fonts/" 2>/dev/null || true
+        log_info "  Copied /usr/share/fonts"
+    fi
+    mkdir -p "${SYSROOT_DIR}/var/cache/fontconfig" 2>/dev/null || true
+    if [[ -d "/usr/share/icons" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share/icons"
+        for theme in default breeze_cursors Adwaita hicolor; do
+            if [[ -d "/usr/share/icons/${theme}" ]]; then
+                mkdir -p "${SYSROOT_DIR}/usr/share/icons/${theme}"
+                cp -a "/usr/share/icons/${theme}/." "${SYSROOT_DIR}/usr/share/icons/${theme}/" 2>/dev/null || true
+                log_info "  Copied /usr/share/icons/${theme}"
+            fi
+        done
+    fi
+
     # If weston is available on the build host, copy its runtime data/plugins.
     if [[ -x "${SYSROOT_DIR}/bin/weston" ]]; then
         for d in /usr/lib/weston /usr/lib64/weston /usr/share/weston \

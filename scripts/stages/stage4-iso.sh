@@ -398,6 +398,40 @@ install_packages_to_sysroot() {
         log_info "  Installed /etc/xdg/weston/weston.ini"
     fi
 
+    # Fontconfig + fonts (Weston terminal/shell uses it; missing config causes warnings).
+    if [[ -d "/etc/fonts" ]]; then
+        mkdir -p "${SYSROOT_DIR}/etc/fonts"
+        cp -a "/etc/fonts/." "${SYSROOT_DIR}/etc/fonts/" 2>/dev/null || true
+        log_info "  Copied /etc/fonts"
+    elif [[ -f "${PROJECT_ROOT}/configs/fontconfig/fonts.conf" ]]; then
+        mkdir -p "${SYSROOT_DIR}/etc/fonts"
+        cp "${PROJECT_ROOT}/configs/fontconfig/fonts.conf" "${SYSROOT_DIR}/etc/fonts/fonts.conf" 2>/dev/null || true
+        log_info "  Added minimal /etc/fonts/fonts.conf"
+    fi
+    if [[ -d "/usr/share/fontconfig" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share/fontconfig"
+        cp -a "/usr/share/fontconfig/." "${SYSROOT_DIR}/usr/share/fontconfig/" 2>/dev/null || true
+        log_info "  Copied /usr/share/fontconfig"
+    fi
+    if [[ -d "/usr/share/fonts" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share/fonts"
+        cp -a "/usr/share/fonts/." "${SYSROOT_DIR}/usr/share/fonts/" 2>/dev/null || true
+        log_info "  Copied /usr/share/fonts"
+    fi
+    mkdir -p "${SYSROOT_DIR}/var/cache/fontconfig" 2>/dev/null || true
+
+    # Cursor themes (missing dnd cursors produce warnings in weston-desktop-shell).
+    if [[ -d "/usr/share/icons" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share/icons"
+        for theme in default breeze_cursors Adwaita hicolor; do
+            if [[ -d "/usr/share/icons/${theme}" ]]; then
+                mkdir -p "${SYSROOT_DIR}/usr/share/icons/${theme}"
+                cp -a "/usr/share/icons/${theme}/." "${SYSROOT_DIR}/usr/share/icons/${theme}/" 2>/dev/null || true
+                log_info "  Copied /usr/share/icons/${theme}"
+            fi
+        done
+    fi
+
     # Ensure shared library dependencies for newly installed binaries are present.
     log_info "Copying runtime libraries for sysroot binaries..."
     for bin in "${SYSROOT_DIR}"/bin/* "${SYSROOT_DIR}"/sbin/*; do

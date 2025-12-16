@@ -22,6 +22,16 @@ umask "$_old_umask"
 
 export LIBSEAT_BACKEND="${LIBSEAT_BACKEND:-seatd}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+export FONTCONFIG_PATH="${FONTCONFIG_PATH:-/etc/fonts}"
+export FONTCONFIG_FILE="${FONTCONFIG_FILE:-/etc/fonts/fonts.conf}"
+export XCURSOR_PATH="${XCURSOR_PATH:-/usr/share/icons}"
+if [ -z "${XCURSOR_THEME:-}" ]; then
+    if [ -d /usr/share/icons/breeze_cursors ]; then
+        export XCURSOR_THEME=breeze_cursors
+    elif [ -d /usr/share/icons/Adwaita ]; then
+        export XCURSOR_THEME=Adwaita
+    fi
+fi
 
 # Xwayland expects /tmp/.X11-unix to exist (it may not create the parent dir).
 mkdir -p /tmp/.X11-unix 2>/dev/null || true
