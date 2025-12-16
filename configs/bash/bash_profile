@@ -1,5 +1,12 @@
 # RavenLinux bash_profile - sourced for login shells
 
+# Load system-wide environment (Go/Rust/etc.)
+if [ -d /etc/profile.d ]; then
+    for f in /etc/profile.d/*.sh; do
+        [ -r "$f" ] && . "$f"
+    done
+fi
+
 # Source bashrc for interactive shells
 if [ -f ~/.bashrc ]; then
     . ~/.bashrc

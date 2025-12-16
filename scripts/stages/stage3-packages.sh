@@ -405,8 +405,8 @@ build_dev_tools() {
         done
     fi
 
-    # Build GCC if not prebuilt
-    if [[ ! -f "${SYSROOT_DIR}/usr/bin/gcc" ]]; then
+    # Build/repair GCC if missing or installed as a broken wrapper
+    if [[ ! -x "${SYSROOT_DIR}/usr/bin/gcc" ]] || ! file "${SYSROOT_DIR}/usr/bin/gcc" 2>/dev/null | grep -q "ELF"; then
         build_gcc
     fi
 
@@ -415,8 +415,8 @@ build_dev_tools() {
         build_golang
     fi
 
-    # Build Python if not prebuilt
-    if [[ ! -f "${SYSROOT_DIR}/usr/bin/python3" ]]; then
+    # Build/repair Python if missing or installed as a broken wrapper
+    if [[ ! -x "${SYSROOT_DIR}/usr/bin/python3" ]] || ! file "${SYSROOT_DIR}/usr/bin/python3" 2>/dev/null | grep -q "ELF"; then
         build_python
     fi
 
@@ -453,33 +453,75 @@ build_gcc() {
     # 3. GCC itself
     # This is a lengthy process - for now, we check for system GCC
 
-    # If system GCC exists, copy it to sysroot
-    local host_gcc=$(command -v gcc)
-    local host_gpp=$(command -v g++)
+    # Prefer copying a working host toolchain into the sysroot over wrappers.
+    # Wrappers break inside the live ISO (they just exec themselves).
+    local host_gcc
+    host_gcc="$(command -v gcc)"
+    local host_gpp
+    host_gpp="$(command -v g++)"
 
-    if [[ -x "${host_gcc}" ]]; then
-        # Create wrapper scripts that use host toolchain
-        mkdir -p "${SYSROOT_DIR}/usr/bin"
+    if [[ -x "${host_gcc}" ]] && [[ -x "${host_gpp}" ]]; then
+        log_info "Copying host GCC toolchain into sysroot..."
 
-        cat > "${SYSROOT_DIR}/usr/bin/gcc" << 'GCCWRAP'
-#!/bin/bash
-# GCC wrapper for RavenLinux
-exec /usr/bin/gcc "$@"
-GCCWRAP
-        chmod 755 "${SYSROOT_DIR}/usr/bin/gcc"
+        local target
+        target="$(gcc -dumpmachine 2>/dev/null || true)"
+        local version
+        version="$(gcc -dumpfullversion 2>/dev/null || gcc -dumpversion 2>/dev/null || true)"
 
-        cat > "${SYSROOT_DIR}/usr/bin/g++" << 'GPPWRAP'
-#!/bin/bash
-# G++ wrapper for RavenLinux
-exec /usr/bin/g++ "$@"
-GPPWRAP
-        chmod 755 "${SYSROOT_DIR}/usr/bin/g++"
+        mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/bin"
 
-        # Symlinks
+        cp -L "${host_gcc}" "${SYSROOT_DIR}/usr/bin/gcc"
+        cp -L "${host_gpp}" "${SYSROOT_DIR}/usr/bin/g++"
+        chmod 755 "${SYSROOT_DIR}/usr/bin/gcc" "${SYSROOT_DIR}/usr/bin/g++"
+
+        # Common driver symlinks
         ln -sf gcc "${SYSROOT_DIR}/usr/bin/cc"
         ln -sf g++ "${SYSROOT_DIR}/usr/bin/c++"
 
-        log_success "GCC wrapper installed"
+        # Copy binutils that GCC relies on at runtime
+        for bin in as ld ar ranlib nm strip objdump objcopy readelf; do
+            if command -v "${bin}" &>/dev/null; then
+                cp -L "$(command -v "${bin}")" "${SYSROOT_DIR}/usr/bin/${bin}" 2>/dev/null || true
+                chmod 755 "${SYSROOT_DIR}/usr/bin/${bin}" 2>/dev/null || true
+                copy_binary_deps "$(command -v "${bin}")"
+            fi
+        done
+
+        # Copy GCC internal programs (cc1, collect2, etc.) and support directories.
+        for prog in cc1 cc1plus collect2 lto1 lto-wrapper; do
+            local p
+            p="$(gcc -print-prog-name="${prog}" 2>/dev/null || true)"
+            if [[ -n "${p}" ]] && [[ -x "${p}" ]]; then
+                local d
+                d="$(dirname "${p}")"
+                mkdir -p "${SYSROOT_DIR}${d}"
+                cp -L "${p}" "${SYSROOT_DIR}${p}" 2>/dev/null || true
+                copy_binary_deps "${p}"
+            fi
+        done
+
+        if [[ -n "${target}" ]] && [[ -n "${version}" ]]; then
+            for dir in "/usr/lib/gcc/${target}/${version}" "/usr/libexec/gcc/${target}/${version}" "/usr/lib/gcc/${target}" "/usr/libexec/gcc/${target}"; do
+                if [[ -d "${dir}" ]]; then
+                    mkdir -p "${SYSROOT_DIR}${dir}"
+                    cp -a "${dir}/." "${SYSROOT_DIR}${dir}/" 2>/dev/null || true
+                fi
+            done
+        fi
+
+        # Copy include directories used by GCC
+        for inc in "$(gcc -print-file-name=include 2>/dev/null)" "$(gcc -print-file-name=include-fixed 2>/dev/null)"; do
+            if [[ -n "${inc}" ]] && [[ -d "${inc}" ]]; then
+                mkdir -p "${SYSROOT_DIR}${inc}"
+                cp -a "${inc}/." "${SYSROOT_DIR}${inc}/" 2>/dev/null || true
+            fi
+        done
+
+        # Copy shared library deps for the GCC driver itself
+        copy_binary_deps "${host_gcc}"
+        copy_binary_deps "${host_gpp}"
+
+        log_success "Host GCC toolchain installed"
     fi
 }
 
@@ -538,32 +580,63 @@ build_python() {
 
     # Check for host Python
     if command -v python3 &>/dev/null; then
-        local host_py=$(command -v python3)
-        local host_ver=$(python3 --version 2>&1 | cut -d' ' -f2)
+        local host_py
+        host_py="$(command -v python3)"
+        local host_ver
+        host_ver="$(python3 --version 2>&1 | awk '{print $2}')"
 
-        log_info "Using host Python ${host_ver}"
+        log_info "Copying host Python ${host_ver} into sysroot..."
 
-        # Create wrapper
         mkdir -p "${SYSROOT_DIR}/usr/bin"
-        cat > "${SYSROOT_DIR}/usr/bin/python3" << 'PYWRAP'
-#!/bin/bash
-# Python wrapper for RavenLinux
-exec /usr/bin/python3 "$@"
-PYWRAP
+        cp -L "${host_py}" "${SYSROOT_DIR}/usr/bin/python3"
         chmod 755 "${SYSROOT_DIR}/usr/bin/python3"
         ln -sf python3 "${SYSROOT_DIR}/usr/bin/python"
 
-        # pip wrapper
+        # Copy stdlib and site-packages for the host Python installation
+        local -a py_paths=()
+        while IFS= read -r p; do
+            [[ -n "$p" ]] && py_paths+=("$p")
+        done < <(python3 - <<'PY'
+import sysconfig
+paths = sysconfig.get_paths()
+keys = ["stdlib", "platstdlib", "purelib", "platlib", "include", "platinclude"]
+seen = set()
+for k in keys:
+    p = paths.get(k)
+    if p and p not in seen:
+        seen.add(p)
+        print(p)
+PY
+)
+
+        for p in "${py_paths[@]}"; do
+            if [[ -d "${p}" ]]; then
+                mkdir -p "${SYSROOT_DIR}${p}"
+                cp -a "${p}/." "${SYSROOT_DIR}${p}/" 2>/dev/null || true
+            fi
+        done
+
+        # Copy libpython if present
+        local libdir
+        libdir="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")' 2>/dev/null || true)"
+        local ldlib
+        ldlib="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("LDLIBRARY") or "")' 2>/dev/null || true)"
+        if [[ -n "${libdir}" ]] && [[ -n "${ldlib}" ]] && [[ -f "${libdir}/${ldlib}" ]]; then
+            mkdir -p "${SYSROOT_DIR}${libdir}"
+            cp -L "${libdir}/${ldlib}" "${SYSROOT_DIR}${libdir}/" 2>/dev/null || true
+            # Common symlink names
+            cp -L "${libdir}/libpython"* "${SYSROOT_DIR}${libdir}/" 2>/dev/null || true
+        fi
+
+        # Copy pip if available
         if command -v pip3 &>/dev/null; then
-            cat > "${SYSROOT_DIR}/usr/bin/pip3" << 'PIPWRAP'
-#!/bin/bash
-exec /usr/bin/pip3 "$@"
-PIPWRAP
-            chmod 755 "${SYSROOT_DIR}/usr/bin/pip3"
+            cp -L "$(command -v pip3)" "${SYSROOT_DIR}/usr/bin/pip3" 2>/dev/null || true
+            chmod 755 "${SYSROOT_DIR}/usr/bin/pip3" 2>/dev/null || true
             ln -sf pip3 "${SYSROOT_DIR}/usr/bin/pip"
         fi
 
-        log_success "Python wrapper installed"
+        copy_binary_deps "${host_py}"
+        log_success "Python installed from host"
     else
         log_warn "Host Python not found - will be available via rvn install python"
     fi
@@ -578,7 +651,15 @@ build_editors() {
     mkdir -p "${SYSROOT_DIR}/etc/xdg/nvim"
     mkdir -p "${SYSROOT_DIR}/etc/vim"
 
-    # Build Vim if not present
+    # Build/repair Vim if not present or linked against libcanberra / has build-path RUNPATH
+    if [[ -f "${SYSROOT_DIR}/usr/bin/vim" ]]; then
+        if readelf -d "${SYSROOT_DIR}/usr/bin/vim" 2>/dev/null | grep -q "libcanberra\\.so" || \
+           readelf -d "${SYSROOT_DIR}/usr/bin/vim" 2>/dev/null | grep -q "${SYSROOT_DIR}/usr/lib"; then
+            log_warn "Vim needs rebuild (removing libcanberra dependency / build-path RUNPATH)"
+            rm -f "${SYSROOT_DIR}/usr/bin/vim" "${SYSROOT_DIR}/usr/bin/xxd" "${SYSROOT_DIR}/usr/bin/vi" \
+                  "${SYSROOT_DIR}/bin/vim" "${SYSROOT_DIR}/bin/vi" 2>/dev/null || true
+        fi
+    fi
     if [[ ! -f "${SYSROOT_DIR}/usr/bin/vim" ]]; then
         build_vim
     fi
@@ -1314,12 +1395,13 @@ build_vim() {
     # NOTE: Do NOT set LD_LIBRARY_PATH here - it will cause the host shell to load
     # the sysroot's readline which breaks /bin/sh with "undefined symbol: rl_print_keybinding"
     # LIBRARY_PATH is the compile-time equivalent - tells gcc where to find libs without affecting runtime
-    export LDFLAGS="-L${SYSROOT_DIR}/usr/lib -Wl,-rpath,${SYSROOT_DIR}/usr/lib"
+    export LDFLAGS="-L${SYSROOT_DIR}/usr/lib"
     export CPPFLAGS="-I${SYSROOT_DIR}/usr/include -I${SYSROOT_DIR}/usr/include/ncursesw -I${SYSROOT_DIR}/usr/include/sodium"
     export CFLAGS="-I${SYSROOT_DIR}/usr/include -I${SYSROOT_DIR}/usr/include/ncursesw"
     export PKG_CONFIG_PATH="${SYSROOT_DIR}/usr/lib/pkgconfig"
     export LIBRARY_PATH="${SYSROOT_DIR}/usr/lib"
     export LIBS="-L${SYSROOT_DIR}/usr/lib -lncursesw -ltinfo"
+    local ld_library_path="${SYSROOT_DIR}/usr/lib:${SYSROOT_DIR}/lib:${SYSROOT_DIR}/lib64"
 
     # Determine optional features based on what libraries are available
     local optional_flags=""
@@ -1348,18 +1430,21 @@ build_vim() {
     make distclean 2>/dev/null || make clean 2>/dev/null || true
 
     # Configure vim with ncurses and optional features
-    ./configure \
+    # Vim's configure runs compiled test programs. Since we link against sysroot ncurses/tinfo,
+    # ensure those are discoverable at runtime without embedding build-path RUNPATH into the final binary.
+    LD_LIBRARY_PATH="${ld_library_path}" ./configure \
         --prefix=/usr \
         --with-features=huge \
         --enable-multibyte \
         --disable-gui \
         --without-x \
+        --disable-canberra \
         --with-tlib=ncursesw \
         --enable-cscope \
         --disable-netbeans \
         ${optional_flags}
 
-    if make -j$(nproc) && make DESTDIR="${SYSROOT_DIR}" install; then
+    if LD_LIBRARY_PATH="${ld_library_path}" make -j$(nproc) && LD_LIBRARY_PATH="${ld_library_path}" make DESTDIR="${SYSROOT_DIR}" install; then
         # Create symlinks
         mkdir -p "${SYSROOT_DIR}/bin"
         ln -sf ../usr/bin/vim "${SYSROOT_DIR}/bin/vim"
@@ -1993,10 +2078,12 @@ install_essential_libs() {
         "libffi*"
         "libdl*"
         "libltdl*"
+        "libtdb*"
 
         # Python runtime
         "libpython3*"
         "libexpat*"
+        "libsqlite3*"
 
         # Lua runtime (neovim)
         "libluajit*"
@@ -2024,6 +2111,8 @@ install_essential_libs() {
         "libm.so*"
         "libgmp*"
         "libmpfr*"
+        "libmpc*"
+        "libisl*"
 
         # Threading
         "libpthread*"
@@ -2256,6 +2345,7 @@ install_shell_tools() {
     if [[ -d "${configs_dir}/zsh" ]]; then
         mkdir -p "${SYSROOT_DIR}/etc/zsh"
         cp "${configs_dir}/zsh/"* "${SYSROOT_DIR}/etc/zsh/" 2>/dev/null || true
+        chmod 644 "${SYSROOT_DIR}/etc/zsh/"* 2>/dev/null || true
         # Also create user skeleton
         mkdir -p "${SYSROOT_DIR}/etc/skel"
         cp "${configs_dir}/zsh/zshrc" "${SYSROOT_DIR}/etc/skel/.zshrc" 2>/dev/null || true
@@ -2273,6 +2363,7 @@ install_shell_tools() {
         cp "${configs_dir}/bash/"* "${SYSROOT_DIR}/etc/bash/" 2>/dev/null || true
         cp "${configs_dir}/bash/bashrc" "${SYSROOT_DIR}/etc/bashrc" 2>/dev/null || true
         cp "${configs_dir}/bash/bash_profile" "${SYSROOT_DIR}/etc/profile" 2>/dev/null || true
+        chmod 644 "${SYSROOT_DIR}/etc/bash/"* "${SYSROOT_DIR}/etc/bashrc" "${SYSROOT_DIR}/etc/profile" 2>/dev/null || true
         # User skeleton
         cp "${configs_dir}/bash/bashrc" "${SYSROOT_DIR}/etc/skel/.bashrc" 2>/dev/null || true
         cp "${configs_dir}/bash/bash_profile" "${SYSROOT_DIR}/etc/skel/.bash_profile" 2>/dev/null || true
