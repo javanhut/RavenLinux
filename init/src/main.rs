@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use nix::mount::{mount, MsFlags};
@@ -647,25 +647,49 @@ fn unmount_filesystems() {
     }
 }
 
-fn emergency_shell() {
+fn emergency_shell() -> ! {
     eprintln!();
     eprintln!("!!! EMERGENCY SHELL !!!");
     eprintln!("Init has failed. Dropping to emergency shell.");
     eprintln!("Type 'exit' to attempt to continue boot.");
     eprintln!();
 
-    // Try various shells
-    let shells = ["/bin/bash", "/bin/sh", "/bin/zsh"];
-    for shell in &shells {
-        if Path::new(shell).exists() {
-            let _ = Command::new(shell).status();
-            return;
-        }
-    }
-
-    // No shell available, just loop
-    eprintln!("No shell available. System halted.");
+    // Keep PID 1 alive: if the user exits the shell, re-open it.
     loop {
-        std::thread::sleep(Duration::from_secs(1));
+        let shells = ["/bin/bash", "/bin/sh", "/bin/zsh"];
+        let mut started = false;
+
+        for shell in &shells {
+            if !Path::new(shell).exists() {
+                continue;
+            }
+
+            eprintln!("Starting emergency shell: {shell}");
+            let start = Instant::now();
+            match Command::new(shell).status() {
+                Ok(status) => {
+                    // If the shell immediately exits with 127, it's commonly an exec/linker failure
+                    // (e.g., missing shared library symbol). Try the next shell.
+                    if start.elapsed() < Duration::from_millis(200) && status.code() == Some(127) {
+                        eprintln!("Shell {shell} failed to start (exit 127). Trying next...");
+                        continue;
+                    }
+
+                    started = true;
+                    eprintln!("Shell exited (status={status:?}). Returning to emergency mode...");
+                    break;
+                }
+                Err(err) => {
+                    eprintln!("Failed to exec {shell}: {err}. Trying next...");
+                }
+            }
+        }
+
+        if !started {
+            eprintln!("No shell available. System halted.");
+            std::thread::sleep(Duration::from_secs(1));
+        } else {
+            std::thread::sleep(Duration::from_secs(1));
+        }
     }
 }

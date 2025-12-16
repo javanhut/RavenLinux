@@ -96,7 +96,7 @@ copy_system_utils() {
         # File operations
         find grep sed awk xargs file less more
         # Disk utilities
-        mount umount fdisk parted mkfs.ext4 mkfs.vfat fsck blkid lsblk
+        mount umount mountpoint fdisk parted mkfs.ext4 mkfs.vfat fsck blkid lsblk
         # System info
         dmesg lspci lsusb free uptime uname hostname hostnamectl
         # User management

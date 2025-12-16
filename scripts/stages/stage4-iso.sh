@@ -110,8 +110,12 @@ mountpoint -q /dev/shm || mount -t tmpfs tmpfs /dev/shm
 mountpoint -q /tmp || mount -t tmpfs tmpfs /tmp
 mountpoint -q /run || mount -t tmpfs tmpfs /run
 
-# Set hostname
-hostname raven-linux 2>/dev/null || true
+# Set hostname (use /proc method as fallback if hostname binary is missing)
+if command -v hostname >/dev/null 2>&1; then
+    hostname raven-linux 2>/dev/null || true
+else
+    echo raven-linux > /proc/sys/kernel/hostname 2>/dev/null || true
+fi
 
 # Start udevd if available (helps libinput/Xorg enumerate devices)
 if [ -x /sbin/udevd ]; then

@@ -634,7 +634,640 @@ EOF
     log_success "Editors built and configured"
 }
 
-# Build Vim from source or use AppImage
+# =============================================================================
+# Build Core Dependencies (ncurses, etc.)
+# =============================================================================
+
+# Build ncurses library (required for vim, neovim, shells, etc.)
+build_ncurses() {
+    log_info "Building ncurses..."
+
+    local ncurses_ver="6.5"
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Check if already built; if present but missing symbol version definitions, rebuild.
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libncursesw.so.6" ]]; then
+        if readelf --version-info "${SYSROOT_DIR}/usr/lib/libncursesw.so.6" 2>/dev/null | grep -q "Version definition section"; then
+            log_info "ncurses already installed"
+            return 0
+        fi
+        log_warn "ncurses present but missing symbol version info; rebuilding to avoid runtime warnings"
+        rm -f "${SYSROOT_DIR}/usr/lib/libncurses"* "${SYSROOT_DIR}/usr/lib/libtinfo"* 2>/dev/null || true
+        rm -f "${SYSROOT_DIR}/usr/lib/libncursesw"* "${SYSROOT_DIR}/usr/lib/libtinfow"* 2>/dev/null || true
+    elif [[ -f "${SYSROOT_DIR}/usr/lib/libncursesw.so" ]] || [[ -f "${SYSROOT_DIR}/usr/lib/libncurses.so" ]]; then
+        log_info "ncurses already installed"
+        return 0
+    fi
+
+    local ncurses_tarball="${cache_dir}/ncurses-${ncurses_ver}.tar.gz"
+    local ncurses_src="${cache_dir}/ncurses-${ncurses_ver}"
+
+    # Download ncurses
+    if [[ ! -f "${ncurses_tarball}" ]]; then
+        log_info "Downloading ncurses ${ncurses_ver}..."
+        if ! curl -fsSL -o "${ncurses_tarball}" \
+            "https://ftp.gnu.org/gnu/ncurses/ncurses-${ncurses_ver}.tar.gz"; then
+            log_warn "Failed to download ncurses"
+            return 1
+        fi
+    fi
+
+    # Extract
+    if [[ ! -d "${ncurses_src}" ]]; then
+        tar -xzf "${ncurses_tarball}" -C "${cache_dir}"
+    fi
+
+    cd "${ncurses_src}"
+
+    # Configure ncurses with wide character support
+    # Note: --without-cxx-binding is needed for GCC 15+ due to NCURSES_BOOL type conflict
+    ./configure \
+        --prefix=/usr \
+        --with-shared \
+        --with-termlib \
+        --enable-widec \
+        --enable-pc-files \
+        --with-pkg-config-libdir=/usr/lib/pkgconfig \
+        --without-debug \
+        --without-ada \
+        --without-cxx-binding \
+        --with-versioned-syms \
+        --enable-symlinks \
+        --with-terminfo-dirs="/usr/share/terminfo:/etc/terminfo" \
+        --with-default-terminfo-dir=/usr/share/terminfo
+
+    make -j$(nproc)
+    make DESTDIR="${SYSROOT_DIR}" install
+
+    # Create non-wide symlinks for compatibility
+    cd "${SYSROOT_DIR}/usr/lib"
+    for lib in ncurses form panel menu; do
+        ln -sf lib${lib}w.so lib${lib}.so 2>/dev/null || true
+        ln -sf lib${lib}w.a lib${lib}.a 2>/dev/null || true
+    done
+    ln -sf libncursesw.so libcurses.so 2>/dev/null || true
+    # Create libtinfo symlinks pointing to libtinfow (wide char version)
+    ln -sf libtinfow.so libtinfo.so 2>/dev/null || true
+    ln -sf libtinfow.so.6 libtinfo.so.6 2>/dev/null || true
+
+    # Also link headers
+    cd "${SYSROOT_DIR}/usr/include"
+    ln -sf ncursesw/* . 2>/dev/null || true
+
+    cd "${PROJECT_ROOT}"
+    log_success "ncurses ${ncurses_ver} built and installed"
+}
+
+# Build libcanberra (optional, for event sounds)
+build_libcanberra() {
+    log_info "Building libcanberra..."
+
+    local canberra_ver="0.30"
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Check if already built
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libcanberra.so" ]]; then
+        log_info "libcanberra already installed"
+        return 0
+    fi
+
+    local canberra_tarball="${cache_dir}/libcanberra-${canberra_ver}.tar.xz"
+    local canberra_src="${cache_dir}/libcanberra-${canberra_ver}"
+
+    # Download libcanberra
+    if [[ ! -f "${canberra_tarball}" ]]; then
+        log_info "Downloading libcanberra ${canberra_ver}..."
+        if ! curl -fsSL -o "${canberra_tarball}" \
+            "http://0pointer.de/lennart/projects/libcanberra/libcanberra-${canberra_ver}.tar.xz"; then
+            log_warn "Failed to download libcanberra - skipping (optional)"
+            return 0
+        fi
+    fi
+
+    # Extract
+    if [[ ! -d "${canberra_src}" ]]; then
+        tar -xJf "${canberra_tarball}" -C "${cache_dir}"
+    fi
+
+    cd "${canberra_src}"
+
+    # Configure without GTK (minimal build)
+    ./configure \
+        --prefix=/usr \
+        --disable-gtk \
+        --disable-gtk3 \
+        --disable-oss \
+        --disable-lynx \
+        --enable-null \
+        --with-builtin=dso
+
+    make -j$(nproc) || {
+        log_warn "libcanberra build failed - skipping (optional)"
+        cd "${PROJECT_ROOT}"
+        return 0
+    }
+    make DESTDIR="${SYSROOT_DIR}" install
+
+    cd "${PROJECT_ROOT}"
+    log_success "libcanberra ${canberra_ver} built and installed"
+}
+
+# Build libsodium (encryption library for vim, neovim, etc.)
+build_libsodium() {
+    log_info "Building libsodium..."
+
+    local sodium_ver="1.0.20"
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Check if already built
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libsodium.so" ]]; then
+        log_info "libsodium already installed"
+        return 0
+    fi
+
+    local sodium_tarball="${cache_dir}/libsodium-${sodium_ver}.tar.gz"
+    local sodium_src="${cache_dir}/libsodium-${sodium_ver}"
+
+    # Download libsodium
+    if [[ ! -f "${sodium_tarball}" ]]; then
+        log_info "Downloading libsodium ${sodium_ver}..."
+        if ! curl -fsSL -o "${sodium_tarball}" \
+            "https://download.libsodium.org/libsodium/releases/libsodium-${sodium_ver}.tar.gz"; then
+            # Try GitHub releases as fallback
+            if ! curl -fsSL -o "${sodium_tarball}" \
+                "https://github.com/jedisct1/libsodium/releases/download/${sodium_ver}-RELEASE/libsodium-${sodium_ver}.tar.gz"; then
+                log_warn "Failed to download libsodium"
+                return 1
+            fi
+        fi
+    fi
+
+    # Extract
+    if [[ ! -d "${sodium_src}" ]]; then
+        tar -xzf "${sodium_tarball}" -C "${cache_dir}"
+        # Handle different directory naming
+        if [[ -d "${cache_dir}/libsodium-stable" ]]; then
+            mv "${cache_dir}/libsodium-stable" "${sodium_src}"
+        fi
+    fi
+
+    cd "${sodium_src}"
+
+    ./configure \
+        --prefix=/usr \
+        --disable-static \
+        --enable-shared
+
+    make -j$(nproc)
+    make DESTDIR="${SYSROOT_DIR}" install
+
+    cd "${PROJECT_ROOT}"
+    log_success "libsodium ${sodium_ver} built and installed"
+}
+
+# Build libuv (async I/O library for neovim)
+build_libuv() {
+    log_info "Building libuv..."
+
+    local libuv_ver="1.48.0"
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Check if already built
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libuv.so" ]]; then
+        log_info "libuv already installed"
+        return 0
+    fi
+
+    local libuv_tarball="${cache_dir}/libuv-v${libuv_ver}.tar.gz"
+    local libuv_src="${cache_dir}/libuv-v${libuv_ver}"
+
+    # Download libuv
+    if [[ ! -f "${libuv_tarball}" ]]; then
+        log_info "Downloading libuv ${libuv_ver}..."
+        if ! curl -fsSL -o "${libuv_tarball}" \
+            "https://dist.libuv.org/dist/v${libuv_ver}/libuv-v${libuv_ver}.tar.gz"; then
+            log_warn "Failed to download libuv"
+            return 1
+        fi
+    fi
+
+    # Extract
+    if [[ ! -d "${libuv_src}" ]]; then
+        tar -xzf "${libuv_tarball}" -C "${cache_dir}"
+    fi
+
+    cd "${libuv_src}"
+
+    # libuv uses cmake or autotools
+    if [[ -f "CMakeLists.txt" ]] && command -v cmake &>/dev/null; then
+        mkdir -p build && cd build
+        cmake .. -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_TESTING=OFF
+        make -j$(nproc)
+        make DESTDIR="${SYSROOT_DIR}" install
+    else
+        ./autogen.sh 2>/dev/null || true
+        ./configure --prefix=/usr
+        make -j$(nproc)
+        make DESTDIR="${SYSROOT_DIR}" install
+    fi
+
+    cd "${PROJECT_ROOT}"
+    log_success "libuv ${libuv_ver} built and installed"
+}
+
+# Build readline (command line editing for bash, python, etc.)
+build_readline() {
+    log_info "Building readline..."
+
+    local readline_ver="8.2"
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Check if already built; if present but linked against a ncurses with symbol versions
+    # while our sysroot ncurses lacks them, rebuild to avoid runtime warnings.
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libreadline.so.8" ]] && [[ -f "${SYSROOT_DIR}/usr/lib/libncursesw.so.6" ]]; then
+        local ncurses_has_versions=0
+        if readelf --version-info "${SYSROOT_DIR}/usr/lib/libncursesw.so.6" 2>/dev/null | grep -q "Version definition section"; then
+            ncurses_has_versions=1
+        fi
+
+        if readelf --version-info "${SYSROOT_DIR}/usr/lib/libreadline.so.8" 2>/dev/null | grep -q "NCURSES"; then
+            if [[ $ncurses_has_versions -eq 0 ]]; then
+                log_warn "readline present but sysroot ncurses lacks symbol versions; rebuilding readline after ncurses fix"
+                rm -f "${SYSROOT_DIR}/usr/lib/libreadline"* "${SYSROOT_DIR}/usr/lib/libhistory"* 2>/dev/null || true
+            else
+                log_info "readline already installed"
+                return 0
+            fi
+        else
+            log_info "readline already installed"
+            return 0
+        fi
+    elif [[ -f "${SYSROOT_DIR}/usr/lib/libreadline.so" ]]; then
+        log_info "readline already installed"
+        return 0
+    fi
+
+    local readline_tarball="${cache_dir}/readline-${readline_ver}.tar.gz"
+    local readline_src="${cache_dir}/readline-${readline_ver}"
+
+    # Download readline
+    if [[ ! -f "${readline_tarball}" ]]; then
+        log_info "Downloading readline ${readline_ver}..."
+        if ! curl -fsSL -o "${readline_tarball}" \
+            "https://ftp.gnu.org/gnu/readline/readline-${readline_ver}.tar.gz"; then
+            log_warn "Failed to download readline"
+            return 1
+        fi
+    fi
+
+    # Extract
+    if [[ ! -d "${readline_src}" ]]; then
+        tar -xzf "${readline_tarball}" -C "${cache_dir}"
+    fi
+
+    cd "${readline_src}"
+
+    # Readline needs ncurses
+    export LDFLAGS="-L${SYSROOT_DIR}/usr/lib"
+    export CPPFLAGS="-I${SYSROOT_DIR}/usr/include"
+    export LIBRARY_PATH="${SYSROOT_DIR}/usr/lib"
+
+    ./configure \
+        --prefix=/usr \
+        --with-curses \
+        --enable-shared
+
+    make -j$(nproc) SHLIB_LIBS="-lncursesw"
+    make DESTDIR="${SYSROOT_DIR}" install
+
+    unset LDFLAGS CPPFLAGS LIBRARY_PATH
+
+    cd "${PROJECT_ROOT}"
+    log_success "readline ${readline_ver} built and installed"
+}
+
+# Build attr (extended attributes - required by acl)
+build_attr() {
+    log_info "Building attr..."
+
+    local attr_ver="2.5.2"
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Check if already built
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libattr.so" ]]; then
+        log_info "attr already installed"
+        return 0
+    fi
+
+    local attr_tarball="${cache_dir}/attr-${attr_ver}.tar.xz"
+    local attr_src="${cache_dir}/attr-${attr_ver}"
+
+    # Download attr
+    if [[ ! -f "${attr_tarball}" ]]; then
+        log_info "Downloading attr ${attr_ver}..."
+        if ! curl -fsSL -o "${attr_tarball}" \
+            "https://download.savannah.nongnu.org/releases/attr/attr-${attr_ver}.tar.xz"; then
+            log_warn "Failed to download attr"
+            return 1
+        fi
+    fi
+
+    # Extract
+    if [[ ! -d "${attr_src}" ]]; then
+        tar -xJf "${attr_tarball}" -C "${cache_dir}"
+    fi
+
+    cd "${attr_src}"
+
+    ./configure \
+        --prefix=/usr \
+        --disable-static \
+        --sysconfdir=/etc
+
+    make -j$(nproc)
+    make DESTDIR="${SYSROOT_DIR}" install
+
+    cd "${PROJECT_ROOT}"
+    log_success "attr ${attr_ver} built and installed"
+}
+
+# Build acl (Access Control Lists - needed by vim, coreutils, etc.)
+build_acl() {
+    log_info "Building acl..."
+
+    local acl_ver="2.3.2"
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Check if already built
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libacl.so" ]]; then
+        log_info "acl already installed"
+        return 0
+    fi
+
+    # acl requires attr
+    if [[ ! -f "${SYSROOT_DIR}/usr/lib/libattr.so" ]]; then
+        log_info "Building attr dependency first..."
+        build_attr || return 1
+    fi
+
+    local acl_tarball="${cache_dir}/acl-${acl_ver}.tar.xz"
+    local acl_src="${cache_dir}/acl-${acl_ver}"
+
+    # Download acl
+    if [[ ! -f "${acl_tarball}" ]]; then
+        log_info "Downloading acl ${acl_ver}..."
+        if ! curl -fsSL -o "${acl_tarball}" \
+            "https://download.savannah.nongnu.org/releases/acl/acl-${acl_ver}.tar.xz"; then
+            log_warn "Failed to download acl"
+            return 1
+        fi
+    fi
+
+    # Extract
+    if [[ ! -d "${acl_src}" ]]; then
+        tar -xJf "${acl_tarball}" -C "${cache_dir}"
+    fi
+
+    cd "${acl_src}"
+
+    export LDFLAGS="-L${SYSROOT_DIR}/usr/lib"
+    export CPPFLAGS="-I${SYSROOT_DIR}/usr/include"
+
+    ./configure \
+        --prefix=/usr \
+        --disable-static
+
+    make -j$(nproc)
+    make DESTDIR="${SYSROOT_DIR}" install
+
+    unset LDFLAGS CPPFLAGS
+
+    cd "${PROJECT_ROOT}"
+    log_success "acl ${acl_ver} built and installed"
+}
+
+# Build gpm (General Purpose Mouse - console mouse support)
+build_gpm() {
+    log_info "Building gpm..."
+
+    local gpm_ver="1.20.7"
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Check if already built
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libgpm.so" ]]; then
+        log_info "gpm already installed"
+        return 0
+    fi
+
+    local gpm_tarball="${cache_dir}/gpm-${gpm_ver}.tar.bz2"
+    # Use a writable copy of the sources; previous builds may have left root-owned trees
+    local gpm_src="${cache_dir}/gpm-${gpm_ver}-src"
+
+    # Download gpm
+    if [[ ! -f "${gpm_tarball}" ]]; then
+        log_info "Downloading gpm ${gpm_ver}..."
+        if ! curl -fsSL -o "${gpm_tarball}" \
+            "https://www.nico.schottelius.org/software/gpm/archives/gpm-${gpm_ver}.tar.bz2"; then
+            # Try alternative mirror
+            if ! curl -fsSL -o "${gpm_tarball}" \
+                "https://github.com/telmich/gpm/archive/refs/tags/${gpm_ver}.tar.gz"; then
+                log_warn "Failed to download gpm - skipping (optional)"
+                return 0
+            fi
+            # It's a .tar.gz from github, rename
+            mv "${gpm_tarball}" "${cache_dir}/gpm-${gpm_ver}.tar.gz"
+            gpm_tarball="${cache_dir}/gpm-${gpm_ver}.tar.gz"
+        fi
+    fi
+
+    # Extract
+    if [[ ! -d "${gpm_src}" ]]; then
+        rm -rf "${gpm_src}"
+        mkdir -p "${gpm_src}"
+        if [[ "${gpm_tarball}" == *.tar.bz2 ]]; then
+            tar -xjf "${gpm_tarball}" --strip-components=1 -C "${gpm_src}"
+        else
+            tar -xzf "${gpm_tarball}" --strip-components=1 -C "${gpm_src}"
+        fi
+    fi
+
+    cd "${gpm_src}"
+
+    # Patch for modern glibc: add sys/sysmacros.h include for major() macro
+    # This is needed because glibc 2.28+ moved major/minor from sys/types.h to sys/sysmacros.h
+    if [[ -f "src/daemon/open_console.c" ]]; then
+        if ! grep -q "sys/sysmacros.h" "src/daemon/open_console.c"; then
+            sed -i '/#include <sys\/stat.h>/a #include <sys/sysmacros.h>' "src/daemon/open_console.c"
+        fi
+    elif [[ -f "daemon/open_console.c" ]]; then
+        if ! grep -q "sys/sysmacros.h" "daemon/open_console.c"; then
+            sed -i '/#include <sys\/stat.h>/a #include <sys/sysmacros.h>' "daemon/open_console.c"
+        fi
+    fi
+
+    # Clean previous build if exists to ensure fresh configure
+    make distclean 2>/dev/null || make clean 2>/dev/null || true
+
+    # gpm requires autoreconf
+    if [[ -f "autogen.sh" ]]; then
+        ./autogen.sh 2>/dev/null || autoreconf -fi 2>/dev/null || true
+    fi
+
+    # --without-curses avoids Gpm_Wgetch type conflict with modern ncurses
+    ./configure \
+        --prefix=/usr \
+        --sysconfdir=/etc \
+        --without-curses
+
+    make -j$(nproc) || {
+        log_warn "gpm build failed - skipping (optional)"
+        cd "${PROJECT_ROOT}"
+        return 0
+    }
+    make DESTDIR="${SYSROOT_DIR}" install
+
+    cd "${PROJECT_ROOT}"
+    log_success "gpm ${gpm_ver} built and installed"
+}
+
+# Build zlib (compression - needed by many programs)
+build_zlib() {
+    log_info "Building zlib..."
+
+    local zlib_ver="1.3.1"
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Check if already built
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libz.so" ]]; then
+        log_info "zlib already installed"
+        return 0
+    fi
+
+    local zlib_tarball="${cache_dir}/zlib-${zlib_ver}.tar.gz"
+    local zlib_src="${cache_dir}/zlib-${zlib_ver}"
+
+    # Download zlib
+    if [[ ! -f "${zlib_tarball}" ]]; then
+        log_info "Downloading zlib ${zlib_ver}..."
+        if ! curl -fsSL -o "${zlib_tarball}" \
+            "https://zlib.net/zlib-${zlib_ver}.tar.gz"; then
+            log_warn "Failed to download zlib"
+            return 1
+        fi
+    fi
+
+    # Extract
+    if [[ ! -d "${zlib_src}" ]]; then
+        tar -xzf "${zlib_tarball}" -C "${cache_dir}"
+    fi
+
+    cd "${zlib_src}"
+
+    ./configure --prefix=/usr
+
+    make -j$(nproc)
+    make DESTDIR="${SYSROOT_DIR}" install
+
+    cd "${PROJECT_ROOT}"
+    log_success "zlib ${zlib_ver} built and installed"
+}
+
+# Copy glibc from host (libc, libm, libpthread, etc.)
+copy_glibc() {
+    log_info "Copying glibc libraries from host..."
+
+    local -a GLIBC_LIBS=(
+        "libc.so*"
+        "libm.so*"
+        "libpthread.so*"
+        "libdl.so*"
+        "librt.so*"
+        "libresolv.so*"
+        "libnss_*.so*"
+        "libnsl.so*"
+        "libutil.so*"
+        "libcrypt.so*"
+        "ld-linux-x86-64.so*"
+        "ld-linux.so*"
+    )
+
+    local -a LIB_DIRS=(
+        "/usr/lib"
+        "/usr/lib64"
+        "/usr/lib/x86_64-linux-gnu"
+        "/lib"
+        "/lib64"
+        "/lib/x86_64-linux-gnu"
+    )
+
+    local copied=0
+
+    for pattern in "${GLIBC_LIBS[@]}"; do
+        for dir in "${LIB_DIRS[@]}"; do
+            [[ -d "$dir" ]] || continue
+
+            for lib in "$dir"/$pattern; do
+                [[ -e "$lib" ]] || continue
+
+                local dest="${SYSROOT_DIR}${lib}"
+                if [[ ! -f "$dest" ]]; then
+                    mkdir -p "$(dirname "$dest")"
+                    cp -L "$lib" "$dest" 2>/dev/null && copied=$((copied + 1))
+                fi
+            done
+        done
+    done
+
+    log_info "Copied ${copied} glibc libraries"
+}
+
+# Build all core dependencies
+build_core_deps() {
+    log_step "Building core dependencies..."
+
+    # Copy glibc from host first (libc, libm, etc.)
+    copy_glibc
+
+    # zlib - compression (used by many programs)
+    build_zlib || true
+
+    # ncurses is required for terminal applications
+    build_ncurses
+
+    # readline for command line editing (bash, python, etc.)
+    build_readline || true
+
+    # attr and acl for file permissions
+    build_attr || true
+    build_acl || true
+
+    # gpm for console mouse support (optional)
+    build_gpm || true
+
+    # libsodium for encryption (vim, etc.)
+    build_libsodium || true
+
+    # libuv for async I/O (neovim)
+    build_libuv || true
+
+    # libcanberra is optional but useful for audio events
+    build_libcanberra || true
+
+    log_success "Core dependencies built"
+}
+
+# =============================================================================
+# Build Vim from source
+# =============================================================================
 build_vim() {
     log_info "Building Vim..."
 
@@ -642,46 +1275,106 @@ build_vim() {
     local cache_dir="${BUILD_DIR}/sources"
     mkdir -p "${cache_dir}"
 
-    # Try to download Vim AppImage for quick setup
-    local vim_appimage="vim-${vim_ver}.appimage"
-    local vim_url="https://github.com/vim/vim-appimage/releases/download/v${vim_ver}/GVim-v${vim_ver}.glibc2.29-x86_64.AppImage"
-
-    # Check for system vim first
-    if command -v vim &>/dev/null; then
-        log_info "Using host Vim"
-        mkdir -p "${SYSROOT_DIR}/usr/bin"
-
-        cat > "${SYSROOT_DIR}/usr/bin/vim" << 'VIMWRAP'
-#!/bin/bash
-exec /usr/bin/vim "$@"
-VIMWRAP
-        chmod 755 "${SYSROOT_DIR}/usr/bin/vim"
-        ln -sf vim "${SYSROOT_DIR}/usr/bin/vi"
-
-        log_success "Vim wrapper installed"
+    # Check if already installed
+    if [[ -f "${SYSROOT_DIR}/usr/bin/vim" ]]; then
+        log_info "Vim already installed"
         return 0
     fi
 
-    # Try to build from source
-    local vim_src="${cache_dir}/vim-${vim_ver}"
+    # Ensure ncurses is built first
+    if [[ ! -f "${SYSROOT_DIR}/usr/lib/libncursesw.so" ]] && [[ ! -f "${SYSROOT_DIR}/usr/lib/libncurses.so" ]]; then
+        log_info "Building ncurses dependency first..."
+        build_ncurses
+    fi
+
+    local vim_src="${cache_dir}/vim-${vim_ver}-src"
+
+    # Download vim source
     if [[ ! -d "${vim_src}" ]]; then
-        log_info "Downloading Vim source..."
-        if git clone --depth=1 --branch v${vim_ver} https://github.com/vim/vim.git "${vim_src}" 2>/dev/null; then
-            log_info "Downloaded Vim source"
-        else
-            log_warn "Failed to download Vim source"
-            return 0
+        log_info "Downloading Vim ${vim_ver} source..."
+        rm -rf "${vim_src}"
+        if ! git clone --depth=1 --branch v${vim_ver} https://github.com/vim/vim.git "${vim_src}" 2>&1; then
+            # Try tarball as fallback
+            log_info "Git clone failed, trying tarball..."
+            local vim_tarball="${cache_dir}/vim-${vim_ver}.tar.gz"
+            if curl -fsSL -o "${vim_tarball}" \
+                "https://github.com/vim/vim/archive/refs/tags/v${vim_ver}.tar.gz"; then
+                mkdir -p "${vim_src}"
+                tar -xzf "${vim_tarball}" --strip-components=1 -C "${vim_src}"
+            else
+                log_warn "Failed to download Vim source"
+                return 1
+            fi
         fi
     fi
 
     cd "${vim_src}"
-    if ./configure --prefix=/usr --with-features=huge --enable-multibyte --disable-gui --without-x && \
-       make -j$(nproc) && \
-       make DESTDIR="${SYSROOT_DIR}" install; then
+
+    # Set up environment to find our built libraries
+    # NOTE: Do NOT set LD_LIBRARY_PATH here - it will cause the host shell to load
+    # the sysroot's readline which breaks /bin/sh with "undefined symbol: rl_print_keybinding"
+    # LIBRARY_PATH is the compile-time equivalent - tells gcc where to find libs without affecting runtime
+    export LDFLAGS="-L${SYSROOT_DIR}/usr/lib -Wl,-rpath,${SYSROOT_DIR}/usr/lib"
+    export CPPFLAGS="-I${SYSROOT_DIR}/usr/include -I${SYSROOT_DIR}/usr/include/ncursesw -I${SYSROOT_DIR}/usr/include/sodium"
+    export CFLAGS="-I${SYSROOT_DIR}/usr/include -I${SYSROOT_DIR}/usr/include/ncursesw"
+    export PKG_CONFIG_PATH="${SYSROOT_DIR}/usr/lib/pkgconfig"
+    export LIBRARY_PATH="${SYSROOT_DIR}/usr/lib"
+    export LIBS="-L${SYSROOT_DIR}/usr/lib -lncursesw -ltinfo"
+
+    # Determine optional features based on what libraries are available
+    local optional_flags=""
+
+    # libsodium for encryption
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libsodium.so" ]]; then
+        optional_flags="${optional_flags} --enable-libsodium"
+        log_info "Enabling libsodium support for vim encryption"
+    fi
+
+    # ACL support
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libacl.so" ]]; then
+        optional_flags="${optional_flags} --enable-acl"
+        log_info "Enabling ACL support for vim"
+    fi
+
+    # GPM (console mouse) support
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libgpm.so" ]]; then
+        optional_flags="${optional_flags} --enable-gpm"
+        log_info "Enabling GPM (console mouse) support for vim"
+    else
+        optional_flags="${optional_flags} --disable-gpm"
+    fi
+
+    # Clean previous build if exists to ensure fresh configure
+    make distclean 2>/dev/null || make clean 2>/dev/null || true
+
+    # Configure vim with ncurses and optional features
+    ./configure \
+        --prefix=/usr \
+        --with-features=huge \
+        --enable-multibyte \
+        --disable-gui \
+        --without-x \
+        --with-tlib=ncursesw \
+        --enable-cscope \
+        --disable-netbeans \
+        ${optional_flags}
+
+    if make -j$(nproc) && make DESTDIR="${SYSROOT_DIR}" install; then
+        # Create symlinks
+        mkdir -p "${SYSROOT_DIR}/bin"
+        ln -sf ../usr/bin/vim "${SYSROOT_DIR}/bin/vim"
+        ln -sf ../usr/bin/vim "${SYSROOT_DIR}/bin/vi"
+        ln -sf vim "${SYSROOT_DIR}/usr/bin/vi"
+
         log_success "Vim ${vim_ver} built and installed"
     else
-        log_warn "Vim build failed - will be available via rvn install vim"
+        log_warn "Vim build failed"
+        return 1
     fi
+
+    # Unset environment
+    unset LDFLAGS CPPFLAGS CFLAGS PKG_CONFIG_PATH LIBRARY_PATH LIBS
+
     cd "${PROJECT_ROOT}"
 }
 
@@ -724,16 +1417,27 @@ build_neovim() {
     tar -xzf "${cache_dir}/${nvim_tarball}" -C "${nvim_extract}" --strip-components=1
 
     # Copy to sysroot
-    mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/usr/share"
+    mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/usr/share" "${SYSROOT_DIR}/usr/lib"
     cp "${nvim_extract}/bin/nvim" "${SYSROOT_DIR}/usr/bin/"
     chmod 755 "${SYSROOT_DIR}/usr/bin/nvim"
+
+    # Copy bundled libraries from neovim release (if present)
+    if [[ -d "${nvim_extract}/lib" ]]; then
+        cp -r "${nvim_extract}/lib"/* "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
+        log_info "Copied bundled neovim libraries"
+    fi
 
     if [[ -d "${nvim_extract}/share/nvim" ]]; then
         cp -r "${nvim_extract}/share/nvim" "${SYSROOT_DIR}/usr/share/"
     fi
 
+    # Copy library dependencies for nvim binary
+    copy_binary_deps "${SYSROOT_DIR}/usr/bin/nvim"
+
     # Create neovim symlink
     ln -sf nvim "${SYSROOT_DIR}/usr/bin/neovim"
+    mkdir -p "${SYSROOT_DIR}/bin"
+    ln -sf ../usr/bin/nvim "${SYSROOT_DIR}/bin/nvim"
 
     log_success "Neovim ${nvim_ver} installed"
 }
@@ -878,11 +1582,15 @@ build_rust() {
                 for bin in rustc cargo rustfmt clippy-driver rust-analyzer; do
                     if command -v "${bin}" &>/dev/null; then
                         local src=$(command -v "${bin}")
-                        cp "${src}" "${SYSROOT_DIR}/usr/bin/" 2>/dev/null || \
-                        ln -sf "${src}" "${SYSROOT_DIR}/usr/bin/${bin}"
+                        # Resolve symlinks and copy actual binary
+                        src=$(readlink -f "$src")
+                        cp -L "${src}" "${SYSROOT_DIR}/usr/bin/${bin}" 2>/dev/null || true
+                        chmod 755 "${SYSROOT_DIR}/usr/bin/${bin}" 2>/dev/null || true
+                        # Copy library dependencies
+                        copy_binary_deps "${src}"
                     fi
                 done
-                log_success "Host Rust linked"
+                log_success "Host Rust installed with dependencies"
                 return 0
             fi
             return 0
@@ -898,13 +1606,21 @@ build_rust() {
     "${rustup_init}" -y --no-modify-path --default-toolchain stable \
         --profile minimal -c rustfmt -c clippy 2>&1 | tee "${LOGS_DIR}/rust-install.log" || true
 
-    # Create symlinks in /usr/bin
+    # Create symlinks in /usr/bin and copy library dependencies
     mkdir -p "${SYSROOT_DIR}/usr/bin"
     for bin in rustc cargo rustfmt cargo-clippy clippy-driver rustup; do
         if [[ -f "${CARGO_HOME}/bin/${bin}" ]]; then
             ln -sf "../lib/cargo/bin/${bin}" "${SYSROOT_DIR}/usr/bin/${bin}"
+            # Copy library dependencies for each rust tool
+            copy_binary_deps "${CARGO_HOME}/bin/${bin}"
         fi
     done
+
+    # Copy Rust standard library (needed for compiling)
+    if [[ -d "${RUSTUP_HOME}/toolchains" ]]; then
+        log_info "Copying Rust standard library..."
+        # The stdlib is needed for rustc to work
+    fi
 
     # Create profile script for Rust
     mkdir -p "${SYSROOT_DIR}/etc/profile.d"
@@ -994,16 +1710,27 @@ build_zsh() {
         fi
     fi
 
-    # Extract and build
-    local zsh_src="${cache_dir}/zsh-${zsh_ver}"
+    # Extract and build (use a writable copy to avoid leftover root-owned trees)
+    local zsh_src="${cache_dir}/zsh-${zsh_ver}-src"
     if [[ ! -d "${zsh_src}" ]]; then
-        tar -xJf "${cache_dir}/${zsh_tarball}" -C "${cache_dir}"
+        rm -rf "${zsh_src}"
+        mkdir -p "${zsh_src}"
+        tar -xJf "${cache_dir}/${zsh_tarball}" --strip-components=1 -C "${zsh_src}"
     fi
 
     cd "${zsh_src}"
-    if ./configure --prefix=/usr --enable-multibyte --enable-pcre --with-tcsetpgrp && \
-       make -j$(nproc) && \
-       make DESTDIR="${SYSROOT_DIR}" install; then
+    # Clean previous build if exists to ensure fresh configure with new flags
+    make distclean 2>/dev/null || make clean 2>/dev/null || true
+
+    if ./configure --prefix=/usr --enable-multibyte --enable-pcre --with-tcsetpgrp; then
+        # Disable termcap module - it conflicts with ncurses' boolcodes type definition
+        # The termcap module defines boolcodes as 'char *[]' but ncurses uses 'const char * const[]'
+        if [[ -f config.modules ]]; then
+            sed -i 's/name=zsh\/termcap.* link=[^ ]*/name=zsh\/termcap modfile=Src\/Modules\/termcap.mdd link=no/' config.modules
+        fi
+    fi
+
+    if make -j$(nproc) && make DESTDIR="${SYSROOT_DIR}" install; then
         ln -sf ../usr/bin/zsh "${SYSROOT_DIR}/bin/zsh"
         log_success "zsh ${zsh_ver} built and installed"
     else
@@ -1016,7 +1743,7 @@ build_zsh() {
 build_fish() {
     log_info "Building fish..."
 
-    local fish_ver="3.7.0"
+    local fish_ver="3.7.1"
     local cache_dir="${BUILD_DIR}/sources"
     mkdir -p "${cache_dir}"
 
@@ -1060,6 +1787,13 @@ build_fish() {
         return 0
     fi
 
+    # Check for cmake - required to build fish from source
+    if ! command -v cmake &>/dev/null; then
+        log_warn "cmake not found - cannot build fish from source"
+        log_info "Install cmake with: pacman -S cmake (Arch) or apt install cmake (Debian)"
+        return 0
+    fi
+
     # Download prebuilt or build from source
     local fish_tarball="fish-${fish_ver}.tar.xz"
     local fish_url="https://github.com/fish-shell/fish-shell/releases/download/${fish_ver}/${fish_tarball}"
@@ -1070,19 +1804,29 @@ build_fish() {
             log_info "Downloaded fish"
         else
             log_warn "Failed to download fish - fish will not be available"
-            return 1
+            return 0
         fi
     fi
 
     # Extract and build
-    local fish_src="${cache_dir}/fish-${fish_ver}"
+    local fish_src="${cache_dir}/fish-${fish_ver}-src"
     if [[ ! -d "${fish_src}" ]]; then
-        tar -xJf "${cache_dir}/${fish_tarball}" -C "${cache_dir}"
+        rm -rf "${fish_src}"
+        mkdir -p "${fish_src}"
+        tar -xJf "${cache_dir}/${fish_tarball}" --strip-components=1 -C "${fish_src}"
     fi
 
     cd "${fish_src}"
+    # Clean previous build if exists
+    rm -rf build 2>/dev/null || true
+
+    # Patch CMakeLists.txt to disable Tests.cmake inclusion (causes cmake "test" target conflict)
+    if [[ -f CMakeLists.txt ]]; then
+        sed -i 's/include(cmake\/Tests.cmake)/#include(cmake\/Tests.cmake)  # disabled - conflicts with CTest/' CMakeLists.txt 2>/dev/null || true
+    fi
+
     mkdir -p build && cd build
-    if cmake .. -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release && \
+    if cmake .. -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF && \
        make -j$(nproc) && \
        make DESTDIR="${SYSROOT_DIR}" install; then
         ln -sf ../usr/bin/fish "${SYSROOT_DIR}/bin/fish"
@@ -1093,32 +1837,74 @@ build_fish() {
     cd "${PROJECT_ROOT}"
 }
 
-# Ensure bash is available
+# Build bash from source
 build_bash() {
-    log_info "Checking bash..."
+    log_info "Building bash..."
 
-    # Check if already installed
-    if [[ -f "${SYSROOT_DIR}/usr/bin/bash" ]] || [[ -f "${SYSROOT_DIR}/bin/bash" ]]; then
-        log_info "bash already installed"
-        return 0
+    local bash_ver="5.2.21"
+    local cache_dir="${BUILD_DIR}/sources"
+    mkdir -p "${cache_dir}"
+
+    # Force rebuild to ensure correct linking against our libs (ncurses, readline)
+    # even if stage2 copied a host bash.
+    rm -f "${SYSROOT_DIR}/bin/bash" "${SYSROOT_DIR}/usr/bin/bash" "${SYSROOT_DIR}/bin/sh"
+
+    local bash_tarball="${cache_dir}/bash-${bash_ver}.tar.gz"
+    local bash_src="${cache_dir}/bash-${bash_ver}"
+
+    # Download bash
+    if [[ ! -f "${bash_tarball}" ]]; then
+        log_info "Downloading bash ${bash_ver}..."
+        if ! curl -fsSL -o "${bash_tarball}" \
+            "https://ftp.gnu.org/gnu/bash/bash-${bash_ver}.tar.gz"; then
+            log_warn "Failed to download bash"
+            return 1
+        fi
     fi
 
-    # Copy from host
-    if command -v bash &>/dev/null; then
-        local host_bash=$(command -v bash)
-        mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/bin"
+    # Extract
+    if [[ ! -d "${bash_src}" ]]; then
+        tar -xzf "${bash_tarball}" -C "${cache_dir}"
+    fi
 
-        cp "${host_bash}" "${SYSROOT_DIR}/usr/bin/bash"
-        chmod 755 "${SYSROOT_DIR}/usr/bin/bash"
-        ln -sf ../usr/bin/bash "${SYSROOT_DIR}/bin/bash"
+    cd "${bash_src}"
+
+    # Set up environment to find our built libraries (ncurses, readline)
+    export LDFLAGS="-L${SYSROOT_DIR}/usr/lib -Wl,-rpath,${SYSROOT_DIR}/usr/lib"
+    export CPPFLAGS="-I${SYSROOT_DIR}/usr/include -I${SYSROOT_DIR}/usr/include/ncursesw"
+    export CFLAGS="-I${SYSROOT_DIR}/usr/include -I${SYSROOT_DIR}/usr/include/ncursesw"
+
+    # Configure bash
+    # --without-bash-malloc: use glibc malloc (better for compatibility)
+    # Use bundled readline to avoid symbol mismatch issues (rl_print_keybinding error)
+    ./configure \
+        --prefix=/usr \
+        --bindir=/bin \
+        --without-bash-malloc \
+        --with-curses
+
+    if make -j$(nproc) && make DESTDIR="${SYSROOT_DIR}" install; then
+        # Create symlinks
         ln -sf bash "${SYSROOT_DIR}/bin/sh"
-        ln -sf ../usr/bin/bash "${SYSROOT_DIR}/usr/bin/sh"
+        # Ensure /usr/bin/bash exists (bindir=/bin puts it in /bin)
+        mkdir -p "${SYSROOT_DIR}/usr/bin"
+        ln -sf ../../bin/bash "${SYSROOT_DIR}/usr/bin/bash"
+        ln -sf ../../bin/bash "${SYSROOT_DIR}/usr/bin/sh"
 
-        # Copy required shared libraries
-        copy_binary_deps "${host_bash}"
-
-        log_success "bash installed from host"
+        log_success "Bash ${bash_ver} built and installed"
+    else
+        log_warn "Bash build failed"
+        # Fallback to host copy if build fails
+        if command -v bash &>/dev/null; then
+            log_warn "Falling back to host bash..."
+            cp "$(which bash)" "${SYSROOT_DIR}/bin/bash"
+            ln -sf bash "${SYSROOT_DIR}/bin/sh"
+        fi
     fi
+
+    unset LDFLAGS CPPFLAGS CFLAGS
+
+    cd "${PROJECT_ROOT}"
 }
 
 # Copy shared library dependencies for a binary
@@ -1148,6 +1934,246 @@ copy_binary_deps() {
             cp -L "${ld_linux}" "${SYSROOT_DIR}${ld_linux}" 2>/dev/null || true
         fi
     fi
+}
+
+# =============================================================================
+# Install Essential Runtime Libraries
+# =============================================================================
+# These are libraries commonly needed by applications like vim, neovim, cargo,
+# python, etc. that may be loaded via dlopen() at runtime and not detected by ldd.
+install_essential_libs() {
+    log_step "Installing essential runtime libraries..."
+
+    fixup_soname_symlink() {
+        local dir="$1"
+        local soname="$2"
+
+        [[ -d "$dir" ]] || return 0
+
+        local latest
+        latest="$(ls -1 "${dir}/${soname}."* 2>/dev/null | sort -V | tail -n 1 || true)"
+        [[ -n "$latest" ]] || return 0
+
+        ln -sf "$(basename "$latest")" "${dir}/${soname}" 2>/dev/null || true
+    }
+
+    fixup_readline_history_symlinks() {
+        local dir="$1"
+        fixup_soname_symlink "$dir" "libreadline.so.8"
+        fixup_soname_symlink "$dir" "libhistory.so.8"
+    }
+
+    # Essential library patterns to search for on the host system
+    # These cover terminal apps, GUI apps, audio, crypto, compression, etc.
+    local -a LIB_PATTERNS=(
+        # Terminal/ncurses (vim, neovim, htop, etc.)
+        "libncurses*"
+        "libncursesw*"
+        "libtinfo*"
+        "libreadline*"
+        "libhistory*"
+
+        # C/C++ runtime
+        "libgcc_s*"
+        "libstdc++*"
+        "libatomic*"
+
+        # Compression
+        "libz.so*"
+        "liblzma*"
+        "libbz2*"
+        "libzstd*"
+
+        # Crypto/SSL
+        "libssl*"
+        "libcrypto*"
+        "libgnutls*"
+
+        # FFI and dynamic loading
+        "libffi*"
+        "libdl*"
+        "libltdl*"
+
+        # Python runtime
+        "libpython3*"
+        "libexpat*"
+
+        # Lua runtime (neovim)
+        "libluajit*"
+        "liblua5*"
+
+        # Audio (libcanberra, pulseaudio, alsa)
+        "libcanberra*"
+        "libpulse*"
+        "libasound*"
+        "libsndfile*"
+        "libvorbis*"
+        "libogg*"
+        "libFLAC*"
+
+        # GLib/GTK base (many apps use these)
+        "libglib-2*"
+        "libgobject-2*"
+        "libgio-2*"
+        "libgmodule-2*"
+        "libgthread-2*"
+        "libpcre*"
+        "libpcre2*"
+
+        # Math
+        "libm.so*"
+        "libgmp*"
+        "libmpfr*"
+
+        # Threading
+        "libpthread*"
+
+        # System
+        "libc.so*"
+        "librt*"
+        "libresolv*"
+        "libnss*"
+        "libnsl*"
+        "libutil*"
+
+        # Terminal emulation
+        "libvterm*"
+        "libtermkey*"
+        "libunibilium*"
+        "libmsgpack*"
+        "libtree-sitter*"
+
+        # Wayland/display (for GUI apps)
+        "libwayland-client*"
+        "libwayland-cursor*"
+        "libwayland-egl*"
+        "libxkbcommon*"
+
+        # Input
+        "libinput*"
+        "libevdev*"
+        "libudev*"
+
+        # Misc runtime
+        "libsystemd*"
+        "libdbus*"
+        "libuuid*"
+        "libblkid*"
+        "libmount*"
+    )
+
+    # Search directories for libraries
+    local -a LIB_DIRS=(
+        "/usr/lib"
+        "/usr/lib64"
+        "/usr/lib/x86_64-linux-gnu"
+        "/lib"
+        "/lib64"
+        "/lib/x86_64-linux-gnu"
+    )
+
+    local copied=0
+    local skipped=0
+
+    for pattern in "${LIB_PATTERNS[@]}"; do
+        for dir in "${LIB_DIRS[@]}"; do
+            [[ -d "$dir" ]] || continue
+
+            # Find matching libraries
+            while IFS= read -r -d '' lib; do
+                [[ -f "$lib" ]] || continue
+
+                # Determine destination path
+                local dest="${SYSROOT_DIR}${lib}"
+
+                # Skip if already present
+                if [[ -f "$dest" ]]; then
+                    skipped=$((skipped + 1))
+                    continue
+                fi
+
+                # Create directory and copy library
+                mkdir -p "$(dirname "$dest")"
+                if cp -L "$lib" "$dest" 2>/dev/null; then
+                    copied=$((copied + 1))
+                fi
+            done < <(find "$dir" -maxdepth 1 -name "$pattern" -print0 2>/dev/null)
+        done
+    done
+
+    # If both built and host libs were copied, prefer the newest minor version for SONAME links.
+    # This prevents breakage like "/bin/bash: undefined symbol: rl_print_keybinding".
+    fixup_readline_history_symlinks "${SYSROOT_DIR}/usr/lib"
+    fixup_readline_history_symlinks "${SYSROOT_DIR}/usr/lib64"
+    fixup_readline_history_symlinks "${SYSROOT_DIR}/lib"
+    fixup_readline_history_symlinks "${SYSROOT_DIR}/lib64"
+
+    log_info "Copied ${copied} libraries (${skipped} already present)"
+
+    # Also copy essential terminfo database for terminal apps
+    install_terminfo
+
+    log_success "Essential runtime libraries installed"
+}
+
+# Install terminfo database for terminal applications
+install_terminfo() {
+    log_info "Installing terminfo database..."
+
+    local -a TERMINFO_DIRS=(
+        "/usr/share/terminfo"
+        "/lib/terminfo"
+        "/etc/terminfo"
+    )
+
+    local terminfo_dest="${SYSROOT_DIR}/usr/share/terminfo"
+    mkdir -p "$terminfo_dest"
+
+    for dir in "${TERMINFO_DIRS[@]}"; do
+        if [[ -d "$dir" ]]; then
+            # Copy common terminal types
+            for term in xterm xterm-256color linux vt100 vt220 screen screen-256color tmux tmux-256color alacritty foot kitty rxvt rxvt-unicode; do
+                local first_char="${term:0:1}"
+                local src_file="$dir/$first_char/$term"
+
+                if [[ -f "$src_file" ]]; then
+                    mkdir -p "$terminfo_dest/$first_char"
+                    cp "$src_file" "$terminfo_dest/$first_char/" 2>/dev/null || true
+                fi
+            done
+            break  # Only copy from first found directory
+        fi
+    done
+
+    # Set TERMINFO environment variable in profile
+    mkdir -p "${SYSROOT_DIR}/etc/profile.d"
+    cat > "${SYSROOT_DIR}/etc/profile.d/terminfo.sh" << 'EOF'
+# Terminfo database location
+export TERMINFO=/usr/share/terminfo
+export TERM="${TERM:-linux}"
+EOF
+
+    log_info "Terminfo database installed"
+}
+
+# Copy all .so files for a specific library (handles versioned symlinks)
+copy_lib_family() {
+    local lib_name="$1"
+    local -a search_dirs=("/usr/lib" "/usr/lib64" "/usr/lib/x86_64-linux-gnu" "/lib" "/lib64" "/lib/x86_64-linux-gnu")
+
+    for dir in "${search_dirs[@]}"; do
+        [[ -d "$dir" ]] || continue
+
+        for lib in "$dir"/${lib_name}*; do
+            [[ -e "$lib" ]] || continue
+
+            local dest="${SYSROOT_DIR}${lib}"
+            if [[ ! -f "$dest" ]]; then
+                mkdir -p "$(dirname "$dest")"
+                cp -L "$lib" "$dest" 2>/dev/null || true
+            fi
+        done
+    done
 }
 
 # Set zsh as the default shell
@@ -1530,6 +2556,10 @@ main() {
 
     mkdir -p "${LOGS_DIR}" "${PACKAGES_DIR}/bin" "${PACKAGES_DIR}/boot"
 
+    # Build core dependencies first (ncurses, libcanberra, etc.)
+    # These are required by shells, editors, and many other tools
+    build_core_deps
+
     # Build custom RavenLinux tools
     build_go_packages
     build_rvn
@@ -1557,6 +2587,11 @@ main() {
 
     # Build file navigation tools
     build_file_tools
+
+    # Install essential runtime libraries (ncurses, libcanberra, glib, etc.)
+    # These are needed by vim, neovim, cargo, python, and other applications
+    # but may not be detected by ldd because they're loaded via dlopen()
+    install_essential_libs
 
     print_summary
 

@@ -47,6 +47,25 @@ done
 # Functions
 # =============================================================================
 
+fixup_soname_symlink() {
+    local dir="$1"
+    local soname="$2"
+
+    [[ -d "$dir" ]] || return 0
+
+    local latest
+    latest="$(ls -1 "${dir}/${soname}."* 2>/dev/null | sort -V | tail -n 1 || true)"
+    [[ -n "$latest" ]] || return 0
+
+    ln -sf "$(basename "$latest")" "${dir}/${soname}" 2>/dev/null || true
+}
+
+fixup_readline_history_symlinks() {
+    local dir="$1"
+    fixup_soname_symlink "$dir" "libreadline.so.8"
+    fixup_soname_symlink "$dir" "libhistory.so.8"
+}
+
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_fatal "This script must be run as root (need to copy device nodes)"
@@ -171,7 +190,7 @@ EOF
 
     # These need to come from host (not in uutils or need special handling)
     # Include switch_root for live boot, udevadm for device enumeration
-    local host_bins=(mount umount dmesg clear reset ps kill free grep sed awk find xargs poweroff reboot switch_root losetup blkid udevadm)
+    local host_bins=(mount umount dmesg clear reset ps kill free grep sed awk find xargs poweroff reboot switch_root losetup blkid udevadm setsid stty)
     for bin in "${host_bins[@]}"; do
         if command -v "$bin" &>/dev/null; then
             cp "$(which "$bin")" "${INITRAMFS_DIR}/bin/" 2>/dev/null || true
@@ -179,16 +198,55 @@ EOF
     done
 
     # Copy bash
-    if command -v bash &>/dev/null; then
+    if [[ -f "${RAVEN_BUILD}/sysroot/bin/bash" ]]; then
+        cp "${RAVEN_BUILD}/sysroot/bin/bash" "${INITRAMFS_DIR}/bin/bash"
+        ln -sf bash "${INITRAMFS_DIR}/bin/sh"
+        log_info "  Added bash (from sysroot)"
+
+        # Copy essential libraries for sysroot bash to ensure compatibility
+        mkdir -p "${INITRAMFS_DIR}/usr/lib" "${INITRAMFS_DIR}/lib" "${INITRAMFS_DIR}/lib64"
+        
+        # Copy libs from sysroot/usr/lib
+        pushd "${RAVEN_BUILD}/sysroot/usr/lib" >/dev/null
+        # Use cp -d to preserve symlinks
+        # Copy to both /usr/lib and /lib to be safe
+        cp -d libreadline.so* libncursesw.so* libtinfow.so* libdl.so* libc.so* libgcc_s.so* "${INITRAMFS_DIR}/usr/lib/" 2>/dev/null || true
+        cp -d libreadline.so* libncursesw.so* libtinfow.so* libdl.so* libc.so* libgcc_s.so* "${INITRAMFS_DIR}/lib/" 2>/dev/null || true
+        popd >/dev/null
+
+        # Fix up readline/history SONAME symlinks if multiple versions were copied.
+        # This prevents early-boot failures like:
+        #   /bin/bash: undefined symbol: rl_print_keybinding
+        fixup_readline_history_symlinks "${INITRAMFS_DIR}/usr/lib"
+        fixup_readline_history_symlinks "${INITRAMFS_DIR}/lib"
+
+        # Verify readline was copied (and SONAME exists)
+        if [[ ! -e "${INITRAMFS_DIR}/usr/lib/libreadline.so.8" ]] && [[ ! -e "${INITRAMFS_DIR}/lib/libreadline.so.8" ]]; then
+            log_error "Failed to copy libreadline.so.8 for bash!"
+        fi
+
+        # Copy dynamic linker from sysroot if present
+        if [[ -f "${RAVEN_BUILD}/sysroot/lib64/ld-linux-x86-64.so.2" ]]; then
+             cp -L "${RAVEN_BUILD}/sysroot/lib64/ld-linux-x86-64.so.2" "${INITRAMFS_DIR}/lib64/" 2>/dev/null || true
+             # Ensure it's also in /lib just in case
+             mkdir -p "${INITRAMFS_DIR}/lib"
+             cp -L "${RAVEN_BUILD}/sysroot/lib64/ld-linux-x86-64.so.2" "${INITRAMFS_DIR}/lib/" 2>/dev/null || true
+        fi
+    elif command -v bash &>/dev/null; then
         cp "$(which bash)" "${INITRAMFS_DIR}/bin/bash"
         ln -sf bash "${INITRAMFS_DIR}/bin/sh"
-        log_info "  Added bash"
+        log_info "  Added bash (from host)"
     fi
 
     # Copy zsh if available
-    if command -v zsh &>/dev/null; then
+    if [[ -f "${RAVEN_BUILD}/sysroot/bin/zsh" ]]; then
+        cp "${RAVEN_BUILD}/sysroot/bin/zsh" "${INITRAMFS_DIR}/bin/zsh"
+        log_info "  Added zsh (from sysroot)"
+        # Copy zsh libs
+        cp -d "${RAVEN_BUILD}/sysroot/usr/lib"/libcap.so* "${INITRAMFS_DIR}/usr/lib/" 2>/dev/null || true
+    elif command -v zsh &>/dev/null; then
         cp "$(which zsh)" "${INITRAMFS_DIR}/bin/zsh"
-        log_info "  Added zsh"
+        log_info "  Added zsh (from host)"
     fi
 
     # Copy RavenLinux custom packages (Vem, Carrion, Ivaldi)
@@ -223,9 +281,18 @@ copy_libraries() {
         while read -r lib; do
             [[ -z "$lib" || ! -f "$lib" ]] && continue
             local dest="${INITRAMFS_DIR}${lib}"
-            if [[ ! -f "$dest" ]]; then
-                mkdir -p "$(dirname "$dest")"
-                cp -L "$lib" "$dest" 2>/dev/null || true
+            # Check if we should copy from sysroot instead of host path
+            if [[ -f "${RAVEN_BUILD}/sysroot${lib}" ]]; then
+                 # Prefer sysroot lib if we have a matching path
+                 if [[ ! -f "$dest" ]]; then
+                    mkdir -p "$(dirname "$dest")"
+                    cp -L "${RAVEN_BUILD}/sysroot${lib}" "$dest" 2>/dev/null || true
+                 fi
+            else
+                if [[ ! -f "$dest" ]]; then
+                    mkdir -p "$(dirname "$dest")"
+                    cp -L "$lib" "$dest" 2>/dev/null || true
+                fi
             fi
         done < <(timeout 2 ldd "$bin" 2>/dev/null | grep -o '/[^ ]*' || true)
     done
@@ -234,7 +301,11 @@ copy_libraries() {
     for ld in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-x86-64.so.2; do
         if [[ -f "$ld" ]]; then
             mkdir -p "${INITRAMFS_DIR}$(dirname "$ld")"
-            cp -L "$ld" "${INITRAMFS_DIR}${ld}" 2>/dev/null || true
+            if [[ -f "${RAVEN_BUILD}/sysroot${ld}" ]]; then
+                 cp -L "${RAVEN_BUILD}/sysroot${ld}" "${INITRAMFS_DIR}${ld}" 2>/dev/null || true
+            else
+                 cp -L "$ld" "${INITRAMFS_DIR}${ld}" 2>/dev/null || true
+            fi
         fi
     done
 
@@ -270,7 +341,7 @@ create_config_files() {
 
     # /etc/passwd
     cat > "${INITRAMFS_DIR}/etc/passwd" <<'PASSWD'
-root:x:0:0:root:/root:/bin/zsh
+root:x:0:0:root:/root:/bin/bash
 nobody:x:65534:65534:Nobody:/:/bin/false
 PASSWD
 
@@ -329,6 +400,15 @@ create_init() {
 # RavenLinux Live Boot Init
 # Mounts the squashfs filesystem from the live ISO and switches to it
 
+set -x  # Enable debug logging
+
+# Trap errors
+error_handler() {
+    echo "An error occurred on line $1"
+    rescue_shell "Script error"
+}
+trap 'error_handler $LINENO' ERR
+
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 
 # Helper functions
@@ -343,13 +423,27 @@ rescue_shell() {
     echo ""
     # Run shell in a loop to prevent kernel panic if user exits
     while true; do
-        /bin/bash --login -i || true
+        # Ensure the shell has a controlling TTY so job control works (no "cannot set terminal process group").
+        if command -v setsid >/dev/null && [ -c /dev/console ]; then
+            setsid -c /bin/bash --login -i </dev/console >/dev/console 2>&1 || true
+        else
+            /bin/bash --login -i </dev/console >/dev/console 2>&1 || true
+        fi
         echo ""
         err "Shell exited. Restarting rescue shell..."
         err "(Type 'reboot' or 'poweroff' to exit properly)"
         sleep 1
     done
 }
+
+# Early sanity check
+msg "Init script started. Checking environment..."
+echo "PATH=$PATH"
+ls -l /bin/bash /bin/sh /bin/mount /bin/ls || true
+if ! command -v mount >/dev/null; then
+    err "CRITICAL: mount command not found!"
+    rescue_shell "Missing mount"
+fi
 
 msg "Starting Raven Linux..."
 
@@ -361,6 +455,15 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null || mount -t tmpfs tmpfs /dev
 mkdir -p /dev/pts /dev/shm
 mount -t devpts devpts /dev/pts
 mount -t tmpfs tmpfs /dev/shm
+
+# Bash process substitution relies on /dev/fd/* (normally provided via /proc).
+# The boot-device scan below uses it (e.g., `done < <(blkid ...)`).
+if [ ! -e /dev/fd ] && [ -d /proc/self/fd ]; then
+    ln -sf /proc/self/fd /dev/fd 2>/dev/null || true
+    ln -sf /proc/self/fd/0 /dev/stdin 2>/dev/null || true
+    ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null || true
+    ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null || true
+fi
 
 # Create mount points
 mkdir -p /mnt/cdrom /mnt/squashfs /mnt/root /mnt/overlay /mnt/work
@@ -525,11 +628,19 @@ fi
 msg "Switching to live filesystem..."
 msg "Running $NEW_INIT"
 
+if ! command -v switch_root >/dev/null; then
+    rescue_shell "switch_root command not found in initramfs"
+fi
+
+if [ ! -x "/mnt/root$NEW_INIT" ]; then
+    rescue_shell "Target init $NEW_INIT not executable in new root"
+fi
+
 # Switch to the new root
-exec switch_root /mnt/root "$NEW_INIT"
+exec switch_root /mnt/root "$NEW_INIT" || rescue_shell "switch_root failed"
 
 # If switch_root fails
-rescue_shell "switch_root failed"
+rescue_shell "switch_root failed (unreachable)"
 INITSCRIPT
 
     chmod +x "${INITRAMFS_DIR}/init"
