@@ -23,6 +23,11 @@ umask "$_old_umask"
 export LIBSEAT_BACKEND="${LIBSEAT_BACKEND:-seatd}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 
+# Xwayland expects /tmp/.X11-unix to exist (it may not create the parent dir).
+mkdir -p /tmp/.X11-unix 2>/dev/null || true
+chmod 1777 /tmp /tmp/.X11-unix 2>/dev/null || true
+rm -f /tmp/.X11-unix/X0 2>/dev/null || true
+
 # Help libxkbcommon find keyboard layouts on minimal images.
 # Some builds expect /usr/share/xkeyboard-config-2; others use /usr/share/X11/xkb.
 if [ ! -e /usr/share/xkeyboard-config-2 ] && [ -d /usr/share/X11/xkb ]; then
@@ -231,15 +236,16 @@ start_weston() {
     fi
 
     if [ "$have_xwayland" -eq 1 ]; then
-        start_compositor "weston" weston --backend=drm-backend.so --tty=1 --xwayland && return 0
+        # Avoid passing --tty to weston: some setups end up forwarding it to Xwayland, which then exits.
+        start_compositor "weston" weston --backend=drm-backend.so --xwayland && return 0
     else
-        start_compositor "weston" weston --backend=drm-backend.so --tty=1 && return 0
+        start_compositor "weston" weston --backend=drm-backend.so && return 0
     fi
     log "Retrying weston with --renderer=pixman..."
     if [ "$have_xwayland" -eq 1 ]; then
-        start_compositor "weston (pixman)" weston --backend=drm-backend.so --tty=1 --renderer=pixman --xwayland && return 0
+        start_compositor "weston (pixman)" weston --backend=drm-backend.so --renderer=pixman --xwayland && return 0
     else
-        start_compositor "weston (pixman)" weston --backend=drm-backend.so --tty=1 --renderer=pixman && return 0
+        start_compositor "weston (pixman)" weston --backend=drm-backend.so --renderer=pixman && return 0
     fi
     return 1
 }

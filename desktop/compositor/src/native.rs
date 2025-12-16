@@ -404,8 +404,9 @@ pub fn run_native(_config: &Config) -> Result<()> {
         .context("acquire initial buffer")?
         .ok_or_else(|| anyhow!("No buffer available"))?;
 
+    // drmModeAddFB expects (depth, bpp). For XRGB8888 use depth=24, bpp=32.
     let framebuffer = surface
-        .add_framebuffer(first_buffer.handle(), 32, 32)
+        .add_framebuffer(first_buffer.handle(), 24, 32)
         .context("create initial framebuffer")?;
 
     *first_buffer.userdata() = Some(framebuffer);
@@ -497,7 +498,7 @@ pub fn run_native(_config: &Config) -> Result<()> {
                     if let Ok(Some(next_buffer)) = swapchain.acquire() {
                         // Create framebuffer if needed
                         if next_buffer.userdata().is_none() {
-                            if let Ok(fb) = surface_clone.add_framebuffer(next_buffer.handle(), 32, 32) {
+                            if let Ok(fb) = surface_clone.add_framebuffer(next_buffer.handle(), 24, 32) {
                                 *next_buffer.userdata() = Some(fb);
                             }
                         }
