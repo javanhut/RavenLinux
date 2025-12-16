@@ -119,6 +119,7 @@ copy_system_utils() {
         modprobe insmod rmmod lsmod depmod modinfo kmod
         # Reference compositor (optional)
         weston
+        weston-terminal
         # Alternative compositor (optional)
         Hyprland hyprctl
         # X11/Xwayland (optional, for legacy app support)
@@ -197,6 +198,14 @@ copy_system_utils() {
                 log_info "  Copied $(basename "$d") runtime data"
             fi
         done
+
+        # Install Weston config for RavenLinux sessions.
+        if [[ -f "${PROJECT_ROOT}/configs/weston/weston.ini" ]]; then
+            mkdir -p "${SYSROOT_DIR}/etc/xdg/weston"
+            cp "${PROJECT_ROOT}/configs/weston/weston.ini" "${SYSROOT_DIR}/etc/xdg/weston/weston.ini" 2>/dev/null || true
+            chmod 644 "${SYSROOT_DIR}/etc/xdg/weston/weston.ini" 2>/dev/null || true
+            log_info "  Added /etc/xdg/weston/weston.ini"
+        fi
     fi
 
     # Copy xkeyboard-config data for libxkbcommon (keyboard layouts).

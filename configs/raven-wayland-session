@@ -44,7 +44,15 @@ if [ -z "${XKB_CONFIG_ROOT:-}" ]; then
 fi
 
 cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
-wayland_choice="$(printf '%s\n' "$cmdline" | tr ' ' '\n' | sed -n 's/^raven\\.wayland=//p' | head -n 1)"
+wayland_choice=""
+for arg in $cmdline; do
+    case "$arg" in
+        raven.wayland=*)
+            wayland_choice="${arg#raven.wayland=}"
+            break
+            ;;
+    esac
+done
 
 start_seatd() {
     # Check if seatd is already running
@@ -83,15 +91,56 @@ start_seatd() {
 
 wait_for_wayland_socket() {
     pid="$1"
-    sock="${XDG_RUNTIME_DIR}/wayland-0"
     i=0
     while [ "$i" -lt 50 ]; do
-        [ -S "$sock" ] && return 0
+        for s in "${XDG_RUNTIME_DIR}"/wayland-*; do
+            [ -S "$s" ] || continue
+            WAYLAND_SOCK="$s"
+            export WAYLAND_DISPLAY="$(basename "$WAYLAND_SOCK")"
+            return 0
+        done
         kill -0 "$pid" 2>/dev/null || return 1
         i=$((i + 1))
         sleep 0.1
     done
     return 1
+}
+
+start_session_components() {
+    compositor="$1"
+
+    # Ensure a session bus exists (many desktop-ish apps expect it).
+    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-daemon >/dev/null 2>&1; then
+        eval "$(dbus-daemon --session --fork --print-address 2>/dev/null | sed 's/^/export DBUS_SESSION_BUS_ADDRESS=/' )" || true
+    fi
+
+    case "$compositor" in
+        weston*)
+            if command -v weston-terminal >/dev/null 2>&1; then
+                log "Autostart: weston-terminal"
+                weston-terminal >>"$LOGFILE" 2>&1 &
+            elif command -v foot >/dev/null 2>&1; then
+                log "Autostart: foot"
+                foot >>"$LOGFILE" 2>&1 &
+            elif command -v alacritty >/dev/null 2>&1; then
+                log "Autostart: alacritty"
+                alacritty >>"$LOGFILE" 2>&1 &
+            fi
+            ;;
+        hyprland*|Hyprland*)
+            if command -v foot >/dev/null 2>&1; then
+                log "Autostart: foot"
+                foot >>"$LOGFILE" 2>&1 &
+            elif command -v alacritty >/dev/null 2>&1; then
+                log "Autostart: alacritty"
+                alacritty >>"$LOGFILE" 2>&1 &
+            fi
+            ;;
+        raven-compositor*)
+            # Raven compositor is still early; clients may not be visible yet.
+            log "Note: Raven compositor shell components are not implemented yet."
+            ;;
+    esac
 }
 
 start_compositor() {
@@ -107,7 +156,8 @@ start_compositor() {
     pid=$!
 
     if wait_for_wayland_socket "$pid"; then
-        log "${name} started (wayland socket ready)"
+        log "${name} started (WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-unknown})"
+        start_session_components "$name"
         wait "$pid"
         return $?
     fi
@@ -159,6 +209,8 @@ if [ -z "$preferred" ]; then
     fi
 fi
 
+log "cmdline: ${cmdline}"
+log "raven.wayland: ${wayland_choice:-<unset>}"
 log "Preferred compositor: $preferred"
 log "Available DRM devices:"
 ls -la /dev/dri/ 2>&1 | tee -a "$LOGFILE" || true
@@ -235,17 +287,20 @@ start_weston() {
         done
     fi
 
+    weston_config=""
+    [ -f /etc/xdg/weston/weston.ini ] && weston_config="--config=/etc/xdg/weston/weston.ini"
+
     if [ "$have_xwayland" -eq 1 ]; then
         # Avoid passing --tty to weston: some setups end up forwarding it to Xwayland, which then exits.
-        start_compositor "weston" weston --backend=drm-backend.so --xwayland && return 0
+        start_compositor "weston" weston ${weston_config} --backend=drm-backend.so --xwayland && return 0
     else
-        start_compositor "weston" weston --backend=drm-backend.so && return 0
+        start_compositor "weston" weston ${weston_config} --backend=drm-backend.so && return 0
     fi
     log "Retrying weston with --renderer=pixman..."
     if [ "$have_xwayland" -eq 1 ]; then
-        start_compositor "weston (pixman)" weston --backend=drm-backend.so --renderer=pixman --xwayland && return 0
+        start_compositor "weston (pixman)" weston ${weston_config} --backend=drm-backend.so --renderer=pixman --xwayland && return 0
     else
-        start_compositor "weston (pixman)" weston --backend=drm-backend.so --renderer=pixman && return 0
+        start_compositor "weston (pixman)" weston ${weston_config} --backend=drm-backend.so --renderer=pixman && return 0
     fi
     return 1
 }

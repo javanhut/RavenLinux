@@ -133,6 +133,13 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
         }
     }
 
+    // Avoid starting both a compositor and the session wrapper at once.
+    for svc in &mut config.services {
+        if svc.name == "weston" || svc.name == "raven-compositor" || svc.name == "wayland-session" {
+            svc.enabled = false;
+        }
+    }
+
     // Ensure runtime dirs for root session exist.
     fs::create_dir_all("/run/user/0").ok();
     let _ = fs::set_permissions("/run/user/0", fs::Permissions::from_mode(0o700));
@@ -155,37 +162,57 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
     compositor_env.insert("XDG_RUNTIME_DIR".to_string(), "/run/user/0".to_string());
     compositor_env.insert("LIBSEAT_BACKEND".to_string(), "seatd".to_string());
 
-    match wayland_choice {
-        Some("weston") => ensure_service(
+    let session_path = Path::new("/bin/raven-wayland-session");
+    if session_path.exists() {
+        let mut env = compositor_env;
+        env.insert(
+            "RAVEN_WAYLAND_COMPOSITOR".to_string(),
+            wayland_choice.unwrap_or("raven").to_string(),
+        );
+
+        ensure_service(
             &mut config.services,
             ServiceConfig {
-                name: "weston".to_string(),
-                description: "Weston Wayland compositor".to_string(),
-                exec: "/bin/weston".to_string(),
-                args: vec![
-                    "--backend=drm-backend.so".to_string(),
-                    "--tty=1".to_string(),
-                ],
-                restart: true,
-                enabled: true,
-                critical: false,
-                environment: compositor_env,
-            },
-        ),
-        _ => ensure_service(
-            &mut config.services,
-            ServiceConfig {
-                name: "raven-compositor".to_string(),
-                description: "Raven Wayland compositor".to_string(),
-                exec: "/bin/raven-compositor".to_string(),
+                name: "wayland-session".to_string(),
+                description: "Raven Wayland session".to_string(),
+                exec: "/bin/raven-wayland-session".to_string(),
                 args: Vec::new(),
                 restart: true,
                 enabled: true,
                 critical: false,
-                environment: compositor_env,
+                environment: env,
             },
-        ),
-    };
+        );
+    } else {
+        match wayland_choice {
+            Some("weston") => ensure_service(
+                &mut config.services,
+                ServiceConfig {
+                    name: "weston".to_string(),
+                    description: "Weston Wayland compositor".to_string(),
+                    exec: "/bin/weston".to_string(),
+                    args: vec!["--backend=drm-backend.so".to_string()],
+                    restart: true,
+                    enabled: true,
+                    critical: false,
+                    environment: compositor_env,
+                },
+            ),
+            _ => ensure_service(
+                &mut config.services,
+                ServiceConfig {
+                    name: "raven-compositor".to_string(),
+                    description: "Raven Wayland compositor".to_string(),
+                    exec: "/bin/raven-compositor".to_string(),
+                    args: Vec::new(),
+                    restart: true,
+                    enabled: true,
+                    critical: false,
+                    environment: compositor_env,
+                },
+            ),
+        };
+    }
 
     Ok(())
 }

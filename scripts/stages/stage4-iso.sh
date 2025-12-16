@@ -391,6 +391,12 @@ install_packages_to_sysroot() {
         cp "${PROJECT_ROOT}/configs/raven-x11-session" "${SYSROOT_DIR}/bin/raven-x11-session" 2>/dev/null || true
         chmod +x "${SYSROOT_DIR}/bin/raven-x11-session" 2>/dev/null || true
     fi
+    if [[ -f "${PROJECT_ROOT}/configs/weston/weston.ini" ]]; then
+        mkdir -p "${SYSROOT_DIR}/etc/xdg/weston"
+        cp "${PROJECT_ROOT}/configs/weston/weston.ini" "${SYSROOT_DIR}/etc/xdg/weston/weston.ini" 2>/dev/null || true
+        chmod 644 "${SYSROOT_DIR}/etc/xdg/weston/weston.ini" 2>/dev/null || true
+        log_info "  Installed /etc/xdg/weston/weston.ini"
+    fi
 
     # Ensure shared library dependencies for newly installed binaries are present.
     log_info "Copying runtime libraries for sysroot binaries..."
@@ -504,6 +510,11 @@ menuentry "Raven Linux" --class raven {
 }
 
 submenu "Raven Linux (Graphical) >" --class raven {
+    menuentry "Raven Desktop (Wayland)" --class raven {
+        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=weston console=ttyS0,115200 console=tty0
+        initrd /boot/initramfs.img
+    }
+
     menuentry "Raven Compositor (Wayland)" --class raven {
         linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=ttyS0,115200 console=tty0
         initrd /boot/initramfs.img
