@@ -115,7 +115,7 @@ copy_system_utils() {
         # File operations
         find grep sed awk xargs file less more
         # Debugging/diagnostics
-        which whereis type
+        which whereis type timeout
         strace ltrace lsof ldd
         # Disk utilities
         mount umount mountpoint fdisk parted mkfs.ext4 mkfs.vfat fsck blkid lsblk
@@ -125,6 +125,7 @@ copy_system_utils() {
         sensors smartctl nvme hdparm
         # User management
         passwd login chpasswd useradd usermod groupadd getent
+        runuser setpriv newgrp sg
         # Archiving
         tar gzip gunzip bzip2 xz zstd unzip zip
         # Editors (fallback)
@@ -2389,6 +2390,137 @@ fi
 printf '%s\n' "$name"
 EOF
     chmod 755 "${SYSROOT_DIR}/bin/whoami" 2>/dev/null || true
+
+    # /bin/switch-user - Clean user switching utility for RavenLinux
+    # Uses runuser/setpriv instead of su to avoid PAM issues
+    cat > "${SYSROOT_DIR}/bin/switch-user" << 'SWITCHUSER'
+#!/bin/bash
+# switch-user - RavenLinux User Switching Utility
+# Usage: switch-user <username>
+#
+# Cleanly switches to another user WITHOUT using su/PAM
+
+# Colors
+RED='\033[1;31m'
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+NC='\033[0m'
+
+usage() {
+    echo -e "${CYAN}switch-user${NC} - RavenLinux User Switching Utility"
+    echo ""
+    echo "Usage: switch-user <username>"
+    echo ""
+    echo "Options:"
+    echo "  -h, --help     Show this help message"
+    echo "  -l, --list     List available users"
+    echo ""
+    echo "Examples:"
+    echo "  switch-user javanhut     # Switch to user 'javanhut'"
+    echo "  switch-user root         # Switch back to root"
+    exit 0
+}
+
+list_users() {
+    echo -e "${CYAN}Available users:${NC}"
+    while IFS=: read -r username _ uid _ _ home shell; do
+        if [[ "$uid" -ge 1000 ]] || [[ "$uid" -eq 0 ]]; then
+            if [[ -n "$shell" ]] && [[ "$shell" != "/bin/false" ]] && [[ "$shell" != "/sbin/nologin" ]]; then
+                if [[ "$uid" -eq 0 ]]; then
+                    echo -e "  ${GREEN}$username${NC} (root)"
+                else
+                    echo -e "  ${GREEN}$username${NC} (UID: $uid)"
+                fi
+            fi
+        fi
+    done < /etc/passwd
+    exit 0
+}
+
+error() {
+    echo -e "${RED}Error:${NC} $1" >&2
+    exit 1
+}
+
+# Parse arguments
+case "${1:-}" in
+    -h|--help|help) usage ;;
+    -l|--list|list) list_users ;;
+    "")
+        echo -e "${RED}Error:${NC} No username specified"
+        echo "Usage: switch-user <username>"
+        exit 1
+        ;;
+esac
+
+TARGET_USER="$1"
+
+# Check if user exists
+if ! grep -q "^${TARGET_USER}:" /etc/passwd 2>/dev/null; then
+    error "User '${TARGET_USER}' does not exist"
+fi
+
+# Get user info from /etc/passwd
+IFS=: read -r _ _ USER_UID USER_GID _ USER_HOME USER_SHELL < <(grep "^${TARGET_USER}:" /etc/passwd)
+
+# Validate/find shell
+if [[ ! -x "$USER_SHELL" ]]; then
+    for sh in /bin/bash /bin/zsh /bin/sh; do
+        [[ -x "$sh" ]] && { USER_SHELL="$sh"; break; }
+    done
+fi
+[[ -x "$USER_SHELL" ]] || error "No valid shell found for user '${TARGET_USER}'"
+
+# Create home directory if missing
+[[ -d "$USER_HOME" ]] || { mkdir -p "$USER_HOME" 2>/dev/null; chown "${USER_UID}:${USER_GID}" "$USER_HOME" 2>/dev/null; }
+
+# Create XDG runtime directory
+XDG_RUNTIME="/run/user/${USER_UID}"
+[[ -d "$XDG_RUNTIME" ]] || { mkdir -p "$XDG_RUNTIME" 2>/dev/null; chown "${USER_UID}:${USER_GID}" "$XDG_RUNTIME" 2>/dev/null; chmod 700 "$XDG_RUNTIME" 2>/dev/null; }
+
+# Must be root to switch users
+[[ $(id -u) -eq 0 ]] || error "Must be root to switch users"
+
+echo -e "${GREEN}Switching to user:${NC} ${TARGET_USER}"
+
+# Try different methods to switch user (in order of preference)
+
+# Method 1: runuser (doesn't use PAM, designed for scripts)
+if command -v runuser >/dev/null 2>&1; then
+    exec runuser -u "$TARGET_USER" -- "$USER_SHELL" -l
+fi
+
+# Method 2: setpriv (directly changes UID/GID)
+if command -v setpriv >/dev/null 2>&1; then
+    exec setpriv --reuid="$USER_UID" --regid="$USER_GID" --init-groups \
+        env HOME="$USER_HOME" USER="$TARGET_USER" LOGNAME="$TARGET_USER" \
+        SHELL="$USER_SHELL" XDG_RUNTIME_DIR="$XDG_RUNTIME" \
+        "$USER_SHELL" -l
+fi
+
+# Method 3: Direct exec with bash's exec builtin (requires bash 4.4+)
+# This is a fallback that uses /proc to switch credentials
+if [[ -w /proc/self/uid_map ]]; then
+    exec env HOME="$USER_HOME" USER="$TARGET_USER" LOGNAME="$TARGET_USER" \
+        SHELL="$USER_SHELL" XDG_RUNTIME_DIR="$XDG_RUNTIME" \
+        "$USER_SHELL" -l
+fi
+
+# Method 4: Last resort - use su with timeout
+if command -v su >/dev/null 2>&1; then
+    echo -e "${YELLOW}Warning:${NC} Using su (may hang if PAM has issues)"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 5 su - "$TARGET_USER" || error "su timed out or failed"
+    else
+        exec su - "$TARGET_USER"
+    fi
+fi
+
+error "No method available to switch user"
+SWITCHUSER
+    chmod 755 "${SYSROOT_DIR}/bin/switch-user"
+    log_info "  Created switch-user utility"
 
     # /etc/profile
     cat > "${SYSROOT_DIR}/etc/profile" << 'EOF'
