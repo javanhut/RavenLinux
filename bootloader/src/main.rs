@@ -302,7 +302,7 @@ fn print_banner(stdout: &mut uefi::proto::console::text::Output) {
     let _ = writeln!(stdout, r"    ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝");
     let _ = stdout.set_color(Color::Cyan, Color::Black);
     let _ = writeln!(stdout, r"    ╔══════════════════════════════════════════════════════╗");
-    let _ = writeln!(stdout, r"    ║              B O O T L O A D E R  v{}              ║", VERSION);
+    let _ = writeln!(stdout, r"    ║              UEFI MENU SELECT v{}                 ║", VERSION);
     let _ = writeln!(stdout, r"    ╚══════════════════════════════════════════════════════╝");
     let _ = writeln!(stdout, "");
 }

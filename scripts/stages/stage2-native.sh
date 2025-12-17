@@ -124,7 +124,7 @@ copy_system_utils() {
         dmidecode lscpu
         sensors smartctl nvme hdparm
         # User management
-        passwd login chpasswd useradd usermod groupadd
+        passwd login chpasswd useradd usermod groupadd getent
         # Archiving
         tar gzip gunzip bzip2 xz zstd unzip zip
         # Editors (fallback)
@@ -196,21 +196,9 @@ copy_system_utils() {
         fi
     done
 
-    # Prefer sudo-rs (built in stage1) over host sudo/su
-    for bin in sudo su visudo; do
-        if [[ -f "${BUILD_DIR}/bin/${bin}" ]]; then
-            cp "${BUILD_DIR}/bin/${bin}" "${SYSROOT_DIR}/bin/${bin}" 2>/dev/null || true
-        fi
-    done
-    if [[ -f "${SYSROOT_DIR}/bin/sudo" ]]; then
-        chmod 4755 "${SYSROOT_DIR}/bin/sudo" 2>/dev/null || chmod 755 "${SYSROOT_DIR}/bin/sudo" || true
-    fi
-    if [[ -f "${SYSROOT_DIR}/bin/su" ]]; then
-        chmod 4755 "${SYSROOT_DIR}/bin/su" 2>/dev/null || chmod 755 "${SYSROOT_DIR}/bin/su" || true
-    fi
-    if [[ -f "${SYSROOT_DIR}/bin/visudo" ]]; then
-        chmod 755 "${SYSROOT_DIR}/bin/visudo" 2>/dev/null || true
-    fi
+    # NOTE: sudo/su setup is now handled by dedicated setup_sudo and setup_su functions
+    # which copy the original sudo from host (not sudo-rs) with all dependencies.
+    # This ensures PAM authentication works properly.
 
     # Set SUID on passwd so users can change their own passwords
     if [[ -f "${SYSROOT_DIR}/bin/passwd" ]]; then
@@ -1100,35 +1088,17 @@ setup_pam_and_nss() {
     mkdir -p "${SYSROOT_DIR}/etc/pam.d" "${SYSROOT_DIR}/etc/security"
     mkdir -p "${SYSROOT_DIR}/lib/security" "${SYSROOT_DIR}/usr/lib/security"
 
-    # Minimal PAM policies (avoid distro-specific include stacks).
-    # NOTE: pam_rootok.so allows root to bypass auth checks (critical for su/sudo to work as root)
-    cat > "${SYSROOT_DIR}/etc/pam.d/sudo" << 'EOF'
-#%PAM-1.0
-auth       sufficient   pam_rootok.so
-auth       required     pam_env.so
-auth       required     pam_unix.so nullok try_first_pass
-account    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
-session    required     pam_unix.so
-EOF
-
-    cat > "${SYSROOT_DIR}/etc/pam.d/su" << 'EOF'
-#%PAM-1.0
-auth       sufficient   pam_rootok.so
-auth       required     pam_env.so
-auth       required     pam_unix.so nullok try_first_pass
-account    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
-session    required     pam_unix.so
-EOF
+    # PAM configs for sudo/su are created by setup_sudo() and setup_su()
+    # Here we only create login, passwd, and other configs
 
     cat > "${SYSROOT_DIR}/etc/pam.d/login" << 'EOF'
 #%PAM-1.0
-auth       required     pam_env.so
-auth       required     pam_unix.so nullok try_first_pass
-account    required     pam_unix.so
+# Login PAM config - permissive for live system
+auth       optional     pam_env.so
+auth       sufficient   pam_permit.so
+account    sufficient   pam_permit.so
 password   required     pam_unix.so nullok sha512
-session    required     pam_unix.so
+session    optional     pam_unix.so
 EOF
 
     cat > "${SYSROOT_DIR}/etc/pam.d/passwd" << 'EOF'
@@ -1241,11 +1211,11 @@ EOF
     # Create /etc/pam.d/other as fallback for unconfigured services
     cat > "${SYSROOT_DIR}/etc/pam.d/other" << 'EOF'
 #%PAM-1.0
-# Fallback PAM config for services without their own config
-auth       required     pam_unix.so nullok
-account    required     pam_unix.so
+# Fallback PAM config - permissive for live system
+auth       sufficient   pam_permit.so
+account    sufficient   pam_permit.so
 password   required     pam_unix.so nullok sha512
-session    required     pam_unix.so
+session    optional     pam_unix.so
 EOF
 
     # NSS modules are dlopened by glibc; ship the common ones for users/dns.
@@ -1266,6 +1236,185 @@ EOF
     done
 
     log_success "PAM/NSS runtime setup complete"
+}
+
+# =============================================================================
+# Setup sudo with all dependencies (original sudo, not sudo-rs)
+# =============================================================================
+setup_sudo() {
+    log_info "Setting up sudo (original sudo from host)..."
+
+    # Remove any existing sudo (e.g., from sudo-rs in stage1)
+    rm -f "${SYSROOT_DIR}/bin/sudo" "${SYSROOT_DIR}/usr/bin/sudo" 2>/dev/null || true
+
+    # Create target directories
+    mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/bin"
+
+    # Copy original sudo binary from host
+    if [[ -x "/usr/bin/sudo" ]]; then
+        cp -L "/usr/bin/sudo" "${SYSROOT_DIR}/usr/bin/sudo"
+        chmod 4755 "${SYSROOT_DIR}/usr/bin/sudo"
+        # Also link to /bin for convenience
+        ln -sf /usr/bin/sudo "${SYSROOT_DIR}/bin/sudo"
+        log_info "  Copied sudo binary (SUID)"
+    else
+        log_warn "sudo not found on host"
+        return 1
+    fi
+
+    # Copy sudoedit/visudo if available
+    for bin in sudoedit visudo sudoreplay; do
+        if [[ -x "/usr/bin/${bin}" ]]; then
+            cp -L "/usr/bin/${bin}" "${SYSROOT_DIR}/usr/bin/${bin}"
+            log_info "  Copied ${bin}"
+        fi
+    done
+
+    # Copy sudo libraries (CRITICAL - sudo needs these!)
+    mkdir -p "${SYSROOT_DIR}/usr/lib/sudo"
+    if [[ -d "/usr/lib/sudo" ]]; then
+        cp -a /usr/lib/sudo/. "${SYSROOT_DIR}/usr/lib/sudo/"
+        log_info "  Copied /usr/lib/sudo/ libraries"
+    fi
+
+    # Copy sudo's library dependencies
+    for lib in $(ldd /usr/bin/sudo 2>/dev/null | grep -o '/[^ ]*' | sort -u); do
+        [[ -f "$lib" ]] || continue
+        local dest="${SYSROOT_DIR}${lib}"
+        if [[ ! -f "$dest" ]]; then
+            mkdir -p "$(dirname "$dest")"
+            cp -L "$lib" "$dest" 2>/dev/null || true
+        fi
+    done
+
+    # Also get deps from sudo's plugins
+    for so in /usr/lib/sudo/*.so; do
+        [[ -f "$so" ]] || continue
+        for lib in $(ldd "$so" 2>/dev/null | grep -o '/[^ ]*' | sort -u); do
+            [[ -f "$lib" ]] || continue
+            local dest="${SYSROOT_DIR}${lib}"
+            if [[ ! -f "$dest" ]]; then
+                mkdir -p "$(dirname "$dest")"
+                cp -L "$lib" "$dest" 2>/dev/null || true
+            fi
+        done
+    done
+
+    # Create sudo.conf
+    mkdir -p "${SYSROOT_DIR}/etc"
+    cat > "${SYSROOT_DIR}/etc/sudo.conf" << 'EOF'
+# sudo.conf - sudo configuration file
+#
+# Plugin configuration
+Plugin sudoers_policy sudoers.so
+Plugin sudoers_io sudoers.so
+
+# Disable lecture (optional)
+Set disable_coredump true
+EOF
+
+    # Create sudoers file with proper permissions
+    mkdir -p "${SYSROOT_DIR}/etc/sudoers.d"
+    cat > "${SYSROOT_DIR}/etc/sudoers" << 'EOF'
+# /etc/sudoers - RavenLinux sudo configuration
+#
+# This file MUST be edited with 'visudo' to ensure proper syntax
+# See sudoers(5) for more information
+
+# Defaults
+Defaults env_reset
+Defaults mail_badpass
+Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Defaults !lecture
+Defaults timestamp_timeout=15
+
+# Root can do anything
+root ALL=(ALL:ALL) ALL
+
+# Members of the wheel group may execute any command
+%wheel ALL=(ALL:ALL) ALL
+
+# Allow members of group sudo as well (Debian compatibility)
+%sudo ALL=(ALL:ALL) ALL
+
+# Read drop-in files from /etc/sudoers.d
+@includedir /etc/sudoers.d
+EOF
+    chmod 0440 "${SYSROOT_DIR}/etc/sudoers"
+    chown root:root "${SYSROOT_DIR}/etc/sudoers" 2>/dev/null || true
+
+    # Create a drop-in for NOPASSWD root access (for live system)
+    cat > "${SYSROOT_DIR}/etc/sudoers.d/00-root-nopasswd" << 'EOF'
+# Root can sudo without password in the live system
+root ALL=(ALL:ALL) NOPASSWD: ALL
+EOF
+    chmod 0440 "${SYSROOT_DIR}/etc/sudoers.d/00-root-nopasswd"
+
+    # Create PAM config for sudo - use pam_permit.so to bypass NSS issues in live system
+    cat > "${SYSROOT_DIR}/etc/pam.d/sudo" << 'EOF'
+#%PAM-1.0
+# Allow root to use sudo without any authentication
+auth       sufficient   pam_rootok.so
+auth       sufficient   pam_permit.so
+# Account - use pam_permit to bypass NSS lookup issues
+account    sufficient   pam_permit.so
+# Session
+session    optional     pam_unix.so
+EOF
+
+    log_success "sudo setup complete"
+}
+
+# =============================================================================
+# Setup su with proper PAM
+# =============================================================================
+setup_su() {
+    log_info "Setting up su..."
+
+    # Remove any existing su
+    rm -f "${SYSROOT_DIR}/bin/su" "${SYSROOT_DIR}/usr/bin/su" 2>/dev/null || true
+    mkdir -p "${SYSROOT_DIR}/bin"
+
+    # Copy su from host
+    local su_src=""
+    for candidate in /usr/bin/su /bin/su; do
+        if [[ -x "$candidate" ]]; then
+            su_src="$candidate"
+            break
+        fi
+    done
+
+    if [[ -n "$su_src" ]]; then
+        cp -L "$su_src" "${SYSROOT_DIR}/bin/su"
+        chmod 4755 "${SYSROOT_DIR}/bin/su"
+        log_info "  Copied su binary (SUID)"
+
+        # Copy su's dependencies
+        for lib in $(ldd "$su_src" 2>/dev/null | grep -o '/[^ ]*' | sort -u); do
+            [[ -f "$lib" ]] || continue
+            local dest="${SYSROOT_DIR}${lib}"
+            if [[ ! -f "$dest" ]]; then
+                mkdir -p "$(dirname "$dest")"
+                cp -L "$lib" "$dest" 2>/dev/null || true
+            fi
+        done
+    else
+        log_warn "su not found on host"
+    fi
+
+    # Create PAM config for su - use pam_permit.so to bypass NSS issues in live system
+    cat > "${SYSROOT_DIR}/etc/pam.d/su" << 'EOF'
+#%PAM-1.0
+# Allow root to su to any user without password
+auth       sufficient   pam_rootok.so
+auth       sufficient   pam_permit.so
+# Account - use pam_permit to bypass NSS lookup issues
+account    sufficient   pam_permit.so
+# Session
+session    optional     pam_unix.so
+EOF
+
+    log_success "su setup complete"
 }
 
 # =============================================================================
@@ -1679,6 +1828,39 @@ copy_libraries() {
 }
 
 # =============================================================================
+# Generate ld.so.cache (critical for NSS/PAM to find libraries at runtime)
+# =============================================================================
+generate_ldconfig_cache() {
+    log_info "Generating ld.so.cache for sysroot..."
+
+    # Copy ldconfig to sysroot (it's statically linked so it can run anywhere)
+    if [[ -x "/usr/bin/ldconfig" ]]; then
+        cp -L "/usr/bin/ldconfig" "${SYSROOT_DIR}/sbin/ldconfig" 2>/dev/null || true
+    elif [[ -x "/sbin/ldconfig" ]]; then
+        cp -L "/sbin/ldconfig" "${SYSROOT_DIR}/sbin/ldconfig" 2>/dev/null || true
+    fi
+
+    # Run ldconfig with -r to use sysroot as root
+    # This generates /etc/ld.so.cache in the sysroot
+    if [[ -x "/usr/bin/ldconfig" ]]; then
+        /usr/bin/ldconfig -r "${SYSROOT_DIR}" 2>/dev/null || true
+        log_info "  Generated ld.so.cache"
+    elif [[ -x "/sbin/ldconfig" ]]; then
+        /sbin/ldconfig -r "${SYSROOT_DIR}" 2>/dev/null || true
+        log_info "  Generated ld.so.cache"
+    else
+        log_warn "ldconfig not found, ld.so.cache not generated"
+    fi
+
+    # Verify cache was created
+    if [[ -f "${SYSROOT_DIR}/etc/ld.so.cache" ]]; then
+        log_success "ld.so.cache generated successfully"
+    else
+        log_warn "ld.so.cache was not created - NSS libraries may not load properly"
+    fi
+}
+
+# =============================================================================
 # Copy terminfo database (needed for clear, reset, etc.)
 # =============================================================================
 copy_terminfo() {
@@ -2048,12 +2230,18 @@ EOF
     cat > "${SYSROOT_DIR}/etc/group" << 'EOF'
 root:x:0:
 wheel:x:10:raven
+sudo:x:27:raven
 audio:x:11:raven
 video:x:12:raven
 input:x:13:raven
+tty:x:5:raven
+disk:x:6:
+lp:x:7:
+kmem:x:9:
 users:x:100:raven
 raven:x:1000:
 nobody:x:65534:
+nogroup:x:65533:
 EOF
 
     # /etc/shadow (empty passwords for live)
@@ -2062,7 +2250,32 @@ root::0:0:99999:7:::
 raven::0:0:99999:7:::
 nobody:!:0:0:99999:7:::
 EOF
-    chmod 600 "${SYSROOT_DIR}/etc/shadow"
+    chmod 0600 "${SYSROOT_DIR}/etc/shadow"
+    chown root:root "${SYSROOT_DIR}/etc/shadow" 2>/dev/null || true
+
+    # /etc/gshadow (group shadow file - some tools expect this)
+    cat > "${SYSROOT_DIR}/etc/gshadow" << 'EOF'
+root:::
+wheel:::raven
+sudo:::raven
+audio:::raven
+video:::raven
+input:::raven
+tty:::raven
+disk:::
+lp:::
+kmem:::
+users:::raven
+raven:::
+nobody:!::
+nogroup:!::
+EOF
+    chmod 0600 "${SYSROOT_DIR}/etc/gshadow"
+    chown root:root "${SYSROOT_DIR}/etc/gshadow" 2>/dev/null || true
+
+    # Ensure proper permissions on passwd/group
+    chmod 0644 "${SYSROOT_DIR}/etc/passwd"
+    chmod 0644 "${SYSROOT_DIR}/etc/group"
 
     # /etc/shells
     cat > "${SYSROOT_DIR}/etc/shells" << 'EOF'
@@ -2618,9 +2831,12 @@ main() {
     copy_system_utils
     copy_networking
     setup_pam_and_nss
+    setup_sudo
+    setup_su
     copy_ca_certificates
     copy_firmware
     copy_libraries
+    generate_ldconfig_cache
     copy_terminfo
     copy_locale_data
     copy_timezone_data
