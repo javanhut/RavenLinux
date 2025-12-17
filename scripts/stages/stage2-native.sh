@@ -2,9 +2,24 @@
 # =============================================================================
 # RavenLinux Stage 2: Native System Build
 # =============================================================================
-# Copies host tools and libraries needed for a functional live system
-# In a full LFS-style build, this would rebuild everything natively
-# For now, we copy essential tools from the host system
+# Builds the native system by:
+#   1. Copying tools from host system when available (fast path)
+#   2. Building from source when not available on host (fallback)
+#
+# This ensures functionality is never limited by what's installed on the
+# build host system. Critical tools like iwd, D-Bus, etc. will be built
+# from source if not found on the host.
+#
+# Environment Variables:
+#   RAVEN_FORCE_SOURCE_BUILD=1  - Always build from source, never copy from host
+#   RAVEN_JOBS=N                - Number of parallel build jobs (default: nproc)
+#   RAVEN_EXPAT_VERSION         - expat version to build (default: 2.6.2)
+#   RAVEN_DBUS_VERSION          - D-Bus version to build (default: 1.14.10)
+#   RAVEN_ELL_VERSION           - ELL version to build (default: 0.68)
+#   RAVEN_IWD_VERSION           - iwd version to build (default: 2.19)
+#   RAVEN_DHCPCD_VERSION        - dhcpcd version to build (default: 10.0.6)
+#   RAVEN_ETHTOOL_VERSION       - ethtool version to build (default: 6.11)
+# =============================================================================
 
 set -euo pipefail
 
@@ -17,6 +32,10 @@ PROJECT_ROOT="${RAVEN_ROOT:-$(dirname "$(dirname "$SCRIPT_DIR")")}"
 BUILD_DIR="${RAVEN_BUILD:-${PROJECT_ROOT}/build}"
 SYSROOT_DIR="${SYSROOT_DIR:-${BUILD_DIR}/sysroot}"
 LOGS_DIR="${LOGS_DIR:-${BUILD_DIR}/logs}"
+
+# Source build configuration (set RAVEN_FORCE_SOURCE_BUILD=1 to always build from source)
+: "${RAVEN_FORCE_SOURCE_BUILD:=0}"
+: "${RAVEN_JOBS:=$(nproc 2>/dev/null || echo 4)}"
 
 # =============================================================================
 # Logging (use shared library or define fallbacks)
@@ -96,7 +115,8 @@ copy_system_utils() {
         # File operations
         find grep sed awk xargs file less more
         # Debugging/diagnostics
-        strace lsof
+        which whereis type
+        strace ltrace lsof ldd
         # Disk utilities
         mount umount mountpoint fdisk parted mkfs.ext4 mkfs.vfat fsck blkid lsblk
         # System info
@@ -132,6 +152,11 @@ copy_system_utils() {
         Xorg Xwayland xinit startx xterm xclock xsetroot twm
         # Systemd tools (if available, for compatibility)
         journalctl systemctl udevadm
+        # Build tools (needed for source builds when host binaries unavailable)
+        make cmake ninja meson gcc g++ cc c++ ld ar as nm objcopy objdump
+        strip ranlib pkg-config autoconf automake autoreconf libtool m4
+        # Python (needed by meson and some build systems)
+        python python3 pip pip3
     )
 
     for util in "${utils[@]}"; do
@@ -186,6 +211,21 @@ copy_system_utils() {
     if [[ -f "${SYSROOT_DIR}/bin/visudo" ]]; then
         chmod 755 "${SYSROOT_DIR}/bin/visudo" 2>/dev/null || true
     fi
+
+    # Set SUID on passwd so users can change their own passwords
+    if [[ -f "${SYSROOT_DIR}/bin/passwd" ]]; then
+        chmod 4755 "${SYSROOT_DIR}/bin/passwd" 2>/dev/null || chmod 755 "${SYSROOT_DIR}/bin/passwd" || true
+        log_info "  Set SUID on passwd"
+    fi
+
+    # Set SUID on mount/umount for user mounts (optional, some distros do this)
+    # Uncomment if you want users to be able to mount/umount:
+    # if [[ -f "${SYSROOT_DIR}/bin/mount" ]]; then
+    #     chmod 4755 "${SYSROOT_DIR}/bin/mount" 2>/dev/null || true
+    # fi
+    # if [[ -f "${SYSROOT_DIR}/bin/umount" ]]; then
+    #     chmod 4755 "${SYSROOT_DIR}/bin/umount" 2>/dev/null || true
+    # fi
 
     # Raven Wayland session launcher (optional, used when booting with raven.graphics=wayland)
     if [[ -f "${PROJECT_ROOT}/configs/raven-wayland-session" ]]; then
@@ -334,7 +374,13 @@ copy_system_utils() {
 copy_networking() {
     log_info "Copying networking tools..."
 
+    # Ensure critical networking components are available
+    # These will copy from host if available, or build from source if not
     ensure_ethtool
+    ensure_dbus      # Required by iwd
+    ensure_iwd       # Modern WiFi daemon (preferred)
+    ensure_wpa_supplicant || true  # Fallback WiFi (optional)
+    ensure_dhcpcd    # DHCP client
 
     local net_tools=(
         ip ping ping6 ss netstat route
@@ -448,6 +494,604 @@ ensure_ethtool() {
 }
 
 # =============================================================================
+# Source Build Fallback System
+# =============================================================================
+# These ensure_* functions implement a fallback pattern:
+#   1. If RAVEN_FORCE_SOURCE_BUILD=1, skip to source build
+#   2. Check if binary exists on host -> copy it
+#   3. Check if already built in sysroot -> skip
+#   4. Download source and build from scratch
+#
+# This ensures functionality is never limited by what's on the host system.
+# =============================================================================
+
+# Helper: Download a file with curl or wget
+download_file() {
+    local url="$1"
+    local dest="$2"
+
+    if [[ -f "$dest" ]]; then
+        return 0
+    fi
+
+    if command -v curl &>/dev/null; then
+        curl -fL -o "$dest" "$url" 2>/dev/null && return 0
+    fi
+    if command -v wget &>/dev/null; then
+        wget -q -O "$dest" "$url" 2>/dev/null && return 0
+    fi
+
+    log_warn "Cannot download $url (need curl or wget)"
+    return 1
+}
+
+# Helper: Check if we should force source builds
+should_force_source_build() {
+    [[ "${RAVEN_FORCE_SOURCE_BUILD:-0}" == "1" ]]
+}
+
+# Helper: Copy binary from host if available
+copy_from_host() {
+    local binary_name="$1"
+    local dest_path="$2"
+
+    if should_force_source_build; then
+        return 1
+    fi
+
+    local src=""
+    # Check common locations
+    for path in "/usr/bin/${binary_name}" "/bin/${binary_name}" "/usr/sbin/${binary_name}" "/sbin/${binary_name}" "/usr/libexec/${binary_name}"; do
+        if [[ -x "$path" ]]; then
+            src="$path"
+            break
+        fi
+    done
+
+    # Also try which
+    if [[ -z "$src" ]] && command -v "$binary_name" &>/dev/null; then
+        src="$(which "$binary_name" 2>/dev/null)" || true
+    fi
+
+    if [[ -n "$src" ]] && [[ -x "$src" ]]; then
+        mkdir -p "$(dirname "$dest_path")"
+        cp -L "$src" "$dest_path" 2>/dev/null || return 1
+        chmod +x "$dest_path" 2>/dev/null || true
+        log_info "  Copied ${binary_name} from host"
+        return 0
+    fi
+
+    return 1
+}
+
+# =============================================================================
+# Ensure expat is available (XML parser, required by D-Bus)
+# =============================================================================
+ensure_expat() {
+    log_info "Ensuring expat (XML parser)..."
+
+    # Check if already in sysroot
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libexpat.so.1" ]] || [[ -f "${SYSROOT_DIR}/lib/libexpat.so.1" ]]; then
+        log_info "  expat already present in sysroot"
+        return 0
+    fi
+
+    # Try to copy from host
+    if ! should_force_source_build; then
+        local found=0
+        for libdir in /usr/lib /lib /usr/lib64 /lib64 /usr/lib/x86_64-linux-gnu; do
+            if [[ -f "${libdir}/libexpat.so.1" ]]; then
+                mkdir -p "${SYSROOT_DIR}/usr/lib"
+                cp -L "${libdir}/libexpat.so.1" "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
+                cp -L "${libdir}/libexpat.so" "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
+                # Also copy headers if available
+                if [[ -f "/usr/include/expat.h" ]]; then
+                    mkdir -p "${SYSROOT_DIR}/usr/include"
+                    cp -L /usr/include/expat*.h "${SYSROOT_DIR}/usr/include/" 2>/dev/null || true
+                fi
+                log_info "  Copied expat from host"
+                found=1
+                break
+            fi
+        done
+        [[ $found -eq 1 ]] && return 0
+    fi
+
+    # Build from source
+    local version="${RAVEN_EXPAT_VERSION:-2.6.2}"
+    local sources_dir="${BUILD_DIR}/sources"
+    local tarball="${sources_dir}/expat-${version}.tar.xz"
+    local url="https://github.com/libexpat/libexpat/releases/download/R_${version//./_}/expat-${version}.tar.xz"
+    local build_dir="${sources_dir}/expat-${version}"
+
+    mkdir -p "${sources_dir}"
+
+    if ! download_file "$url" "$tarball"; then
+        log_warn "Failed to download expat; D-Bus may not build"
+        return 1
+    fi
+
+    if ! command -v make &>/dev/null || ! command -v cc &>/dev/null; then
+        log_warn "Cannot build expat (missing make/cc)"
+        return 1
+    fi
+
+    rm -rf "${build_dir}" 2>/dev/null || true
+    tar -xf "${tarball}" -C "${sources_dir}" 2>/dev/null || {
+        log_warn "Failed to extract expat"
+        return 1
+    }
+
+    log_info "  Building expat ${version}..."
+    (
+        cd "${build_dir}"
+        ./configure --prefix=/usr --disable-static --enable-shared >/dev/null 2>&1 || \
+            ./configure --prefix=/usr --disable-static --enable-shared
+        make -j"${RAVEN_JOBS:-$(nproc)}" >/dev/null 2>&1 || make -j"${RAVEN_JOBS:-$(nproc)}"
+        make DESTDIR="${SYSROOT_DIR}" install >/dev/null 2>&1 || make DESTDIR="${SYSROOT_DIR}" install
+    ) || {
+        log_warn "expat build failed"
+        return 1
+    }
+
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libexpat.so.1" ]]; then
+        log_success "  Built and installed expat"
+        return 0
+    else
+        log_warn "expat build completed but library not found"
+        return 1
+    fi
+}
+
+# =============================================================================
+# Ensure D-Bus is available (message bus, required by iwd)
+# =============================================================================
+ensure_dbus() {
+    log_info "Ensuring D-Bus..."
+
+    # Check if dbus-daemon already in sysroot
+    if [[ -x "${SYSROOT_DIR}/usr/bin/dbus-daemon" ]] || [[ -x "${SYSROOT_DIR}/bin/dbus-daemon" ]]; then
+        log_info "  D-Bus already present in sysroot"
+        return 0
+    fi
+
+    # Try to copy from host
+    if ! should_force_source_build; then
+        if copy_from_host "dbus-daemon" "${SYSROOT_DIR}/usr/bin/dbus-daemon"; then
+            # Also copy related tools
+            copy_from_host "dbus-send" "${SYSROOT_DIR}/usr/bin/dbus-send" || true
+            copy_from_host "dbus-launch" "${SYSROOT_DIR}/usr/bin/dbus-launch" || true
+            copy_from_host "dbus-uuidgen" "${SYSROOT_DIR}/usr/bin/dbus-uuidgen" || true
+            copy_from_host "dbus-monitor" "${SYSROOT_DIR}/usr/bin/dbus-monitor" || true
+
+            # Copy D-Bus libraries
+            for libdir in /usr/lib /lib /usr/lib64 /lib64 /usr/lib/x86_64-linux-gnu; do
+                if [[ -f "${libdir}/libdbus-1.so.3" ]]; then
+                    mkdir -p "${SYSROOT_DIR}/usr/lib"
+                    cp -L "${libdir}/libdbus-1.so"* "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
+                    break
+                fi
+            done
+
+            # Copy D-Bus config
+            if [[ -d "/usr/share/dbus-1" ]]; then
+                mkdir -p "${SYSROOT_DIR}/usr/share/dbus-1"
+                cp -r /usr/share/dbus-1/* "${SYSROOT_DIR}/usr/share/dbus-1/" 2>/dev/null || true
+            fi
+            if [[ -d "/etc/dbus-1" ]]; then
+                mkdir -p "${SYSROOT_DIR}/etc/dbus-1"
+                cp -r /etc/dbus-1/* "${SYSROOT_DIR}/etc/dbus-1/" 2>/dev/null || true
+            fi
+
+            return 0
+        fi
+    fi
+
+    # Ensure expat is available (D-Bus dependency)
+    ensure_expat || log_warn "expat not available; D-Bus build may fail"
+
+    # Build from source
+    local version="${RAVEN_DBUS_VERSION:-1.14.10}"
+    local sources_dir="${BUILD_DIR}/sources"
+    local tarball="${sources_dir}/dbus-${version}.tar.xz"
+    local url="https://dbus.freedesktop.org/releases/dbus/dbus-${version}.tar.xz"
+    local build_dir="${sources_dir}/dbus-${version}"
+
+    mkdir -p "${sources_dir}"
+
+    if ! download_file "$url" "$tarball"; then
+        log_warn "Failed to download D-Bus"
+        return 1
+    fi
+
+    if ! command -v make &>/dev/null || ! command -v cc &>/dev/null; then
+        log_warn "Cannot build D-Bus (missing make/cc)"
+        return 1
+    fi
+
+    rm -rf "${build_dir}" 2>/dev/null || true
+    tar -xf "${tarball}" -C "${sources_dir}" 2>/dev/null || {
+        log_warn "Failed to extract D-Bus"
+        return 1
+    }
+
+    log_info "  Building D-Bus ${version}..."
+
+    # Set PKG_CONFIG_PATH to find expat we just built
+    local pkg_config_path="${SYSROOT_DIR}/usr/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+    (
+        cd "${build_dir}"
+        export PKG_CONFIG_PATH="$pkg_config_path"
+        export CFLAGS="-I${SYSROOT_DIR}/usr/include ${CFLAGS:-}"
+        export LDFLAGS="-L${SYSROOT_DIR}/usr/lib ${LDFLAGS:-}"
+
+        ./configure \
+            --prefix=/usr \
+            --sysconfdir=/etc \
+            --localstatedir=/var \
+            --disable-static \
+            --disable-doxygen-docs \
+            --disable-xml-docs \
+            --disable-systemd \
+            --disable-selinux \
+            --disable-apparmor \
+            --disable-libaudit \
+            --with-system-socket=/run/dbus/system_bus_socket \
+            --with-system-pid-file=/run/dbus/pid \
+            >/dev/null 2>&1 || \
+        ./configure \
+            --prefix=/usr \
+            --sysconfdir=/etc \
+            --localstatedir=/var \
+            --disable-static
+
+        make -j"${RAVEN_JOBS:-$(nproc)}" >/dev/null 2>&1 || make -j"${RAVEN_JOBS:-$(nproc)}"
+        make DESTDIR="${SYSROOT_DIR}" install >/dev/null 2>&1 || make DESTDIR="${SYSROOT_DIR}" install
+    ) || {
+        log_warn "D-Bus build failed"
+        return 1
+    }
+
+    if [[ -x "${SYSROOT_DIR}/usr/bin/dbus-daemon" ]]; then
+        log_success "  Built and installed D-Bus"
+
+        # Create necessary directories
+        mkdir -p "${SYSROOT_DIR}/run/dbus"
+        mkdir -p "${SYSROOT_DIR}/var/lib/dbus"
+
+        return 0
+    else
+        log_warn "D-Bus build completed but binary not found"
+        return 1
+    fi
+}
+
+# =============================================================================
+# Ensure ELL is available (Embedded Linux Library, required by iwd)
+# =============================================================================
+ensure_ell() {
+    log_info "Ensuring ELL (Embedded Linux Library)..."
+
+    # Check if already in sysroot
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libell.so.0" ]] || [[ -f "${SYSROOT_DIR}/lib/libell.so.0" ]]; then
+        log_info "  ELL already present in sysroot"
+        return 0
+    fi
+
+    # Try to copy from host
+    if ! should_force_source_build; then
+        local found=0
+        for libdir in /usr/lib /lib /usr/lib64 /lib64 /usr/lib/x86_64-linux-gnu; do
+            if [[ -f "${libdir}/libell.so.0" ]]; then
+                mkdir -p "${SYSROOT_DIR}/usr/lib"
+                cp -L "${libdir}/libell.so"* "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
+                # Copy headers
+                if [[ -d "/usr/include/ell" ]]; then
+                    mkdir -p "${SYSROOT_DIR}/usr/include"
+                    cp -r /usr/include/ell "${SYSROOT_DIR}/usr/include/" 2>/dev/null || true
+                fi
+                # Copy pkgconfig
+                if [[ -f "${libdir}/pkgconfig/ell.pc" ]]; then
+                    mkdir -p "${SYSROOT_DIR}/usr/lib/pkgconfig"
+                    cp -L "${libdir}/pkgconfig/ell.pc" "${SYSROOT_DIR}/usr/lib/pkgconfig/" 2>/dev/null || true
+                fi
+                log_info "  Copied ELL from host"
+                found=1
+                break
+            fi
+        done
+        [[ $found -eq 1 ]] && return 0
+    fi
+
+    # Build from source
+    local version="${RAVEN_ELL_VERSION:-0.68}"
+    local sources_dir="${BUILD_DIR}/sources"
+    local tarball="${sources_dir}/ell-${version}.tar.xz"
+    local url="https://mirrors.edge.kernel.org/pub/linux/libs/ell/ell-${version}.tar.xz"
+    local build_dir="${sources_dir}/ell-${version}"
+
+    mkdir -p "${sources_dir}"
+
+    if ! download_file "$url" "$tarball"; then
+        log_warn "Failed to download ELL"
+        return 1
+    fi
+
+    if ! command -v make &>/dev/null || ! command -v cc &>/dev/null; then
+        log_warn "Cannot build ELL (missing make/cc)"
+        return 1
+    fi
+
+    rm -rf "${build_dir}" 2>/dev/null || true
+    tar -xf "${tarball}" -C "${sources_dir}" 2>/dev/null || {
+        log_warn "Failed to extract ELL"
+        return 1
+    }
+
+    log_info "  Building ELL ${version}..."
+    (
+        cd "${build_dir}"
+        ./configure --prefix=/usr --enable-shared --disable-static >/dev/null 2>&1 || \
+            ./configure --prefix=/usr --enable-shared --disable-static
+        make -j"${RAVEN_JOBS:-$(nproc)}" >/dev/null 2>&1 || make -j"${RAVEN_JOBS:-$(nproc)}"
+        make DESTDIR="${SYSROOT_DIR}" install >/dev/null 2>&1 || make DESTDIR="${SYSROOT_DIR}" install
+    ) || {
+        log_warn "ELL build failed"
+        return 1
+    }
+
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libell.so.0" ]] || [[ -f "${SYSROOT_DIR}/usr/lib/libell.so" ]]; then
+        log_success "  Built and installed ELL"
+        return 0
+    else
+        log_warn "ELL build completed but library not found"
+        return 1
+    fi
+}
+
+# =============================================================================
+# Ensure iwd is available (WiFi daemon)
+# =============================================================================
+ensure_iwd() {
+    log_info "Ensuring iwd (WiFi daemon)..."
+
+    # Check if already in sysroot
+    if [[ -x "${SYSROOT_DIR}/usr/libexec/iwd" ]]; then
+        log_info "  iwd already present in sysroot"
+        return 0
+    fi
+
+    # Try to copy from host
+    if ! should_force_source_build; then
+        # iwd daemon is typically in /usr/libexec/iwd
+        local iwd_found=0
+        for iwd_path in /usr/libexec/iwd /usr/lib/iwd /usr/sbin/iwd; do
+            if [[ -x "$iwd_path" ]]; then
+                mkdir -p "${SYSROOT_DIR}/usr/libexec"
+                cp -L "$iwd_path" "${SYSROOT_DIR}/usr/libexec/iwd" 2>/dev/null || true
+                chmod +x "${SYSROOT_DIR}/usr/libexec/iwd" 2>/dev/null || true
+                log_info "  Copied iwd daemon from host"
+                iwd_found=1
+                break
+            fi
+        done
+
+        # Copy iwctl and iwmon
+        copy_from_host "iwctl" "${SYSROOT_DIR}/usr/bin/iwctl" || true
+        copy_from_host "iwmon" "${SYSROOT_DIR}/usr/bin/iwmon" || true
+
+        # Copy iwd D-Bus config
+        if [[ -d "/usr/share/dbus-1/system.d" ]]; then
+            mkdir -p "${SYSROOT_DIR}/usr/share/dbus-1/system.d"
+            cp /usr/share/dbus-1/system.d/iwd*.conf "${SYSROOT_DIR}/usr/share/dbus-1/system.d/" 2>/dev/null || true
+        fi
+        if [[ -d "/etc/dbus-1/system.d" ]]; then
+            mkdir -p "${SYSROOT_DIR}/etc/dbus-1/system.d"
+            cp /etc/dbus-1/system.d/iwd*.conf "${SYSROOT_DIR}/etc/dbus-1/system.d/" 2>/dev/null || true
+        fi
+
+        # Copy iwd config directory structure
+        mkdir -p "${SYSROOT_DIR}/var/lib/iwd"
+        mkdir -p "${SYSROOT_DIR}/etc/iwd"
+
+        if [[ $iwd_found -eq 1 ]]; then
+            return 0
+        fi
+    fi
+
+    # Ensure dependencies
+    ensure_dbus || log_warn "D-Bus not available; iwd requires D-Bus"
+    ensure_ell || {
+        log_warn "ELL not available; cannot build iwd"
+        return 1
+    }
+
+    # Build from source
+    local version="${RAVEN_IWD_VERSION:-2.19}"
+    local sources_dir="${BUILD_DIR}/sources"
+    local tarball="${sources_dir}/iwd-${version}.tar.xz"
+    local url="https://mirrors.edge.kernel.org/pub/linux/network/wireless/iwd-${version}.tar.xz"
+    local build_dir="${sources_dir}/iwd-${version}"
+
+    mkdir -p "${sources_dir}"
+
+    if ! download_file "$url" "$tarball"; then
+        log_warn "Failed to download iwd"
+        return 1
+    fi
+
+    if ! command -v make &>/dev/null || ! command -v cc &>/dev/null; then
+        log_warn "Cannot build iwd (missing make/cc)"
+        return 1
+    fi
+
+    rm -rf "${build_dir}" 2>/dev/null || true
+    tar -xf "${tarball}" -C "${sources_dir}" 2>/dev/null || {
+        log_warn "Failed to extract iwd"
+        return 1
+    }
+
+    log_info "  Building iwd ${version}..."
+
+    # Set paths to find ELL and D-Bus we built
+    local pkg_config_path="${SYSROOT_DIR}/usr/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+    (
+        cd "${build_dir}"
+        export PKG_CONFIG_PATH="$pkg_config_path"
+        export CFLAGS="-I${SYSROOT_DIR}/usr/include ${CFLAGS:-}"
+        export LDFLAGS="-L${SYSROOT_DIR}/usr/lib -Wl,-rpath,/usr/lib ${LDFLAGS:-}"
+
+        ./configure \
+            --prefix=/usr \
+            --sysconfdir=/etc \
+            --localstatedir=/var \
+            --libexecdir=/usr/libexec \
+            --disable-systemd-service \
+            --disable-manual-pages \
+            --enable-client \
+            --enable-monitor \
+            --disable-wired \
+            >/dev/null 2>&1 || \
+        ./configure \
+            --prefix=/usr \
+            --libexecdir=/usr/libexec \
+            --disable-systemd-service \
+            --disable-wired
+
+        make -j"${RAVEN_JOBS:-$(nproc)}" >/dev/null 2>&1 || make -j"${RAVEN_JOBS:-$(nproc)}"
+        make DESTDIR="${SYSROOT_DIR}" install >/dev/null 2>&1 || make DESTDIR="${SYSROOT_DIR}" install
+    ) || {
+        log_warn "iwd build failed"
+        return 1
+    }
+
+    if [[ -x "${SYSROOT_DIR}/usr/libexec/iwd" ]]; then
+        log_success "  Built and installed iwd"
+
+        # Create necessary directories
+        mkdir -p "${SYSROOT_DIR}/var/lib/iwd"
+        mkdir -p "${SYSROOT_DIR}/etc/iwd"
+
+        return 0
+    else
+        log_warn "iwd build completed but binary not found"
+        return 1
+    fi
+}
+
+# =============================================================================
+# Ensure wpa_supplicant is available (fallback WiFi daemon)
+# =============================================================================
+ensure_wpa_supplicant() {
+    log_info "Ensuring wpa_supplicant (fallback WiFi)..."
+
+    # Check if already in sysroot
+    if [[ -x "${SYSROOT_DIR}/usr/sbin/wpa_supplicant" ]] || [[ -x "${SYSROOT_DIR}/sbin/wpa_supplicant" ]]; then
+        log_info "  wpa_supplicant already present in sysroot"
+        return 0
+    fi
+
+    # Try to copy from host
+    if ! should_force_source_build; then
+        if copy_from_host "wpa_supplicant" "${SYSROOT_DIR}/usr/sbin/wpa_supplicant"; then
+            copy_from_host "wpa_cli" "${SYSROOT_DIR}/usr/sbin/wpa_cli" || true
+            copy_from_host "wpa_passphrase" "${SYSROOT_DIR}/usr/sbin/wpa_passphrase" || true
+
+            # Create config directory
+            mkdir -p "${SYSROOT_DIR}/etc/wpa_supplicant"
+
+            return 0
+        fi
+    fi
+
+    # wpa_supplicant is complex to build (needs OpenSSL, libnl, etc.)
+    # For now, just warn if not available
+    log_warn "wpa_supplicant not available on host; skipping (use iwd instead)"
+    return 1
+}
+
+# =============================================================================
+# Ensure dhcpcd is available (DHCP client)
+# =============================================================================
+ensure_dhcpcd() {
+    log_info "Ensuring dhcpcd..."
+
+    # Check if already in sysroot
+    if [[ -x "${SYSROOT_DIR}/usr/bin/dhcpcd" ]] || [[ -x "${SYSROOT_DIR}/sbin/dhcpcd" ]]; then
+        log_info "  dhcpcd already present in sysroot"
+        return 0
+    fi
+
+    # Try to copy from host
+    if ! should_force_source_build; then
+        if copy_from_host "dhcpcd" "${SYSROOT_DIR}/sbin/dhcpcd"; then
+            # Copy config
+            if [[ -f "/etc/dhcpcd.conf" ]]; then
+                cp /etc/dhcpcd.conf "${SYSROOT_DIR}/etc/" 2>/dev/null || true
+            fi
+            mkdir -p "${SYSROOT_DIR}/var/lib/dhcpcd"
+            return 0
+        fi
+    fi
+
+    # Build from source
+    local version="${RAVEN_DHCPCD_VERSION:-10.0.6}"
+    local sources_dir="${BUILD_DIR}/sources"
+    local tarball="${sources_dir}/dhcpcd-${version}.tar.xz"
+    local url="https://github.com/NetworkConfiguration/dhcpcd/releases/download/v${version}/dhcpcd-${version}.tar.xz"
+    local build_dir="${sources_dir}/dhcpcd-${version}"
+
+    mkdir -p "${sources_dir}"
+
+    if ! download_file "$url" "$tarball"; then
+        log_warn "Failed to download dhcpcd"
+        return 1
+    fi
+
+    if ! command -v make &>/dev/null || ! command -v cc &>/dev/null; then
+        log_warn "Cannot build dhcpcd (missing make/cc)"
+        return 1
+    fi
+
+    rm -rf "${build_dir}" 2>/dev/null || true
+    tar -xf "${tarball}" -C "${sources_dir}" 2>/dev/null || {
+        log_warn "Failed to extract dhcpcd"
+        return 1
+    }
+
+    log_info "  Building dhcpcd ${version}..."
+    (
+        cd "${build_dir}"
+        ./configure \
+            --prefix=/usr \
+            --sbindir=/sbin \
+            --sysconfdir=/etc \
+            --runstatedir=/run \
+            --dbdir=/var/lib/dhcpcd \
+            --disable-privsep \
+            >/dev/null 2>&1 || \
+        ./configure --prefix=/usr --sbindir=/sbin
+
+        make -j"${RAVEN_JOBS:-$(nproc)}" >/dev/null 2>&1 || make -j"${RAVEN_JOBS:-$(nproc)}"
+        make DESTDIR="${SYSROOT_DIR}" install >/dev/null 2>&1 || make DESTDIR="${SYSROOT_DIR}" install
+    ) || {
+        log_warn "dhcpcd build failed"
+        return 1
+    }
+
+    if [[ -x "${SYSROOT_DIR}/sbin/dhcpcd" ]]; then
+        log_success "  Built and installed dhcpcd"
+        mkdir -p "${SYSROOT_DIR}/var/lib/dhcpcd"
+        return 0
+    else
+        log_warn "dhcpcd build completed but binary not found"
+        return 1
+    fi
+}
+
+# =============================================================================
 # Setup PAM + NSS runtime pieces (sudo/login need dlopened modules)
 # =============================================================================
 setup_pam_and_nss() {
@@ -457,8 +1101,10 @@ setup_pam_and_nss() {
     mkdir -p "${SYSROOT_DIR}/lib/security" "${SYSROOT_DIR}/usr/lib/security"
 
     # Minimal PAM policies (avoid distro-specific include stacks).
+    # NOTE: pam_rootok.so allows root to bypass auth checks (critical for su/sudo to work as root)
     cat > "${SYSROOT_DIR}/etc/pam.d/sudo" << 'EOF'
 #%PAM-1.0
+auth       sufficient   pam_rootok.so
 auth       required     pam_env.so
 auth       required     pam_unix.so nullok try_first_pass
 account    required     pam_unix.so
@@ -468,6 +1114,7 @@ EOF
 
     cat > "${SYSROOT_DIR}/etc/pam.d/su" << 'EOF'
 #%PAM-1.0
+auth       sufficient   pam_rootok.so
 auth       required     pam_env.so
 auth       required     pam_unix.so nullok try_first_pass
 account    required     pam_unix.so
@@ -487,6 +1134,13 @@ EOF
     cat > "${SYSROOT_DIR}/etc/pam.d/passwd" << 'EOF'
 #%PAM-1.0
 password   required     pam_unix.so nullok sha512
+EOF
+
+    # Create /etc/environment (required by pam_env.so - will fail without it)
+    cat > "${SYSROOT_DIR}/etc/environment" << 'EOF'
+# /etc/environment
+# System-wide environment variables
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 EOF
 
     # Minimal security config expected by some PAM modules.
@@ -511,11 +1165,15 @@ EOF
     local pam_modules=(
         pam_unix.so
         pam_env.so
+        pam_rootok.so
         pam_deny.so
         pam_permit.so
         pam_warn.so
         pam_limits.so
         pam_loginuid.so
+        pam_nologin.so
+        pam_securetty.so
+        pam_wheel.so
     )
 
     local copied_any=0
@@ -538,6 +1196,57 @@ EOF
     else
         log_info "  Added PAM modules"
     fi
+
+    # Copy PAM helper binaries (unix_chkpwd is CRITICAL for password verification)
+    # pam_unix.so uses unix_chkpwd to verify passwords when called by non-root processes
+    mkdir -p "${SYSROOT_DIR}/sbin" "${SYSROOT_DIR}/usr/sbin"
+    local pam_helpers=(
+        unix_chkpwd
+        unix_update
+    )
+    local helper_dirs=(
+        /usr/bin
+        /sbin
+        /usr/sbin
+        /usr/lib
+        /usr/lib/security
+        /lib/security
+    )
+    for helper in "${pam_helpers[@]}"; do
+        local src=""
+        for d in "${helper_dirs[@]}"; do
+            if [[ -x "${d}/${helper}" ]]; then
+                src="${d}/${helper}"
+                break
+            fi
+        done
+        if [[ -n "$src" ]]; then
+            cp -L "$src" "${SYSROOT_DIR}/sbin/${helper}"
+            chmod 4755 "${SYSROOT_DIR}/sbin/${helper}"  # SUID root
+            log_info "  Added PAM helper: ${helper} (SUID)"
+        else
+            log_warn "PAM helper ${helper} not found on host - su/sudo may not work for non-root users"
+        fi
+    done
+
+    # Create /etc/security/pam_env.conf (required by pam_env.so)
+    cat > "${SYSROOT_DIR}/etc/security/pam_env.conf" << 'EOF'
+# /etc/security/pam_env.conf
+# Environment variables set by pam_env module
+# Format: VARIABLE [DEFAULT=value] [OVERRIDE=value]
+#
+# This file is read by pam_env.so to set environment variables for all PAM sessions.
+EOF
+
+    # Create /etc/pam.d/other as fallback for unconfigured services
+    cat > "${SYSROOT_DIR}/etc/pam.d/other" << 'EOF'
+#%PAM-1.0
+# Fallback PAM config for services without their own config
+auth       required     pam_unix.so nullok
+account    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
+session    required     pam_unix.so
+EOF
 
     # NSS modules are dlopened by glibc; ship the common ones for users/dns.
     mkdir -p "${SYSROOT_DIR}/lib" "${SYSROOT_DIR}/usr/lib"
@@ -914,6 +1623,58 @@ copy_libraries() {
     sync_runtime_lib "libstdc++.so.6"
     sync_runtime_lib "libgcc_s.so.1"
 
+    # Create symlinks for PAM libraries in /lib (PAM modules in /lib/security look here)
+    # This fixes "PAM error: Authentication service cannot retrieve authentication info"
+    log_info "Creating PAM library symlinks in /lib..."
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libpam.so.0" ]] && [[ ! -e "${SYSROOT_DIR}/lib/libpam.so.0" ]]; then
+        ln -sf /usr/lib/libpam.so.0 "${SYSROOT_DIR}/lib/libpam.so.0" 2>/dev/null || \
+            cp -L "${SYSROOT_DIR}/usr/lib/libpam.so.0" "${SYSROOT_DIR}/lib/libpam.so.0" 2>/dev/null || true
+        log_info "  Created /lib/libpam.so.0"
+    fi
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libpam_misc.so.0" ]] && [[ ! -e "${SYSROOT_DIR}/lib/libpam_misc.so.0" ]]; then
+        ln -sf /usr/lib/libpam_misc.so.0 "${SYSROOT_DIR}/lib/libpam_misc.so.0" 2>/dev/null || \
+            cp -L "${SYSROOT_DIR}/usr/lib/libpam_misc.so.0" "${SYSROOT_DIR}/lib/libpam_misc.so.0" 2>/dev/null || true
+        log_info "  Created /lib/libpam_misc.so.0"
+    fi
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libpamc.so.0" ]] && [[ ! -e "${SYSROOT_DIR}/lib/libpamc.so.0" ]]; then
+        ln -sf /usr/lib/libpamc.so.0 "${SYSROOT_DIR}/lib/libpamc.so.0" 2>/dev/null || \
+            cp -L "${SYSROOT_DIR}/usr/lib/libpamc.so.0" "${SYSROOT_DIR}/lib/libpamc.so.0" 2>/dev/null || true
+        log_info "  Created /lib/libpamc.so.0"
+    fi
+
+    # Ensure libcrypt symlink exists (needed by pam_unix.so)
+    if [[ ! -e "${SYSROOT_DIR}/lib/libcrypt.so.1" ]]; then
+        if [[ -f "${SYSROOT_DIR}/lib/libcrypt.so.2" ]]; then
+            ln -sf libcrypt.so.2 "${SYSROOT_DIR}/lib/libcrypt.so.1" 2>/dev/null || true
+            log_info "  Created /lib/libcrypt.so.1 -> libcrypt.so.2"
+        elif [[ -f "${SYSROOT_DIR}/usr/lib/libcrypt.so.2" ]]; then
+            ln -sf /usr/lib/libcrypt.so.2 "${SYSROOT_DIR}/lib/libcrypt.so.1" 2>/dev/null || true
+            log_info "  Created /lib/libcrypt.so.1 -> /usr/lib/libcrypt.so.2"
+        fi
+    fi
+
+    # Explicitly copy PAM-related libraries (pam_unix.so dependencies that may be missed)
+    # These are critical for authentication to work
+    log_info "Ensuring PAM dependency libraries..."
+    local pam_deps=(
+        libtirpc.so.3
+        libnsl.so.3
+        libaudit.so.1
+        libcap-ng.so.0
+    )
+    for lib in "${pam_deps[@]}"; do
+        if [[ ! -f "${SYSROOT_DIR}/usr/lib/${lib}" ]]; then
+            for src_dir in /usr/lib /lib /usr/lib64 /lib64; do
+                if [[ -f "${src_dir}/${lib}" ]]; then
+                    cp -L "${src_dir}/${lib}" "${SYSROOT_DIR}/usr/lib/${lib}" 2>/dev/null || true
+                    cp -L "${src_dir}/${lib}" "${SYSROOT_DIR}/lib/${lib}" 2>/dev/null || true
+                    log_info "  Copied ${lib}"
+                    break
+                fi
+            done
+        fi
+    done
+
     log_success "Libraries copied"
 }
 
@@ -1078,6 +1839,48 @@ UTC
 EOF
 
     log_success "Timezone data configured"
+}
+
+# =============================================================================
+# Create essential system directories
+# =============================================================================
+create_system_directories() {
+    log_info "Creating essential system directories..."
+
+    # Runtime directories (these are typically tmpfs at boot, but need to exist)
+    mkdir -p "${SYSROOT_DIR}/tmp"
+    mkdir -p "${SYSROOT_DIR}/run"
+    mkdir -p "${SYSROOT_DIR}/run/dbus"
+    mkdir -p "${SYSROOT_DIR}/run/lock"
+    chmod 1777 "${SYSROOT_DIR}/tmp" 2>/dev/null || true
+    chmod 755 "${SYSROOT_DIR}/run" 2>/dev/null || true
+
+    # Variable data directories
+    mkdir -p "${SYSROOT_DIR}/var/log"
+    mkdir -p "${SYSROOT_DIR}/var/tmp"
+    mkdir -p "${SYSROOT_DIR}/var/mail"
+    mkdir -p "${SYSROOT_DIR}/var/spool/mail"
+    mkdir -p "${SYSROOT_DIR}/var/lib"
+    mkdir -p "${SYSROOT_DIR}/var/cache"
+    chmod 1777 "${SYSROOT_DIR}/var/tmp" 2>/dev/null || true
+
+    # Create compatibility symlinks
+    ln -sf /run "${SYSROOT_DIR}/var/run" 2>/dev/null || true
+    ln -sf /run/lock "${SYSROOT_DIR}/var/lock" 2>/dev/null || true
+
+    # System directories
+    mkdir -p "${SYSROOT_DIR}/usr/libexec"
+    mkdir -p "${SYSROOT_DIR}/usr/local/bin"
+    mkdir -p "${SYSROOT_DIR}/usr/local/lib"
+    mkdir -p "${SYSROOT_DIR}/usr/local/share"
+
+    # Config directories
+    mkdir -p "${SYSROOT_DIR}/etc/profile.d"
+    mkdir -p "${SYSROOT_DIR}/etc/skel"
+    mkdir -p "${SYSROOT_DIR}/etc/default"
+    mkdir -p "${SYSROOT_DIR}/etc/ld.so.conf.d"
+
+    log_success "System directories created"
 }
 
 # =============================================================================
@@ -1472,6 +2275,309 @@ EOF
     cp "${SYSROOT_DIR}/etc/zsh/zshrc" "${SYSROOT_DIR}/home/raven/.zshrc"
     cp "${SYSROOT_DIR}/etc/zsh/zshrc" "${SYSROOT_DIR}/root/.zshrc"
 
+    # /etc/login.defs - shadow password suite configuration
+    cat > "${SYSROOT_DIR}/etc/login.defs" << 'EOF'
+# /etc/login.defs - Shadow password suite configuration
+# RavenLinux defaults
+
+# Password aging controls
+PASS_MAX_DAYS   99999
+PASS_MIN_DAYS   0
+PASS_WARN_AGE   7
+
+# Min/max values for automatic UID/GID selection
+UID_MIN                  1000
+UID_MAX                 60000
+SYS_UID_MIN               201
+SYS_UID_MAX               999
+GID_MIN                  1000
+GID_MAX                 60000
+SYS_GID_MIN               201
+SYS_GID_MAX               999
+
+# Home directory and umask
+CREATE_HOME     yes
+UMASK           022
+HOME_MODE       0700
+
+# Password encryption method
+ENCRYPT_METHOD  SHA512
+
+# Enable userdel to remove user groups if no members exist
+USERGROUPS_ENAB yes
+
+# Ensure mail directory exists
+MAIL_DIR        /var/mail
+
+# Default login shell
+DEFAULT_HOME    yes
+
+# Chfn restrictions
+CHFN_RESTRICT   rwh
+
+# Su defaults
+SU_NAME         su
+ENV_SUPATH      PATH=/sbin:/bin:/usr/sbin:/usr/bin
+ENV_PATH        PATH=/bin:/usr/bin
+
+# Log successful/failed logins
+LOG_OK_LOGINS   no
+FAILLOG_ENAB    yes
+
+# TTY permissions
+TTYPERM         0600
+EOF
+
+    # /etc/gshadow - group shadow file
+    cat > "${SYSROOT_DIR}/etc/gshadow" << 'EOF'
+root:::
+wheel:::raven
+audio:::raven
+video:::raven
+input:::raven
+users:::raven
+raven:::
+nobody:!::
+EOF
+    chmod 600 "${SYSROOT_DIR}/etc/gshadow" 2>/dev/null || true
+
+    # /etc/subuid - subordinate user IDs for containers/namespaces
+    cat > "${SYSROOT_DIR}/etc/subuid" << 'EOF'
+root:100000:65536
+raven:165536:65536
+EOF
+
+    # /etc/subgid - subordinate group IDs for containers/namespaces
+    cat > "${SYSROOT_DIR}/etc/subgid" << 'EOF'
+root:100000:65536
+raven:165536:65536
+EOF
+
+    # /etc/securetty - list of secure TTYs for root login
+    cat > "${SYSROOT_DIR}/etc/securetty" << 'EOF'
+# /etc/securetty - TTYs from which root can log in
+console
+tty1
+tty2
+tty3
+tty4
+tty5
+tty6
+ttyS0
+ttyS1
+ttyAMA0
+hvc0
+xvc0
+EOF
+
+    # /etc/environment - system-wide environment variables
+    cat > "${SYSROOT_DIR}/etc/environment" << 'EOF'
+# /etc/environment - system-wide environment variables
+PATH="/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin"
+LANG="en_US.UTF-8"
+EOF
+
+    # /etc/host.conf - resolver configuration
+    cat > "${SYSROOT_DIR}/etc/host.conf" << 'EOF'
+# /etc/host.conf - resolver configuration
+order hosts,bind
+multi on
+EOF
+
+    # /etc/ld.so.conf - dynamic linker configuration
+    cat > "${SYSROOT_DIR}/etc/ld.so.conf" << 'EOF'
+# /etc/ld.so.conf - dynamic linker configuration
+/lib
+/lib64
+/usr/lib
+/usr/lib64
+/usr/local/lib
+include /etc/ld.so.conf.d/*.conf
+EOF
+
+    # /etc/inputrc - readline configuration
+    cat > "${SYSROOT_DIR}/etc/inputrc" << 'EOF'
+# /etc/inputrc - readline configuration
+# RavenLinux defaults
+
+# Ring bell on completion
+set bell-style none
+
+# Use visible bell if available
+set bell-style visible
+
+# Show all completions at once
+set show-all-if-ambiguous on
+
+# Ignore case when completing
+set completion-ignore-case on
+
+# Treat hyphens and underscores as equivalent
+set completion-map-case on
+
+# Show extra file information when completing
+set visible-stats on
+
+# Color files by types
+set colored-stats on
+
+# Append file type indicator
+set mark-symlinked-directories on
+
+# Match files whose names begin with '.'
+set match-hidden-files on
+
+# Key bindings
+"\e[A": history-search-backward
+"\e[B": history-search-forward
+"\e[1;5C": forward-word
+"\e[1;5D": backward-word
+"\e[3~": delete-char
+"\e[H": beginning-of-line
+"\e[F": end-of-line
+EOF
+
+    # /etc/services - network services database (essential entries)
+    cat > "${SYSROOT_DIR}/etc/services" << 'EOF'
+# /etc/services - network services database
+# RavenLinux essential services
+
+tcpmux          1/tcp
+echo            7/tcp
+echo            7/udp
+discard         9/tcp           sink null
+discard         9/udp           sink null
+systat          11/tcp          users
+daytime         13/tcp
+daytime         13/udp
+netstat         15/tcp
+qotd            17/tcp          quote
+chargen         19/tcp          ttytst source
+chargen         19/udp          ttytst source
+ftp-data        20/tcp
+ftp             21/tcp
+ssh             22/tcp
+ssh             22/udp
+telnet          23/tcp
+smtp            25/tcp          mail
+time            37/tcp          timserver
+time            37/udp          timserver
+nameserver      42/tcp          name
+whois           43/tcp          nicname
+domain          53/tcp
+domain          53/udp
+bootps          67/udp
+bootpc          68/udp
+tftp            69/udp
+gopher          70/tcp
+finger          79/tcp
+http            80/tcp          www www-http
+kerberos        88/tcp          kerberos-sec
+kerberos        88/udp          kerberos-sec
+pop3            110/tcp         pop-3
+sunrpc          111/tcp         portmapper rpcbind
+sunrpc          111/udp         portmapper rpcbind
+auth            113/tcp         ident tap
+nntp            119/tcp         readnews untp
+ntp             123/udp
+netbios-ns      137/udp
+netbios-dgm     138/udp
+netbios-ssn     139/tcp
+imap            143/tcp         imap2
+snmp            161/udp
+snmp-trap       162/udp         snmptrap
+bgp             179/tcp
+irc             194/tcp
+ldap            389/tcp
+https           443/tcp
+smtps           465/tcp
+submission      587/tcp
+ldaps           636/tcp
+imaps           993/tcp
+pop3s           995/tcp
+openvpn         1194/udp
+mqtt            1883/tcp
+nfs             2049/tcp
+nfs             2049/udp
+mysql           3306/tcp
+rdp             3389/tcp
+postgresql      5432/tcp
+amqp            5672/tcp
+x11             6000/tcp
+http-alt        8080/tcp
+EOF
+
+    # /etc/protocols - protocol number database
+    cat > "${SYSROOT_DIR}/etc/protocols" << 'EOF'
+# /etc/protocols - protocol number database
+# RavenLinux essential protocols
+
+ip              0       IP              # Internet Protocol
+hopopt          0       HOPOPT          # Hop-by-hop options
+icmp            1       ICMP            # Internet Control Message
+igmp            2       IGMP            # Internet Group Management
+ggp             3       GGP             # Gateway-Gateway Protocol
+ipencap         4       IP-ENCAP        # IP encapsulated in IP
+st              5       ST              # ST datagram mode
+tcp             6       TCP             # Transmission Control Protocol
+egp             8       EGP             # Exterior Gateway Protocol
+igp             9       IGP             # Interior Gateway Protocol
+pup             12      PUP             # PARC universal packet
+udp             17      UDP             # User Datagram Protocol
+hmp             20      HMP             # Host Monitoring Protocol
+xns-idp         22      XNS-IDP         # Xerox NS IDP
+rdp             27      RDP             # Reliable Datagram Protocol
+iso-tp4         29      ISO-TP4         # ISO Transport Protocol Class 4
+dccp            33      DCCP            # Datagram Congestion Control Protocol
+xtp             36      XTP             # Xpress Transfer Protocol
+ddp             37      DDP             # Datagram Delivery Protocol
+idpr-cmtp       38      IDPR-CMTP       # IDPR Control Message Transport
+ipv6            41      IPv6            # IPv6 header
+ipv6-route      43      IPv6-Route      # Routing Header for IPv6
+ipv6-frag       44      IPv6-Frag       # Fragment Header for IPv6
+idrp            45      IDRP            # Inter-Domain Routing Protocol
+rsvp            46      RSVP            # Resource ReSerVation Protocol
+gre             47      GRE             # Generic Routing Encapsulation
+esp             50      ESP             # Encapsulating Security Payload
+ah              51      AH              # Authentication Header
+skip            57      SKIP            # Simple Key-Management for IP
+ipv6-icmp       58      IPv6-ICMP       # ICMP for IPv6
+ipv6-nonxt      59      IPv6-NoNxt      # No Next Header for IPv6
+ipv6-opts       60      IPv6-Opts       # Destination Options for IPv6
+eigrp           88      EIGRP           # EIGRP
+ospf            89      OSPFIGP         # Open Shortest Path First
+ax.25           93      AX.25           # AX.25
+ipip            94      IPIP            # IP-within-IP
+etherip         97      ETHERIP         # Ethernet-within-IP
+encap           98      ENCAP           # Encapsulation Header
+pim             103     PIM             # Protocol Independent Multicast
+ipcomp          108     IPCOMP          # IP Payload Compression Protocol
+vrrp            112     VRRP            # Virtual Router Redundancy Protocol
+l2tp            115     L2TP            # Layer Two Tunneling Protocol
+isis            124     ISIS            # IS-IS over IPv4
+sctp            132     SCTP            # Stream Control Transmission Protocol
+fc              133     FC              # Fibre Channel
+udplite         136     UDPLite         # UDP-Lite
+mpls-in-ip      137     MPLS-in-IP      # MPLS-in-IP
+manet           138     MANET           # MANET Protocols
+hip             139     HIP             # Host Identity Protocol
+shim6           140     Shim6           # Site Multihoming by IPv6 Intermediation
+wesp            141     WESP            # Wrapped ESP
+rohc            142     ROHC            # Robust Header Compression
+EOF
+
+    # /etc/default/useradd - useradd defaults
+    cat > "${SYSROOT_DIR}/etc/default/useradd" << 'EOF'
+# /etc/default/useradd - useradd default values
+GROUP=100
+HOME=/home
+INACTIVE=-1
+EXPIRE=
+SHELL=/bin/bash
+SKEL=/etc/skel
+CREATE_MAIL_SPOOL=yes
+EOF
+
     log_success "Configuration files created"
 }
 
@@ -1518,6 +2624,7 @@ main() {
     copy_terminfo
     copy_locale_data
     copy_timezone_data
+    create_system_directories
     create_configs
 
     echo ""

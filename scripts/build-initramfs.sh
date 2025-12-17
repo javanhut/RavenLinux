@@ -400,69 +400,121 @@ create_init() {
 # RavenLinux Live Boot Init
 # Mounts the squashfs filesystem from the live ISO and switches to it
 
-set -x  # Enable debug logging
-
-# Trap errors
-error_handler() {
-    echo "An error occurred on line $1"
-    rescue_shell "Script error"
-}
-trap 'error_handler $LINENO' ERR
-
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 
-# Helper functions
-msg() { echo -e "\033[1;34m::\033[0m $1"; }
-err() { echo -e "\033[1;31mERROR:\033[0m $1"; }
+# =============================================================================
+# Color and Status Output Functions (systemd/OpenRC style)
+# =============================================================================
+RED='\033[1;31m'
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[1;34m'
+WHITE='\033[1;37m'
+CYAN='\033[1;36m'
+NC='\033[0m'
+
+ok()   { echo -e "  [  ${GREEN}OK${NC}  ] $1"; }
+warn() { echo -e "  [${YELLOW}WARN${NC} ] $1"; }
+fail() { echo -e "  [${RED}FAIL${NC} ] $1"; }
+info() { echo -e "  [ ${BLUE}**${NC}  ] $1"; }
+step() { echo -e "\n${WHITE}>>>${NC} $1"; }
+
 rescue_shell() {
-    err "Boot failed! Dropping to rescue shell..."
-    err "Reason: $1"
     echo ""
-    echo "  You can try to fix the problem manually."
-    echo "  Type 'reboot' to restart, 'poweroff' to shut down."
+    fail "Boot failed: $1"
     echo ""
-    # Run shell in a loop to prevent kernel panic if user exits
+    echo -e "  ${YELLOW}You can try to fix the problem manually.${NC}"
+    echo -e "  Type ${WHITE}'reboot'${NC} to restart, ${WHITE}'poweroff'${NC} to shut down."
+    echo ""
     while true; do
-        # Ensure the shell has a controlling TTY so job control works (no "cannot set terminal process group").
         if command -v setsid >/dev/null && [ -c /dev/console ]; then
             setsid -c /bin/bash --login -i </dev/console >/dev/console 2>&1 || true
         else
             /bin/bash --login -i </dev/console >/dev/console 2>&1 || true
         fi
         echo ""
-        err "Shell exited. Restarting rescue shell..."
-        err "(Type 'reboot' or 'poweroff' to exit properly)"
+        warn "Shell exited. Restarting rescue shell..."
         sleep 1
     done
 }
 
-# Early sanity check
-msg "Init script started. Checking environment..."
-echo "PATH=$PATH"
-ls -l /bin/bash /bin/sh /bin/mount /bin/ls || true
-if ! command -v mount >/dev/null; then
-    err "CRITICAL: mount command not found!"
-    rescue_shell "Missing mount"
+# =============================================================================
+# Boot Sequence
+# =============================================================================
+
+# Clear screen and center the boot banner
+clear 2>/dev/null || printf '\033[2J\033[H'
+
+# Add vertical spacing to center (assuming ~24 line terminal, banner is ~10 lines)
+echo ""
+echo ""
+echo ""
+echo ""
+echo ""
+echo ""
+
+# Display centered boot banner
+echo -e "${CYAN}              ██████╗  █████╗ ██╗   ██╗███████╗███╗   ██╗    ██╗     ██╗███╗   ██╗██╗   ██╗██╗  ██╗${NC}"
+echo -e "${CYAN}              ██╔══██╗██╔══██╗██║   ██║██╔════╝████╗  ██║    ██║     ██║████╗  ██║██║   ██║╚██╗██╔╝${NC}"
+echo -e "${CYAN}              ██████╔╝███████║██║   ██║█████╗  ██╔██╗ ██║    ██║     ██║██╔██╗ ██║██║   ██║ ╚███╔╝${NC}"
+echo -e "${CYAN}              ██╔══██╗██╔══██║╚██╗ ██╔╝██╔══╝  ██║╚██╗██║    ██║     ██║██║╚██╗██║██║   ██║ ██╔██╗${NC}"
+echo -e "${CYAN}              ██║  ██║██║  ██║ ╚████╔╝ ███████╗██║ ╚████║    ███████╗██║██║ ╚████║╚██████╔╝██╔╝ ██╗${NC}"
+echo -e "${CYAN}              ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝    ╚══════╝╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝${NC}"
+echo ""
+echo -e "                                              ${WHITE}Live Boot${NC}"
+echo ""
+echo ""
+
+# -----------------------------------------------------------------------------
+# Mount Virtual Filesystems
+# -----------------------------------------------------------------------------
+step "Mounting virtual filesystems"
+
+if mount -t proc proc /proc 2>/dev/null; then
+    ok "Mounted /proc"
+else
+    fail "Failed to mount /proc"
+    rescue_shell "Critical filesystem mount failed"
 fi
 
-msg "Starting Raven Linux..."
+if mount -t sysfs sysfs /sys 2>/dev/null; then
+    ok "Mounted /sys"
+else
+    fail "Failed to mount /sys"
+    rescue_shell "Critical filesystem mount failed"
+fi
 
-# Mount essential filesystems
-msg "Mounting virtual filesystems..."
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev 2>/dev/null || mount -t tmpfs tmpfs /dev
+if mount -t devtmpfs devtmpfs /dev 2>/dev/null; then
+    ok "Mounted /dev (devtmpfs)"
+elif mount -t tmpfs tmpfs /dev 2>/dev/null; then
+    ok "Mounted /dev (tmpfs fallback)"
+else
+    fail "Failed to mount /dev"
+    rescue_shell "Critical filesystem mount failed"
+fi
+
 mkdir -p /dev/pts /dev/shm
-mount -t devpts devpts /dev/pts
-mount -t tmpfs tmpfs /dev/shm
 
-# Bash process substitution relies on /dev/fd/* (normally provided via /proc).
-# The boot-device scan below uses it (e.g., `done < <(blkid ...)`).
+if mount -t devpts devpts /dev/pts 2>/dev/null; then
+    ok "Mounted /dev/pts"
+else
+    warn "Failed to mount /dev/pts (non-critical)"
+fi
+
+if mount -t tmpfs tmpfs /dev/shm 2>/dev/null; then
+    ok "Mounted /dev/shm"
+else
+    warn "Failed to mount /dev/shm (non-critical)"
+fi
+
+# Setup /dev/fd symlinks for bash process substitution
 if [ ! -e /dev/fd ] && [ -d /proc/self/fd ]; then
-    ln -sf /proc/self/fd /dev/fd 2>/dev/null || true
-    ln -sf /proc/self/fd/0 /dev/stdin 2>/dev/null || true
-    ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null || true
-    ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null || true
+    ln -sf /proc/self/fd /dev/fd 2>/dev/null && \
+    ln -sf /proc/self/fd/0 /dev/stdin 2>/dev/null && \
+    ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null && \
+    ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null && \
+    ok "Created /dev/fd symlinks" || \
+    warn "Could not create /dev/fd symlinks"
 fi
 
 # Create mount points
@@ -471,39 +523,45 @@ mkdir -p /mnt/cdrom /mnt/squashfs /mnt/root /mnt/overlay /mnt/work
 # Suppress kernel messages for cleaner output
 dmesg -n 1 2>/dev/null || true
 
-# Wait for devices to settle (USB drives may take longer to enumerate)
-msg "Waiting for devices..."
+# -----------------------------------------------------------------------------
+# Wait for Devices
+# -----------------------------------------------------------------------------
+step "Waiting for devices to settle"
+
+info "Waiting 3 seconds for device enumeration..."
 sleep 3
 
-# Trigger udev if available to help enumerate devices
 if command -v udevadm &>/dev/null; then
     udevadm trigger 2>/dev/null || true
     udevadm settle --timeout=5 2>/dev/null || true
+    ok "Device enumeration complete (udev)"
+else
+    ok "Device enumeration complete"
 fi
 
-# Find the boot device (CD-ROM, USB, NVMe, etc. with our live filesystem)
+# -----------------------------------------------------------------------------
+# Find Boot Device
+# -----------------------------------------------------------------------------
+step "Searching for boot device"
+
 BOOT_DEVICE=""
 ISO_LABEL="RAVEN_LIVE"
 
-msg "Searching for boot device..."
-
-# Method 1: Look for device with our label using blkid (most reliable)
+# Method 1: Look for device with our label using blkid
 if command -v blkid &>/dev/null; then
-    # Search ALL block devices for our label
     while IFS= read -r line; do
         dev="${line%%:*}"
         if [ -b "$dev" ] 2>/dev/null; then
             label=$(blkid -o value -s LABEL "$dev" 2>/dev/null)
             if [ "$label" = "$ISO_LABEL" ]; then
                 BOOT_DEVICE="$dev"
-                msg "Found boot device by label: $BOOT_DEVICE"
                 break
             fi
         fi
     done < <(blkid 2>/dev/null)
 fi
 
-# Method 2: Scan common device paths for our label
+# Method 2: Scan common device paths
 if [ -z "$BOOT_DEVICE" ] && command -v blkid &>/dev/null; then
     for pattern in /dev/sr* /dev/sd* /dev/nvme*n*p* /dev/vd* /dev/mmcblk*p* /dev/loop*; do
         for dev in $pattern; do
@@ -511,23 +569,21 @@ if [ -z "$BOOT_DEVICE" ] && command -v blkid &>/dev/null; then
             label=$(blkid -o value -s LABEL "$dev" 2>/dev/null)
             if [ "$label" = "$ISO_LABEL" ]; then
                 BOOT_DEVICE="$dev"
-                msg "Found boot device by label scan: $BOOT_DEVICE"
                 break 2
             fi
         done
     done
 fi
 
-# Method 3: If not found by label, try to find any ISO9660 filesystem
+# Method 3: Try to find any ISO9660 filesystem
 if [ -z "$BOOT_DEVICE" ] && command -v blkid &>/dev/null; then
-    msg "Label not found, searching for ISO9660 filesystems..."
+    info "Label not found, searching for ISO9660..."
     for pattern in /dev/sr* /dev/sd* /dev/nvme*n*p* /dev/vd* /dev/mmcblk*p* /dev/loop*; do
         for dev in $pattern; do
             [ -b "$dev" ] 2>/dev/null || continue
             fstype=$(blkid -o value -s TYPE "$dev" 2>/dev/null)
             if [ "$fstype" = "iso9660" ]; then
                 BOOT_DEVICE="$dev"
-                msg "Found ISO9660 device: $BOOT_DEVICE"
                 break 2
             fi
         done
@@ -539,35 +595,37 @@ if [ -z "$BOOT_DEVICE" ]; then
     for dev in /dev/sr0 /dev/sr1 /dev/cdrom /dev/loop0; do
         if [ -b "$dev" ]; then
             BOOT_DEVICE="$dev"
-            msg "Using fallback device: $BOOT_DEVICE"
             break
         fi
     done
 fi
 
-# Debug: show available block devices if still not found
 if [ -z "$BOOT_DEVICE" ]; then
-    err "Could not find boot device!"
-    err "Available block devices:"
+    fail "No boot device found"
+    info "Available block devices:"
     ls -la /dev/sd* /dev/sr* /dev/nvme* /dev/vd* /dev/mmcblk* 2>/dev/null || true
-    err "blkid output:"
-    blkid 2>/dev/null || true
-    rescue_shell "No boot device found"
+    rescue_shell "Boot device not found"
 fi
 
-# Mount the CD-ROM/ISO
-msg "Mounting boot device..."
-if ! mount -t iso9660 -o ro "$BOOT_DEVICE" /mnt/cdrom 2>/dev/null; then
-    # Try auto detection
-    if ! mount -o ro "$BOOT_DEVICE" /mnt/cdrom 2>/dev/null; then
-        rescue_shell "Failed to mount boot device: $BOOT_DEVICE"
-    fi
+ok "Found boot device: $BOOT_DEVICE"
+
+# -----------------------------------------------------------------------------
+# Mount Boot Filesystems
+# -----------------------------------------------------------------------------
+step "Mounting boot filesystems"
+
+if mount -t iso9660 -o ro "$BOOT_DEVICE" /mnt/cdrom 2>/dev/null; then
+    ok "Mounted ISO9660 filesystem"
+elif mount -o ro "$BOOT_DEVICE" /mnt/cdrom 2>/dev/null; then
+    ok "Mounted boot device (auto-detected type)"
+else
+    fail "Failed to mount boot device: $BOOT_DEVICE"
+    rescue_shell "Cannot mount boot device"
 fi
 
-# Check for squashfs
+# Find squashfs
 SQUASHFS="/mnt/cdrom/raven/filesystem.squashfs"
 if [ ! -f "$SQUASHFS" ]; then
-    # Try alternative locations
     for alt in "/mnt/cdrom/live/filesystem.squashfs" "/mnt/cdrom/squashfs.img"; do
         if [ -f "$alt" ]; then
             SQUASHFS="$alt"
@@ -577,39 +635,81 @@ if [ ! -f "$SQUASHFS" ]; then
 fi
 
 if [ ! -f "$SQUASHFS" ]; then
-    ls -la /mnt/cdrom/ 2>/dev/null
-    rescue_shell "Squashfs not found at $SQUASHFS"
+    fail "Squashfs not found"
+    info "Contents of /mnt/cdrom:"
+    ls -la /mnt/cdrom/ 2>/dev/null || true
+    rescue_shell "Squashfs image not found"
 fi
 
-msg "Found squashfs: $SQUASHFS"
+ok "Found squashfs: $SQUASHFS"
 
-# Mount the squashfs
-msg "Mounting squashfs filesystem..."
-if ! mount -t squashfs -o ro,loop "$SQUASHFS" /mnt/squashfs 2>/dev/null; then
-    rescue_shell "Failed to mount squashfs"
+if mount -t squashfs -o ro,loop "$SQUASHFS" /mnt/squashfs 2>/dev/null; then
+    ok "Mounted squashfs filesystem"
+else
+    fail "Failed to mount squashfs"
+    rescue_shell "Cannot mount squashfs image"
 fi
 
-# Create overlay filesystem for writable live system
-msg "Setting up overlay filesystem..."
-mount -t tmpfs tmpfs /mnt/overlay
+# -----------------------------------------------------------------------------
+# Setup Overlay Filesystem
+# -----------------------------------------------------------------------------
+step "Setting up overlay filesystem"
+
+if mount -t tmpfs tmpfs /mnt/overlay 2>/dev/null; then
+    ok "Created tmpfs for overlay"
+else
+    fail "Failed to create overlay tmpfs"
+    rescue_shell "Cannot create overlay"
+fi
+
 mkdir -p /mnt/overlay/upper /mnt/overlay/work
 
 if mount -t overlay overlay -o lowerdir=/mnt/squashfs,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work /mnt/root 2>/dev/null; then
-    msg "Overlay mounted successfully"
+    ok "Mounted overlay filesystem (read-write)"
 else
-    # Fallback: mount squashfs directly (read-only)
-    msg "Overlay failed, using read-only root"
-    mount --bind /mnt/squashfs /mnt/root
+    warn "Overlay mount failed, falling back to read-only"
+    if mount --bind /mnt/squashfs /mnt/root 2>/dev/null; then
+        ok "Mounted root filesystem (read-only fallback)"
+    else
+        fail "Failed to mount root filesystem"
+        rescue_shell "Cannot mount root"
+    fi
 fi
 
-# Move the virtual filesystems to the new root
-msg "Preparing to switch root..."
-mkdir -p /mnt/root/proc /mnt/root/sys /mnt/root/dev /mnt/root/mnt/cdrom
+# -----------------------------------------------------------------------------
+# Prepare Switch Root
+# -----------------------------------------------------------------------------
+step "Preparing to switch root"
 
-mount --move /proc /mnt/root/proc
-mount --move /sys /mnt/root/sys
-mount --move /dev /mnt/root/dev
-mount --bind /mnt/cdrom /mnt/root/mnt/cdrom 2>/dev/null || true
+mkdir -p /mnt/root/proc /mnt/root/sys /mnt/root/dev /mnt/root/mnt/cdrom
+ok "Created mount points in new root"
+
+if mount --move /proc /mnt/root/proc 2>/dev/null; then
+    ok "Moved /proc to new root"
+else
+    fail "Failed to move /proc"
+    rescue_shell "Cannot prepare new root"
+fi
+
+if mount --move /sys /mnt/root/sys 2>/dev/null; then
+    ok "Moved /sys to new root"
+else
+    fail "Failed to move /sys"
+    rescue_shell "Cannot prepare new root"
+fi
+
+if mount --move /dev /mnt/root/dev 2>/dev/null; then
+    ok "Moved /dev to new root"
+else
+    fail "Failed to move /dev"
+    rescue_shell "Cannot prepare new root"
+fi
+
+if mount --bind /mnt/cdrom /mnt/root/mnt/cdrom 2>/dev/null; then
+    ok "Bind mounted /mnt/cdrom"
+else
+    warn "Could not bind mount /mnt/cdrom (non-critical)"
+fi
 
 # Find init in the new root
 NEW_INIT=""
@@ -621,26 +721,38 @@ for init in /init /sbin/init /bin/init; do
 done
 
 if [ -z "$NEW_INIT" ]; then
-    # Fallback to shell
     NEW_INIT="/bin/bash"
+    warn "No init found, falling back to $NEW_INIT"
+else
+    ok "Found init: $NEW_INIT"
 fi
 
-msg "Switching to live filesystem..."
-msg "Running $NEW_INIT"
+# -----------------------------------------------------------------------------
+# Switch Root
+# -----------------------------------------------------------------------------
+step "Switching to live filesystem"
 
 if ! command -v switch_root >/dev/null; then
-    rescue_shell "switch_root command not found in initramfs"
+    fail "switch_root command not found"
+    rescue_shell "Missing switch_root"
 fi
 
 if [ ! -x "/mnt/root$NEW_INIT" ]; then
-    rescue_shell "Target init $NEW_INIT not executable in new root"
+    fail "Init not executable: /mnt/root$NEW_INIT"
+    rescue_shell "Invalid init"
 fi
 
-# Switch to the new root
-exec switch_root /mnt/root "$NEW_INIT" || rescue_shell "switch_root failed"
+ok "Ready to switch root"
+info "Executing switch_root to $NEW_INIT"
 
-# If switch_root fails
-rescue_shell "switch_root failed (unreachable)"
+# switch_root may print "failed to unlink" warnings - these are harmless
+# (busybox switch_root trying to clean up initramfs that still has mounts)
+# Redirect stderr to suppress these warnings, exec replaces this process
+exec switch_root /mnt/root "$NEW_INIT" 2>/dev/null
+
+# If we get here, switch_root failed completely (exec didn't replace us)
+fail "switch_root failed"
+rescue_shell "switch_root failed"
 INITSCRIPT
 
     chmod +x "${INITRAMFS_DIR}/init"
