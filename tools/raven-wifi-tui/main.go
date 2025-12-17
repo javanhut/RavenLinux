@@ -147,11 +147,13 @@ type interfacesLoadedMsg struct {
 type scanDoneMsg struct {
 	networks []Network
 	err      error
+	sysStatus SystemStatus
 }
 
 type connectDoneMsg struct {
 	success bool
 	err     error
+	sysStatus SystemStatus
 }
 
 func main() {
@@ -181,11 +183,7 @@ func (m model) Init() tea.Cmd {
 
 func loadInterfaces() tea.Msg {
 	interfaces := getAllInterfaces()
-	sysStatus := SystemStatus{
-		DBusRunning: isDBusRunning(),
-		IWDRunning:  isIWDRunning(),
-		WPARunning:  isWPARunning(),
-	}
+	sysStatus := getSystemStatus()
 	return interfacesLoadedMsg{interfaces: interfaces, sysStatus: sysStatus}
 }
 
@@ -201,6 +199,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case scanDoneMsg:
+		m.sysStatus = msg.sysStatus
 		if msg.err != nil {
 			m.lastError = msg.err.Error()
 			m.networks = nil
@@ -212,6 +211,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case connectDoneMsg:
+		m.sysStatus = msg.sysStatus
 		if msg.err != nil || !msg.success {
 			m.state = stateError
 			if msg.err != nil {
@@ -610,14 +610,14 @@ func (m model) renderInterfaceInfo() string {
 		s.WriteString("\n")
 		s.WriteString(warnStyle.Render("⚠ D-Bus is not running. iwd/iwctl will not work."))
 		s.WriteString("\n")
-		s.WriteString(dimStyle.Render("  Enable in /etc/raven/init.toml"))
+		s.WriteString(dimStyle.Render("  Fix: start dbus-daemon (or enable it in /etc/raven/init.toml if using raven-init)"))
 	}
 
 	if iface.IsWireless && !m.sysStatus.IWDRunning && !m.sysStatus.WPARunning {
 		s.WriteString("\n")
 		s.WriteString(warnStyle.Render("⚠ No WiFi daemon running (iwd or wpa_supplicant)."))
 		s.WriteString("\n")
-		s.WriteString(dimStyle.Render("  Enable iwd in /etc/raven/init.toml"))
+		s.WriteString(dimStyle.Render("  Fix: start iwd (or enable it in /etc/raven/init.toml if using raven-init)"))
 	}
 
 	help := "\nEsc/b: Back"
@@ -854,6 +854,9 @@ func isWPARunning() bool {
 
 func scanNetworks(iface string, status SystemStatus) tea.Cmd {
 	return func() tea.Msg {
+		ensureWiFiDaemons()
+		status = getSystemStatus()
+
 		// Ensure interface is up
 		exec.Command("ip", "link", "set", iface, "up").Run()
 		exec.Command("rfkill", "unblock", "wifi").Run()
@@ -916,7 +919,7 @@ func scanNetworks(iface string, status SystemStatus) tea.Cmd {
 			}
 		}
 
-		return scanDoneMsg{networks: unique, err: lastErr}
+		return scanDoneMsg{networks: unique, err: lastErr, sysStatus: status}
 	}
 }
 
@@ -1089,6 +1092,9 @@ func getCurrentSSID(iface string) string {
 
 func connectToNetwork(iface, ssid, password string, status SystemStatus) tea.Cmd {
 	return func() tea.Msg {
+		ensureWiFiDaemons()
+		status = getSystemStatus()
+
 		var lastErr error
 
 		// Try iwd first if available
@@ -1100,7 +1106,7 @@ func connectToNetwork(iface, ssid, password string, status SystemStatus) tea.Cmd
 					time.Sleep(2 * time.Second)
 
 					if getCurrentSSID(iface) == ssid {
-						return connectDoneMsg{success: true}
+						return connectDoneMsg{success: true, sysStatus: status}
 					}
 				} else {
 					lastErr = err
@@ -1115,16 +1121,16 @@ func connectToNetwork(iface, ssid, password string, status SystemStatus) tea.Cmd
 			time.Sleep(2 * time.Second)
 
 			if getCurrentSSID(iface) == ssid {
-				return connectDoneMsg{success: true}
+				return connectDoneMsg{success: true, sysStatus: status}
 			}
 		} else if lastErr == nil {
 			lastErr = err
 		}
 
 		if lastErr != nil {
-			return connectDoneMsg{success: false, err: lastErr}
+			return connectDoneMsg{success: false, err: lastErr, sysStatus: status}
 		}
-		return connectDoneMsg{success: false, err: fmt.Errorf("connection verification failed")}
+		return connectDoneMsg{success: false, err: fmt.Errorf("connection verification failed"), sysStatus: status}
 	}
 }
 
@@ -1197,6 +1203,39 @@ func requestDHCP(iface string) {
 	}
 	if _, err := exec.LookPath("raven-dhcp"); err == nil {
 		exec.Command("raven-dhcp", "-i", iface).Run()
+	}
+}
+
+func getSystemStatus() SystemStatus {
+	return SystemStatus{
+		DBusRunning: isDBusRunning(),
+		IWDRunning:  isIWDRunning(),
+		WPARunning:  isWPARunning(),
+	}
+}
+
+func ensureWiFiDaemons() {
+	// D-Bus is required for iwd/iwctl.
+	if !isDBusRunning() {
+		if _, err := exec.LookPath("dbus-daemon"); err == nil {
+			_ = os.MkdirAll("/run/dbus", 0755)
+			if _, err := exec.LookPath("dbus-uuidgen"); err == nil {
+				exec.Command("dbus-uuidgen", "--ensure=/etc/machine-id").Run()
+			}
+			_ = exec.Command("dbus-daemon", "--system", "--fork", "--nopidfile").Start()
+			time.Sleep(150 * time.Millisecond)
+		}
+	}
+
+	// Start iwd if present (preferred WiFi backend).
+	if isDBusRunning() && !isIWDRunning() {
+		if _, err := os.Stat("/usr/libexec/iwd"); err == nil {
+			_ = exec.Command("/usr/libexec/iwd").Start()
+			time.Sleep(150 * time.Millisecond)
+		} else if _, err := exec.LookPath("iwd"); err == nil {
+			_ = exec.Command("iwd").Start()
+			time.Sleep(150 * time.Millisecond)
+		}
 	}
 }
 

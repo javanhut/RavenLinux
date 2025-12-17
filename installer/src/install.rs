@@ -129,6 +129,66 @@ fn configure_system(target: &str, config: &InstallConfig) -> Result<()> {
         &config.system.hostname,
     )?;
 
+    // Ensure raven-init config exists (used by WiFi tooling and raven-init PID1)
+    let raven_etc_dir = format!("{}/etc/raven", target);
+    std::fs::create_dir_all(&raven_etc_dir)?;
+    let init_toml_path = format!("{}/init.toml", raven_etc_dir);
+    if !Path::new(&init_toml_path).exists() {
+        let default_init_toml = r#"# RavenLinux Init Configuration
+# /etc/raven/init.toml
+
+[system]
+hostname = "raven-linux"
+default_runlevel = "default"
+shutdown_timeout = 10
+load_modules = true
+enable_udev = true
+enable_network = true
+log_level = "info"
+
+[[services]]
+name = "getty-tty1"
+description = "Getty login on tty1"
+exec = "/sbin/agetty"
+args = ["--noclear", "--autologin", "root", "tty1", "linux"]
+restart = true
+enabled = true
+critical = false
+
+[[services]]
+name = "getty-ttyS0"
+description = "Serial console getty on ttyS0"
+exec = "/sbin/agetty"
+args = ["--noclear", "--autologin", "root", "-L", "115200", "ttyS0", "vt102"]
+restart = true
+enabled = false
+critical = false
+
+[[services]]
+name = "dbus"
+description = "D-Bus system message bus"
+exec = "/usr/bin/dbus-daemon"
+args = ["--system", "--nofork", "--nopidfile"]
+restart = true
+enabled = true
+critical = false
+
+[[services]]
+name = "iwd"
+description = "iNet Wireless Daemon"
+exec = "/usr/libexec/iwd"
+args = []
+restart = true
+enabled = true
+critical = false
+"#;
+        std::fs::write(&init_toml_path, default_init_toml)?;
+        std::fs::set_permissions(
+            &init_toml_path,
+            std::fs::Permissions::from_mode(0o644),
+        )?;
+    }
+
     // Set timezone
     let tz_path = format!("{}/etc/localtime", target);
     std::fs::remove_file(&tz_path).ok();

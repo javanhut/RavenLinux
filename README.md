@@ -96,6 +96,8 @@ This opens an interactive terminal interface where you can:
 
 That's it! No complicated commands to remember.
 
+Note: RavenLinux ships `rtw89` firmware and sets `options rtw89_pci disable_aspm=1` by default to ensure RTL8852BE cards reliably create a `wlan*` interface at boot.
+
 ### Alternative: GUI WiFi Manager
 If you prefer a graphical interface:
 ```bash
@@ -158,6 +160,10 @@ cd RavenLinux
 
 # Boot in QEMU with graphics
 ./scripts/dev-env.sh qemu -g
+
+# Boot in QEMU headless (no new window, serial console in this terminal)
+# Tip: In the RavenBoot menu select "Raven Linux (Serial Console)" for best logs/debugging.
+./scripts/dev-env.sh qemu
 
 # Check status
 ./scripts/dev-env.sh status

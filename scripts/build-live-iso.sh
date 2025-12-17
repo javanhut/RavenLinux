@@ -100,6 +100,77 @@ copy_kernel() {
     fi
 }
 
+copy_kernel_modules() {
+    log_step "Copying kernel modules..."
+
+    local modules_root="${RAVEN_BUILD}/kernel/lib/modules"
+    if [[ ! -d "${modules_root}" ]]; then
+        log_warn "Kernel modules not found at ${modules_root}; skipping"
+        return 0
+    fi
+
+    local release
+    release="$(find "${modules_root}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort -V | tail -n 1)"
+    if [[ -z "${release}" ]]; then
+        log_warn "No kernel module directories found in ${modules_root}; skipping"
+        return 0
+    fi
+
+    mkdir -p "${LIVE_ROOT}/lib/modules"
+    rm -rf "${LIVE_ROOT}/lib/modules/${release}" 2>/dev/null || true
+    cp -a "${modules_root}/${release}" "${LIVE_ROOT}/lib/modules/" 2>/dev/null || true
+
+    if [[ -d "${LIVE_ROOT}/lib/modules/${release}" ]]; then
+        log_info "  Copied /lib/modules/${release}"
+
+        if command -v depmod &>/dev/null; then
+            depmod -b "${LIVE_ROOT}" "${release}" 2>/dev/null || log_warn "depmod failed for ${release}"
+        else
+            log_warn "depmod not found on host; kernel module auto-loading may not work"
+        fi
+
+        log_success "Kernel modules copied"
+    else
+        log_warn "Failed to copy kernel modules into live root"
+    fi
+}
+
+copy_firmware() {
+    log_step "Copying firmware blobs..."
+
+    local host_firmware=""
+    for candidate in /usr/lib/firmware /lib/firmware; do
+        if [[ -d "$candidate" ]]; then
+            host_firmware="$candidate"
+            break
+        fi
+    done
+
+    if [[ -z "$host_firmware" ]]; then
+        log_warn "No host firmware directory found; WiFi may not work"
+        return 0
+    fi
+
+    mkdir -p "${LIVE_ROOT}/lib/firmware"
+
+    local copied_any=0
+    for dir in rtw89 rtw88 rtlwifi rtl_nic rtl_bt; do
+        if [[ -d "${host_firmware}/${dir}" ]]; then
+            mkdir -p "${LIVE_ROOT}/lib/firmware/${dir}"
+            cp -a "${host_firmware}/${dir}/." "${LIVE_ROOT}/lib/firmware/${dir}/" 2>/dev/null || true
+            log_info "  Added ${dir} firmware"
+            copied_any=1
+        fi
+    done
+
+    if [[ "${copied_any}" -eq 0 ]]; then
+        log_warn "No Realtek firmware found under ${host_firmware}; install linux-firmware on the host and rebuild"
+        return 0
+    fi
+
+    log_success "Firmware installed"
+}
+
 copy_initramfs() {
     log_step "Copying initramfs..."
 
@@ -147,6 +218,68 @@ copy_coreutils() {
 
         log_success "Coreutils installed (host)"
     fi
+}
+
+copy_diagnostics_tools() {
+    log_step "Copying diagnostic tools..."
+
+    local tools=(
+        dmesg
+        lsmod modprobe depmod modinfo
+        lspci lsusb dmidecode
+        lscpu
+        sensors smartctl nvme hdparm
+        strace lsof
+        mokutil efibootmgr
+        udevadm
+    )
+
+    for tool in "${tools[@]}"; do
+        if command -v "$tool" &>/dev/null; then
+            cp "$(which "$tool")" "${LIVE_ROOT}/bin/" 2>/dev/null || \
+            cp "$(which "$tool")" "${LIVE_ROOT}/sbin/" 2>/dev/null || true
+            log_info "  Added ${tool}"
+        fi
+    done
+
+    # udev runtime data + daemon (needed for device enumeration + module auto-load)
+    if [[ -d "/usr/lib/udev" ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/lib"
+        cp -a "/usr/lib/udev" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+        log_info "  Copied /usr/lib/udev"
+    fi
+    if [[ -d "/etc/udev" ]]; then
+        mkdir -p "${LIVE_ROOT}/etc"
+        cp -a "/etc/udev" "${LIVE_ROOT}/etc/" 2>/dev/null || true
+        log_info "  Copied /etc/udev"
+    fi
+    if [[ -e "/usr/lib/systemd/systemd-udevd" ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/lib/systemd"
+        cp -L "/usr/lib/systemd/systemd-udevd" "${LIVE_ROOT}/usr/lib/systemd/systemd-udevd" 2>/dev/null || true
+        chmod +x "${LIVE_ROOT}/usr/lib/systemd/systemd-udevd" 2>/dev/null || true
+        log_info "  Copied /usr/lib/systemd/systemd-udevd"
+    fi
+    for udevd in /sbin/udevd /usr/sbin/udevd /usr/lib/udev/udevd; do
+        if [[ -e "${udevd}" ]]; then
+            mkdir -p "${LIVE_ROOT}/sbin"
+            cp -L "${udevd}" "${LIVE_ROOT}/sbin/udevd" 2>/dev/null || true
+            chmod +x "${LIVE_ROOT}/sbin/udevd" 2>/dev/null || true
+            log_info "  Copied ${udevd} -> /sbin/udevd"
+            break
+        fi
+    done
+    if [[ ! -e "${LIVE_ROOT}/sbin/udevd" ]] && [[ -e "${LIVE_ROOT}/usr/lib/systemd/systemd-udevd" ]]; then
+        mkdir -p "${LIVE_ROOT}/sbin"
+        ln -sf /usr/lib/systemd/systemd-udevd "${LIVE_ROOT}/sbin/udevd" 2>/dev/null || true
+    fi
+
+    # Some module loaders expect modprobe in /sbin.
+    if [[ -x "${LIVE_ROOT}/bin/modprobe" ]] && [[ ! -e "${LIVE_ROOT}/sbin/modprobe" ]]; then
+        mkdir -p "${LIVE_ROOT}/sbin"
+        ln -sf /bin/modprobe "${LIVE_ROOT}/sbin/modprobe" 2>/dev/null || true
+    fi
+
+    log_success "Diagnostic tools installed"
 }
 
 copy_sudo_rs() {
@@ -272,7 +405,7 @@ copy_raven_packages() {
     local packages_bin="${RAVEN_BUILD}/packages/bin"
 
     if [[ -d "${packages_bin}" ]]; then
-        for pkg in vem carrion ivaldi raven-installer rvn raven-dhcp; do
+        for pkg in vem carrion ivaldi raven-installer rvn raven-dhcp raven-powerctl reboot poweroff halt; do
             if [[ -f "${packages_bin}/${pkg}" ]]; then
                 cp "${packages_bin}/${pkg}" "${LIVE_ROOT}/bin/${pkg}"
                 log_info "  Added ${pkg}"
@@ -309,11 +442,87 @@ copy_package_manager() {
     fi
 }
 
+ensure_ethtool_live() {
+    if command -v ethtool &>/dev/null; then
+        return 0
+    fi
+
+    for candidate in \
+        "${RAVEN_BUILD}/sysroot/sbin/ethtool" \
+        "${RAVEN_BUILD}/sysroot/bin/ethtool" \
+        "${RAVEN_BUILD}/sysroot/usr/sbin/ethtool" \
+        "${RAVEN_BUILD}/sysroot/usr/bin/ethtool"; do
+        if [[ -x "${candidate}" ]]; then
+            mkdir -p "${LIVE_ROOT}/sbin"
+            cp -L "${candidate}" "${LIVE_ROOT}/sbin/ethtool" 2>/dev/null || true
+            log_info "  Added ethtool (from sysroot)"
+            return 0
+        fi
+    done
+
+    local version="${RAVEN_ETHTOOL_VERSION:-6.11}"
+    local sources_dir="${RAVEN_BUILD}/sources"
+    local tarball="${sources_dir}/ethtool-${version}.tar.xz"
+    local url="https://www.kernel.org/pub/software/network/ethtool/ethtool-${version}.tar.xz"
+    local build_dir="${sources_dir}/ethtool-${version}"
+
+    mkdir -p "${sources_dir}" 2>/dev/null || true
+
+    if [[ ! -f "${tarball}" ]]; then
+        if command -v curl &>/dev/null; then
+            log_info "Downloading ethtool ${version}..."
+            curl -fL -o "${tarball}" "${url}" 2>/dev/null || true
+        elif command -v wget &>/dev/null; then
+            log_info "Downloading ethtool ${version}..."
+            wget -O "${tarball}" "${url}" 2>/dev/null || true
+        else
+            log_warn "ethtool missing and cannot download it (need curl or wget)"
+            return 0
+        fi
+    fi
+
+    if [[ ! -f "${tarball}" ]]; then
+        log_warn "ethtool missing and download failed"
+        return 0
+    fi
+
+    if ! command -v make &>/dev/null || ! command -v cc &>/dev/null; then
+        log_warn "Cannot build ethtool (missing make/cc); ethtool will be missing"
+        return 0
+    fi
+
+    rm -rf "${build_dir}" 2>/dev/null || true
+    tar -xf "${tarball}" -C "${sources_dir}" 2>/dev/null || {
+        log_warn "Failed to extract ${tarball}; ethtool will be missing"
+        return 0
+    }
+
+    if [[ ! -d "${build_dir}" ]]; then
+        log_warn "Expected extracted directory ${build_dir} not found; ethtool will be missing"
+        return 0
+    fi
+
+    log_info "Building ethtool ${version}..."
+    (
+        cd "${build_dir}"
+        ./configure --prefix=/usr --sbindir=/sbin >/dev/null 2>&1 || ./configure --prefix=/usr --sbindir=/sbin
+        make -j"${RAVEN_JOBS:-$(nproc)}" >/dev/null 2>&1 || make -j"${RAVEN_JOBS:-$(nproc)}"
+        make DESTDIR="${LIVE_ROOT}" install-strip >/dev/null 2>&1 || make DESTDIR="${LIVE_ROOT}" install
+    ) || {
+        log_warn "ethtool build failed; ethtool will be missing"
+        return 0
+    }
+
+    if [[ -x "${LIVE_ROOT}/sbin/ethtool" ]] || [[ -x "${LIVE_ROOT}/bin/ethtool" ]]; then
+        log_info "  Added ethtool (built during ISO build)"
+    fi
+}
+
 copy_networking_tools() {
     log_step "Copying networking tools..."
 
     # Copy essential networking tools from host
-    local net_tools=(ip ping dhcpcd wpa_supplicant iw iwconfig ifconfig route netstat ss curl wget)
+    local net_tools=(ip ping ping6 dhcpcd wpa_supplicant iw iwconfig iwlist rfkill ethtool ifconfig route netstat ss curl wget mtr traceroute tracepath tcpdump)
 
     for tool in "${net_tools[@]}"; do
         if command -v "$tool" &>/dev/null; then
@@ -322,6 +531,9 @@ copy_networking_tools() {
             log_info "  Added ${tool}"
         fi
     done
+
+    # Ensure ethtool exists even if the build host doesn't ship it.
+    ensure_ethtool_live
 
     # Copy DNS resolver config
     echo "nameserver 8.8.8.8" > "${LIVE_ROOT}/etc/resolv.conf"
@@ -551,6 +763,108 @@ copy_ca_certificates() {
     log_success "CA certificates installed"
 }
 
+setup_pam_and_nss() {
+    log_step "Setting up PAM and NSS runtime modules..."
+
+    mkdir -p "${LIVE_ROOT}/etc/pam.d" "${LIVE_ROOT}/etc/security"
+    mkdir -p "${LIVE_ROOT}/lib/security" "${LIVE_ROOT}/usr/lib/security"
+
+    cat > "${LIVE_ROOT}/etc/pam.d/sudo" << 'EOF'
+#%PAM-1.0
+auth       required     pam_env.so
+auth       required     pam_unix.so nullok try_first_pass
+account    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
+session    required     pam_unix.so
+EOF
+
+    cat > "${LIVE_ROOT}/etc/pam.d/su" << 'EOF'
+#%PAM-1.0
+auth       required     pam_env.so
+auth       required     pam_unix.so nullok try_first_pass
+account    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
+session    required     pam_unix.so
+EOF
+
+    cat > "${LIVE_ROOT}/etc/pam.d/login" << 'EOF'
+#%PAM-1.0
+auth       required     pam_env.so
+auth       required     pam_unix.so nullok try_first_pass
+account    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
+session    required     pam_unix.so
+EOF
+
+    cat > "${LIVE_ROOT}/etc/pam.d/passwd" << 'EOF'
+#%PAM-1.0
+password   required     pam_unix.so nullok sha512
+EOF
+
+    cat > "${LIVE_ROOT}/etc/security/limits.conf" << 'EOF'
+# /etc/security/limits.conf
+# Minimal defaults (RavenLinux). Add custom limits in /etc/security/limits.d/.
+EOF
+    mkdir -p "${LIVE_ROOT}/etc/security/limits.d"
+
+    local host_security_dirs=()
+    for d in \
+        /lib/security \
+        /usr/lib/security \
+        /lib64/security \
+        /usr/lib64/security \
+        /lib/x86_64-linux-gnu/security \
+        /usr/lib/x86_64-linux-gnu/security; do
+        [[ -d "$d" ]] && host_security_dirs+=("$d")
+    done
+
+    local pam_modules=(
+        pam_unix.so
+        pam_env.so
+        pam_deny.so
+        pam_permit.so
+        pam_warn.so
+        pam_limits.so
+        pam_loginuid.so
+    )
+
+    local copied_any=0
+    for mod in "${pam_modules[@]}"; do
+        local src=""
+        for d in "${host_security_dirs[@]}"; do
+            if [[ -e "${d}/${mod}" ]]; then
+                src="${d}/${mod}"
+                break
+            fi
+        done
+        [[ -n "$src" ]] || continue
+        cp -L "$src" "${LIVE_ROOT}/lib/security/${mod}" 2>/dev/null || true
+        cp -L "$src" "${LIVE_ROOT}/usr/lib/security/${mod}" 2>/dev/null || true
+        copied_any=1
+    done
+
+    if [[ "${copied_any}" -eq 0 ]]; then
+        log_warn "No PAM modules found on host; sudo/login may not work (install a PAM stack and rebuild)"
+    else
+        log_info "  Added PAM modules"
+    fi
+
+    # NSS modules (dlopened by glibc)
+    mkdir -p "${LIVE_ROOT}/lib" "${LIVE_ROOT}/usr/lib"
+    local nss_libs=(libnss_files.so.2 libnss_dns.so.2 libnss_compat.so.2)
+    for lib in "${nss_libs[@]}"; do
+        for d in /lib /lib64 /usr/lib /usr/lib64 /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu; do
+            if [[ -e "${d}/${lib}" ]]; then
+                cp -L "${d}/${lib}" "${LIVE_ROOT}/lib/${lib}" 2>/dev/null || true
+                cp -L "${d}/${lib}" "${LIVE_ROOT}/usr/lib/${lib}" 2>/dev/null || true
+                break
+            fi
+        done
+    done
+
+    log_success "PAM/NSS setup complete"
+}
+
 copy_libraries() {
     log_step "Copying required libraries..."
 
@@ -575,6 +889,10 @@ copy_libraries() {
 
     # Copy deps for dlopened modules (e.g. Weston backends, Mesa GBM/DRI modules).
     for so in \
+        "${LIVE_ROOT}"/lib/security/*.so \
+        "${LIVE_ROOT}"/usr/lib/security/*.so \
+        "${LIVE_ROOT}"/lib/libnss_*.so.* \
+        "${LIVE_ROOT}"/usr/lib/libnss_*.so.* \
         "${LIVE_ROOT}"/usr/lib/libweston-*/*.so \
         "${LIVE_ROOT}"/usr/lib64/libweston-*/*.so \
         "${LIVE_ROOT}"/usr/lib/weston/*.so \
@@ -677,6 +995,81 @@ EOF
 127.0.1.1   raven-linux.localdomain raven-linux
 EOF
 
+    # /etc/raven/init.toml (service configuration for raven-init)
+    mkdir -p "${LIVE_ROOT}/etc/raven"
+    if [[ -f "${PROJECT_ROOT}/etc/raven/init.toml" ]]; then
+        cp "${PROJECT_ROOT}/etc/raven/init.toml" "${LIVE_ROOT}/etc/raven/init.toml"
+    elif [[ -f "${PROJECT_ROOT}/init/config/init.toml" ]]; then
+        cp "${PROJECT_ROOT}/init/config/init.toml" "${LIVE_ROOT}/etc/raven/init.toml"
+    fi
+    if [[ ! -f "${LIVE_ROOT}/etc/raven/init.toml" ]]; then
+        cat > "${LIVE_ROOT}/etc/raven/init.toml" << 'EOF'
+# RavenLinux Init Configuration
+# /etc/raven/init.toml
+
+[system]
+hostname = "raven-linux"
+default_runlevel = "default"
+shutdown_timeout = 10
+load_modules = true
+enable_udev = true
+enable_network = true
+log_level = "info"
+
+[[services]]
+name = "getty-tty1"
+description = "Getty login on tty1"
+exec = "/sbin/agetty"
+args = ["--noclear", "--autologin", "root", "tty1", "linux"]
+restart = true
+enabled = true
+critical = false
+
+[[services]]
+name = "getty-ttyS0"
+description = "Serial console getty on ttyS0"
+exec = "/sbin/agetty"
+args = ["--noclear", "--autologin", "root", "-L", "115200", "ttyS0", "vt102"]
+restart = true
+enabled = false
+critical = false
+
+[[services]]
+name = "dbus"
+description = "D-Bus system message bus"
+exec = "/usr/bin/dbus-daemon"
+args = ["--system", "--nofork", "--nopidfile"]
+restart = true
+enabled = true
+critical = false
+
+[[services]]
+name = "iwd"
+description = "iNet Wireless Daemon"
+exec = "/usr/libexec/iwd"
+args = []
+restart = true
+enabled = true
+critical = false
+EOF
+    fi
+    chmod 0644 "${LIVE_ROOT}/etc/raven/init.toml" 2>/dev/null || true
+
+    # /etc/nsswitch.conf (glibc NSS defaults; required for users/dns on minimal systems)
+    cat > "${LIVE_ROOT}/etc/nsswitch.conf" << 'EOF'
+passwd: files
+group: files
+shadow: files
+
+hosts: files dns
+networks: files
+
+protocols: files
+services: files
+ethers: files
+rpc: files
+EOF
+
     # /etc/passwd
     cat > "${LIVE_ROOT}/etc/passwd" << EOF
 root:x:0:0:root:/root:/bin/zsh
@@ -714,12 +1107,26 @@ EOF
     mkdir -p "${LIVE_ROOT}/etc/sudoers.d"
     cat > "${LIVE_ROOT}/etc/sudoers" << 'EOF'
 Defaults env_reset
-Defaults lecture=never
+Defaults !lecture
 
 root ALL=(ALL:ALL) ALL
 %wheel ALL=(ALL:ALL) ALL
 EOF
     chmod 0440 "${LIVE_ROOT}/etc/sudoers" 2>/dev/null || true
+
+    # Kernel module config directories (kmod expects these to exist)
+    mkdir -p "${LIVE_ROOT}/etc/modprobe.d" "${LIVE_ROOT}/etc/modules-load.d"
+    cat > "${LIVE_ROOT}/etc/modprobe.d/raven.conf" << 'EOF'
+# RavenLinux kernel module configuration
+# Place module options/blacklists here.
+EOF
+
+    # Realtek rtw89 (RTL8852BE) stability defaults
+    cat > "${LIVE_ROOT}/etc/modprobe.d/rtw89.conf" << 'EOF'
+# RavenLinux: Realtek rtw89 defaults
+# RTL8852BE often fails to bring up a netdev with PCIe ASPM enabled on some laptops.
+options rtw89_pci disable_aspm=1
+EOF
 
     # rvn package manager config
     mkdir -p "${LIVE_ROOT}/etc/rvn"
@@ -876,8 +1283,15 @@ setup_iso_structure() {
 create_squashfs() {
     log_step "Creating squashfs filesystem..."
 
+    local pseudo="${ISO_DIR}/squashfs.pseudo"
+    : > "${pseudo}"
+    [[ -e "${LIVE_ROOT}/bin/sudo" ]] && echo "bin/sudo m 4755 0 0" >> "${pseudo}"
+    [[ -e "${LIVE_ROOT}/bin/su" ]] && echo "bin/su m 4755 0 0" >> "${pseudo}"
+    [[ -e "${LIVE_ROOT}/etc/shadow" ]] && echo "etc/shadow m 600 0 0" >> "${pseudo}"
+
     run_logged mksquashfs "${LIVE_ROOT}" "${ISO_DIR}/iso-root/raven/filesystem.squashfs" \
         -comp zstd -Xcompression-level 15 \
+        -pf "${pseudo}" -pseudo-override \
         -b 1M -no-duplicates -quiet
 
     log_success "Squashfs created"
@@ -1065,6 +1479,7 @@ main() {
     check_dependencies
     setup_live_root
     copy_kernel
+    copy_kernel_modules
     copy_initramfs
     copy_coreutils
     copy_sudo_rs
@@ -1072,9 +1487,12 @@ main() {
     copy_shells
     copy_raven_packages
     copy_package_manager
+    copy_diagnostics_tools
     copy_networking_tools
     copy_wayland_tools
     copy_ca_certificates
+    copy_firmware
+    setup_pam_and_nss
     copy_libraries
     create_config_files
     create_init_system

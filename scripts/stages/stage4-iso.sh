@@ -90,6 +90,156 @@ create_live_init() {
 
     mkdir -p "${SYSROOT_DIR}"/{bin,sbin,etc}
 
+    # Provide a default raven-init config in the ISO so tools can reference it.
+    mkdir -p "${SYSROOT_DIR}/etc/raven"
+    if [[ -f "${PROJECT_ROOT}/etc/raven/init.toml" ]]; then
+        cp "${PROJECT_ROOT}/etc/raven/init.toml" "${SYSROOT_DIR}/etc/raven/init.toml" 2>/dev/null || true
+    elif [[ -f "${PROJECT_ROOT}/init/config/init.toml" ]]; then
+        cp "${PROJECT_ROOT}/init/config/init.toml" "${SYSROOT_DIR}/etc/raven/init.toml" 2>/dev/null || true
+    fi
+    if [[ ! -f "${SYSROOT_DIR}/etc/raven/init.toml" ]]; then
+        cat > "${SYSROOT_DIR}/etc/raven/init.toml" << 'EOF'
+# RavenLinux Init Configuration
+# /etc/raven/init.toml
+
+[system]
+hostname = "raven-linux"
+default_runlevel = "default"
+shutdown_timeout = 10
+load_modules = true
+enable_udev = true
+enable_network = true
+log_level = "info"
+
+[[services]]
+name = "getty-tty1"
+description = "Getty login on tty1"
+exec = "/sbin/agetty"
+args = ["--noclear", "--autologin", "root", "tty1", "linux"]
+restart = true
+enabled = true
+critical = false
+
+[[services]]
+name = "getty-ttyS0"
+description = "Serial console getty on ttyS0"
+exec = "/sbin/agetty"
+args = ["--noclear", "--autologin", "root", "-L", "115200", "ttyS0", "vt102"]
+restart = true
+enabled = false
+critical = false
+
+[[services]]
+name = "dbus"
+description = "D-Bus system message bus"
+exec = "/usr/bin/dbus-daemon"
+args = ["--system", "--nofork", "--nopidfile"]
+restart = true
+enabled = true
+critical = false
+
+[[services]]
+name = "iwd"
+description = "iNet Wireless Daemon"
+exec = "/usr/libexec/iwd"
+args = []
+restart = true
+enabled = true
+critical = false
+EOF
+    fi
+    chmod 0644 "${SYSROOT_DIR}/etc/raven/init.toml" 2>/dev/null || true
+
+    # If earlier build stages weren't run, create minimal auth/NSS files so sudo/login work.
+    local default_shell="/bin/sh"
+    if [[ -x "${SYSROOT_DIR}/bin/zsh" ]]; then
+        default_shell="/bin/zsh"
+    elif [[ -x "${SYSROOT_DIR}/bin/bash" ]]; then
+        default_shell="/bin/bash"
+    fi
+
+    if [[ ! -f "${SYSROOT_DIR}/etc/nsswitch.conf" ]]; then
+        cat > "${SYSROOT_DIR}/etc/nsswitch.conf" << 'EOF'
+passwd: files
+group: files
+shadow: files
+
+hosts: files dns
+networks: files
+
+protocols: files
+services: files
+ethers: files
+rpc: files
+EOF
+    fi
+
+    if [[ ! -f "${SYSROOT_DIR}/etc/passwd" ]]; then
+        cat > "${SYSROOT_DIR}/etc/passwd" << EOF
+root:x:0:0:root:/root:${default_shell}
+raven:x:1000:1000:Raven User:/home/raven:${default_shell}
+nobody:x:65534:65534:Nobody:/:/bin/false
+EOF
+    fi
+
+    if [[ ! -f "${SYSROOT_DIR}/etc/group" ]]; then
+        cat > "${SYSROOT_DIR}/etc/group" << 'EOF'
+root:x:0:
+wheel:x:10:raven
+audio:x:11:raven
+video:x:12:raven
+input:x:13:raven
+users:x:100:raven
+raven:x:1000:
+nobody:x:65534:
+EOF
+    fi
+
+    if [[ ! -f "${SYSROOT_DIR}/etc/shadow" ]]; then
+        cat > "${SYSROOT_DIR}/etc/shadow" << 'EOF'
+root::0:0:99999:7:::
+raven::0:0:99999:7:::
+nobody:!:0:0:99999:7:::
+EOF
+        chmod 600 "${SYSROOT_DIR}/etc/shadow" 2>/dev/null || true
+    fi
+
+    if [[ ! -f "${SYSROOT_DIR}/etc/pam.d/sudo" ]]; then
+        mkdir -p "${SYSROOT_DIR}/etc/pam.d" "${SYSROOT_DIR}/etc/security" "${SYSROOT_DIR}/etc/security/limits.d"
+        cat > "${SYSROOT_DIR}/etc/pam.d/sudo" << 'EOF'
+#%PAM-1.0
+auth       required     pam_env.so
+auth       required     pam_unix.so nullok try_first_pass
+account    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
+session    required     pam_unix.so
+EOF
+        cat > "${SYSROOT_DIR}/etc/pam.d/su" << 'EOF'
+#%PAM-1.0
+auth       required     pam_env.so
+auth       required     pam_unix.so nullok try_first_pass
+account    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
+session    required     pam_unix.so
+EOF
+        cat > "${SYSROOT_DIR}/etc/pam.d/login" << 'EOF'
+#%PAM-1.0
+auth       required     pam_env.so
+auth       required     pam_unix.so nullok try_first_pass
+account    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
+session    required     pam_unix.so
+EOF
+        cat > "${SYSROOT_DIR}/etc/pam.d/passwd" << 'EOF'
+#%PAM-1.0
+password   required     pam_unix.so nullok sha512
+EOF
+        cat > "${SYSROOT_DIR}/etc/security/limits.conf" << 'EOF'
+# /etc/security/limits.conf
+# Minimal defaults (RavenLinux). Add custom limits in /etc/security/limits.d/.
+EOF
+    fi
+
     cat > "${SYSROOT_DIR}/init" << 'INIT'
 #!/bin/bash
 # RavenLinux Live Init
@@ -110,6 +260,31 @@ mountpoint -q /dev/shm || mount -t tmpfs tmpfs /dev/shm
 mountpoint -q /tmp || mount -t tmpfs tmpfs /tmp
 mountpoint -q /run || mount -t tmpfs tmpfs /run
 
+# Fix common permission/ownership issues that break PAM/sudo in live images.
+fix_auth_perms() {
+    command -v chown >/dev/null 2>&1 || return 0
+    command -v chmod >/dev/null 2>&1 || return 0
+
+    # PAM rejects insecure shadow files (wrong owner/mode), and sudo requires setuid root.
+    if [ -e /etc/shadow ]; then
+        chown 0:0 /etc/shadow 2>/dev/null || true
+        chmod 600 /etc/shadow 2>/dev/null || true
+    fi
+
+    for f in /etc/passwd /etc/group; do
+        [ -e "$f" ] || continue
+        chown 0:0 "$f" 2>/dev/null || true
+        chmod 644 "$f" 2>/dev/null || true
+    done
+
+    for b in /bin/sudo /bin/su; do
+        [ -e "$b" ] || continue
+        chown 0:0 "$b" 2>/dev/null || true
+        chmod 4755 "$b" 2>/dev/null || true
+    done
+}
+fix_auth_perms || true
+
 # Set hostname (use /proc method as fallback if hostname binary is missing)
 if command -v hostname >/dev/null 2>&1; then
     hostname raven-linux 2>/dev/null || true
@@ -127,6 +302,33 @@ fi
 if command -v udevadm >/dev/null 2>&1; then
     udevadm trigger --action=add 2>/dev/null || udevadm trigger 2>/dev/null || true
     udevadm settle 2>/dev/null || true
+fi
+
+# Start D-Bus system bus (needed by iwd/iwctl and many GUI apps)
+if [ ! -S /run/dbus/system_bus_socket ] && command -v dbus-daemon >/dev/null 2>&1; then
+    mkdir -p /run/dbus
+    if command -v dbus-uuidgen >/dev/null 2>&1; then
+        dbus-uuidgen --ensure=/etc/machine-id >/dev/null 2>&1 || true
+    fi
+    dbus-daemon --system --fork --nopidfile >/dev/null 2>&1 || true
+fi
+
+# Start iwd if available (WiFi daemon)
+if ! pgrep -x iwd >/dev/null 2>&1; then
+    if [ -x /usr/libexec/iwd ]; then
+        /usr/libexec/iwd >/dev/null 2>&1 &
+    elif command -v iwd >/dev/null 2>&1; then
+        iwd >/dev/null 2>&1 &
+    fi
+fi
+
+# Bring up wired networking automatically (WiFi still needs a connect step)
+if command -v raven-dhcp >/dev/null 2>&1; then
+    raven-dhcp --all -q >/dev/null 2>&1 || true
+elif command -v dhcpcd >/dev/null 2>&1; then
+    dhcpcd -q >/dev/null 2>&1 || true
+elif command -v udhcpc >/dev/null 2>&1; then
+    udhcpc -q -f >/dev/null 2>&1 || true
 fi
 
 # Try to load common GPU drivers (helps VMs where the driver is modular).
@@ -182,12 +384,15 @@ start_shell_loop() {
 
     # Find first available TTY
     local tty_dev="/dev/tty1"
+    if echo "$cmdline" | grep -qE '(^| )raven\.console=serial($| )'; then
+        tty_dev="/dev/ttyS0"
+    fi
     if [ ! -c "$tty_dev" ]; then
         tty_dev="/dev/console"
     fi
 
-    # Switch to tty1 if openvt is available
-    if command -v openvt >/dev/null 2>&1; then
+    # Switch to tty1 if openvt is available (only makes sense for real VTs)
+    if [ "$tty_dev" = "/dev/tty1" ] && command -v openvt >/dev/null 2>&1; then
         while true; do
             if [ -x /bin/bash ]; then
                 # Use -- to separate openvt options from command arguments
@@ -204,9 +409,14 @@ start_shell_loop() {
     else
         # Fallback: redirect to TTY device directly
         # Close inherited fds and reopen on the TTY
+        if [ "$tty_dev" = "/dev/ttyS0" ] && command -v stty >/dev/null 2>&1; then
+            stty -F "$tty_dev" 115200 cs8 -cstopb -parenb 2>/dev/null || true
+        fi
         exec 0<>"$tty_dev" 1>&0 2>&0
         while true; do
-            if [ -x /bin/bash ]; then
+            if [ "$tty_dev" = "/dev/ttyS0" ] && [ -x /sbin/agetty ]; then
+                /sbin/agetty --noclear --autologin root -L 115200 ttyS0 vt102 || true
+            elif [ -x /bin/bash ]; then
                 /bin/bash --login -i
             elif [ -x /bin/sh ]; then
                 /bin/sh -l
@@ -344,6 +554,18 @@ copy_kernel_modules() {
 
     if [[ -d "${SYSROOT_DIR}/lib/modules/${release}" ]]; then
         log_info "  Copied /lib/modules/${release}"
+
+        # Generate modules.dep/modules.alias so udev + modprobe can auto-load drivers.
+        if command -v depmod &>/dev/null; then
+            if depmod -b "${SYSROOT_DIR}" "${release}" 2>/dev/null; then
+                log_info "  Ran depmod for ${release}"
+            else
+                log_warn "depmod failed for ${release}; kernel module auto-loading may not work"
+            fi
+        else
+            log_warn "depmod not found on host; kernel module auto-loading may not work"
+        fi
+
         log_success "Kernel modules copied"
     else
         log_warn "Failed to copy kernel modules into sysroot"
@@ -464,8 +686,15 @@ create_squashfs() {
     # Install packages to sysroot before creating squashfs
     install_packages_to_sysroot
 
+    local pseudo="${LOGS_DIR}/squashfs.pseudo"
+    : > "${pseudo}"
+    [[ -e "${SYSROOT_DIR}/bin/sudo" ]] && echo "bin/sudo m 4755 0 0" >> "${pseudo}"
+    [[ -e "${SYSROOT_DIR}/bin/su" ]] && echo "bin/su m 4755 0 0" >> "${pseudo}"
+    [[ -e "${SYSROOT_DIR}/etc/shadow" ]] && echo "etc/shadow m 600 0 0" >> "${pseudo}"
+
     mksquashfs "${SYSROOT_DIR}" "${ISO_ROOT}/raven/filesystem.squashfs" \
         -comp zstd -Xcompression-level 15 \
+        -pf "${pseudo}" -pseudo-override \
         -b 1M -no-duplicates -quiet \
         2>&1 | tee "${LOGS_DIR}/squashfs.log"
 

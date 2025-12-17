@@ -147,6 +147,29 @@ impl Default for BootConfig {
             children: Vec::new(),
         });
 
+        // Serial-first entries for headless debugging (make ttyS0 the primary console)
+        entries.push(BootEntry {
+            name: String::from("Raven Linux (Serial Console)"),
+            kernel: String::from("\\EFI\\raven\\vmlinuz"),
+            initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
+            cmdline: String::from(
+                "rdinit=/init quiet loglevel=3 raven.console=serial console=tty0 console=ttyS0,115200",
+            ),
+            entry_type: EntryType::LinuxEfi,
+            children: Vec::new(),
+        });
+
+        entries.push(BootEntry {
+            name: String::from("Raven Linux (Serial Console, Verbose)"),
+            kernel: String::from("\\EFI\\raven\\vmlinuz"),
+            initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
+            cmdline: String::from(
+                "rdinit=/init loglevel=7 raven.console=serial console=tty0 console=ttyS0,115200",
+            ),
+            entry_type: EntryType::LinuxEfi,
+            children: Vec::new(),
+        });
+
         // Graphical submenu
         let mut graphical_entries: Vec<BootEntry> = Vec::new();
 
@@ -205,6 +228,17 @@ impl Default for BootConfig {
             kernel: String::from("\\EFI\\raven\\vmlinuz"),
             initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
             cmdline: String::from("rdinit=/init single console=ttyS0,115200 console=tty0"),
+            entry_type: EntryType::LinuxEfi,
+            children: Vec::new(),
+        });
+
+        entries.push(BootEntry {
+            name: String::from("Raven Linux (Recovery, Serial Console)"),
+            kernel: String::from("\\EFI\\raven\\vmlinuz"),
+            initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
+            cmdline: String::from(
+                "rdinit=/init single raven.console=serial console=tty0 console=ttyS0,115200",
+            ),
             entry_type: EntryType::LinuxEfi,
             children: Vec::new(),
         });

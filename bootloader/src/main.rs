@@ -160,6 +160,42 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         }
     };
 
+    // If no keyboard input protocol is available (common in fully headless QEMU setups),
+    // auto-boot the default entry rather than waiting in the menu forever.
+    if !has_text_input(system_table.boot_services()) {
+        if let Some(entry) = config.entries.get(config.default).cloned() {
+            {
+                let stdout = system_table.stdout();
+                let _ = stdout.set_color(Color::Yellow, Color::Black);
+                let _ = writeln!(
+                    stdout,
+                    "No keyboard input detected; auto-booting default entry: {}",
+                    entry.name
+                );
+                let _ = stdout.set_color(Color::LightGray, Color::Black);
+                let _ = writeln!(
+                    stdout,
+                    "Tip: use the 'Serial Console' entry for -nographic debugging."
+                );
+            }
+
+            let result = boot_entry(system_table.boot_services(), image_handle, &entry);
+
+            {
+                let stdout = system_table.stdout();
+                let _ = stdout.set_color(Color::Red, Color::Black);
+                let _ = writeln!(stdout, "\nBoot failed: {:?}", result);
+                let _ = writeln!(stdout, "Press any key to reboot...");
+            }
+            wait_for_key(system_table.boot_services());
+            system_table.runtime_services().reset(
+                uefi::table::runtime::ResetType::COLD,
+                Status::SUCCESS,
+                None,
+            );
+        }
+    }
+
     // Main menu loop with submenu support
     let mut nav = MenuNav::new(&config);
 
@@ -217,6 +253,12 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
             }
         }
     }
+}
+
+fn has_text_input(boot_services: &BootServices) -> bool {
+    boot_services
+        .get_handle_for_protocol::<uefi::proto::console::text::Input>()
+        .is_ok()
 }
 
 /// Result of menu interaction

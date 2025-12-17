@@ -95,10 +95,14 @@ copy_system_utils() {
         ps kill killall pkill pgrep top htop
         # File operations
         find grep sed awk xargs file less more
+        # Debugging/diagnostics
+        strace lsof
         # Disk utilities
         mount umount mountpoint fdisk parted mkfs.ext4 mkfs.vfat fsck blkid lsblk
         # System info
         dmesg lspci lsusb free uptime uname hostname hostnamectl
+        dmidecode lscpu
+        sensors smartctl nvme hdparm
         # User management
         passwd login chpasswd useradd usermod groupadd
         # Archiving
@@ -117,6 +121,8 @@ copy_system_utils() {
         seatd
         # Kernel module utilities (needed for auto-loading GPU/input drivers)
         modprobe insmod rmmod lsmod depmod modinfo kmod
+        # Boot/SecureBoot diagnostics (optional)
+        mokutil efibootmgr
         # Reference compositor (optional)
         weston
         weston-terminal
@@ -328,17 +334,19 @@ copy_system_utils() {
 copy_networking() {
     log_info "Copying networking tools..."
 
+    ensure_ethtool
+
     local net_tools=(
         ip ping ping6 ss netstat route
         dhcpcd dhclient udhcpc
         iwd iwctl iwmon                    # iwd (preferred WiFi backend)
         wpa_supplicant wpa_cli wpa_passphrase  # wpa_supplicant (fallback)
-        iw iwconfig iwlist rfkill
+        iw iwconfig iwlist rfkill ethtool
         ifconfig
         curl wget
         nc ncat
         host dig nslookup
-        traceroute tracepath
+        traceroute tracepath mtr tcpdump
     )
 
     for tool in "${net_tools[@]}"; do
@@ -361,6 +369,194 @@ copy_networking() {
     echo "nameserver 1.1.1.1" >> "${SYSROOT_DIR}/etc/resolv.conf"
 
     log_success "Networking tools installed"
+}
+
+# =============================================================================
+# Ensure ethtool is available (host copy fallback builds from source)
+# =============================================================================
+ensure_ethtool() {
+    # Prefer host ethtool if present.
+    if command -v ethtool &>/dev/null; then
+        return 0
+    fi
+
+    # Already present in sysroot from a previous step.
+    if [[ -x "${SYSROOT_DIR}/bin/ethtool" ]] || [[ -x "${SYSROOT_DIR}/sbin/ethtool" ]]; then
+        return 0
+    fi
+
+    local version="${RAVEN_ETHTOOL_VERSION:-6.11}"
+    local sources_dir="${BUILD_DIR}/sources"
+    local tarball="${sources_dir}/ethtool-${version}.tar.xz"
+    local url="https://www.kernel.org/pub/software/network/ethtool/ethtool-${version}.tar.xz"
+    local build_dir="${sources_dir}/ethtool-${version}"
+
+    mkdir -p "${sources_dir}" 2>/dev/null || true
+
+    if [[ ! -f "${tarball}" ]]; then
+        if command -v curl &>/dev/null; then
+            log_info "Downloading ethtool ${version}..."
+            curl -fL -o "${tarball}" "${url}" 2>/dev/null || true
+        elif command -v wget &>/dev/null; then
+            log_info "Downloading ethtool ${version}..."
+            wget -O "${tarball}" "${url}" 2>/dev/null || true
+        else
+            log_warn "Cannot download ethtool (need curl or wget); ethtool will be missing"
+            return 0
+        fi
+    fi
+
+    if [[ ! -f "${tarball}" ]]; then
+        log_warn "ethtool not found on host and download failed; ethtool will be missing"
+        return 0
+    fi
+
+    if ! command -v make &>/dev/null || ! command -v cc &>/dev/null; then
+        log_warn "Cannot build ethtool (missing make/cc); install ethtool on the host or add build tools"
+        return 0
+    fi
+
+    rm -rf "${build_dir}" 2>/dev/null || true
+    if tar -xf "${tarball}" -C "${sources_dir}" 2>/dev/null; then
+        :
+    else
+        log_warn "Failed to extract ${tarball}; ethtool will be missing"
+        return 0
+    fi
+
+    if [[ ! -d "${build_dir}" ]]; then
+        log_warn "Expected extracted directory ${build_dir} not found; ethtool will be missing"
+        return 0
+    fi
+
+    log_info "Building ethtool ${version}..."
+    (
+        cd "${build_dir}"
+        ./configure --prefix=/usr --sbindir=/sbin >/dev/null 2>&1 || ./configure --prefix=/usr --sbindir=/sbin
+        make -j"${RAVEN_JOBS:-$(nproc)}" >/dev/null 2>&1 || make -j"${RAVEN_JOBS:-$(nproc)}"
+        make DESTDIR="${SYSROOT_DIR}" install-strip >/dev/null 2>&1 || make DESTDIR="${SYSROOT_DIR}" install
+    ) || {
+        log_warn "ethtool build failed; ethtool will be missing"
+        return 0
+    }
+
+    if [[ -x "${SYSROOT_DIR}/sbin/ethtool" ]] || [[ -x "${SYSROOT_DIR}/bin/ethtool" ]]; then
+        log_info "  Installed ethtool into sysroot"
+    else
+        log_warn "ethtool build completed but binary not found in sysroot"
+    fi
+}
+
+# =============================================================================
+# Setup PAM + NSS runtime pieces (sudo/login need dlopened modules)
+# =============================================================================
+setup_pam_and_nss() {
+    log_info "Setting up PAM and NSS runtime modules..."
+
+    mkdir -p "${SYSROOT_DIR}/etc/pam.d" "${SYSROOT_DIR}/etc/security"
+    mkdir -p "${SYSROOT_DIR}/lib/security" "${SYSROOT_DIR}/usr/lib/security"
+
+    # Minimal PAM policies (avoid distro-specific include stacks).
+    cat > "${SYSROOT_DIR}/etc/pam.d/sudo" << 'EOF'
+#%PAM-1.0
+auth       required     pam_env.so
+auth       required     pam_unix.so nullok try_first_pass
+account    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
+session    required     pam_unix.so
+EOF
+
+    cat > "${SYSROOT_DIR}/etc/pam.d/su" << 'EOF'
+#%PAM-1.0
+auth       required     pam_env.so
+auth       required     pam_unix.so nullok try_first_pass
+account    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
+session    required     pam_unix.so
+EOF
+
+    cat > "${SYSROOT_DIR}/etc/pam.d/login" << 'EOF'
+#%PAM-1.0
+auth       required     pam_env.so
+auth       required     pam_unix.so nullok try_first_pass
+account    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
+session    required     pam_unix.so
+EOF
+
+    cat > "${SYSROOT_DIR}/etc/pam.d/passwd" << 'EOF'
+#%PAM-1.0
+password   required     pam_unix.so nullok sha512
+EOF
+
+    # Minimal security config expected by some PAM modules.
+    cat > "${SYSROOT_DIR}/etc/security/limits.conf" << 'EOF'
+# /etc/security/limits.conf
+# Minimal defaults (RavenLinux). Add custom limits in /etc/security/limits.d/.
+EOF
+    mkdir -p "${SYSROOT_DIR}/etc/security/limits.d"
+
+    # Copy PAM modules from host into both common module roots.
+    local host_security_dirs=()
+    for d in \
+        /lib/security \
+        /usr/lib/security \
+        /lib64/security \
+        /usr/lib64/security \
+        /lib/x86_64-linux-gnu/security \
+        /usr/lib/x86_64-linux-gnu/security; do
+        [[ -d "$d" ]] && host_security_dirs+=("$d")
+    done
+
+    local pam_modules=(
+        pam_unix.so
+        pam_env.so
+        pam_deny.so
+        pam_permit.so
+        pam_warn.so
+        pam_limits.so
+        pam_loginuid.so
+    )
+
+    local copied_any=0
+    for mod in "${pam_modules[@]}"; do
+        local src=""
+        for d in "${host_security_dirs[@]}"; do
+            if [[ -e "${d}/${mod}" ]]; then
+                src="${d}/${mod}"
+                break
+            fi
+        done
+        [[ -n "$src" ]] || continue
+        cp -L "$src" "${SYSROOT_DIR}/lib/security/${mod}" 2>/dev/null || true
+        cp -L "$src" "${SYSROOT_DIR}/usr/lib/security/${mod}" 2>/dev/null || true
+        copied_any=1
+    done
+
+    if [[ "${copied_any}" -eq 0 ]]; then
+        log_warn "No PAM modules found on host; sudo/login may not work (install a PAM stack and rerun stage2)"
+    else
+        log_info "  Added PAM modules"
+    fi
+
+    # NSS modules are dlopened by glibc; ship the common ones for users/dns.
+    mkdir -p "${SYSROOT_DIR}/lib" "${SYSROOT_DIR}/usr/lib"
+    local nss_libs=(
+        libnss_files.so.2
+        libnss_dns.so.2
+        libnss_compat.so.2
+    )
+    for lib in "${nss_libs[@]}"; do
+        for d in /lib /lib64 /usr/lib /usr/lib64 /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu; do
+            if [[ -e "${d}/${lib}" ]]; then
+                cp -L "${d}/${lib}" "${SYSROOT_DIR}/lib/${lib}" 2>/dev/null || true
+                cp -L "${d}/${lib}" "${SYSROOT_DIR}/usr/lib/${lib}" 2>/dev/null || true
+                break
+            fi
+        done
+    done
+
+    log_success "PAM/NSS runtime setup complete"
 }
 
 # =============================================================================
@@ -397,6 +593,46 @@ copy_ca_certificates() {
 }
 
 # =============================================================================
+# Copy firmware blobs (needed for WiFi, etc.)
+# =============================================================================
+copy_firmware() {
+    log_info "Copying firmware blobs..."
+
+    local host_firmware=""
+    for candidate in /usr/lib/firmware /lib/firmware; do
+        if [[ -d "$candidate" ]]; then
+            host_firmware="$candidate"
+            break
+        fi
+    done
+
+    if [[ -z "$host_firmware" ]]; then
+        log_warn "No host firmware directory found; WiFi (e.g. RTL8852BE) may not work"
+        return 0
+    fi
+
+    mkdir -p "${SYSROOT_DIR}/lib/firmware"
+
+    local copied_any=0
+    # Common Realtek WiFi firmware locations (coverage across many chipsets).
+    for dir in rtw89 rtw88 rtlwifi rtl_nic rtl_bt; do
+        if [[ -d "${host_firmware}/${dir}" ]]; then
+            mkdir -p "${SYSROOT_DIR}/lib/firmware/${dir}"
+            cp -a "${host_firmware}/${dir}/." "${SYSROOT_DIR}/lib/firmware/${dir}/" 2>/dev/null || true
+            log_info "  Added ${dir} firmware"
+            copied_any=1
+        fi
+    done
+
+    if [[ "${copied_any}" -eq 0 ]]; then
+        log_warn "No Realtek WiFi firmware found under ${host_firmware}; install linux-firmware on the host and rerun stage2"
+        return 0
+    fi
+
+    log_success "Firmware installed"
+}
+
+# =============================================================================
 # Copy required libraries for all binaries
 # =============================================================================
 copy_libraries() {
@@ -427,6 +663,10 @@ copy_libraries() {
     # main executable). Copy deps for common module locations we ship.
     log_info "Copying runtime libraries for dlopened modules..."
     for so in \
+        "${SYSROOT_DIR}"/lib/security/*.so \
+        "${SYSROOT_DIR}"/usr/lib/security/*.so \
+        "${SYSROOT_DIR}"/lib/libnss_*.so.* \
+        "${SYSROOT_DIR}"/usr/lib/libnss_*.so.* \
         "${SYSROOT_DIR}"/usr/lib/libweston-*/*.so \
         "${SYSROOT_DIR}"/usr/lib64/libweston-*/*.so \
         "${SYSROOT_DIR}"/usr/lib/weston/*.so \
@@ -919,6 +1159,81 @@ UNAMESCRIPT
 127.0.1.1   raven-linux.localdomain raven-linux
 EOF
 
+    # /etc/raven/init.toml (service configuration for raven-init)
+    mkdir -p "${SYSROOT_DIR}/etc/raven"
+    if [[ -f "${PROJECT_ROOT}/etc/raven/init.toml" ]]; then
+        cp "${PROJECT_ROOT}/etc/raven/init.toml" "${SYSROOT_DIR}/etc/raven/init.toml"
+    elif [[ -f "${PROJECT_ROOT}/init/config/init.toml" ]]; then
+        cp "${PROJECT_ROOT}/init/config/init.toml" "${SYSROOT_DIR}/etc/raven/init.toml"
+    fi
+    if [[ ! -f "${SYSROOT_DIR}/etc/raven/init.toml" ]]; then
+        cat > "${SYSROOT_DIR}/etc/raven/init.toml" << 'EOF'
+# RavenLinux Init Configuration
+# /etc/raven/init.toml
+
+[system]
+hostname = "raven-linux"
+default_runlevel = "default"
+shutdown_timeout = 10
+load_modules = true
+enable_udev = true
+enable_network = true
+log_level = "info"
+
+[[services]]
+name = "getty-tty1"
+description = "Getty login on tty1"
+exec = "/sbin/agetty"
+args = ["--noclear", "--autologin", "root", "tty1", "linux"]
+restart = true
+enabled = true
+critical = false
+
+[[services]]
+name = "getty-ttyS0"
+description = "Serial console getty on ttyS0"
+exec = "/sbin/agetty"
+args = ["--noclear", "--autologin", "root", "-L", "115200", "ttyS0", "vt102"]
+restart = true
+enabled = false
+critical = false
+
+[[services]]
+name = "dbus"
+description = "D-Bus system message bus"
+exec = "/usr/bin/dbus-daemon"
+args = ["--system", "--nofork", "--nopidfile"]
+restart = true
+enabled = true
+critical = false
+
+[[services]]
+name = "iwd"
+description = "iNet Wireless Daemon"
+exec = "/usr/libexec/iwd"
+args = []
+restart = true
+enabled = true
+critical = false
+EOF
+    fi
+    chmod 0644 "${SYSROOT_DIR}/etc/raven/init.toml" 2>/dev/null || true
+
+    # /etc/nsswitch.conf (glibc NSS defaults; required for users/dns on minimal systems)
+    cat > "${SYSROOT_DIR}/etc/nsswitch.conf" << 'EOF'
+passwd: files
+group: files
+shadow: files
+
+hosts: files dns
+networks: files
+
+protocols: files
+services: files
+ethers: files
+rpc: files
+EOF
+
     # /etc/passwd
     cat > "${SYSROOT_DIR}/etc/passwd" << EOF
 root:x:0:0:root:/root:${default_shell}
@@ -957,12 +1272,26 @@ EOF
     mkdir -p "${SYSROOT_DIR}/etc/sudoers.d"
     cat > "${SYSROOT_DIR}/etc/sudoers" << 'EOF'
 Defaults env_reset
-Defaults lecture=never
+Defaults !lecture
 
 root ALL=(ALL:ALL) ALL
 %wheel ALL=(ALL:ALL) ALL
 EOF
     chmod 0440 "${SYSROOT_DIR}/etc/sudoers" 2>/dev/null || true
+
+    # Kernel module config directories (kmod expects these to exist)
+    mkdir -p "${SYSROOT_DIR}/etc/modprobe.d" "${SYSROOT_DIR}/etc/modules-load.d"
+    cat > "${SYSROOT_DIR}/etc/modprobe.d/raven.conf" << 'EOF'
+# RavenLinux kernel module configuration
+# Place module options/blacklists here.
+EOF
+
+    # Realtek rtw89 (RTL8852BE) stability defaults
+    cat > "${SYSROOT_DIR}/etc/modprobe.d/rtw89.conf" << 'EOF'
+# RavenLinux: Realtek rtw89 defaults
+# RTL8852BE often fails to bring up a netdev with PCIe ASPM enabled on some laptops.
+options rtw89_pci disable_aspm=1
+EOF
 
     # rvn package manager config
     mkdir -p "${SYSROOT_DIR}/etc/rvn"
@@ -1182,7 +1511,9 @@ main() {
     copy_shells
     copy_system_utils
     copy_networking
+    setup_pam_and_nss
     copy_ca_certificates
+    copy_firmware
     copy_libraries
     copy_terminfo
     copy_locale_data
