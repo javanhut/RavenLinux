@@ -255,14 +255,14 @@ fn install_bootloader(target: &str, device: &str, encrypted: bool) -> Result<()>
 
 /// Create user account
 fn create_user(target: &str, username: &str, password: &str, full_name: &str) -> Result<()> {
-    // Create user with zsh as default shell
+    // Create user with bash as default shell
     chroot_exec(
         target,
         &[
             "useradd",
             "-m",
             "-G", "wheel,video,audio",
-            "-s", "/bin/zsh",
+            "-s", "/bin/bash",
             "-c", full_name,
             username,
         ],

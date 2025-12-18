@@ -183,12 +183,6 @@ EOF
         log_info "  Added bash"
     fi
 
-    # Copy zsh if available
-    if command -v zsh &>/dev/null; then
-        cp "$(which zsh)" "${INITRAMFS_DIR}/bin/zsh"
-        log_info "  Added zsh"
-    fi
-
     log_success "Binaries copied"
 }
 
@@ -249,7 +243,7 @@ create_config_files() {
 
     # /etc/passwd
     cat > "${INITRAMFS_DIR}/etc/passwd" <<'PASSWD'
-root:x:0:0:root:/root:/bin/zsh
+root:x:0:0:root:/root:/bin/bash
 nobody:x:65534:65534:Nobody:/:/bin/false
 PASSWD
 
@@ -271,7 +265,6 @@ SHADOW
     cat > "${INITRAMFS_DIR}/etc/shells" <<'SHELLS'
 /bin/sh
 /bin/bash
-/bin/zsh
 SHELLS
 
     # /etc/profile
@@ -285,17 +278,17 @@ alias ls='ls --color=auto'
 alias ll='ls -la'
 PROFILE
 
-    # Root's zshrc
+    # Root's bashrc
     mkdir -p "${INITRAMFS_DIR}/root"
-    cat > "${INITRAMFS_DIR}/root/.zshrc" <<'ZSHRC'
+    cat > "${INITRAMFS_DIR}/root/.bashrc" <<'BASHRC'
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export HOME=/root
 export TERM=linux
 export RAVEN_LINUX=1
-PROMPT='[%n@raven-linux]# '
+PS1='[\u@raven-linux]# '
 alias ls='ls --color=auto'
 alias ll='ls -la'
-ZSHRC
+BASHRC
 
     log_success "Configuration files created"
 }
@@ -340,10 +333,8 @@ echo "  Type 'poweroff' to shutdown"
 echo "  Or press Ctrl+A, X to exit QEMU"
 echo ""
 
-# Check for zsh, fall back to bash
-if [ -x /bin/zsh ]; then
-    exec /bin/zsh -l
-elif [ -x /bin/bash ]; then
+# Start an interactive bash shell
+if [ -x /bin/bash ]; then
     exec /bin/bash -l
 else
     exec /bin/bash

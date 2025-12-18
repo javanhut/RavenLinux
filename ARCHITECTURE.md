@@ -16,7 +16,7 @@ RavenLinux is an independent, developer-focused Linux distribution built from sc
 - **C Library**: musl libc (lightweight, secure) or glibc
 - **Init System**: Custom `raven-init` or systemd
 - **Core Utilities**: uutils (Rust coreutils)
-- **Shell**: zsh (default), bash, sh available
+- **Shell**: bash (default), fish, sh available
 
 ### 2. Package Manager (rvn)
 - Written in Rust for performance

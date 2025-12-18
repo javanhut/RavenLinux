@@ -335,17 +335,16 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            xorriso \
-            mtools \
-            dosfstools \
-            grub-efi-amd64-bin \
-            grub-pc-bin \
-            squashfs-tools \
-            cpio \
-            zstd \
-            bash \
-            zsh
+	          sudo apt-get install -y \
+	            xorriso \
+	            mtools \
+	            dosfstools \
+	            grub-efi-amd64-bin \
+	            grub-pc-bin \
+	            squashfs-tools \
+	            cpio \
+	            zstd \
+	            bash
 
       - name: Download kernel artifact
         uses: actions/download-artifact@v4

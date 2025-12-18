@@ -63,16 +63,7 @@ fi
 copy_shells() {
     log_info "Copying shells..."
 
-    local have_zsh=false
     local have_bash=false
-
-    # Copy zsh
-    if command -v zsh &>/dev/null; then
-        cp "$(which zsh)" "${SYSROOT_DIR}/bin/zsh" && have_zsh=true
-        mkdir -p "${SYSROOT_DIR}/usr/share/zsh"
-        cp -r /usr/share/zsh/* "${SYSROOT_DIR}/usr/share/zsh/" 2>/dev/null || true
-        log_info "  Added zsh"
-    fi
 
     # Copy bash
     if command -v bash &>/dev/null; then
@@ -81,9 +72,7 @@ copy_shells() {
     fi
 
     # Create sh symlink
-    if $have_zsh; then
-        ln -sf zsh "${SYSROOT_DIR}/bin/sh"
-    elif $have_bash; then
+    if $have_bash; then
         ln -sf bash "${SYSROOT_DIR}/bin/sh"
     else
         log_warn "  WARNING: No shell available for /bin/sh!"
@@ -1372,17 +1361,14 @@ password  required    pam_unix.so sha512 shadow try_first_pass
 # End /etc/pam.d/system-password
 EOF
 
-    # login: Console login (LFS-based with proper authentication)
+    # login: Console login (simple config that works)
     cat > "${SYSROOT_DIR}/etc/pam.d/login" << 'EOF'
 #%PAM-1.0
-# Begin /etc/pam.d/login - RavenLinux (LFS-based)
-auth      requisite   pam_nologin.so
-auth      include     system-auth
-account   include     system-account
-session   required    pam_env.so
-session   required    pam_limits.so
-session   include     system-session
-password  include     system-password
+# Begin /etc/pam.d/login - RavenLinux
+auth       required     pam_unix.so nullok try_first_pass
+account    required     pam_unix.so
+session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
 # End /etc/pam.d/login
 EOF
 
@@ -2392,12 +2378,10 @@ create_system_directories() {
 create_configs() {
     log_info "Creating configuration files..."
 
-    # Default shell preference: bash > zsh > sh
+    # Default shell preference: bash > sh
     local default_shell="/bin/sh"
     if [[ -x "${SYSROOT_DIR}/bin/bash" ]]; then
         default_shell="/bin/bash"
-    elif [[ -x "${SYSROOT_DIR}/bin/zsh" ]]; then
-        default_shell="/bin/zsh"
     elif [[ -x "${SYSROOT_DIR}/bin/sh" ]]; then
         default_shell="/bin/sh"
     fi
@@ -2630,7 +2614,6 @@ EOF
     cat > "${SYSROOT_DIR}/etc/shells" << 'EOF'
 /bin/sh
 /bin/bash
-/bin/zsh
 EOF
 
     # /etc/sudoers (wheel group allowed by default)
@@ -2814,7 +2797,7 @@ IFS=: read -r _ _ USER_UID USER_GID _ USER_HOME USER_SHELL < <(grep "^${TARGET_U
 
 # Validate/find shell
 if [[ ! -x "$USER_SHELL" ]]; then
-    for sh in /bin/bash /bin/zsh /bin/sh; do
+    for sh in /bin/bash /bin/sh; do
         [[ -x "$sh" ]] && { USER_SHELL="$sh"; break; }
     done
 fi
@@ -2938,19 +2921,26 @@ EOF
     mkdir -p "${SYSROOT_DIR}/home/raven"
     mkdir -p "${SYSROOT_DIR}/root"
 
-    # ZSH config
-    mkdir -p "${SYSROOT_DIR}/etc/zsh"
-    cat > "${SYSROOT_DIR}/etc/zsh/zshrc" << 'EOF'
-# RavenLinux ZSH Configuration
-HISTFILE=~/.zsh_history
+    # Bash config (system + default user configs)
+    mkdir -p "${SYSROOT_DIR}/etc/bash" "${SYSROOT_DIR}/etc/skel"
+
+    if [[ -f "${PROJECT_ROOT}/configs/bash/bashrc" ]]; then
+        cp "${PROJECT_ROOT}/configs/bash/bashrc" "${SYSROOT_DIR}/etc/bash/bashrc"
+        cp "${PROJECT_ROOT}/configs/bash/bashrc" "${SYSROOT_DIR}/etc/bashrc"
+    else
+        cat > "${SYSROOT_DIR}/etc/bashrc" << 'EOF'
+# RavenLinux default bashrc (generated)
+case $- in
+    *i*) ;;
+      *) return ;;
+esac
+
+HISTFILE=~/.bash_history
 HISTSIZE=10000
-SAVEHIST=10000
-setopt SHARE_HISTORY HIST_IGNORE_DUPS
+HISTFILESIZE=10000
+shopt -s histappend
 
-autoload -Uz compinit && compinit
-autoload -Uz promptinit && promptinit
-
-    PROMPT='[%n@raven-linux]# '
+PS1='[\u@raven-linux]# '
 
 alias ls='ls --color=auto'
 alias ll='ls -la'
@@ -2958,15 +2948,25 @@ alias la='ls -A'
 alias grep='grep --color=auto'
 alias ..='cd ..'
 
-bindkey -v
-bindkey '^R' history-incremental-search-backward
-
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin:$HOME/.local/bin
 export EDITOR=vem
+export VISUAL=vem
 EOF
+        cp "${SYSROOT_DIR}/etc/bashrc" "${SYSROOT_DIR}/etc/bash/bashrc"
+    fi
 
-    cp "${SYSROOT_DIR}/etc/zsh/zshrc" "${SYSROOT_DIR}/home/raven/.zshrc"
-    cp "${SYSROOT_DIR}/etc/zsh/zshrc" "${SYSROOT_DIR}/root/.zshrc"
+    cp "${SYSROOT_DIR}/etc/bashrc" "${SYSROOT_DIR}/etc/skel/.bashrc" 2>/dev/null || true
+    cp "${SYSROOT_DIR}/etc/bashrc" "${SYSROOT_DIR}/home/raven/.bashrc" 2>/dev/null || true
+    cp "${SYSROOT_DIR}/etc/bashrc" "${SYSROOT_DIR}/root/.bashrc" 2>/dev/null || true
+
+    cat > "${SYSROOT_DIR}/etc/skel/.bash_profile" << 'EOF'
+# RavenLinux bash_profile (generated)
+if [ -f ~/.bashrc ]; then
+    . ~/.bashrc
+fi
+EOF
+    cp "${SYSROOT_DIR}/etc/skel/.bash_profile" "${SYSROOT_DIR}/home/raven/.bash_profile" 2>/dev/null || true
+    cp "${SYSROOT_DIR}/etc/skel/.bash_profile" "${SYSROOT_DIR}/root/.bash_profile" 2>/dev/null || true
 
     # /etc/login.defs - shadow password suite configuration
     cat > "${SYSROOT_DIR}/etc/login.defs" << 'EOF'

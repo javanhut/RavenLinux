@@ -1720,108 +1720,21 @@ RUSTPROFILE
 }
 
 # =============================================================================
-# Build All Shells (zsh, fish, bash) with Dependencies
+# Build Shells (bash, fish) with Dependencies
 # =============================================================================
 build_shells() {
     log_step "Building shells..."
 
-    # Build/install zsh
-    build_zsh
+    # Ensure bash is available (usually from base system)
+    build_bash
 
     # Build/install fish
     build_fish
 
-    # Ensure bash is available (usually from base system)
-    build_bash
-
-    # Set zsh as default shell
+    # Set bash as default shell
     set_default_shell
 
-    log_success "All shells built"
-}
-
-# Build zsh with dependencies
-build_zsh() {
-    log_info "Building zsh..."
-
-    local zsh_ver="5.9"
-    local cache_dir="${BUILD_DIR}/sources"
-    mkdir -p "${cache_dir}"
-
-    # Check if already installed
-    if [[ -f "${SYSROOT_DIR}/usr/bin/zsh" ]]; then
-        log_info "zsh already installed"
-        return 0
-    fi
-
-    # Try to copy from host first
-    if command -v zsh &>/dev/null; then
-        local host_zsh=$(command -v zsh)
-        log_info "Copying host zsh and dependencies..."
-
-        mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/bin"
-        mkdir -p "${SYSROOT_DIR}/usr/lib" "${SYSROOT_DIR}/usr/share/zsh"
-
-        # Copy zsh binary
-        cp "${host_zsh}" "${SYSROOT_DIR}/usr/bin/zsh"
-        chmod 755 "${SYSROOT_DIR}/usr/bin/zsh"
-        ln -sf ../usr/bin/zsh "${SYSROOT_DIR}/bin/zsh"
-
-        # Copy zsh libraries and completions
-        for dir in /usr/share/zsh /usr/lib/zsh; do
-            if [[ -d "${dir}" ]]; then
-                cp -r "${dir}"/* "${SYSROOT_DIR}${dir}/" 2>/dev/null || true
-            fi
-        done
-
-        # Copy required shared libraries
-        copy_binary_deps "${host_zsh}"
-
-        log_success "zsh ${zsh_ver} installed from host"
-        return 0
-    fi
-
-    # Download and build from source
-    local zsh_tarball="zsh-${zsh_ver}.tar.xz"
-    local zsh_url="https://sourceforge.net/projects/zsh/files/zsh/${zsh_ver}/${zsh_tarball}/download"
-
-    if [[ ! -f "${cache_dir}/${zsh_tarball}" ]]; then
-        log_info "Downloading zsh ${zsh_ver}..."
-        if curl -fsSL -o "${cache_dir}/${zsh_tarball}" -L "${zsh_url}"; then
-            log_info "Downloaded zsh"
-        else
-            log_warn "Failed to download zsh"
-            return 1
-        fi
-    fi
-
-    # Extract and build (use a writable copy to avoid leftover root-owned trees)
-    local zsh_src="${cache_dir}/zsh-${zsh_ver}-src"
-    if [[ ! -d "${zsh_src}" ]]; then
-        rm -rf "${zsh_src}"
-        mkdir -p "${zsh_src}"
-        tar -xJf "${cache_dir}/${zsh_tarball}" --strip-components=1 -C "${zsh_src}"
-    fi
-
-    cd "${zsh_src}"
-    # Clean previous build if exists to ensure fresh configure with new flags
-    make distclean 2>/dev/null || make clean 2>/dev/null || true
-
-    if ./configure --prefix=/usr --enable-multibyte --enable-pcre --with-tcsetpgrp; then
-        # Disable termcap module - it conflicts with ncurses' boolcodes type definition
-        # The termcap module defines boolcodes as 'char *[]' but ncurses uses 'const char * const[]'
-        if [[ -f config.modules ]]; then
-            sed -i 's/name=zsh\/termcap.* link=[^ ]*/name=zsh\/termcap modfile=Src\/Modules\/termcap.mdd link=no/' config.modules
-        fi
-    fi
-
-    if make -j$(nproc) && make DESTDIR="${SYSROOT_DIR}" install; then
-        ln -sf ../usr/bin/zsh "${SYSROOT_DIR}/bin/zsh"
-        log_success "zsh ${zsh_ver} built and installed"
-    else
-        log_warn "zsh build failed"
-    fi
-    cd "${PROJECT_ROOT}"
+    log_success "Shells built"
 }
 
 # Build fish with dependencies
@@ -1955,9 +1868,10 @@ build_bash() {
     cd "${bash_src}"
 
     # Set up environment to find our built libraries (ncurses, readline)
+    # -std=gnu89 required for bash's old K&R style C code to compile with modern GCC
     export LDFLAGS="-L${SYSROOT_DIR}/usr/lib -Wl,-rpath,${SYSROOT_DIR}/usr/lib"
     export CPPFLAGS="-I${SYSROOT_DIR}/usr/include -I${SYSROOT_DIR}/usr/include/ncursesw"
-    export CFLAGS="-I${SYSROOT_DIR}/usr/include -I${SYSROOT_DIR}/usr/include/ncursesw"
+    export CFLAGS="-I${SYSROOT_DIR}/usr/include -I${SYSROOT_DIR}/usr/include/ncursesw -std=gnu89"
 
     # Configure bash
     # --without-bash-malloc: use glibc malloc (better for compatibility)
@@ -2265,17 +2179,15 @@ copy_lib_family() {
     done
 }
 
-# Set zsh as the default shell
+# Set bash as the default shell
 set_default_shell() {
-    log_info "Setting zsh as default shell..."
+    log_info "Setting bash as default shell..."
 
     # Create /etc/shells
     mkdir -p "${SYSROOT_DIR}/etc"
     cat > "${SYSROOT_DIR}/etc/shells" << 'SHELLS'
 # Valid login shells - RavenLinux
-# Default: zsh
-/bin/zsh
-/usr/bin/zsh
+# Default: bash
 /bin/bash
 /usr/bin/bash
 /bin/fish
@@ -2284,18 +2196,17 @@ set_default_shell() {
 /usr/bin/sh
 SHELLS
 
-    # Set default shell for root to zsh
+    # Set default shell for root to bash
     if [[ -f "${SYSROOT_DIR}/etc/passwd" ]]; then
-        sed -i 's|root:.*:/bin/bash|root:x:0:0:root:/root:/bin/zsh|' "${SYSROOT_DIR}/etc/passwd" 2>/dev/null || true
-        sed -i 's|root:.*:/bin/sh|root:x:0:0:root:/root:/bin/zsh|' "${SYSROOT_DIR}/etc/passwd" 2>/dev/null || true
+        sed -i 's|^root:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:.*$|root:x:0:0:root:/root:/bin/bash|' "${SYSROOT_DIR}/etc/passwd" 2>/dev/null || true
     else
-        # Create passwd with zsh as default
+        # Create passwd with bash as default
         cat > "${SYSROOT_DIR}/etc/passwd" << 'PASSWD'
-root:x:0:0:root:/root:/bin/zsh
+root:x:0:0:root:/root:/bin/bash
 PASSWD
     fi
 
-    # Create /etc/default/useradd to set zsh as default for new users
+    # Create /etc/default/useradd to set bash as default for new users
     mkdir -p "${SYSROOT_DIR}/etc/default"
     cat > "${SYSROOT_DIR}/etc/default/useradd" << 'USERADD'
 # Default values for useradd
@@ -2303,12 +2214,12 @@ GROUP=100
 HOME=/home
 INACTIVE=-1
 EXPIRE=
-SHELL=/bin/zsh
+SHELL=/bin/bash
 SKEL=/etc/skel
 CREATE_MAIL_SPOOL=yes
 USERADD
 
-    log_success "zsh set as default shell"
+    log_success "bash set as default shell"
 }
 
 # =============================================================================
@@ -2340,22 +2251,6 @@ install_shell_tools() {
 
     # Copy shell configurations
     local configs_dir="${PROJECT_ROOT}/configs"
-
-    # zsh configs
-    if [[ -d "${configs_dir}/zsh" ]]; then
-        mkdir -p "${SYSROOT_DIR}/etc/zsh"
-        cp "${configs_dir}/zsh/"* "${SYSROOT_DIR}/etc/zsh/" 2>/dev/null || true
-        chmod 644 "${SYSROOT_DIR}/etc/zsh/"* 2>/dev/null || true
-        # Also create user skeleton
-        mkdir -p "${SYSROOT_DIR}/etc/skel"
-        cp "${configs_dir}/zsh/zshrc" "${SYSROOT_DIR}/etc/skel/.zshrc" 2>/dev/null || true
-        cp "${configs_dir}/zsh/zshenv" "${SYSROOT_DIR}/etc/skel/.zshenv" 2>/dev/null || true
-        # Copy to root home
-        mkdir -p "${SYSROOT_DIR}/root"
-        cp "${configs_dir}/zsh/zshrc" "${SYSROOT_DIR}/root/.zshrc" 2>/dev/null || true
-        cp "${configs_dir}/zsh/zshenv" "${SYSROOT_DIR}/root/.zshenv" 2>/dev/null || true
-        log_info "Installed zsh configs"
-    fi
 
     # bash configs
     if [[ -d "${configs_dir}/bash" ]]; then
@@ -2436,7 +2331,7 @@ build_fzf() {
 
     # Download shell integration scripts
     mkdir -p "${SYSROOT_DIR}/usr/share/fzf"
-    for script in completion.bash completion.zsh key-bindings.bash key-bindings.zsh key-bindings.fish; do
+    for script in completion.bash completion.fish key-bindings.bash key-bindings.fish; do
         local script_url="https://raw.githubusercontent.com/junegunn/fzf/${fzf_ver}/shell/${script}"
         curl -fsSL -o "${SYSROOT_DIR}/usr/share/fzf/${script}" "${script_url}" 2>/dev/null || true
     done
@@ -2557,7 +2452,7 @@ print_summary() {
 
     echo ""
     echo -e "${CYAN}Shells:${NC}"
-    for shell in zsh bash fish; do
+    for shell in bash fish; do
         if [[ -f "${SYSROOT_DIR}/usr/bin/${shell}" ]] || [[ -f "${SYSROOT_DIR}/bin/${shell}" ]]; then
             echo -e "  ${GREEN}[OK]${NC} ${shell}"
         else
@@ -2621,16 +2516,16 @@ print_summary() {
     [[ -f "${SYSROOT_DIR}/etc/xdg/nvim/init.lua" ]] && echo -e "  ${GREEN}[OK]${NC} Neovim config"
     [[ -f "${SYSROOT_DIR}/etc/vim/vimrc" ]] && echo -e "  ${GREEN}[OK]${NC} Vim config"
     [[ -f "${SYSROOT_DIR}/etc/shells" ]] && echo -e "  ${GREEN}[OK]${NC} /etc/shells"
-    [[ -f "${SYSROOT_DIR}/etc/zsh/zshrc" ]] && echo -e "  ${GREEN}[OK]${NC} zshrc"
+    [[ -f "${SYSROOT_DIR}/etc/bashrc" ]] && echo -e "  ${GREEN}[OK]${NC} bashrc"
     [[ -f "${SYSROOT_DIR}/etc/fish/config.fish" ]] && echo -e "  ${GREEN}[OK]${NC} fish config"
-    [[ -f "${SYSROOT_DIR}/root/.zshrc" ]] && echo -e "  ${GREEN}[OK]${NC} root zshrc"
+    [[ -f "${SYSROOT_DIR}/root/.bashrc" ]] && echo -e "  ${GREEN}[OK]${NC} root bashrc"
 
     # Check default shell
     echo ""
-    if grep -q "/bin/zsh" "${SYSROOT_DIR}/etc/passwd" 2>/dev/null; then
-        echo -e "  ${GREEN}[OK]${NC} Default shell: zsh"
+    if grep -q "/bin/bash" "${SYSROOT_DIR}/etc/passwd" 2>/dev/null; then
+        echo -e "  ${GREEN}[OK]${NC} Default shell: bash"
     else
-        echo -e "  ${YELLOW}[--]${NC} Default shell: not set to zsh"
+        echo -e "  ${YELLOW}[--]${NC} Default shell: not set to bash"
     fi
     echo ""
 }
@@ -2660,7 +2555,7 @@ main() {
     build_wifi_tools
     build_bootloader
 
-    # Build shells (zsh, fish, bash) - MUST come early as default shell
+    # Build shells (bash, fish) - MUST come early as default shell
     build_shells
 
     # Build and install development tools

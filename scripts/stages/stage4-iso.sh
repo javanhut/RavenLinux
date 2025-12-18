@@ -152,9 +152,7 @@ EOF
 
     # If earlier build stages weren't run, create minimal auth/NSS files so sudo/login work.
     local default_shell="/bin/sh"
-    if [[ -x "${SYSROOT_DIR}/bin/zsh" ]]; then
-        default_shell="/bin/zsh"
-    elif [[ -x "${SYSROOT_DIR}/bin/bash" ]]; then
+    if [[ -x "${SYSROOT_DIR}/bin/bash" ]]; then
         default_shell="/bin/bash"
     fi
 

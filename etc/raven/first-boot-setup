@@ -74,8 +74,6 @@ case "$create_user" in
             default_shell="/bin/sh"
             if [ -x /bin/bash ]; then
                 default_shell="/bin/bash"
-            elif [ -x /bin/zsh ]; then
-                default_shell="/bin/zsh"
             fi
 
             # Create user with home directory and add to useful groups

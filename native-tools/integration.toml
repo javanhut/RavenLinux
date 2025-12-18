@@ -103,7 +103,7 @@ default_vcs = "vcs"
 
 # Shell integration
 [system.shell]
-# Add completions for bash/zsh/fish
+# Add completions for bash/fish
 completions = true
 
 # Aliases to set up

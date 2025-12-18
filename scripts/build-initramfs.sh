@@ -331,17 +331,6 @@ EOF
         log_info "  Added bash (from host)"
     fi
 
-    # Copy zsh if available
-    if [[ -f "${RAVEN_BUILD}/sysroot/bin/zsh" ]]; then
-        cp "${RAVEN_BUILD}/sysroot/bin/zsh" "${INITRAMFS_DIR}/bin/zsh"
-        log_info "  Added zsh (from sysroot)"
-        # Copy zsh libs
-        cp -d "${RAVEN_BUILD}/sysroot/usr/lib"/libcap.so* "${INITRAMFS_DIR}/usr/lib/" 2>/dev/null || true
-    elif command -v zsh &>/dev/null; then
-        cp "$(which zsh)" "${INITRAMFS_DIR}/bin/zsh"
-        log_info "  Added zsh (from host)"
-    fi
-
     # Copy RavenLinux custom packages (Vem, Carrion, Ivaldi)
     local PACKAGES_BIN="${RAVEN_BUILD}/packages/bin"
     if [[ -d "${PACKAGES_BIN}" ]]; then
@@ -514,7 +503,6 @@ SHADOW
     cat > "${INITRAMFS_DIR}/etc/shells" <<'SHELLS'
 /bin/sh
 /bin/bash
-/bin/zsh
 SHELLS
 
     # /etc/profile
@@ -529,18 +517,18 @@ alias ls='ls --color=auto'
 alias ll='ls -la'
 PROFILE
 
-    # Root's zshrc
+    # Root's bashrc
     mkdir -p "${INITRAMFS_DIR}/root"
-    cat > "${INITRAMFS_DIR}/root/.zshrc" <<'ZSHRC'
+    cat > "${INITRAMFS_DIR}/root/.bashrc" <<'BASHRC'
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export LD_LIBRARY_PATH=/lib:/usr/lib:/lib64:/usr/lib64
 export HOME=/root
 export TERM=linux
 export RAVEN_LINUX=1
-PROMPT='[%n@raven-linux]# '
+PS1='[\u@raven-linux]# '
 alias ls='ls --color=auto'
 alias ll='ls -la'
-ZSHRC
+BASHRC
 
     log_success "Configuration files created"
 }

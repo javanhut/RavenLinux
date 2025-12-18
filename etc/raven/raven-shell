@@ -17,11 +17,8 @@ if [ ! -f /etc/.raven-first-boot-done ] && [ -x /etc/raven/first-boot-setup ]; t
     /etc/raven/first-boot-setup
 fi
 
-# Prefer bash over zsh
+# Prefer bash
 if [ -x /bin/bash ]; then
     exec /bin/bash -l -i
-fi
-if [ -x /bin/zsh ]; then
-    exec /bin/zsh -l -i
 fi
 exec /bin/sh -i

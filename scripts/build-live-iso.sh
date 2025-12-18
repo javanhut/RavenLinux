@@ -80,7 +80,7 @@ setup_live_root() {
 
     rm -rf "${LIVE_ROOT}"
     mkdir -p "${LIVE_ROOT}"/{bin,sbin,lib,lib64,usr/{bin,sbin,lib,lib64,share},etc,var,tmp,root,home,dev,proc,sys,run,mnt,opt}
-    mkdir -p "${LIVE_ROOT}"/usr/share/{fonts,icons,themes,backgrounds,zsh}
+    mkdir -p "${LIVE_ROOT}"/usr/share/{fonts,icons,themes,backgrounds}
     mkdir -p "${LIVE_ROOT}"/etc/{skel,xdg,rvn}
     mkdir -p "${LIVE_ROOT}"/var/{log,cache,lib,tmp}
 
@@ -370,19 +370,7 @@ EOF
 copy_shells() {
     log_step "Copying shells..."
 
-    local have_zsh=false
     local have_bash=false
-
-    # Copy zsh from host
-    if command -v zsh &>/dev/null; then
-        cp "$(which zsh)" "${LIVE_ROOT}/bin/zsh" && have_zsh=true
-
-        # Copy zsh configuration files
-        mkdir -p "${LIVE_ROOT}/usr/share/zsh"
-        cp -r /usr/share/zsh/* "${LIVE_ROOT}/usr/share/zsh/" 2>/dev/null || true
-
-        log_info "  Added zsh"
-    fi
 
     # Copy bash from host
     if command -v bash &>/dev/null; then
@@ -390,15 +378,12 @@ copy_shells() {
         log_info "  Added bash"
     fi
 
-    # Create sh symlink - prefer zsh, fall back to bash
-    if [[ "$have_zsh" == true ]]; then
-        ln -sf zsh "${LIVE_ROOT}/bin/sh"
-        log_info "  /bin/sh -> zsh"
-    elif [[ "$have_bash" == true ]]; then
+    # Create sh symlink - prefer bash
+    if [[ "$have_bash" == true ]]; then
         ln -sf bash "${LIVE_ROOT}/bin/sh"
         log_info "  /bin/sh -> bash"
     else
-        log_warn "  WARNING: No shell available for /bin/sh!"
+        log_warn "  WARNING: bash not found for /bin/sh!"
     fi
 
     log_success "Shells installed"
@@ -1067,9 +1052,6 @@ export LOGNAME="${LOGNAME:-root}"
 export TERM="${TERM:-linux}"
 export PAGER="${PAGER:-cat}"
 
-if [ -x /bin/zsh ]; then
-    exec /bin/zsh -l -i
-fi
 if [ -x /bin/bash ]; then
     exec /bin/bash -l -i
 fi
@@ -1155,8 +1137,8 @@ EOF
 
     # /etc/passwd
     cat > "${LIVE_ROOT}/etc/passwd" << EOF
-root:x:0:0:root:/root:/bin/zsh
-raven:x:1000:1000:Raven User:/home/raven:/bin/zsh
+root:x:0:0:root:/root:/bin/bash
+raven:x:1000:1000:Raven User:/home/raven:/bin/bash
 nobody:x:65534:65534:Nobody:/:/bin/false
 EOF
 
@@ -1183,7 +1165,6 @@ EOF
     cat > "${LIVE_ROOT}/etc/shells" << EOF
 /bin/sh
 /bin/bash
-/bin/zsh
 EOF
 
     # /etc/sudoers (wheel group allowed by default)
@@ -1250,36 +1231,35 @@ export EDITOR=vem
 export VISUAL=vem
 export RAVEN_LINUX=1
 
-# Source zsh config if using zsh
-if [ -n "$ZSH_VERSION" ]; then
-    [ -f /etc/zsh/zshrc ] && . /etc/zsh/zshrc
+# Source bashrc for interactive bash shells
+if [ -n "$BASH_VERSION" ] && [ -f /etc/bashrc ]; then
+    case $- in
+        *i*) . /etc/bashrc ;;
+    esac
 fi
 EOF
 
-    # /etc/zsh/zshrc (system-wide zsh config)
-    mkdir -p "${LIVE_ROOT}/etc/zsh"
-    cat > "${LIVE_ROOT}/etc/zsh/zshrc" << 'EOF'
-# RavenLinux ZSH Configuration
+    # /etc/bashrc (system-wide bash config)
+    mkdir -p "${LIVE_ROOT}/etc/bash"
+    if [[ -f "${PROJECT_ROOT}/configs/bash/bashrc" ]]; then
+        cp "${PROJECT_ROOT}/configs/bash/bashrc" "${LIVE_ROOT}/etc/bash/bashrc"
+        cp "${PROJECT_ROOT}/configs/bash/bashrc" "${LIVE_ROOT}/etc/bashrc"
+    else
+        cat > "${LIVE_ROOT}/etc/bashrc" << 'EOF'
+# RavenLinux default bashrc (generated)
+case $- in
+    *i*) ;;
+      *) return ;;
+esac
 
-# History
-HISTFILE=~/.zsh_history
+HISTFILE=~/.bash_history
 HISTSIZE=10000
-SAVEHIST=10000
-setopt SHARE_HISTORY
-setopt HIST_IGNORE_DUPS
+HISTFILESIZE=10000
+HISTCONTROL=ignoreboth:erasedups
+shopt -s histappend
 
-# Completion
-autoload -Uz compinit
-compinit
+PS1='[\u@raven-linux]# '
 
-# Prompt
-autoload -Uz promptinit
-promptinit
-
-# Custom prompt
-PROMPT='[%n@raven-linux]# '
-
-# Aliases
 alias ls='ls --color=auto'
 alias ll='ls -la'
 alias la='ls -A'
@@ -1288,23 +1268,26 @@ alias grep='grep --color=auto'
 alias ..='cd ..'
 alias ...='cd ../..'
 
-# Keybindings (vim-like)
-bindkey -v
-bindkey '^R' history-incremental-search-backward
-
-# Environment
-export PATH=/bin:/sbin:/usr/bin:/usr/sbin:$HOME/.local/bin
+export PATH="$HOME/.local/bin:$PATH"
 export EDITOR=vem
 export VISUAL=vem
 EOF
+        cp "${LIVE_ROOT}/etc/bashrc" "${LIVE_ROOT}/etc/bash/bashrc"
+    fi
 
     # Create raven user home directory
     mkdir -p "${LIVE_ROOT}/home/raven"
-    cp "${LIVE_ROOT}/etc/zsh/zshrc" "${LIVE_ROOT}/home/raven/.zshrc"
+    cp "${LIVE_ROOT}/etc/bashrc" "${LIVE_ROOT}/home/raven/.bashrc"
+    cat > "${LIVE_ROOT}/home/raven/.bash_profile" << 'EOF'
+if [ -f ~/.bashrc ]; then
+    . ~/.bashrc
+fi
+EOF
     chown -R 1000:1000 "${LIVE_ROOT}/home/raven" 2>/dev/null || true
 
-    # Root's zshrc
-    cp "${LIVE_ROOT}/etc/zsh/zshrc" "${LIVE_ROOT}/root/.zshrc"
+    # Root's bashrc
+    cp "${LIVE_ROOT}/etc/bashrc" "${LIVE_ROOT}/root/.bashrc"
+    cp "${LIVE_ROOT}/home/raven/.bash_profile" "${LIVE_ROOT}/root/.bash_profile" 2>/dev/null || true
 
     log_success "Configuration files created"
 }
@@ -1513,7 +1496,7 @@ print_summary() {
     echo ""
     echo "  Included:"
     echo "    - Linux Kernel 6.17.11"
-    echo "    - Zsh (default shell)"
+    echo "    - Bash (default shell)"
     echo "    - Vem (text editor)"
     echo "    - Carrion (programming language)"
     echo "    - Ivaldi (version control)"

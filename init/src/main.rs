@@ -712,7 +712,7 @@ fn emergency_shell() -> ! {
 
     // Keep PID 1 alive: if the user exits the shell, re-open it.
     loop {
-        let shells = ["/bin/bash", "/bin/sh", "/bin/zsh"];
+        let shells = ["/bin/bash", "/bin/sh"];
         let mut started = false;
 
         for shell in &shells {
