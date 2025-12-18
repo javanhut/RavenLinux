@@ -208,27 +208,28 @@ EOF
         mkdir -p "${SYSROOT_DIR}/etc/pam.d" "${SYSROOT_DIR}/etc/security" "${SYSROOT_DIR}/etc/security/limits.d"
         cat > "${SYSROOT_DIR}/etc/pam.d/sudo" << 'EOF'
 #%PAM-1.0
-auth       required     pam_env.so
+auth       sufficient   pam_rootok.so
 auth       required     pam_unix.so nullok try_first_pass
+account    sufficient   pam_rootok.so
 account    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
 session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
 EOF
         cat > "${SYSROOT_DIR}/etc/pam.d/su" << 'EOF'
 #%PAM-1.0
-auth       required     pam_env.so
+auth       sufficient   pam_rootok.so
 auth       required     pam_unix.so nullok try_first_pass
+account    sufficient   pam_rootok.so
 account    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
 session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
 EOF
         cat > "${SYSROOT_DIR}/etc/pam.d/login" << 'EOF'
 #%PAM-1.0
-auth       required     pam_env.so
 auth       required     pam_unix.so nullok try_first_pass
 account    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
 session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
 EOF
         cat > "${SYSROOT_DIR}/etc/pam.d/passwd" << 'EOF'
 #%PAM-1.0
@@ -284,6 +285,27 @@ fix_auth_perms() {
     done
 }
 fix_auth_perms || true
+
+# Create /dev/log syslog socket (required by PAM/sudo for audit logging)
+# Without this, sudo fails with "PAM error: Authentication service cannot retrieve authentication info"
+start_syslog_socket() {
+    [ -S /dev/log ] && return 0
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c '
+import socket, os
+try:
+    os.unlink("/dev/log")
+except: pass
+s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+s.bind("/dev/log")
+os.chmod("/dev/log", 0o666)
+while True:
+    try: s.recv(4096)
+    except: pass
+' >/dev/null 2>&1 &
+    fi
+}
+start_syslog_socket
 
 # Set hostname (use /proc method as fallback if hostname binary is missing)
 if command -v hostname >/dev/null 2>&1; then

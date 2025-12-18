@@ -813,43 +813,35 @@ EOF
 
     cat > "${SYSROOT_DIR}/etc/pam.d/sudo" << 'EOF'
 #%PAM-1.0
-
-# Authentication
-auth       required     pam_env.so
+# Authentication - allow root to use sudo without password
 auth       sufficient   pam_rootok.so
-auth       required     pam_unix.so nullok try_first_pass
-
-# Account management
-account    required     pam_unix.so
-account    required     pam_nologin.so
-
-# Session management
-session    required     pam_limits.so
-session    required     pam_unix.so
-session    optional     pam_elogind.so
-
-# Password management (for sudo -k, etc.)
-password   required     pam_unix.so nullok sha512
-EOF
-
-    # Update su PAM config with elogind session support
-    log_step "Updating su PAM configuration..."
-    cat > "${SYSROOT_DIR}/etc/pam.d/su" << 'EOF'
-#%PAM-1.0
-
-# Authentication - allow root to su without password
-auth       sufficient   pam_rootok.so
-# Uncomment to require wheel group membership for su
-#auth       required     pam_wheel.so use_uid
 auth       required     pam_unix.so nullok try_first_pass
 
 # Account management
 account    sufficient   pam_rootok.so
 account    required     pam_unix.so
 
-# Session management - integrate with elogind
+# Session management
 session    required     pam_unix.so
-session    optional     pam_elogind.so
+
+# Password management (for sudo -k, etc.)
+password   required     pam_unix.so nullok sha512
+EOF
+
+    # Update su PAM config
+    log_step "Updating su PAM configuration..."
+    cat > "${SYSROOT_DIR}/etc/pam.d/su" << 'EOF'
+#%PAM-1.0
+# Authentication - allow root to su without password
+auth       sufficient   pam_rootok.so
+auth       required     pam_unix.so nullok try_first_pass
+
+# Account management
+account    sufficient   pam_rootok.so
+account    required     pam_unix.so
+
+# Session management
+session    required     pam_unix.so
 
 # Password management
 password   required     pam_unix.so nullok sha512
@@ -864,7 +856,6 @@ auth       required     pam_unix.so nullok try_first_pass
 account    sufficient   pam_rootok.so
 account    required     pam_unix.so
 session    required     pam_unix.so
-session    optional     pam_elogind.so
 password   required     pam_unix.so nullok sha512
 EOF
 
@@ -873,17 +864,10 @@ EOF
         cat > "${SYSROOT_DIR}/etc/pam.d/system-auth" << 'EOF'
 #%PAM-1.0
 # Common authentication stack
-
-auth       required     pam_env.so
 auth       required     pam_unix.so nullok try_first_pass
-
 account    required     pam_unix.so
-
 password   required     pam_unix.so nullok sha512
-
-session    required     pam_limits.so
 session    required     pam_unix.so
-session    optional     pam_elogind.so
 EOF
     fi
 

@@ -776,29 +776,30 @@ setup_pam_and_nss() {
 
     cat > "${LIVE_ROOT}/etc/pam.d/sudo" << 'EOF'
 #%PAM-1.0
-auth       required     pam_env.so
+auth       sufficient   pam_rootok.so
 auth       required     pam_unix.so nullok try_first_pass
+account    sufficient   pam_rootok.so
 account    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
 session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
 EOF
 
     cat > "${LIVE_ROOT}/etc/pam.d/su" << 'EOF'
 #%PAM-1.0
-auth       required     pam_env.so
+auth       sufficient   pam_rootok.so
 auth       required     pam_unix.so nullok try_first_pass
+account    sufficient   pam_rootok.so
 account    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
 session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
 EOF
 
     cat > "${LIVE_ROOT}/etc/pam.d/login" << 'EOF'
 #%PAM-1.0
-auth       required     pam_env.so
 auth       required     pam_unix.so nullok try_first_pass
 account    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
 session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
 EOF
 
     cat > "${LIVE_ROOT}/etc/pam.d/passwd" << 'EOF'

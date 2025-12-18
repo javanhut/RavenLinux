@@ -1643,11 +1643,13 @@ EOF
     # ==========================================================================
     cat > "${SYSROOT_DIR}/etc/pam.d/sudo" << 'EOF'
 #%PAM-1.0
-# Begin /etc/pam.d/sudo - RavenLinux (LFS-based)
-auth      include     system-auth
-account   include     system-account
-session   required    pam_env.so
-session   include     system-session
+# Begin /etc/pam.d/sudo - RavenLinux
+auth       sufficient   pam_rootok.so
+auth       required     pam_unix.so nullok try_first_pass
+account    sufficient   pam_rootok.so
+account    required     pam_unix.so
+session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
 # End /etc/pam.d/sudo
 EOF
 
@@ -1698,16 +1700,14 @@ setup_su() {
     # ==========================================================================
     cat > "${SYSROOT_DIR}/etc/pam.d/su" << 'EOF'
 #%PAM-1.0
-# Begin /etc/pam.d/su - RavenLinux (LFS-based)
+# Begin /etc/pam.d/su - RavenLinux
 # Allow root to su without password
-auth      sufficient  pam_rootok.so
-# Note: pam_wheel.so is NOT required - any user can su with correct password
-# Uncomment below to restrict su to wheel group members:
-#auth      required    pam_wheel.so use_uid
-auth      include     system-auth
-account   include     system-account
-session   required    pam_env.so
-session   include     system-session
+auth       sufficient   pam_rootok.so
+auth       required     pam_unix.so nullok try_first_pass
+account    sufficient   pam_rootok.so
+account    required     pam_unix.so
+session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
 # End /etc/pam.d/su
 EOF
 
@@ -2118,6 +2118,30 @@ copy_libraries() {
                     break
                 fi
             done
+        fi
+    done
+
+    # Create /lib symlinks for libraries that exist in /usr/lib but not /lib
+    # This fixes linker lookups that check /lib first (seen in strace of sudo/PAM)
+    log_info "Creating /lib -> /usr/lib symlinks for missing libraries..."
+    local lib_symlinks=(
+        libgcc_s.so.1
+        libaudit.so.1
+        libcap-ng.so.0
+        libtirpc.so.3
+        libgssapi_krb5.so.2
+        libkrb5.so.3
+        libk5crypto.so.3
+        libcom_err.so.2
+        libkrb5support.so.0
+        libkeyutils.so.1
+        libsystemd.so.0
+        libcap.so.2
+    )
+    for lib in "${lib_symlinks[@]}"; do
+        if [[ -f "${SYSROOT_DIR}/usr/lib/${lib}" ]] && [[ ! -e "${SYSROOT_DIR}/lib/${lib}" ]]; then
+            ln -sf "../usr/lib/${lib}" "${SYSROOT_DIR}/lib/${lib}" 2>/dev/null || true
+            log_info "  Created /lib/${lib} -> ../usr/lib/${lib}"
         fi
     done
 
