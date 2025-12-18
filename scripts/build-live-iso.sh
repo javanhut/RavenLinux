@@ -285,12 +285,17 @@ copy_diagnostics_tools() {
 copy_sudo_rs() {
     log_step "Installing sudo-rs..."
 
-    if [[ -f "${RAVEN_BUILD}/bin/sudo" ]]; then
-        cp "${RAVEN_BUILD}/bin/sudo" "${LIVE_ROOT}/bin/sudo"
-        chmod 4755 "${LIVE_ROOT}/bin/sudo" 2>/dev/null || chmod 755 "${LIVE_ROOT}/bin/sudo" || true
-    else
-        log_warn "sudo-rs not found at ${RAVEN_BUILD}/bin/sudo (run ./scripts/build.sh stage1)"
-        return 0
+    # Do not ship sudo by default (avoid stale SUID artifacts across rebuilds).
+    # Set RAVEN_ENABLE_SUDO=1 to include it.
+    rm -f "${LIVE_ROOT}/bin/sudo" "${LIVE_ROOT}/usr/bin/sudo" 2>/dev/null || true
+    if [[ "${RAVEN_ENABLE_SUDO:-0}" == "1" ]]; then
+        if [[ -f "${RAVEN_BUILD}/bin/sudo" ]]; then
+            cp "${RAVEN_BUILD}/bin/sudo" "${LIVE_ROOT}/bin/sudo"
+            chmod 4755 "${LIVE_ROOT}/bin/sudo" 2>/dev/null || chmod 755 "${LIVE_ROOT}/bin/sudo" || true
+        else
+            log_warn "sudo-rs not found at ${RAVEN_BUILD}/bin/sudo (run ./scripts/build.sh stage1)"
+            return 0
+        fi
     fi
 
     if [[ -f "${RAVEN_BUILD}/bin/su" ]]; then
@@ -807,6 +812,34 @@ EOF
 EOF
     mkdir -p "${LIVE_ROOT}/etc/security/limits.d"
 
+    # pam_env.so expects these files. Some distros treat missing files as errors.
+    if [[ ! -f "${LIVE_ROOT}/etc/environment" ]]; then
+        cat > "${LIVE_ROOT}/etc/environment" << 'EOF'
+# /etc/environment
+# System-wide environment variables
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+EOF
+    fi
+
+    if [[ ! -f "${LIVE_ROOT}/etc/security/pam_env.conf" ]]; then
+        cat > "${LIVE_ROOT}/etc/security/pam_env.conf" << 'EOF'
+# /etc/security/pam_env.conf
+# Environment variables set by pam_env module
+# Format: VARIABLE [DEFAULT=value] [OVERRIDE=value]
+EOF
+    fi
+
+    # Fallback for PAM-aware programs that don't ship their own config.
+    if [[ ! -f "${LIVE_ROOT}/etc/pam.d/other" ]]; then
+        cat > "${LIVE_ROOT}/etc/pam.d/other" << 'EOF'
+#%PAM-1.0
+auth        required     pam_deny.so
+account     required     pam_deny.so
+password    required     pam_deny.so
+session     required     pam_deny.so
+EOF
+    fi
+
     local host_security_dirs=()
     for d in \
         /lib/security \
@@ -826,6 +859,10 @@ EOF
         pam_warn.so
         pam_limits.so
         pam_loginuid.so
+        pam_rootok.so
+        pam_nologin.so
+        pam_securetty.so
+        pam_wheel.so
     )
 
     local copied_any=0
@@ -848,6 +885,24 @@ EOF
     else
         log_info "  Added PAM modules"
     fi
+
+    # PAM helper binaries (unix_chkpwd is critical for password verification).
+    mkdir -p "${LIVE_ROOT}/sbin" "${LIVE_ROOT}/usr/sbin"
+    local pam_helpers=(unix_chkpwd unix_update)
+    local helper_dirs=(/usr/sbin /sbin /usr/bin /usr/lib /usr/lib/security /lib/security)
+    for helper in "${pam_helpers[@]}"; do
+        local src=""
+        for d in "${helper_dirs[@]}"; do
+            if [[ -x "${d}/${helper}" ]]; then
+                src="${d}/${helper}"
+                break
+            fi
+        done
+        [[ -n "$src" ]] || continue
+        cp -L "$src" "${LIVE_ROOT}/sbin/${helper}" 2>/dev/null || true
+        chmod 4755 "${LIVE_ROOT}/sbin/${helper}" 2>/dev/null || true
+        log_info "  Added PAM helper: ${helper} (SUID)"
+    done
 
     # NSS modules (dlopened by glibc)
     mkdir -p "${LIVE_ROOT}/lib" "${LIVE_ROOT}/usr/lib"
@@ -988,17 +1043,44 @@ EOF
     # /etc/hostname
     echo "raven-linux" > "${LIVE_ROOT}/etc/hostname"
 
-    # /etc/hosts
-    cat > "${LIVE_ROOT}/etc/hosts" << EOF
-127.0.0.1   localhost
-::1         localhost
-127.0.1.1   raven-linux.localdomain raven-linux
-EOF
+	    # /etc/hosts
+	    cat > "${LIVE_ROOT}/etc/hosts" << EOF
+	127.0.0.1   localhost
+	::1         localhost
+	127.0.1.1   raven-linux.localdomain raven-linux
+	EOF
 
-    # /etc/raven/init.toml (service configuration for raven-init)
-    mkdir -p "${LIVE_ROOT}/etc/raven"
-    if [[ -f "${PROJECT_ROOT}/etc/raven/init.toml" ]]; then
-        cp "${PROJECT_ROOT}/etc/raven/init.toml" "${LIVE_ROOT}/etc/raven/init.toml"
+	    # /bin/raven-shell: used by agetty --skip-login as a PAM-free rescue shell
+	    mkdir -p "${LIVE_ROOT}/bin"
+	    if [[ -f "${PROJECT_ROOT}/etc/raven/raven-shell" ]]; then
+	        cp "${PROJECT_ROOT}/etc/raven/raven-shell" "${LIVE_ROOT}/bin/raven-shell" 2>/dev/null || true
+	    else
+	        cat > "${LIVE_ROOT}/bin/raven-shell" << 'EOF'
+#!/bin/sh
+# When agetty is used with --skip-login, there may be no login(1) to set up a
+# sane environment. Ensure basic defaults so the shell can run external commands.
+export PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+export HOME="${HOME:-/root}"
+export USER="${USER:-root}"
+export LOGNAME="${LOGNAME:-root}"
+export TERM="${TERM:-linux}"
+export PAGER="${PAGER:-cat}"
+
+if [ -x /bin/zsh ]; then
+    exec /bin/zsh -l -i
+fi
+if [ -x /bin/bash ]; then
+    exec /bin/bash -l -i
+fi
+exec /bin/sh -i
+EOF
+	    fi
+	    chmod 0755 "${LIVE_ROOT}/bin/raven-shell" 2>/dev/null || true
+
+	    # /etc/raven/init.toml (service configuration for raven-init)
+	    mkdir -p "${LIVE_ROOT}/etc/raven"
+	    if [[ -f "${PROJECT_ROOT}/etc/raven/init.toml" ]]; then
+	        cp "${PROJECT_ROOT}/etc/raven/init.toml" "${LIVE_ROOT}/etc/raven/init.toml"
     elif [[ -f "${PROJECT_ROOT}/init/config/init.toml" ]]; then
         cp "${PROJECT_ROOT}/init/config/init.toml" "${LIVE_ROOT}/etc/raven/init.toml"
     fi
@@ -1016,23 +1098,23 @@ enable_udev = true
 enable_network = true
 log_level = "info"
 
-[[services]]
-name = "getty-tty1"
-description = "Getty login on tty1"
-exec = "/sbin/agetty"
-args = ["--noclear", "--autologin", "root", "tty1", "linux"]
-restart = true
-enabled = true
-critical = false
+	[[services]]
+	name = "getty-tty1"
+	description = "Getty login on tty1"
+	exec = "/bin/agetty"
+	args = ["--noclear", "--skip-login", "--login-program", "/bin/raven-shell", "tty1", "linux"]
+	restart = true
+	enabled = true
+	critical = false
 
 [[services]]
-name = "getty-ttyS0"
-description = "Serial console getty on ttyS0"
-exec = "/sbin/agetty"
-args = ["--noclear", "--autologin", "root", "-L", "115200", "ttyS0", "vt102"]
-restart = true
-enabled = false
-critical = false
+	name = "getty-ttyS0"
+	description = "Serial console getty on ttyS0"
+	exec = "/bin/agetty"
+	args = ["--noclear", "--skip-login", "--login-program", "/bin/raven-shell", "-L", "115200", "ttyS0", "vt102"]
+	restart = true
+	enabled = false
+	critical = false
 
 [[services]]
 name = "dbus"
@@ -1285,13 +1367,13 @@ create_squashfs() {
 
     local pseudo="${ISO_DIR}/squashfs.pseudo"
     : > "${pseudo}"
-    [[ -e "${LIVE_ROOT}/bin/sudo" ]] && echo "bin/sudo m 4755 0 0" >> "${pseudo}"
     [[ -e "${LIVE_ROOT}/bin/su" ]] && echo "bin/su m 4755 0 0" >> "${pseudo}"
     [[ -e "${LIVE_ROOT}/etc/shadow" ]] && echo "etc/shadow m 600 0 0" >> "${pseudo}"
 
     run_logged mksquashfs "${LIVE_ROOT}" "${ISO_DIR}/iso-root/raven/filesystem.squashfs" \
         -comp zstd -Xcompression-level 15 \
         -pf "${pseudo}" -pseudo-override \
+        -e bin/sudo usr/bin/sudo \
         -b 1M -no-duplicates -quiet
 
     log_success "Squashfs created"

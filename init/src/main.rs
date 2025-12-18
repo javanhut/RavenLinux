@@ -75,6 +75,7 @@ fn run_init() -> Result<()> {
     log::info!("Phase 3: Loading configuration");
     let mut config = load_config()?;
     apply_kernel_cmdline_overrides(&mut config)?;
+    fixup_getty_login_programs(&mut config);
 
     // Phase 4: Setup signal handlers
     log::info!("Phase 4: Setting up signal handlers");
@@ -109,6 +110,25 @@ fn run_init() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn fixup_getty_login_programs(config: &mut InitConfig) {
+    if Path::new("/bin/raven-shell").exists() {
+        return;
+    }
+
+    for svc in &mut config.services {
+        if !svc.exec.ends_with("agetty") {
+            continue;
+        }
+        let mut idx = 0;
+        while idx + 1 < svc.args.len() {
+            if svc.args[idx] == "--login-program" && svc.args[idx + 1] == "/bin/raven-shell" {
+                svc.args[idx + 1] = "/bin/sh".to_string();
+            }
+            idx += 1;
+        }
+    }
 }
 
 fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
@@ -155,6 +175,7 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
             enabled: true,
             critical: false,
             environment: HashMap::new(),
+            tty: None,
         },
     );
 
@@ -181,6 +202,7 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
                 enabled: true,
                 critical: false,
                 environment: env,
+                tty: None,
             },
         );
     } else {
@@ -196,6 +218,7 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
                     enabled: true,
                     critical: false,
                     environment: compositor_env,
+                    tty: None,
                 },
             ),
             _ => ensure_service(
@@ -209,6 +232,7 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
                     enabled: true,
                     critical: false,
                     environment: compositor_env,
+                    tty: None,
                 },
             ),
         };
@@ -422,9 +446,12 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
         let getty_config = ServiceConfig {
             name: "getty-tty1".to_string(),
             description: "Getty on tty1".to_string(),
-            exec: "/sbin/agetty".to_string(),
+            exec: "/bin/agetty".to_string(),
             args: vec![
                 "--noclear".to_string(),
+                "--skip-login".to_string(),
+                "--login-program".to_string(),
+                "/bin/raven-shell".to_string(),
                 "tty1".to_string(),
                 "linux".to_string(),
             ],
@@ -432,6 +459,7 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
             enabled: true,
             critical: false,
             environment: HashMap::new(),
+            tty: Some("/dev/tty1".to_string()),
         };
 
         // Try agetty first, fall back to direct shell
@@ -445,6 +473,7 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
                 enabled: true,
                 critical: false,
                 environment: HashMap::new(),
+                tty: Some("/dev/tty1".to_string()),
             };
             Service::start(&shell_config)
         });

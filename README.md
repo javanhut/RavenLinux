@@ -165,6 +165,10 @@ cd RavenLinux
 # Tip: In the RavenBoot menu select "Raven Linux (Serial Console)" for best logs/debugging.
 ./scripts/dev-env.sh qemu
 
+# Console access:
+# - tty1: starts `/bin/raven-shell` via `agetty --skip-login` (PAM-free rescue shell)
+# - tty2: starts a normal `login` prompt (use this to test PAM/password logins)
+
 # Check status
 ./scripts/dev-env.sh status
 ```

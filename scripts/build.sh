@@ -69,10 +69,17 @@ setup_directories() {
     mkdir -p "${SOURCES_DIR}"
     mkdir -p "${RAVEN_LOG_DIR}"
 
-    # Create sysroot directory structure
-    mkdir -p "${SYSROOT_DIR}"/{bin,boot,dev,etc,home,lib,mnt,opt,proc,root,run,sbin,sys,tmp,usr,var}
-    mkdir -p "${SYSROOT_DIR}"/usr/{bin,include,lib,share,src}
-    mkdir -p "${SYSROOT_DIR}"/var/{cache,lib,log,tmp}
+    # Create sysroot directory structure (only if writable).
+    # Some users may have an old sysroot created as root; stage4 can still run
+    # from a read-only sysroot by copying it into an ISO workspace.
+    if [[ -d "${SYSROOT_DIR}" ]] && [[ ! -w "${SYSROOT_DIR}" ]]; then
+        log_warn "Sysroot is not writable: ${SYSROOT_DIR}"
+        log_warn "Skipping sysroot directory creation. To rebuild sysroot stages, delete/chown it or set RAVEN_BUILD to a new directory."
+    else
+        mkdir -p "${SYSROOT_DIR}"/{bin,boot,dev,etc,home,lib,mnt,opt,proc,root,run,sbin,sys,tmp,usr,var}
+        mkdir -p "${SYSROOT_DIR}"/usr/{bin,include,lib,share,src}
+        mkdir -p "${SYSROOT_DIR}"/var/{cache,lib,log,tmp}
+    fi
 
     log_success "Build directories created"
 }
@@ -205,6 +212,17 @@ build_stage3() {
     fi
 }
 
+# Build security packages (elogind, polkit, accountsservice)
+build_security() {
+    log_section "Building Security Packages"
+
+    if [[ -f "${RAVEN_ROOT}/scripts/build-security.sh" ]]; then
+        run_logged "${RAVEN_ROOT}/scripts/build-security.sh" all
+    else
+        log_warn "build-security.sh not found, skipping"
+    fi
+}
+
 # Stage 4: Generate ISO
 build_stage4() {
     log_section "Stage 4: Generating ISO"
@@ -228,6 +246,7 @@ Stages:
     stage1      Build base system with cross toolchain
     stage2      Native rebuild of entire system
     stage3      Build additional packages
+    security    Build security packages (elogind, polkit, accountsservice)
     stage4      Generate bootable ISO image
 
 Options:
@@ -294,7 +313,7 @@ main() {
                 export RAVEN_NO_LOG=1
                 shift
                 ;;
-            all|stage0|stage1|stage2|stage3|stage4)
+            all|stage0|stage1|stage2|stage3|security|stage4)
                 stage="$1"
                 shift
                 ;;
@@ -332,6 +351,7 @@ main() {
             build_stage1
             build_stage2
             build_stage3
+            build_security
             build_stage4
             ;;
         stage0)
@@ -345,6 +365,9 @@ main() {
             ;;
         stage3)
             build_stage3
+            ;;
+        security)
+            build_security
             ;;
         stage4)
             build_stage4

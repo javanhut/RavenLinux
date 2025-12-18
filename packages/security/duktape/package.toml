@@ -1,0 +1,53 @@
+[package]
+name = "duktape"
+version = "2.7.0"
+description = "Embeddable JavaScript engine with focus on portability and compact footprint"
+license = "MIT"
+homepage = "https://duktape.org"
+repository = "https://github.com/svaarala/duktape"
+maintainers = ["RavenLinux Team"]
+categories = ["security", "libraries"]
+
+[source]
+type = "tarball"
+url = "https://duktape.org/duktape-2.7.0.tar.xz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "make"
+configure_flags = []
+build_flags = ["-f", "Makefile.sharedlibrary", "INSTALL_PREFIX=/usr"]
+env = {}
+pre_build = [
+    "sed -i 's/-Os/-O2/' Makefile.sharedlibrary"
+]
+post_build = []
+pre_install = []
+post_install = []
+
+[dependencies]
+runtime = []
+build = ["gcc"]
+
+[install]
+files = [
+    { src = "libduktape.so.207.20700", dest = "/usr/lib/libduktape.so.207.20700", mode = 755 },
+    { src = "libduktaped.so.207.20700", dest = "/usr/lib/libduktaped.so.207.20700", mode = 755 },
+    { src = "src/duktape.h", dest = "/usr/include/duktape.h", mode = 644 },
+    { src = "src/duk_config.h", dest = "/usr/include/duk_config.h", mode = 644 }
+]
+symlinks = [
+    { target = "libduktape.so.207.20700", link = "/usr/lib/libduktape.so.207" },
+    { target = "libduktape.so.207", link = "/usr/lib/libduktape.so" },
+    { target = "libduktaped.so.207.20700", link = "/usr/lib/libduktaped.so.207" },
+    { target = "libduktaped.so.207", link = "/usr/lib/libduktaped.so" }
+]
+directories = []
+
+[install.pkgconfig]
+# Create pkgconfig file for duktape
+name = "duktape"
+description = "Embeddable JavaScript engine"
+version = "2.7.0"
+libs = "-L${libdir} -lduktape -lm"
+cflags = "-I${includedir}"

@@ -1,0 +1,12 @@
+NAME="Raven Linux"
+PRETTY_NAME="Raven Linux"
+ID=raven
+BUILD_ID=rolling
+VERSION_ID=2025.12
+VERSION="2025.12 (Rolling)"
+ANSI_COLOR="38;2;23;147;209"
+HOME_URL="https://ravenlinux.org"
+DOCUMENTATION_URL="https://docs.ravenlinux.org"
+SUPPORT_URL="https://github.com/ravenlinux/ravenlinux/discussions"
+BUG_REPORT_URL="https://github.com/ravenlinux/ravenlinux/issues"
+LOGO=raven-logo

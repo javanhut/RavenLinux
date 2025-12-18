@@ -8,7 +8,7 @@ license = "MIT"
 
 [dependencies]
 # Unix/Linux system calls
-nix = { version = "0.28", features = ["signal", "process", "mount", "fs", "hostname", "reboot"] }
+nix = { version = "0.28", features = ["signal", "process", "mount", "fs", "hostname", "reboot", "term", "ioctl"] }
 
 # Direct libc access for sync()
 libc = "0.2"

@@ -19,11 +19,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export RAVEN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 export RAVEN_BUILD="${RAVEN_ROOT}/build"
-INITRAMFS_DIR="${RAVEN_BUILD}/initramfs"
-OUTPUT="${RAVEN_BUILD}/initramfs-raven.img"
+INITRAMFS_DIR="${RAVEN_INITRAMFS_DIR:-${RAVEN_BUILD}/initramfs}"
+OUTPUT="${RAVEN_INITRAMFS_OUTPUT:-${RAVEN_BUILD}/initramfs-raven.img}"
 
 # Source shared logging library
 source "${SCRIPT_DIR}/lib/logging.sh"
+
+# Options
+NO_DEVNODES=false
 
 # =============================================================================
 # Argument Parsing
@@ -35,9 +38,13 @@ while [[ $# -gt 0 ]]; do
             export RAVEN_NO_LOG=1
             shift
             ;;
+        --no-devnodes)
+            NO_DEVNODES=true
+            shift
+            ;;
         *)
             log_error "Unknown option: $1"
-            echo "Usage: $0 [--no-log]"
+            echo "Usage: $0 [--no-log] [--no-devnodes]"
             exit 1
             ;;
     esac
@@ -66,8 +73,94 @@ fixup_readline_history_symlinks() {
     fixup_soname_symlink "$dir" "libhistory.so.8"
 }
 
+copy_sysroot_library_by_name() {
+    local libname="$1"
+    local sysroot="${RAVEN_BUILD}/sysroot"
+
+    [[ -d "$sysroot" ]] || return 1
+
+    local candidate=""
+    local search_dirs=(
+        "${sysroot}/lib"
+        "${sysroot}/lib64"
+        "${sysroot}/usr/lib"
+        "${sysroot}/usr/lib64"
+    )
+
+    for dir in "${search_dirs[@]}"; do
+        if [[ -e "${dir}/${libname}" ]]; then
+            candidate="${dir}/${libname}"
+            break
+        fi
+    done
+
+    if [[ -z "$candidate" ]]; then
+        candidate="$(find "$sysroot" -maxdepth 6 -name "$libname" \( -type f -o -type l \) 2>/dev/null | head -n 1 || true)"
+    fi
+
+    [[ -n "$candidate" ]] || return 1
+
+    local rel="${candidate#${sysroot}}"
+    local dest="${INITRAMFS_DIR}${rel}"
+    mkdir -p "$(dirname "$dest")"
+    cp -L "$candidate" "$dest" 2>/dev/null || true
+    return 0
+}
+
+ensure_libc_compat_links() {
+    # Musl binaries commonly need libc.so and/or libc.musl-ARCH.so.1, but ldd output
+    # often only gives us the loader path (/lib/ld-musl-ARCH.so.1). Ensure the common
+    # names exist so basic tools like mkdir/sleep work in early boot.
+    local musl_loader=""
+    musl_loader="$(ls -1 "${INITRAMFS_DIR}"/lib/ld-musl-*.so.1 2>/dev/null | head -n 1 || true)"
+
+    if [[ -n "$musl_loader" ]]; then
+        local loader_path="${musl_loader#${INITRAMFS_DIR}}"
+
+        mkdir -p "${INITRAMFS_DIR}/lib" "${INITRAMFS_DIR}/usr/lib"
+        ln -sf "$loader_path" "${INITRAMFS_DIR}/lib/libc.so" 2>/dev/null || true
+        ln -sf "$loader_path" "${INITRAMFS_DIR}/usr/lib/libc.so" 2>/dev/null || true
+
+        local loader_base
+        loader_base="$(basename "$musl_loader")"
+        local arch="${loader_base#ld-musl-}"
+        arch="${arch%.so.1}"
+
+        if [[ -n "$arch" && "$arch" != "$loader_base" ]]; then
+            ln -sf "$loader_path" "${INITRAMFS_DIR}/lib/libc.musl-${arch}.so.1" 2>/dev/null || true
+            ln -sf "$loader_path" "${INITRAMFS_DIR}/usr/lib/libc.musl-${arch}.so.1" 2>/dev/null || true
+        fi
+
+        return 0
+    fi
+
+    # glibc compatibility: some mislinked binaries may look for libc.so (no SONAME).
+    local glibc_lib=""
+    if [[ -e "${INITRAMFS_DIR}/lib/libc.so.6" ]]; then
+        glibc_lib="/lib/libc.so.6"
+    elif [[ -e "${INITRAMFS_DIR}/usr/lib/libc.so.6" ]]; then
+        glibc_lib="/usr/lib/libc.so.6"
+    elif [[ -e "${INITRAMFS_DIR}/lib64/libc.so.6" ]]; then
+        glibc_lib="/lib64/libc.so.6"
+    elif [[ -e "${INITRAMFS_DIR}/usr/lib64/libc.so.6" ]]; then
+        glibc_lib="/usr/lib64/libc.so.6"
+    fi
+
+    if [[ -n "$glibc_lib" ]]; then
+        mkdir -p "${INITRAMFS_DIR}/lib" "${INITRAMFS_DIR}/usr/lib"
+        ln -sf "$glibc_lib" "${INITRAMFS_DIR}/lib/libc.so" 2>/dev/null || true
+        ln -sf "$glibc_lib" "${INITRAMFS_DIR}/usr/lib/libc.so" 2>/dev/null || true
+    fi
+}
+
 check_root() {
     if [[ $EUID -ne 0 ]]; then
+        if [[ "$NO_DEVNODES" == "true" ]]; then
+            log_warn "Running unprivileged (--no-devnodes): device nodes will not be created in initramfs"
+            log_warn "This requires devtmpfs to mount successfully at boot (no /dev tmpfs fallback)"
+            return 0
+        fi
+
         log_fatal "This script must be run as root (need to copy device nodes)"
     fi
 }
@@ -267,6 +360,8 @@ EOF
 copy_libraries() {
     log_step "Copying required libraries..."
 
+    local -A missing_libs=()
+
     # Find and copy required libraries for binaries in initramfs
     for bin in "${INITRAMFS_DIR}"/bin/*; do
         [[ -f "$bin" && -x "$bin" && ! -L "$bin" ]] || continue
@@ -277,7 +372,16 @@ copy_libraries() {
         fi
 
         # Use timeout to avoid hanging on problematic binaries
-        # Use process substitution to avoid subshell issues with pipefail
+        local ldd_out
+        ldd_out="$(timeout 2 ldd "$bin" 2>/dev/null || true)"
+
+        # Capture any "not found" dependencies so we can try to satisfy them from sysroot.
+        while IFS= read -r libname; do
+            [[ -n "$libname" ]] || continue
+            missing_libs["$libname"]=1
+        done < <(printf '%s\n' "$ldd_out" | awk '/=> not found/ {print $1}' || true)
+
+        # Copy resolved library paths. Use process substitution to avoid pipefail subshell issues.
         while read -r lib; do
             [[ -z "$lib" || ! -f "$lib" ]] && continue
             local dest="${INITRAMFS_DIR}${lib}"
@@ -294,7 +398,7 @@ copy_libraries() {
                     cp -L "$lib" "$dest" 2>/dev/null || true
                 fi
             fi
-        done < <(timeout 2 ldd "$bin" 2>/dev/null | grep -o '/[^ ]*' || true)
+        done < <(printf '%s\n' "$ldd_out" | grep -o '/[^ ]*' || true)
     done
 
     # Copy dynamic linker
@@ -309,11 +413,58 @@ copy_libraries() {
         fi
     done
 
+    # Copy musl loader if present (covers musl-based hosts/sysroots)
+    for ld in /lib/ld-musl-*.so.1; do
+        if [[ -e "${RAVEN_BUILD}/sysroot${ld}" ]]; then
+            mkdir -p "${INITRAMFS_DIR}$(dirname "$ld")"
+            cp -L "${RAVEN_BUILD}/sysroot${ld}" "${INITRAMFS_DIR}${ld}" 2>/dev/null || true
+        elif [[ -f "$ld" ]]; then
+            mkdir -p "${INITRAMFS_DIR}$(dirname "$ld")"
+            cp -L "$ld" "${INITRAMFS_DIR}${ld}" 2>/dev/null || true
+        fi
+    done
+
+    # Try to satisfy any unresolved libs from sysroot by name (common when using a custom sysroot)
+    if [[ ${#missing_libs[@]} -gt 0 ]]; then
+        log_info "Resolving missing libraries from sysroot..."
+        for libname in "${!missing_libs[@]}"; do
+            # libc.so is ambiguous (glibc linker script vs musl shared libc). Handle via compat links.
+            if [[ "$libname" = "libc.so" ]]; then
+                continue
+            fi
+            if ! copy_sysroot_library_by_name "$libname"; then
+                log_warn "Could not resolve missing library from sysroot: ${libname}"
+            fi
+        done
+    fi
+
+    # CRITICAL: Create /lib symlink to /usr/lib for library resolution
+    # Many binaries are linked expecting libraries in /lib/ but we store them in /usr/lib/
+    if [[ -d "${INITRAMFS_DIR}/usr/lib" ]] && [[ ! -L "${INITRAMFS_DIR}/lib" ]]; then
+        # Copy essential libraries to /lib/ as well for compatibility
+        log_info "Copying essential libraries to /lib/ for compatibility..."
+        mkdir -p "${INITRAMFS_DIR}/lib"
+        for lib in libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 \
+                   libgcc_s.so.1 libcrypt.so.2 libresolv.so.2 libnss_files.so.2 \
+                   libnss_dns.so.2; do
+            if [[ -f "${INITRAMFS_DIR}/usr/lib/${lib}" ]]; then
+                cp -L "${INITRAMFS_DIR}/usr/lib/${lib}" "${INITRAMFS_DIR}/lib/${lib}" 2>/dev/null || true
+            fi
+        done
+    fi
+
+    ensure_libc_compat_links
+
     log_success "Libraries copied"
 }
 
 create_device_nodes() {
     log_step "Creating device nodes..."
+
+    if [[ "$NO_DEVNODES" == "true" ]]; then
+        log_warn "Skipping device node creation (--no-devnodes)"
+        return 0
+    fi
 
     mknod -m 600 "${INITRAMFS_DIR}/dev/console" c 5 1
     mknod -m 666 "${INITRAMFS_DIR}/dev/null" c 1 3
@@ -369,6 +520,7 @@ SHELLS
     # /etc/profile
     cat > "${INITRAMFS_DIR}/etc/profile" <<'PROFILE'
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export LD_LIBRARY_PATH=/lib:/usr/lib:/lib64:/usr/lib64
 export HOME=/root
 export TERM=linux
 export PS1='[\u@raven-linux]# '
@@ -381,6 +533,7 @@ PROFILE
     mkdir -p "${INITRAMFS_DIR}/root"
     cat > "${INITRAMFS_DIR}/root/.zshrc" <<'ZSHRC'
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export LD_LIBRARY_PATH=/lib:/usr/lib:/lib64:/usr/lib64
 export HOME=/root
 export TERM=linux
 export RAVEN_LINUX=1
@@ -401,6 +554,7 @@ create_init() {
 # Mounts the squashfs filesystem from the live ISO and switches to it
 
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export LD_LIBRARY_PATH=/lib:/usr/lib:/lib64:/usr/lib64
 
 # =============================================================================
 # Color and Status Output Functions (systemd/OpenRC style)
@@ -549,16 +703,15 @@ ISO_LABEL="RAVEN_LIVE"
 
 # Method 1: Look for device with our label using blkid
 if command -v blkid &>/dev/null; then
-    while IFS= read -r line; do
-        dev="${line%%:*}"
-        if [ -b "$dev" ] 2>/dev/null; then
-            label=$(blkid -o value -s LABEL "$dev" 2>/dev/null)
-            if [ "$label" = "$ISO_LABEL" ]; then
-                BOOT_DEVICE="$dev"
-                break
-            fi
+    # Avoid bash process substitution here; it depends on /dev/fd existing.
+    for dev in $(blkid 2>/dev/null | awk -F: '{print $1}'); do
+        [ -b "$dev" ] 2>/dev/null || continue
+        label=$(blkid -o value -s LABEL "$dev" 2>/dev/null)
+        if [ "$label" = "$ISO_LABEL" ]; then
+            BOOT_DEVICE="$dev"
+            break
         fi
-    done < <(blkid 2>/dev/null)
+    done
 fi
 
 # Method 2: Scan common device paths

@@ -149,7 +149,7 @@ log_level = "info"
 [[services]]
 name = "getty-tty1"
 description = "Getty login on tty1"
-exec = "/sbin/agetty"
+exec = "/bin/agetty"
 args = ["--noclear", "--autologin", "root", "tty1", "linux"]
 restart = true
 enabled = true
@@ -158,7 +158,7 @@ critical = false
 [[services]]
 name = "getty-ttyS0"
 description = "Serial console getty on ttyS0"
-exec = "/sbin/agetty"
+exec = "/bin/agetty"
 args = ["--noclear", "--autologin", "root", "-L", "115200", "ttyS0", "vt102"]
 restart = true
 enabled = false

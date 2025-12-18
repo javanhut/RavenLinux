@@ -1,0 +1,97 @@
+[package]
+name = "elogind"
+version = "255.17"
+description = "Standalone logind from systemd - session/seat management daemon"
+license = "LGPL-2.1-or-later"
+homepage = "https://github.com/elogind/elogind"
+repository = "https://github.com/elogind/elogind"
+maintainers = ["RavenLinux Team"]
+categories = ["security", "system", "session"]
+
+[source]
+type = "tarball"
+url = "https://github.com/elogind/elogind/archive/refs/tags/v255.17.tar.gz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "meson"
+configure_flags = [
+    "--prefix=/usr",
+    "--buildtype=release",
+    "-D man=false",
+    "-D docdir=/usr/share/doc/elogind-255.17",
+    "-D cgroup-controller=elogind",
+    "-D dev-kvm-mode=0660",
+    "-D dbuspolicydir=/etc/dbus-1/system.d",
+    "-D default-kill-user-processes=false"
+]
+build_flags = []
+env = {}
+pre_build = []
+post_build = []
+pre_install = []
+post_install = [
+    "ln -sfv libelogind.pc /usr/lib/pkgconfig/libsystemd.pc",
+    "ln -sfvn elogind /usr/include/systemd"
+]
+
+[dependencies]
+runtime = ["dbus", "linux-pam"]
+build = ["meson", "ninja", "dbus", "linux-pam"]
+
+[install]
+files = []
+symlinks = [
+    { target = "/usr/lib/pkgconfig/libelogind.pc", link = "/usr/lib/pkgconfig/libsystemd.pc" },
+    { target = "/usr/include/elogind", link = "/usr/include/systemd" }
+]
+directories = [
+    "/usr/lib/elogind",
+    "/etc/elogind",
+    "/usr/include/elogind",
+    "/usr/share/doc/elogind-255.17"
+]
+
+[config]
+# PAM configuration for elogind
+pam_files = [
+    { name = "system-session", append = """
+# Begin elogind addition
+session  required    pam_loginuid.so
+session  optional    pam_elogind.so
+# End elogind addition
+""" },
+    { name = "elogind-user", content = """
+# Begin /etc/pam.d/elogind-user
+account  required    pam_access.so
+account  include     system-account
+
+session  required    pam_env.so
+session  required    pam_limits.so
+session  required    pam_unix.so
+session  required    pam_loginuid.so
+session  optional    pam_elogind.so
+
+auth     required    pam_deny.so
+password required    pam_deny.so
+# End /etc/pam.d/elogind-user
+""" }
+]
+
+[kernel]
+# Required kernel options for elogind
+required_options = [
+    "CONFIG_CGROUPS=y",
+    "CONFIG_INOTIFY_USER=y",
+    "CONFIG_SIGNALFD=y",
+    "CONFIG_TIMERFD=y",
+    "CONFIG_EPOLL=y"
+]
+
+[service]
+# Service definition for init system
+name = "elogind"
+description = "Login and seat management"
+type = "dbus"
+dbus_name = "org.freedesktop.login1"
+exec = "/usr/lib/elogind/elogind"
