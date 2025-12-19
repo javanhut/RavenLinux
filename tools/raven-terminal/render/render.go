@@ -50,6 +50,8 @@ type Renderer struct {
 	cellWidth   float32
 	cellHeight  float32
 	fontSize    float32
+	paddingTop  float32
+	paddingBottom float32
 	tabBarWidth float32
 	currentFont string
 
@@ -79,10 +81,12 @@ func NewRenderer() (*Renderer, error) {
 	r := &Renderer{
 		theme:       DefaultTheme(),
 		fontSize:    16.0,
+		paddingTop:  12.0,
+		paddingBottom: 12.0,
 		tabBarWidth: 135.0,
 		currentFont: fonts.DefaultFontName(),
 		glyphs:      make(map[rune]Glyph),
-		atlasSize:   2048, // Larger atlas for Nerd Font icons
+		atlasSize:   512, // Larger atlas for Nerd Font icons
 	}
 
 	if err := r.initGL(); err != nil {
@@ -360,7 +364,7 @@ func (r *Renderer) renderTabBar(tm *tab.TabManager, width, height int, proj [16]
 // renderGrid renders the terminal grid
 func (r *Renderer) renderGrid(g *grid.Grid, width, height int, proj [16]float32, cursorVisible bool) {
 	offsetX := r.tabBarWidth + 5
-	offsetY := float32(5)
+	offsetY := r.paddingTop
 
 	cols := g.Cols
 	rows := g.Rows
@@ -556,7 +560,7 @@ func (r *Renderer) TabBarWidth() float32 {
 // CalculateGridSize calculates the number of columns and rows that fit
 func (r *Renderer) CalculateGridSize(width, height int) (cols, rows int) {
 	availableWidth := float32(width) - r.tabBarWidth - 10
-	availableHeight := float32(height) - 10
+	availableHeight := float32(height) - r.paddingTop - r.paddingBottom
 	cols = int(availableWidth / r.cellWidth)
 	rows = int(availableHeight / r.cellHeight)
 	if cols < 1 {

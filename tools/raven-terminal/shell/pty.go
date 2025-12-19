@@ -47,7 +47,8 @@ func NewPtySession(cols, rows uint16) (*PtySession, error) {
 		return nil, err
 	}
 
-	cmd := exec.Command(shell, "-l")
+	// Run without user profiles/rc so our PS1 and clean env stay in effect
+	cmd := exec.Command(shell, "--noprofile", "--norc")
 
 	// Create new session - critical for independence from parent terminal
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -57,9 +58,9 @@ func NewPtySession(cols, rows uint16) (*PtySession, error) {
 	// Get distro name for prompt
 	distro := getDistroName()
 
-	// Custom PS1: path on line above, then [user@distro] >
-	// \[\e[0;36m\] = cyan color, \[\e[0m\] = reset, \w = working directory
-	ps1 := `\[\e[0;36m\]\w\[\e[0m\]\n[\u@` + distro + `] > `
+	// Custom PS1: friendly two-line prompt with basic system info and ASCII-only symbols.
+	// The path is trimmed to avoid wrapping: show ~, and if longer than 50 chars, keep the tail with an ellipsis.
+	ps1 := "\\[\\e[0;36m\\]$(p=$PWD; home=$HOME; case \"$p\" in \"$home\"*) p=\"~${p#$home}\";; esac; max=50; if [ ${#p} -gt $max ]; then p=\"...${p: -$max}\"; fi; printf %s \"$p\")/\\[\\e[0m\\] PackagesManager: \\[\\e[0;33m\\]$(if [ -f go.mod ]; then echo \"Go $(go version 2>/dev/null | awk '{print $3}')\"; elif [ -f Cargo.toml ]; then echo \"Cargo $(cargo --version 2>/dev/null | awk '{print $2}')\"; elif [ -f package.json ]; then echo \"Node $(node --version 2>/dev/null)\"; elif [ -f pyproject.toml ] || [ -f requirements.txt ] || [ -f Pipfile ]; then echo \"Python $(python3 --version 2>/dev/null | awk '{print $2}')\"; elif compgen -G \"*.cpp\" >/dev/null || compgen -G \"*.cc\" >/dev/null || compgen -G \"*.cxx\" >/dev/null; then echo \"C++ $(c++ --version 2>/dev/null | head -n1 | awk '{print $NF}')\"; else echo \"None\"; fi)\\[\\e[0m\\]   VCS: \\[\\e[0;32m\\]$(if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then echo \"Git\"; elif [ -e .ivaldi ]; then echo \"Ivaldi\"; elif compgen -G \"*.crl\" >/dev/null; then echo \"Carrion\"; else echo \"None\"; fi)\\[\\e[0m\\]\n[\\u@" + distro + "] > "
 
 	// Clean environment - don't inherit from parent terminal
 	cmd.Env = []string{
@@ -67,6 +68,8 @@ func NewPtySession(cols, rows uint16) (*PtySession, error) {
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
 		"RAVEN_TERMINAL=1",
+		"PROMPT_COMMAND=if [ -z \"$__RAVEN_LS_DEFINED\" ]; then __RAVEN_LS_DEFINED=1; alias ls='ls --color=auto -p'; fi",
+		"LS_COLORS=di=01;34:fi=0:ln=01;36:ex=01;32:*.crl=01;35",
 		"HOME=" + currentUser.HomeDir,
 		"USER=" + currentUser.Username,
 		"SHELL=" + shell,
