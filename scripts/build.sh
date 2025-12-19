@@ -166,6 +166,40 @@ build_sudo_rs() {
     done
 }
 
+# Build raven-terminal into build/bin/
+build_raven_terminal() {
+    log_section "Building raven-terminal"
+
+    if [[ -f "${RAVEN_BUILD}/bin/raven-terminal" ]]; then
+        log_info "raven-terminal already built, skipping"
+        return 0
+    fi
+
+    if ! command -v go &>/dev/null; then
+        log_warn "Go not found, skipping raven-terminal build"
+        return 0
+    fi
+
+    local src_dir="${RAVEN_ROOT}/tools/raven-terminal"
+
+    if [[ ! -d "${src_dir}" ]]; then
+        log_warn "raven-terminal source not found at ${src_dir}, skipping"
+        return 0
+    fi
+
+    mkdir -p "${RAVEN_BUILD}/bin"
+
+    log_step "Compiling raven-terminal..."
+    (cd "${src_dir}" && run_logged go build -o "${RAVEN_BUILD}/bin/raven-terminal" .)
+
+    if [[ -f "${RAVEN_BUILD}/bin/raven-terminal" ]]; then
+        chmod +x "${RAVEN_BUILD}/bin/raven-terminal"
+        log_success "Built ${RAVEN_BUILD}/bin/raven-terminal"
+    else
+        log_warn "Failed to build raven-terminal"
+    fi
+}
+
 # Stage 0: Build cross-compilation toolchain
 build_stage0() {
     log_section "Stage 0: Building Cross Toolchain"
@@ -184,6 +218,7 @@ build_stage1() {
 
     if [[ -f "${RAVEN_ROOT}/scripts/stages/stage1-base.sh" ]]; then
         build_sudo_rs
+        build_raven_terminal
         run_logged source "${RAVEN_ROOT}/scripts/stages/stage1-base.sh"
     else
         log_warn "Stage 1 script not found, skipping"
