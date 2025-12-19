@@ -32,6 +32,8 @@ if [ -z "${XCURSOR_THEME:-}" ]; then
         export XCURSOR_THEME=Adwaita
     fi
 fi
+export XCURSOR_SIZE="${XCURSOR_SIZE:-24}"
+export SHELL="${SHELL:-/bin/bash}"
 
 # Xwayland expects /tmp/.X11-unix to exist (it may not create the parent dir).
 mkdir -p /tmp/.X11-unix 2>/dev/null || true
