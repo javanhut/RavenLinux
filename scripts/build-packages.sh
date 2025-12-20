@@ -332,17 +332,32 @@ build_wifi_tools() {
         log_warn "WiFi TUI source not found, skipping"
     fi
 
-    # Build raven-wifi GUI
+    # Build raven-wifi GUI with Wayland support
     local wifi_gui_dir="${PROJECT_ROOT}/tools/raven-wifi"
     if [ -d "$wifi_gui_dir" ]; then
         cd "$wifi_gui_dir"
         log_info "Downloading dependencies for raven-wifi GUI..."
         run_logged go mod download 2>/dev/null || run_logged go mod tidy
 
-        log_info "Compiling raven-wifi GUI..."
-        if run_logged env CGO_ENABLED=1 go build -o raven-wifi .; then
+        log_info "Compiling raven-wifi GUI with Wayland support..."
+        # CGO flags to ensure Wayland backend is linked
+        local cgo_cflags=""
+        local cgo_ldflags=""
+
+        # Add Wayland and XKB flags if available
+        if pkg-config --exists wayland-client wayland-egl xkbcommon 2>/dev/null; then
+            cgo_cflags="$(pkg-config --cflags wayland-client wayland-egl xkbcommon 2>/dev/null || true)"
+            cgo_ldflags="$(pkg-config --libs wayland-client wayland-egl xkbcommon 2>/dev/null || true)"
+            log_info "Building with Wayland support: ${cgo_ldflags}"
+        fi
+
+        if run_logged env CGO_ENABLED=1 \
+            CGO_CFLAGS="${cgo_cflags}" \
+            CGO_LDFLAGS="${cgo_ldflags}" \
+            go build -ldflags="-s -w" -o raven-wifi .; then
             mkdir -p "${OUTPUT_DIR}/bin"
             cp raven-wifi "${OUTPUT_DIR}/bin/"
+            chmod +x "${OUTPUT_DIR}/bin/raven-wifi"
             log_success "raven-wifi (GUI) built -> ${OUTPUT_DIR}/bin/raven-wifi"
         else
             log_error "Failed to build raven-wifi GUI"
@@ -351,6 +366,82 @@ build_wifi_tools() {
     else
         log_warn "WiFi GUI source not found, skipping"
     fi
+}
+
+# Build raven-terminal
+build_raven_terminal() {
+    log_section "Building raven-terminal"
+
+    local terminal_dir="${PROJECT_ROOT}/tools/raven-terminal"
+    if [ ! -d "$terminal_dir" ]; then
+        log_warn "raven-terminal source not found at ${terminal_dir}, skipping"
+        return 0
+    fi
+
+    cd "$terminal_dir"
+    log_info "Downloading dependencies for raven-terminal..."
+    run_logged go mod download 2>/dev/null || run_logged go mod tidy
+
+    log_info "Compiling raven-terminal with Wayland support..."
+    # CGO flags to ensure Wayland backend is linked
+    local cgo_cflags=""
+    local cgo_ldflags=""
+
+    # Add Wayland and XKB flags if available
+    if pkg-config --exists wayland-client wayland-egl xkbcommon 2>/dev/null; then
+        cgo_cflags="$(pkg-config --cflags wayland-client wayland-egl xkbcommon 2>/dev/null || true)"
+        cgo_ldflags="$(pkg-config --libs wayland-client wayland-egl xkbcommon 2>/dev/null || true)"
+        log_info "Building with Wayland support: ${cgo_ldflags}"
+    fi
+
+    if run_logged env CGO_ENABLED=1 \
+        CGO_CFLAGS="${cgo_cflags}" \
+        CGO_LDFLAGS="${cgo_ldflags}" \
+        go build -o raven-terminal .; then
+        mkdir -p "${OUTPUT_DIR}/bin"
+        cp raven-terminal "${OUTPUT_DIR}/bin/"
+        log_success "raven-terminal built -> ${OUTPUT_DIR}/bin/raven-terminal"
+    else
+        log_error "Failed to build raven-terminal"
+    fi
+    cd "${PROJECT_ROOT}"
+}
+
+# Build raven-launcher
+build_raven_launcher() {
+    log_section "Building raven-launcher"
+
+    local launcher_dir="${PROJECT_ROOT}/tools/raven-launcher"
+    if [ ! -d "$launcher_dir" ]; then
+        log_warn "raven-launcher source not found at ${launcher_dir}, skipping"
+        return 0
+    fi
+
+    cd "$launcher_dir"
+    log_info "Downloading dependencies for raven-launcher..."
+    run_logged go mod download 2>/dev/null || run_logged go mod tidy
+
+    log_info "Compiling raven-launcher..."
+    # CGO flags for Wayland support
+    local cgo_cflags=""
+    local cgo_ldflags=""
+
+    if pkg-config --exists wayland-client wayland-egl xkbcommon 2>/dev/null; then
+        cgo_cflags="$(pkg-config --cflags wayland-client wayland-egl xkbcommon 2>/dev/null || true)"
+        cgo_ldflags="$(pkg-config --libs wayland-client wayland-egl xkbcommon 2>/dev/null || true)"
+    fi
+
+    if run_logged env CGO_ENABLED=1 \
+        CGO_CFLAGS="${cgo_cflags}" \
+        CGO_LDFLAGS="${cgo_ldflags}" \
+        go build -o raven-launcher .; then
+        mkdir -p "${OUTPUT_DIR}/bin"
+        cp raven-launcher "${OUTPUT_DIR}/bin/"
+        log_success "raven-launcher built -> ${OUTPUT_DIR}/bin/raven-launcher"
+    else
+        log_error "Failed to build raven-launcher"
+    fi
+    cd "${PROJECT_ROOT}"
 }
 
 # Build all packages
@@ -363,6 +454,8 @@ build_all() {
     build_raven_dhcp
     build_usb_creator
     build_wifi_tools
+    build_raven_terminal
+    build_raven_launcher
     build_bootloader
 }
 

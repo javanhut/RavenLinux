@@ -326,13 +326,35 @@ build_wifi_tools() {
             log_warn "Go not found, skipping raven-wifi GUI build"
         else
             cd "${wifi_gui_dir}"
-            go mod tidy 2>/dev/null || true
+            log_info "Downloading dependencies for raven-wifi GUI..."
+            go mod download 2>/dev/null || go mod tidy 2>/dev/null || true
 
-            if CGO_ENABLED=1 go build -o raven-wifi . 2>&1 | tee "${LOGS_DIR}/wifi-gui.log"; then
+            log_info "Compiling raven-wifi GUI with Wayland support..."
+            
+            # CGO flags to ensure Wayland backend is linked
+            local cgo_cflags=""
+            local cgo_ldflags=""
+
+            # Add Wayland and XKB flags if available
+            if pkg-config --exists wayland-client wayland-egl xkbcommon 2>/dev/null; then
+                cgo_cflags="$(pkg-config --cflags wayland-client wayland-egl xkbcommon 2>/dev/null || true)"
+                cgo_ldflags="$(pkg-config --libs wayland-client wayland-egl xkbcommon 2>/dev/null || true)"
+                log_info "Building with Wayland support: ${cgo_ldflags}"
+            else
+                log_warn "Wayland libraries not found, building with X11 fallback only"
+            fi
+
+            if env CGO_ENABLED=1 \
+                CGO_CFLAGS="${cgo_cflags}" \
+                CGO_LDFLAGS="${cgo_ldflags}" \
+                go build -ldflags="-s -w" -o raven-wifi . 2>&1 | tee "${LOGS_DIR}/wifi-gui.log"; then
+                
                 mkdir -p "${PACKAGES_DIR}/bin" "${SYSROOT_DIR}/bin"
                 cp raven-wifi "${PACKAGES_DIR}/bin/"
                 cp raven-wifi "${SYSROOT_DIR}/bin/"
-                log_success "raven-wifi (GUI) built"
+                chmod +x "${PACKAGES_DIR}/bin/raven-wifi"
+                chmod +x "${SYSROOT_DIR}/bin/raven-wifi"
+                log_success "raven-wifi (GUI) built and installed"
             else
                 log_warn "Failed to build raven-wifi GUI"
             fi
@@ -779,7 +801,9 @@ build_ncurses() {
         --with-default-terminfo-dir=/usr/share/terminfo
 
     make -j$(nproc)
-    make DESTDIR="${SYSROOT_DIR}" install
+    # LD_LIBRARY_PATH is needed so the freshly-built tic can find libtinfow.so.6
+    # when compiling the terminfo database during install
+    LD_LIBRARY_PATH="${SYSROOT_DIR}/usr/lib" make DESTDIR="${SYSROOT_DIR}" install
 
     # Create non-wide symlinks for compatibility
     cd "${SYSROOT_DIR}/usr/lib"

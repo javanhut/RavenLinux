@@ -633,14 +633,7 @@ install_packages_to_sysroot() {
         cp "${PROJECT_ROOT}/configs/raven-x11-session" "${SYSROOT_DIR}/bin/raven-x11-session" 2>/dev/null || true
         chmod +x "${SYSROOT_DIR}/bin/raven-x11-session" 2>/dev/null || true
     fi
-    if [[ -f "${PROJECT_ROOT}/configs/weston/weston.ini" ]]; then
-        mkdir -p "${SYSROOT_DIR}/etc/xdg/weston"
-        cp "${PROJECT_ROOT}/configs/weston/weston.ini" "${SYSROOT_DIR}/etc/xdg/weston/weston.ini" 2>/dev/null || true
-        chmod 644 "${SYSROOT_DIR}/etc/xdg/weston/weston.ini" 2>/dev/null || true
-        log_info "  Installed /etc/xdg/weston/weston.ini"
-    fi
-
-    # Fontconfig + fonts (Weston terminal/shell uses it; missing config causes warnings).
+    # Fontconfig + fonts (needed for terminal/shell; missing config causes warnings).
     if [[ -d "/etc/fonts" ]]; then
         mkdir -p "${SYSROOT_DIR}/etc/fonts"
         cp -a "/etc/fonts/." "${SYSROOT_DIR}/etc/fonts/" 2>/dev/null || true
@@ -662,7 +655,7 @@ install_packages_to_sysroot() {
     fi
     mkdir -p "${SYSROOT_DIR}/var/cache/fontconfig" 2>/dev/null || true
 
-    # Cursor themes (missing dnd cursors produce warnings in weston-desktop-shell).
+    # Cursor themes (needed for proper cursor display in Wayland compositors).
     if [[ -d "/usr/share/icons" ]]; then
         mkdir -p "${SYSROOT_DIR}/usr/share/icons"
         for theme in default breeze_cursors Adwaita hicolor; do
@@ -773,7 +766,7 @@ setup_ravenboot() {
 setup_grub() {
     log_step "Setting up GRUB bootloader..."
 
-    # Create GRUB config with submenus
+    # Create GRUB config with clean menu structure
     cat > "${ISO_ROOT}/boot/grub/grub.cfg" << 'EOF'
 set default=0
 set timeout=5
@@ -787,34 +780,22 @@ set gfxpayload=keep
 set color_normal=cyan/black
 set color_highlight=white/blue
 
+# Default: Graphical mode with Raven Compositor
 menuentry "Raven Linux" --class raven {
+    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=tty0
+    initrd /boot/initramfs.img
+}
+
+# Serial console mode (for VMs, headless, debugging)
+menuentry "Raven Linux (Serial)" --class raven {
     linux /boot/vmlinuz rdinit=/init quiet loglevel=3 console=ttyS0,115200 console=tty0
     initrd /boot/initramfs.img
 }
 
+# Graphical options submenu
 submenu "Raven Linux (Graphical) >" --class raven {
-    menuentry "Raven Desktop (Wayland)" --class raven {
-        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=weston console=ttyS0,115200 console=tty0
-        initrd /boot/initramfs.img
-    }
-
-    menuentry "Raven Compositor (Wayland)" --class raven {
-        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=ttyS0,115200 console=tty0
-        initrd /boot/initramfs.img
-    }
-
-    menuentry "Hyprland (Wayland)" --class raven {
-        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=hyprland console=ttyS0,115200 console=tty0
-        initrd /boot/initramfs.img
-    }
-
-    menuentry "Weston (Wayland)" --class raven {
-        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=weston console=ttyS0,115200 console=tty0
-        initrd /boot/initramfs.img
-    }
-
-    menuentry "X11" --class raven {
-        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=x11 console=ttyS0,115200 console=tty0
+    menuentry "Raven Compositor" --class raven {
+        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=tty0
         initrd /boot/initramfs.img
     }
 
@@ -823,12 +804,13 @@ submenu "Raven Linux (Graphical) >" --class raven {
     }
 }
 
-menuentry "Raven Linux (Recovery)" --class raven {
-    linux /boot/vmlinuz rdinit=/init single console=ttyS0,115200 console=tty0
-    initrd /boot/initramfs.img
-}
-
+# System options submenu
 submenu "System >" --class raven {
+    menuentry "Recovery Mode" --class raven {
+        linux /boot/vmlinuz rdinit=/init single console=ttyS0,115200 console=tty0
+        initrd /boot/initramfs.img
+    }
+
     menuentry "Reboot" --class restart {
         reboot
     }

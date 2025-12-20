@@ -543,21 +543,6 @@ copy_wayland_tools() {
         log_warn "seatd not found - install with: sudo pacman -S seatd"
     fi
 
-    # weston as fallback compositor
-    if command -v weston &>/dev/null; then
-        cp "$(which weston)" "${LIVE_ROOT}/bin/"
-        log_info "  Added weston"
-
-        # Copy weston runtime modules/backends (weston 14 uses libweston-$major)
-        for d in /usr/lib/weston /usr/lib64/weston /usr/share/weston \
-            /usr/lib/libweston-* /usr/lib64/libweston-*; do
-            [[ -d "$d" ]] || continue
-            mkdir -p "${LIVE_ROOT}${d}"
-            cp -a "${d}/." "${LIVE_ROOT}${d}/" 2>/dev/null || true
-            log_info "  Copied $(basename "$d") runtime data"
-        done
-    fi
-
     # X11/Xwayland support (for legacy apps under Wayland, or optional Xorg)
     if command -v Xwayland &>/dev/null; then
         cp "$(which Xwayland)" "${LIVE_ROOT}/bin/"
@@ -1392,11 +1377,6 @@ menuentry "Raven Linux Live" --class raven {
 }
 
 menuentry "Raven Linux Live (Wayland)" --class raven {
-    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=weston
-    initrd /boot/initramfs.img
-}
-
-menuentry "Raven Linux Live (Wayland - Raven Compositor WIP)" --class raven {
     linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven
     initrd /boot/initramfs.img
 }
