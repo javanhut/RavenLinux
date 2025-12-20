@@ -157,12 +157,13 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 		return KeyResult{Action: ActionInput, Data: []byte{byte(key - glfw.KeyA + 1)}}
 	}
 
-	// Space
+	// Space - only handle Ctrl+Space here; normal space is handled by char callback
 	if key == glfw.KeySpace {
 		if ctrl {
 			return KeyResult{Action: ActionInput, Data: []byte{0}}
 		}
-		return KeyResult{Action: ActionInput, Data: []byte{' '}}
+		// Let the char callback handle normal space to avoid double input
+		return KeyResult{Action: ActionNone}
 	}
 
 	// Alt + key sends ESC prefix
