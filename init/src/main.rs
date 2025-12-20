@@ -155,7 +155,7 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
 
     // Avoid starting both a compositor and the session wrapper at once.
     for svc in &mut config.services {
-        if svc.name == "weston" || svc.name == "raven-compositor" || svc.name == "wayland-session" {
+        if svc.name == "raven-compositor" || svc.name == "wayland-session" {
             svc.enabled = false;
         }
     }
@@ -206,36 +206,21 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
             },
         );
     } else {
-        match wayland_choice {
-            Some("weston") => ensure_service(
-                &mut config.services,
-                ServiceConfig {
-                    name: "weston".to_string(),
-                    description: "Weston Wayland compositor".to_string(),
-                    exec: "/bin/weston".to_string(),
-                    args: vec!["--backend=drm-backend.so".to_string()],
-                    restart: true,
-                    enabled: true,
-                    critical: false,
-                    environment: compositor_env,
-                    tty: None,
-                },
-            ),
-            _ => ensure_service(
-                &mut config.services,
-                ServiceConfig {
-                    name: "raven-compositor".to_string(),
-                    description: "Raven Wayland compositor".to_string(),
-                    exec: "/bin/raven-compositor".to_string(),
-                    args: Vec::new(),
-                    restart: true,
-                    enabled: true,
-                    critical: false,
-                    environment: compositor_env,
-                    tty: None,
-                },
-            ),
-        };
+        // Always use raven-compositor
+        ensure_service(
+            &mut config.services,
+            ServiceConfig {
+                name: "raven-compositor".to_string(),
+                description: "Raven Wayland compositor".to_string(),
+                exec: "/bin/raven-compositor".to_string(),
+                args: Vec::new(),
+                restart: true,
+                enabled: true,
+                critical: false,
+                environment: compositor_env,
+                tty: None,
+            },
+        );
     }
 
     Ok(())

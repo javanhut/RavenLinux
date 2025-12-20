@@ -18,13 +18,21 @@ mod workspace;
 use state::RavenState;
 
 fn main() -> Result<()> {
-    // Initialize logging
+    // Raw debug output for serial console
+    eprintln!("=== RAVEN-COMPOSITOR STARTING ===");
+    eprintln!("PID: {}", std::process::id());
+    eprintln!("WAYLAND_DISPLAY: {:?}", std::env::var("WAYLAND_DISPLAY").ok());
+    eprintln!("XDG_RUNTIME_DIR: {:?}", std::env::var("XDG_RUNTIME_DIR").ok());
+
+    // Initialize logging with stderr writer
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_max_level(Level::DEBUG)  // Enable DEBUG level for more info
+        .with_writer(std::io::stderr)   // Explicitly write to stderr
+        .with_ansi(false)               // No ANSI colors for serial
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
+    eprintln!("=== LOGGING INITIALIZED ===");
     info!("Starting raven-compositor v{}", env!("CARGO_PKG_VERSION"));
 
     // Parse command line arguments

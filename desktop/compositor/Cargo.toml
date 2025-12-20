@@ -8,23 +8,23 @@ license = "MIT"
 
 [dependencies]
 # Smithay - Wayland compositor library (Rust alternative to wlroots)
-smithay = { version = "0.3", default-features = false, features = [
+smithay = { version = "0.7", default-features = false, features = [
     "backend_drm",
-    "backend_egl",
     "backend_gbm",
     "backend_libinput",
     "backend_session_libseat",
     "backend_udev",
-    "renderer_gl",
     "wayland_frontend",
 ] }
 
-# libseat for session management (use 0.1 for vendored compatibility)
-libseat = "0.1"
+# Wayland server core
+wayland-server = "0.31"
+wayland-protocols = { version = "0.32", features = ["server"] }
 
 # System interfaces
 libc = "0.2"
 udev = "0.6"
+gbm = "0.18"
 
 # DRM mode info for synthetic display modes (matches smithay's version)
 drm-ffi = "0.2"

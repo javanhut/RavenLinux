@@ -126,31 +126,50 @@ start_session_components() {
         eval "$(dbus-daemon --session --fork --print-address 2>/dev/null | sed 's/^/export DBUS_SESSION_BUS_ADDRESS=/' )" || true
     fi
 
+    # Set up DISPLAY for XWayland if X socket exists
+    # This allows X11/GLFW apps to work through XWayland
+    if [ -z "${DISPLAY:-}" ]; then
+        # Wait briefly for XWayland to create the socket
+        i=0
+        while [ "$i" -lt 20 ]; do
+            if [ -S /tmp/.X11-unix/X0 ]; then
+                export DISPLAY=:0
+                log "XWayland detected, DISPLAY=:0"
+                break
+            fi
+            i=$((i + 1))
+            sleep 0.1
+        done
+    fi
+
     case "$compositor" in
-        weston*)
-            if command -v weston-terminal >/dev/null 2>&1; then
-                log "Autostart: weston-terminal"
-                weston-terminal >>"$LOGFILE" 2>&1 &
-            elif command -v foot >/dev/null 2>&1; then
-                log "Autostart: foot"
-                foot >>"$LOGFILE" 2>&1 &
-            elif command -v alacritty >/dev/null 2>&1; then
-                log "Autostart: alacritty"
-                alacritty >>"$LOGFILE" 2>&1 &
+        raven-compositor*|raven*)
+            # Start Raven shell components
+            # Start desktop first (background layer)
+            if command -v raven-desktop >/dev/null 2>&1; then
+                log "Autostart: raven-desktop"
+                raven-desktop >>"$LOGFILE" 2>&1 &
+            fi
+            # Then start the panel (top layer)
+            if command -v raven-shell >/dev/null 2>&1; then
+                log "Autostart: raven-shell (panel)"
+                sleep 0.2  # Let desktop start first
+                raven-shell >>"$LOGFILE" 2>&1 &
+            fi
+            if command -v raven-terminal >/dev/null 2>&1; then
+                log "Autostart: raven-terminal"
+                sleep 0.5  # Let panel start first
+                raven-terminal >>"$LOGFILE" 2>&1 &
             fi
             ;;
         hyprland*|Hyprland*)
-            if command -v foot >/dev/null 2>&1; then
+            if command -v raven-terminal >/dev/null 2>&1; then
+                log "Autostart: raven-terminal"
+                raven-terminal >>"$LOGFILE" 2>&1 &
+            elif command -v foot >/dev/null 2>&1; then
                 log "Autostart: foot"
                 foot >>"$LOGFILE" 2>&1 &
-            elif command -v alacritty >/dev/null 2>&1; then
-                log "Autostart: alacritty"
-                alacritty >>"$LOGFILE" 2>&1 &
             fi
-            ;;
-        raven-compositor*)
-            # Raven compositor is still early; clients may not be visible yet.
-            log "Note: Raven compositor shell components are not implemented yet."
             ;;
     esac
 }
@@ -211,12 +230,8 @@ preferred="${RAVEN_WAYLAND_COMPOSITOR:-}"
 if [ -z "$preferred" ]; then
     if [ -n "${wayland_choice:-}" ]; then
         preferred="$wayland_choice"
-    elif command -v raven-compositor >/dev/null 2>&1; then
-        # Prefer raven-compositor when available
-        preferred="raven-compositor"
-    elif command -v weston >/dev/null 2>&1; then
-        preferred="weston"
     else
+        # Always default to raven-compositor
         preferred="raven-compositor"
     fi
 fi
@@ -268,7 +283,6 @@ if [ -d /sys/class/drm ]; then
 fi
 
 tried_hypr=0
-tried_weston=0
 tried_raven=0
 
 start_raven_compositor() {
@@ -290,41 +304,9 @@ start_hyprland() {
     return 1
 }
 
-start_weston() {
-    tried_weston=1
-    have_xwayland=0
-    if command -v Xwayland >/dev/null 2>&1; then
-        for m in /usr/lib/libweston-*/xwayland.so /usr/lib64/libweston-*/xwayland.so; do
-            [ -f "$m" ] && have_xwayland=1 && break
-        done
-    fi
-
-    weston_config=""
-    [ -f /etc/xdg/weston/weston.ini ] && weston_config="--config=/etc/xdg/weston/weston.ini"
-
-    if [ "$have_xwayland" -eq 1 ]; then
-        # Avoid passing --tty to weston: some setups end up forwarding it to Xwayland, which then exits.
-        start_compositor "weston" weston ${weston_config} --backend=drm-backend.so --xwayland && return 0
-    else
-        start_compositor "weston" weston ${weston_config} --backend=drm-backend.so && return 0
-    fi
-    log "Retrying weston with --renderer=pixman..."
-    if [ "$have_xwayland" -eq 1 ]; then
-        start_compositor "weston (pixman)" weston ${weston_config} --backend=drm-backend.so --renderer=pixman --xwayland && return 0
-    else
-        start_compositor "weston (pixman)" weston ${weston_config} --backend=drm-backend.so --renderer=pixman && return 0
-    fi
-    return 1
-}
-
 case "$preferred" in
     hyprland|Hyprland)
         start_hyprland && exit 0
-        ;;
-    weston)
-        if command -v weston >/dev/null 2>&1; then
-            start_weston && exit 0
-        fi
         ;;
     raven-compositor|raven)
         if command -v raven-compositor >/dev/null 2>&1; then
@@ -333,16 +315,13 @@ case "$preferred" in
         ;;
 esac
 
-# Fallback order
-if [ "$tried_hypr" -eq 0 ] && ( command -v Hyprland >/dev/null 2>&1 || command -v hyprland >/dev/null 2>&1 ); then
-    start_hyprland && exit 0
-fi
-if [ "$tried_weston" -eq 0 ] && command -v weston >/dev/null 2>&1; then
-    start_weston && exit 0
-fi
+# Fallback order: try raven-compositor first, then hyprland
 if [ "$tried_raven" -eq 0 ] && command -v raven-compositor >/dev/null 2>&1; then
     start_raven_compositor && exit 0
 fi
+if [ "$tried_hypr" -eq 0 ] && ( command -v Hyprland >/dev/null 2>&1 || command -v hyprland >/dev/null 2>&1 ); then
+    start_hyprland && exit 0
+fi
 
-log "No Wayland compositor found (expected 'Hyprland', 'raven-compositor' or 'weston')."
+log "No Wayland compositor found (expected 'raven-compositor' or 'Hyprland')."
 exit 127

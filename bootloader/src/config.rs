@@ -146,9 +146,11 @@ impl Default for BootConfig {
             entry_type: EntryType::LinuxEfi,
             children: Vec::new(),
         });
+        let mut serial_entries: Vec<BootEntry> = Vec::new();
+
 
         // Serial-first entries for headless debugging (make ttyS0 the primary console)
-        entries.push(BootEntry {
+        serial_entries.push(BootEntry {
             name: String::from("Raven Linux (Serial Console)"),
             kernel: String::from("\\EFI\\raven\\vmlinuz"),
             initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
@@ -159,7 +161,7 @@ impl Default for BootConfig {
             children: Vec::new(),
         });
 
-        entries.push(BootEntry {
+        serial_entries.push(BootEntry {
             name: String::from("Raven Linux (Serial Console, Verbose)"),
             kernel: String::from("\\EFI\\raven\\vmlinuz"),
             initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
@@ -169,21 +171,14 @@ impl Default for BootConfig {
             entry_type: EntryType::LinuxEfi,
             children: Vec::new(),
         });
+        serial_entries.push(BootEntry::back());
 
+        entries.push(BootEntry::submenu("Raven Linux (Serial) >", serial_entries));
         // Graphical submenu
         let mut graphical_entries: Vec<BootEntry> = Vec::new();
 
         graphical_entries.push(BootEntry {
             name: String::from("Raven Desktop (Wayland)"),
-            kernel: String::from("\\EFI\\raven\\vmlinuz"),
-            initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
-            cmdline: String::from("rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=weston console=ttyS0,115200 console=tty0"),
-            entry_type: EntryType::LinuxEfi,
-            children: Vec::new(),
-        });
-
-        graphical_entries.push(BootEntry {
-            name: String::from("Raven Compositor (Wayland)"),
             kernel: String::from("\\EFI\\raven\\vmlinuz"),
             initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
             cmdline: String::from("rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=ttyS0,115200 console=tty0"),
@@ -201,15 +196,6 @@ impl Default for BootConfig {
         });
 
         graphical_entries.push(BootEntry {
-            name: String::from("Weston (Wayland)"),
-            kernel: String::from("\\EFI\\raven\\vmlinuz"),
-            initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
-            cmdline: String::from("rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=weston console=ttyS0,115200 console=tty0"),
-            entry_type: EntryType::LinuxEfi,
-            children: Vec::new(),
-        });
-
-        graphical_entries.push(BootEntry {
             name: String::from("X11"),
             kernel: String::from("\\EFI\\raven\\vmlinuz"),
             initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
@@ -221,9 +207,10 @@ impl Default for BootConfig {
         graphical_entries.push(BootEntry::back());
 
         entries.push(BootEntry::submenu("Raven Linux (Graphical) >", graphical_entries));
-
+        
+        let mut recovery_entries: Vec<BootEntry> = Vec::new();
         // Recovery mode
-        entries.push(BootEntry {
+        recovery_entries.push(BootEntry {
             name: String::from("Raven Linux (Recovery)"),
             kernel: String::from("\\EFI\\raven\\vmlinuz"),
             initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
@@ -232,7 +219,7 @@ impl Default for BootConfig {
             children: Vec::new(),
         });
 
-        entries.push(BootEntry {
+        recovery_entries.push(BootEntry {
             name: String::from("Raven Linux (Recovery, Serial Console)"),
             kernel: String::from("\\EFI\\raven\\vmlinuz"),
             initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
@@ -242,7 +229,8 @@ impl Default for BootConfig {
             entry_type: EntryType::LinuxEfi,
             children: Vec::new(),
         });
-
+        recovery_entries.push(BootEntry::back()); 
+        entries.push(BootEntry::submenu("Recovery >", recovery_entries));
         // System submenu
         let mut system_entries: Vec<BootEntry> = Vec::new();
         system_entries.push(BootEntry::uefi_shell());

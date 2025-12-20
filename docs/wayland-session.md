@@ -10,7 +10,7 @@ UEFI Boot Menu
     ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  1. GRUB/RavenBoot loads kernel with parameters:                │
-│     rdinit=/init raven.graphics=wayland raven.wayland=weston    │
+│     rdinit=/init raven.graphics=wayland raven.wayland=raven     │
 └─────────────────────────────────────────────────────────────────┘
     │
     ▼
@@ -28,7 +28,7 @@ UEFI Boot Menu
 │  3. /bin/raven-wayland-session script executes                  │
 │     - Sets environment variables                                │
 │     - Starts seatd if needed                                    │
-│     - Launches compositor (weston/hyprland/raven-compositor)    │
+│     - Launches compositor (raven-compositor or hyprland)        │
 └─────────────────────────────────────────────────────────────────┘
     │
     ▼
@@ -41,9 +41,8 @@ UEFI Boot Menu
     ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  5. Session components start (terminal auto-launches)           │
-│     - weston: weston-terminal / foot / alacritty                │
-│     - hyprland: foot / alacritty                                │
-│     - raven-compositor: (not implemented yet)                   │
+│     - raven-compositor: raven-desktop, raven-shell, raven-terminal │
+│     - hyprland: raven-terminal / foot                           │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -74,15 +73,14 @@ UEFI Boot Menu
 
 | Value | Compositor Started |
 |-------|-------------------|
-| `weston` | Weston compositor with DRM backend |
+| `raven` or `raven-compositor` | Raven compositor (Rust/Smithay) - **default** |
 | `hyprland` or `Hyprland` | Hyprland dynamic tiling compositor |
-| `raven` or `raven-compositor` | Custom Raven compositor (Rust/Smithay) |
-| (not set) | Auto-detects: prefers raven-compositor → weston → hyprland |
+| (not set) | Auto-detects: prefers raven-compositor → hyprland |
 
 **Example GRUB entry:**
 ```
 menuentry "Raven Desktop (Wayland)" {
-    linux /boot/vmlinuz rdinit=/init raven.graphics=wayland raven.wayland=weston
+    linux /boot/vmlinuz rdinit=/init raven.graphics=wayland raven.wayland=raven
     initrd /boot/initramfs.img
 }
 ```
@@ -143,18 +141,15 @@ export XCURSOR_THEME="breeze_cursors"  # or Adwaita
 export XKB_CONFIG_ROOT="/usr/share/xkeyboard-config-2"
 ```
 
-### Compositor Selection (lines 208-220)
+### Compositor Selection
 
 ```sh
 preferred="${RAVEN_WAYLAND_COMPOSITOR:-}"
 if [ -z "$preferred" ]; then
     if [ -n "${wayland_choice:-}" ]; then
         preferred="$wayland_choice"  # From raven.wayland= cmdline
-    elif command -v raven-compositor >/dev/null 2>&1; then
-        preferred="raven-compositor"
-    elif command -v weston >/dev/null 2>&1; then
-        preferred="weston"
     else
+        # Always default to raven-compositor
         preferred="raven-compositor"
     fi
 fi
@@ -162,28 +157,7 @@ fi
 
 ### Compositor Launch Functions
 
-#### Weston (lines 291-316)
-```sh
-start_weston() {
-    # Check for Xwayland support
-    have_xwayland=0
-    if command -v Xwayland >/dev/null 2>&1; then
-        for m in /usr/lib/libweston-*/xwayland.so; do
-            [ -f "$m" ] && have_xwayland=1 && break
-        done
-    fi
-
-    weston_config=""
-    [ -f /etc/xdg/weston/weston.ini ] && weston_config="--config=/etc/xdg/weston/weston.ini"
-
-    # Launch weston with DRM backend
-    start_compositor "weston" weston ${weston_config} \
-        --backend=drm-backend.so \
-        --xwayland
-}
-```
-
-#### Raven Compositor (lines 272-278)
+#### Raven Compositor (default)
 ```sh
 start_raven_compositor() {
     start_compositor "raven-compositor" raven-compositor && return 0
@@ -194,11 +168,24 @@ start_raven_compositor() {
 }
 ```
 
+#### Hyprland
+```sh
+start_hyprland() {
+    if command -v Hyprland >/dev/null 2>&1; then
+        start_compositor "Hyprland" Hyprland && return 0
+    fi
+    if command -v hyprland >/dev/null 2>&1; then
+        start_compositor "hyprland" hyprland && return 0
+    fi
+    return 1
+}
+```
+
 ---
 
-## Terminal Auto-Launch
+## Session Components Auto-Launch
 
-**File:** `configs/raven-wayland-session` (lines 119-154)
+**File:** `configs/raven-wayland-session`
 
 ### Function: `start_session_components()`
 
@@ -214,26 +201,28 @@ start_session_components() {
     fi
 
     case "$compositor" in
-        weston*)
-            # Try terminals in order of preference
-            if command -v weston-terminal >/dev/null 2>&1; then
-                weston-terminal &
-            elif command -v foot >/dev/null 2>&1; then
-                foot &
-            elif command -v alacritty >/dev/null 2>&1; then
-                alacritty &
+        raven-compositor*|raven*)
+            # Start Raven shell components
+            # Start desktop first (background layer)
+            if command -v raven-desktop >/dev/null 2>&1; then
+                raven-desktop &
+            fi
+            # Then start the panel (top layer)
+            if command -v raven-shell >/dev/null 2>&1; then
+                sleep 0.2
+                raven-shell &
+            fi
+            if command -v raven-terminal >/dev/null 2>&1; then
+                sleep 0.5
+                raven-terminal &
             fi
             ;;
         hyprland*|Hyprland*)
-            if command -v foot >/dev/null 2>&1; then
+            if command -v raven-terminal >/dev/null 2>&1; then
+                raven-terminal &
+            elif command -v foot >/dev/null 2>&1; then
                 foot &
-            elif command -v alacritty >/dev/null 2>&1; then
-                alacritty &
             fi
-            ;;
-        raven-compositor*)
-            # Not implemented yet
-            log "Note: Raven compositor shell components are not implemented yet."
             ;;
     esac
 }
@@ -245,68 +234,20 @@ start_session_components() {
 
 ### Adding Auto-Start Applications
 
-Edit `configs/raven-wayland-session`, find `start_session_components()` (line 119), and add your applications:
+Edit `configs/raven-wayland-session`, find `start_session_components()`, and add your applications:
 
 ```sh
 case "$compositor" in
-    weston*)
-        # Existing terminal launch...
+    raven-compositor*|raven*)
+        # Existing components...
 
         # ADD YOUR APPLICATIONS HERE:
-        # Example: Start a panel
+        # Example: Start a status bar
         if command -v waybar >/dev/null 2>&1; then
             waybar &
         fi
-
-        # Example: Set wallpaper
-        if command -v swaybg >/dev/null 2>&1; then
-            swaybg -i /usr/share/backgrounds/default.png &
-        fi
         ;;
 esac
-```
-
-### Weston Configuration
-
-Create/edit `/etc/xdg/weston/weston.ini`:
-
-```ini
-[core]
-# Number of workspaces
-numworkspaces=4
-# Idle timeout (ms)
-idle-time=300
-
-[shell]
-# Panel position: top, bottom, left, right, none
-panel-position=top
-# Background color (ARGB)
-background-color=0xff002244
-# Background image
-background-image=/usr/share/backgrounds/raven.png
-# Background type: scale, scale-crop, tile, centered
-background-type=scale-crop
-# Clock format
-clock-format=minutes
-
-[launcher]
-# Add launcher icons to panel
-icon=/usr/share/icons/hicolor/24x24/apps/terminal.png
-path=/usr/bin/weston-terminal
-
-[launcher]
-icon=/usr/share/icons/hicolor/24x24/apps/firefox.png
-path=/usr/bin/firefox
-
-[keyboard]
-keymap_layout=us
-
-[input-method]
-path=/usr/libexec/weston-keyboard
-
-[terminal]
-font=monospace
-font-size=14
 ```
 
 ### Changing Default Compositor
@@ -336,7 +277,7 @@ start_mycompositor() {
 }
 ```
 
-2. Add to the selection case (around line 318):
+2. Add to the selection case:
 ```sh
 case "$preferred" in
     mycompositor)
@@ -346,11 +287,11 @@ case "$preferred" in
 esac
 ```
 
-3. Add terminal auto-launch in `start_session_components()`:
+3. Add session components in `start_session_components()`:
 ```sh
 case "$compositor" in
     mycompositor*)
-        foot &  # or your preferred terminal
+        raven-terminal &  # or your preferred terminal
         ;;
 esac
 ```
