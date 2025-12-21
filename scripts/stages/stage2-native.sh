@@ -1977,6 +1977,13 @@ copy_libraries() {
         log_info "  Copied hyprland.desktop"
     fi
 
+    # Copy RavenLinux hyprland.conf to root's config directory
+    if [[ -f "${PROJECT_ROOT}/configs/hyprland.conf" ]]; then
+        mkdir -p "${SYSROOT_DIR}/root/.config/hypr"
+        cp "${PROJECT_ROOT}/configs/hyprland.conf" "${SYSROOT_DIR}/root/.config/hypr/hyprland.conf"
+        log_info "  Copied RavenLinux hyprland.conf to /root/.config/hypr/"
+    fi
+
     # EGL vendor JSONs (GLVND)
     for egl_dir in /usr/share/glvnd/egl_vendor.d /etc/glvnd/egl_vendor.d; do
         if [[ -d "${egl_dir}" ]]; then

@@ -645,6 +645,9 @@ copy_wayland_tools() {
         # Also install to skel for user home dirs
         mkdir -p "${LIVE_ROOT}/etc/skel/.config/hypr"
         cp "${PROJECT_ROOT}/configs/hyprland.conf" "${LIVE_ROOT}/etc/skel/.config/hypr/hyprland.conf"
+        # Install to root's config directory (Hyprland looks here when running as root)
+        mkdir -p "${LIVE_ROOT}/root/.config/hypr"
+        cp "${PROJECT_ROOT}/configs/hyprland.conf" "${LIVE_ROOT}/root/.config/hypr/hyprland.conf"
         log_info "  Added Raven hyprland.conf"
     fi
 
