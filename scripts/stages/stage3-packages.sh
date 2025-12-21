@@ -103,126 +103,11 @@ build_rvn() {
 }
 
 # =============================================================================
-# Build raven-compositor (Wayland compositor)
+# Hyprland compositor (copied from host in build-live-iso.sh)
 # =============================================================================
-build_compositor() {
-    log_step "Building raven-compositor..."
-
-    local compositor_dir="${PROJECT_ROOT}/desktop/compositor"
-    local vendor_dir="${BUILD_DIR}/vendor/raven-compositor"
-    local require_compositor="${RAVEN_REQUIRE_COMPOSITOR:-1}"
-    local build_log="${LOGS_DIR}/raven-compositor.log"
-    local vendor_log="${LOGS_DIR}/raven-compositor-vendor.log"
-
-    if [[ ! -d "${compositor_dir}" ]]; then
-        log_warn "raven-compositor source not found"
-        return 0
-    fi
-
-    if ! command -v cargo &>/dev/null; then
-        log_warn "Cargo not found, skipping raven-compositor build"
-        [[ "${require_compositor}" == "1" ]] && return 1 || return 0
-    fi
-
-    cd "${compositor_dir}"
-
-    vendor_compositor() {
-        rm -rf "${vendor_dir}"
-        mkdir -p "${vendor_dir}" 2>/dev/null || true
-
-        log_info "Vendoring Rust dependencies (raven-compositor)..."
-        if cargo vendor --locked --offline "${vendor_dir}" > "${vendor_dir}/cargo-config.toml" 2>&1 | tee "${vendor_log}"; then
-            touch "${vendor_dir}/.cargo-vendor-ok" 2>/dev/null || true
-            log_success "Dependencies vendored -> ${vendor_dir}"
-            return 0
-        fi
-
-        log_warn "Offline vendoring failed; retrying with network..."
-        if cargo vendor --locked "${vendor_dir}" > "${vendor_dir}/cargo-config.toml" 2>&1 | tee "${vendor_log}"; then
-            touch "${vendor_dir}/.cargo-vendor-ok" 2>/dev/null || true
-            log_success "Dependencies vendored -> ${vendor_dir}"
-            return 0
-        fi
-
-        return 1
-    }
-
-    # Preflight native deps (keep aligned with `desktop/compositor/Cargo.toml`).
-    if command -v pkg-config &>/dev/null; then
-        local missing=()
-        local pcs=(
-            libdrm
-            wayland-client
-            wayland-server
-            xkbcommon
-        )
-        for pc in "${pcs[@]}"; do
-            if ! pkg-config --exists "${pc}" 2>/dev/null; then
-                missing+=("${pc}")
-            fi
-        done
-        if [[ ${#missing[@]} -gt 0 ]]; then
-            log_error "Missing system libraries for raven-compositor: ${missing[*]}"
-            log_error "Install the -dev packages for these (and ensure pkg-config can find them)."
-            [[ "${require_compositor}" == "1" ]] && return 1 || return 0
-        fi
-    else
-        log_warn "pkg-config not found; raven-compositor may fail to build due to missing system libs"
-    fi
-
-    # Ensure a lockfile exists (required for `--locked`/vendoring).
-    if [[ ! -f Cargo.lock ]]; then
-        log_info "Generating Cargo.lock (raven-compositor)..."
-        if cargo generate-lockfile 2>&1 | tee "${LOGS_DIR}/raven-compositor-lock.log"; then
-            log_success "Generated Cargo.lock"
-        else
-            log_warn "Failed to generate Cargo.lock (likely no network)"
-            [[ "${require_compositor}" == "1" ]] && return 1 || return 0
-        fi
-    fi
-
-    # Prefer vendored deps (offline/reproducible). If not present, try to create them.
-    if [[ ! -f "${vendor_dir}/.cargo-vendor-ok" ]]; then
-        if ! vendor_compositor; then
-            log_warn "Failed to vendor deps (likely no network); attempting build with existing cache..."
-            [[ "${require_compositor}" == "1" ]] && return 1 || true
-        fi
-    fi
-
-    if CARGO_TARGET_DIR=target-user cargo build --release --locked --offline \
-        --config "source.crates-io.replace-with=\"vendored-sources\"" \
-        --config "source.vendored-sources.directory=\"${vendor_dir}\"" \
-        2>&1 | tee "${build_log}"; then
-        mkdir -p "${PACKAGES_DIR}/bin" "${SYSROOT_DIR}/bin"
-        cp target-user/release/raven-compositor "${PACKAGES_DIR}/bin/"
-        cp target-user/release/raven-compositor "${SYSROOT_DIR}/bin/"
-        log_success "raven-compositor built"
-    else
-        # If vendored sources were modified/corrupted, re-vendor and retry once.
-        if rg -n "listed checksum of .* has changed" "${build_log}" >/dev/null 2>&1; then
-            log_warn "Vendored sources checksum mismatch detected; re-vendoring and retrying..."
-            if vendor_compositor; then
-                if CARGO_TARGET_DIR=target-user cargo build --release --locked --offline \
-                    --config "source.crates-io.replace-with=\"vendored-sources\"" \
-                    --config "source.vendored-sources.directory=\"${vendor_dir}\"" \
-                    2>&1 | tee "${build_log}"; then
-                    mkdir -p "${PACKAGES_DIR}/bin" "${SYSROOT_DIR}/bin"
-                    cp target-user/release/raven-compositor "${PACKAGES_DIR}/bin/"
-                    cp target-user/release/raven-compositor "${SYSROOT_DIR}/bin/"
-                    log_success "raven-compositor built"
-                    cd "${PROJECT_ROOT}"
-                    return 0
-                fi
-            fi
-        fi
-
-        log_warn "Failed to build raven-compositor (Wayland entry will fall back to shell)"
-        log_warn "See: ${build_log}"
-        [[ "${require_compositor}" == "1" ]] && return 1 || return 0
-    fi
-
-    cd "${PROJECT_ROOT}"
-}
+# NOTE: raven-compositor has been replaced with Hyprland.
+# Hyprland binary is copied from the host system during ISO build.
+# See scripts/build-live-iso.sh copy_wayland_tools() function.
 
 # =============================================================================
 # Build raven-installer (Go with Gio UI)
@@ -2573,7 +2458,7 @@ main() {
     # Build custom RavenLinux tools
     build_go_packages
     build_rvn
-    build_compositor
+    # NOTE: Hyprland compositor is copied from host in build-live-iso.sh
     build_installer
     build_usb_creator
     build_wifi_tools

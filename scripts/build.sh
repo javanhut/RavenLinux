@@ -39,7 +39,7 @@ export RAVEN_VERSION="2025.12"
 export RAVEN_ARCH="${RAVEN_ARCH:-x86_64}"
 export RAVEN_TARGET="${RAVEN_ARCH}-raven-linux-musl"
 export RAVEN_JOBS="${RAVEN_JOBS:-$(nproc)}"
-export RAVEN_REQUIRE_COMPOSITOR="${RAVEN_REQUIRE_COMPOSITOR:-1}"
+# NOTE: RAVEN_REQUIRE_COMPOSITOR removed - using Hyprland (copied from host)
 
 # Directory structure
 TOOLCHAIN_DIR="${RAVEN_BUILD}/toolchain"

@@ -142,33 +142,65 @@ start_session_components() {
         done
     fi
 
+    # -------------------------------------------------------------------------
+    # Start user session services (audio, portals)
+    # -------------------------------------------------------------------------
+
+    # PipeWire audio server
+    if command -v pipewire >/dev/null 2>&1; then
+        log "Starting PipeWire..."
+        pipewire >>"$LOGFILE" 2>&1 &
+        sleep 0.1
+    fi
+
+    # WirePlumber session manager (after pipewire)
+    if command -v wireplumber >/dev/null 2>&1; then
+        log "Starting WirePlumber..."
+        wireplumber >>"$LOGFILE" 2>&1 &
+    fi
+
+    # PipeWire PulseAudio compatibility
+    if command -v pipewire-pulse >/dev/null 2>&1; then
+        log "Starting PipeWire-Pulse..."
+        pipewire-pulse >>"$LOGFILE" 2>&1 &
+    fi
+
+    # XDG Desktop Portal (for file dialogs, screen sharing)
+    if [ -x /usr/libexec/xdg-desktop-portal ]; then
+        log "Starting XDG Desktop Portal..."
+        /usr/libexec/xdg-desktop-portal >>"$LOGFILE" 2>&1 &
+    fi
+
+    # XDG Desktop Portal Hyprland backend
+    if [ -x /usr/libexec/xdg-desktop-portal-hyprland ]; then
+        log "Starting XDG Desktop Portal Hyprland..."
+        /usr/libexec/xdg-desktop-portal-hyprland >>"$LOGFILE" 2>&1 &
+    fi
+
+    # -------------------------------------------------------------------------
+    # Compositor-specific autostart
+    # -------------------------------------------------------------------------
+
     case "$compositor" in
-        raven-compositor*|raven*)
-            # Start Raven shell components
-            # Start desktop first (background layer)
+        hyprland*|Hyprland*)
+            # Hyprland handles app autostart via hyprland.conf exec-once
+            log "Hyprland handles app autostart via config"
+            ;;
+        *)
+            # Fallback for any other compositor
             if command -v raven-desktop >/dev/null 2>&1; then
                 log "Autostart: raven-desktop"
                 raven-desktop >>"$LOGFILE" 2>&1 &
             fi
-            # Then start the panel (top layer)
             if command -v raven-shell >/dev/null 2>&1; then
                 log "Autostart: raven-shell (panel)"
-                sleep 0.2  # Let desktop start first
+                sleep 0.2
                 raven-shell >>"$LOGFILE" 2>&1 &
             fi
             if command -v raven-terminal >/dev/null 2>&1; then
                 log "Autostart: raven-terminal"
-                sleep 0.5  # Let panel start first
+                sleep 0.5
                 raven-terminal >>"$LOGFILE" 2>&1 &
-            fi
-            ;;
-        hyprland*|Hyprland*)
-            if command -v raven-terminal >/dev/null 2>&1; then
-                log "Autostart: raven-terminal"
-                raven-terminal >>"$LOGFILE" 2>&1 &
-            elif command -v foot >/dev/null 2>&1; then
-                log "Autostart: foot"
-                foot >>"$LOGFILE" 2>&1 &
             fi
             ;;
     esac
@@ -231,8 +263,8 @@ if [ -z "$preferred" ]; then
     if [ -n "${wayland_choice:-}" ]; then
         preferred="$wayland_choice"
     else
-        # Always default to raven-compositor
-        preferred="raven-compositor"
+        # Default to Hyprland
+        preferred="Hyprland"
     fi
 fi
 
@@ -283,23 +315,18 @@ if [ -d /sys/class/drm ]; then
 fi
 
 tried_hypr=0
-tried_raven=0
-
-start_raven_compositor() {
-    tried_raven=1
-    start_compositor "raven-compositor" raven-compositor && return 0
-    log "Retrying raven-compositor with SMITHAY_USE_LEGACY=1..."
-    start_compositor "raven-compositor (legacy)" env SMITHAY_USE_LEGACY=1 raven-compositor && return 0
-    return 1
-}
 
 start_hyprland() {
     tried_hypr=1
+    # Hyprland requires --i-am-really-stupid flag when running as root (UID 0)
+    hypr_args=""
+    [ "$(id -u)" -eq 0 ] && hypr_args="--i-am-really-stupid"
+
     if command -v Hyprland >/dev/null 2>&1; then
-        start_compositor "Hyprland" Hyprland && return 0
+        start_compositor "Hyprland" Hyprland $hypr_args && return 0
     fi
     if command -v hyprland >/dev/null 2>&1; then
-        start_compositor "hyprland" hyprland && return 0
+        start_compositor "hyprland" hyprland $hypr_args && return 0
     fi
     return 1
 }
@@ -308,20 +335,12 @@ case "$preferred" in
     hyprland|Hyprland)
         start_hyprland && exit 0
         ;;
-    raven-compositor|raven)
-        if command -v raven-compositor >/dev/null 2>&1; then
-            start_raven_compositor && exit 0
-        fi
-        ;;
 esac
 
-# Fallback order: try raven-compositor first, then hyprland
-if [ "$tried_raven" -eq 0 ] && command -v raven-compositor >/dev/null 2>&1; then
-    start_raven_compositor && exit 0
-fi
+# Fallback: try Hyprland
 if [ "$tried_hypr" -eq 0 ] && ( command -v Hyprland >/dev/null 2>&1 || command -v hyprland >/dev/null 2>&1 ); then
     start_hyprland && exit 0
 fi
 
-log "No Wayland compositor found (expected 'raven-compositor' or 'Hyprland')."
+log "No Wayland compositor found (expected 'Hyprland')."
 exit 127

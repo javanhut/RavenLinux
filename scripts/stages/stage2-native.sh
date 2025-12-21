@@ -292,6 +292,19 @@ copy_system_utils() {
         log_warn "  No xkeyboard-config data found on host; keyboard layouts may be missing"
     fi
 
+    # XWayland invokes /usr/bin/xkbcomp at runtime to compile keymaps. If it is
+    # missing, XWayland will fail to start with "Failed to activate virtual core keyboard".
+    # Install xkbcomp into the sysroot and symlink it to the expected path.
+    if [[ -x "/usr/bin/xkbcomp" ]]; then
+        log_info "Copying xkbcomp (required for XWayland)..."
+        mkdir -p "${SYSROOT_DIR}/bin" "${SYSROOT_DIR}/usr/bin"
+        cp -a "/usr/bin/xkbcomp" "${SYSROOT_DIR}/bin/xkbcomp" 2>/dev/null || true
+        ln -sf ../../bin/xkbcomp "${SYSROOT_DIR}/usr/bin/xkbcomp" 2>/dev/null || true
+        log_info "  Added /usr/bin/xkbcomp"
+    else
+        log_warn "  /usr/bin/xkbcomp not found on host; XWayland may fail to start"
+    fi
+
     # Copy libinput data files (quirks) used to classify input devices.
     log_info "Copying libinput data..."
     if [[ -d "/usr/share/libinput" ]]; then
@@ -308,6 +321,13 @@ copy_system_utils() {
         mkdir -p "${SYSROOT_DIR}/usr/lib"
         cp -a "/usr/lib/udev" "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
         log_info "  Copied /usr/lib/udev"
+    fi
+
+    # Copy custom RavenLinux udev rules for input device access
+    if [[ -f "${RAVEN_ROOT}/configs/72-raven-input.rules" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/lib/udev/rules.d"
+        cp "${RAVEN_ROOT}/configs/72-raven-input.rules" "${SYSROOT_DIR}/usr/lib/udev/rules.d/" 2>/dev/null || true
+        log_info "  Copied custom input device udev rules"
     fi
     if [[ -d "/etc/udev" ]]; then
         mkdir -p "${SYSROOT_DIR}/etc"

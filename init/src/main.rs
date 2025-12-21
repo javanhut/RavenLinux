@@ -155,7 +155,7 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
 
     // Avoid starting both a compositor and the session wrapper at once.
     for svc in &mut config.services {
-        if svc.name == "raven-compositor" || svc.name == "wayland-session" {
+        if svc.name == "hyprland" || svc.name == "wayland-session" {
             svc.enabled = false;
         }
     }
@@ -188,7 +188,7 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
         let mut env = compositor_env;
         env.insert(
             "RAVEN_WAYLAND_COMPOSITOR".to_string(),
-            wayland_choice.unwrap_or("raven").to_string(),
+            wayland_choice.unwrap_or("Hyprland").to_string(),
         );
 
         ensure_service(
@@ -206,13 +206,13 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
             },
         );
     } else {
-        // Always use raven-compositor
+        // Fallback to Hyprland directly
         ensure_service(
             &mut config.services,
             ServiceConfig {
-                name: "raven-compositor".to_string(),
-                description: "Raven Wayland compositor".to_string(),
-                exec: "/bin/raven-compositor".to_string(),
+                name: "hyprland".to_string(),
+                description: "Hyprland Wayland compositor".to_string(),
+                exec: "/bin/Hyprland".to_string(),
                 args: Vec::new(),
                 restart: true,
                 enabled: true,

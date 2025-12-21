@@ -248,6 +248,13 @@ copy_diagnostics_tools() {
         cp -a "/usr/lib/udev" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
         log_info "  Copied /usr/lib/udev"
     fi
+
+    # Copy custom RavenLinux udev rules for input device access
+    if [[ -f "${RAVEN_ROOT}/configs/72-raven-input.rules" ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/lib/udev/rules.d"
+        cp "${RAVEN_ROOT}/configs/72-raven-input.rules" "${LIVE_ROOT}/usr/lib/udev/rules.d/" 2>/dev/null || true
+        log_info "  Copied custom input device udev rules"
+    fi
     if [[ -d "/etc/udev" ]]; then
         mkdir -p "${LIVE_ROOT}/etc"
         cp -a "/etc/udev" "${LIVE_ROOT}/etc/" 2>/dev/null || true
@@ -583,15 +590,42 @@ copy_wayland_tools() {
         fi
     done
 
-    # Hyprland (optional)
+    # Hyprland (primary compositor - required)
     if command -v Hyprland &>/dev/null; then
         cp "$(which Hyprland)" "${LIVE_ROOT}/bin/"
         log_info "  Added Hyprland"
+
+        # Copy hyprctl
+        if command -v hyprctl &>/dev/null; then
+            cp "$(which hyprctl)" "${LIVE_ROOT}/bin/"
+            log_info "  Added hyprctl"
+        fi
+
+        # Copy Hyprland ecosystem libraries
+        for lib in libaquamarine libhyprcursor libhyprgraphics libhyprlang libhyprutils; do
+            for libpath in /usr/lib/${lib}.so*; do
+                if [[ -f "$libpath" ]] || [[ -L "$libpath" ]]; then
+                    cp -L "$libpath" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+                fi
+            done
+        done
+        log_info "  Added Hyprland ecosystem libraries"
+
+        # Copy additional dependencies
+        for lib in libdisplay-info libliftoff libre2 libtomlplusplus; do
+            for libpath in /usr/lib/${lib}.so*; do
+                if [[ -f "$libpath" ]] || [[ -L "$libpath" ]]; then
+                    cp -L "$libpath" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+                fi
+            done
+        done
+    else
+        log_error "Hyprland not found on host system!"
+        log_error "Install with: sudo pacman -S hyprland"
+        exit 1
     fi
-    if command -v hyprctl &>/dev/null; then
-        cp "$(which hyprctl)" "${LIVE_ROOT}/bin/"
-        log_info "  Added hyprctl"
-    fi
+
+    # Copy Hyprland data directories
     for hypr_dir in /usr/share/hyprland /usr/share/hypr; do
         [[ -d "${hypr_dir}" ]] || continue
         mkdir -p "${LIVE_ROOT}${hypr_dir}"
@@ -602,6 +636,16 @@ copy_wayland_tools() {
         mkdir -p "${LIVE_ROOT}/usr/share/wayland-sessions"
         cp -a "/usr/share/wayland-sessions/hyprland.desktop" "${LIVE_ROOT}/usr/share/wayland-sessions/" 2>/dev/null || true
         log_info "  Copied hyprland.desktop"
+    fi
+
+    # Copy Raven hyprland.conf
+    if [[ -f "${PROJECT_ROOT}/configs/hyprland.conf" ]]; then
+        mkdir -p "${LIVE_ROOT}/etc/hypr"
+        cp "${PROJECT_ROOT}/configs/hyprland.conf" "${LIVE_ROOT}/etc/hypr/hyprland.conf"
+        # Also install to skel for user home dirs
+        mkdir -p "${LIVE_ROOT}/etc/skel/.config/hypr"
+        cp "${PROJECT_ROOT}/configs/hyprland.conf" "${LIVE_ROOT}/etc/skel/.config/hypr/hyprland.conf"
+        log_info "  Added Raven hyprland.conf"
     fi
 
     # openvt for starting compositor on VT
@@ -617,12 +661,7 @@ copy_wayland_tools() {
         log_info "  Added raven-wayland-session"
     fi
 
-    # Copy raven-compositor if built
-    if [[ -f "${RAVEN_BUILD}/packages/bin/raven-compositor" ]]; then
-        cp "${RAVEN_BUILD}/packages/bin/raven-compositor" "${LIVE_ROOT}/bin/"
-        chmod +x "${LIVE_ROOT}/bin/raven-compositor"
-        log_info "  Added raven-compositor"
-    fi
+    # NOTE: raven-compositor removed - using Hyprland instead (copied above)
 
     # Copy libseat library
     for lib in /usr/lib/libseat.so* /lib/libseat.so*; do
@@ -697,6 +736,25 @@ copy_wayland_tools() {
         log_info "  Added xkeyboard-config (alt location)"
     fi
 
+    # XWayland invokes /usr/bin/xkbcomp at runtime to compile keymaps.
+    # If missing, XWayland will fail to start with keyboard initialization errors.
+    if [[ -x "/usr/bin/xkbcomp" ]]; then
+        mkdir -p "${LIVE_ROOT}/bin" "${LIVE_ROOT}/usr/bin"
+        cp -a "/usr/bin/xkbcomp" "${LIVE_ROOT}/bin/xkbcomp" 2>/dev/null || true
+        ln -sf ../../bin/xkbcomp "${LIVE_ROOT}/usr/bin/xkbcomp" 2>/dev/null || true
+
+        # Copy runtime libs for xkbcomp (live root does not run stage2's copy_libraries).
+        timeout 2 ldd /usr/bin/xkbcomp 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
+            [[ -z "$lib" || ! -f "$lib" ]] && continue
+            mkdir -p "${LIVE_ROOT}$(dirname "$lib")"
+            cp -L "$lib" "${LIVE_ROOT}${lib}" 2>/dev/null || true
+        done || true
+
+        log_info "  Added xkbcomp for XWayland"
+    else
+        log_warn "  /usr/bin/xkbcomp not found on host; XWayland may fail to start"
+    fi
+
     # Copy libxkbcommon
     for lib in /usr/lib/libxkbcommon*.so*; do
         if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
@@ -706,6 +764,193 @@ copy_wayland_tools() {
     done
 
     log_success "Wayland tools installed"
+}
+
+# =============================================================================
+# Copy Desktop Services (PipeWire, Polkit, XDG Desktop Portal)
+# =============================================================================
+copy_desktop_services() {
+    log_step "Copying desktop services (pipewire, polkit, portals)..."
+
+    # -------------------------------------------------------------------------
+    # PipeWire - Audio/Video server
+    # -------------------------------------------------------------------------
+    log_info "Installing PipeWire..."
+
+    # PipeWire binaries
+    for bin in pipewire pipewire-pulse wireplumber pw-cli pw-cat pw-dump pw-top; do
+        if command -v "$bin" &>/dev/null; then
+            cp "$(which "$bin")" "${LIVE_ROOT}/usr/bin/" 2>/dev/null || true
+            log_info "  Added $bin"
+        fi
+    done
+
+    # PipeWire libraries
+    for lib in libpipewire-0.3.so* libwireplumber-0.5.so* libspa-0.2.so*; do
+        for libpath in /usr/lib/${lib}; do
+            if [[ -f "$libpath" ]] || [[ -L "$libpath" ]]; then
+                cp -L "$libpath" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+            fi
+        done
+    done
+
+    # PipeWire SPA plugins (audio backends, format converters)
+    if [[ -d /usr/lib/spa-0.2 ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/lib/spa-0.2"
+        cp -a /usr/lib/spa-0.2/. "${LIVE_ROOT}/usr/lib/spa-0.2/" 2>/dev/null || true
+        log_info "  Added SPA plugins"
+    fi
+
+    # PipeWire modules
+    if [[ -d /usr/lib/pipewire-0.3 ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/lib/pipewire-0.3"
+        cp -a /usr/lib/pipewire-0.3/. "${LIVE_ROOT}/usr/lib/pipewire-0.3/" 2>/dev/null || true
+        log_info "  Added PipeWire modules"
+    fi
+
+    # WirePlumber modules
+    if [[ -d /usr/lib/wireplumber-0.5 ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/lib/wireplumber-0.5"
+        cp -a /usr/lib/wireplumber-0.5/. "${LIVE_ROOT}/usr/lib/wireplumber-0.5/" 2>/dev/null || true
+        log_info "  Added WirePlumber modules"
+    fi
+
+    # PipeWire configuration
+    if [[ -d /usr/share/pipewire ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share/pipewire"
+        cp -a /usr/share/pipewire/. "${LIVE_ROOT}/usr/share/pipewire/" 2>/dev/null || true
+        log_info "  Added PipeWire config"
+    fi
+    if [[ -d /etc/pipewire ]]; then
+        mkdir -p "${LIVE_ROOT}/etc/pipewire"
+        cp -a /etc/pipewire/. "${LIVE_ROOT}/etc/pipewire/" 2>/dev/null || true
+    fi
+
+    # WirePlumber configuration
+    if [[ -d /usr/share/wireplumber ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share/wireplumber"
+        cp -a /usr/share/wireplumber/. "${LIVE_ROOT}/usr/share/wireplumber/" 2>/dev/null || true
+        log_info "  Added WirePlumber config"
+    fi
+    if [[ -d /etc/wireplumber ]]; then
+        mkdir -p "${LIVE_ROOT}/etc/wireplumber"
+        cp -a /etc/wireplumber/. "${LIVE_ROOT}/etc/wireplumber/" 2>/dev/null || true
+    fi
+
+    # -------------------------------------------------------------------------
+    # Polkit - Privilege escalation
+    # -------------------------------------------------------------------------
+    log_info "Installing Polkit..."
+
+    # Polkit daemon
+    if [[ -f /usr/lib/polkit-1/polkitd ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/lib/polkit-1"
+        cp /usr/lib/polkit-1/polkitd "${LIVE_ROOT}/usr/lib/polkit-1/" 2>/dev/null || true
+        chmod +x "${LIVE_ROOT}/usr/lib/polkit-1/polkitd"
+        log_info "  Added polkitd"
+    fi
+
+    # Polkit binaries
+    for bin in pkaction pkcheck pkexec pkttyagent; do
+        if command -v "$bin" &>/dev/null; then
+            cp "$(which "$bin")" "${LIVE_ROOT}/usr/bin/" 2>/dev/null || true
+        fi
+    done
+
+    # Polkit libraries
+    for lib in libpolkit-gobject-1.so* libpolkit-agent-1.so*; do
+        for libpath in /usr/lib/${lib}; do
+            if [[ -f "$libpath" ]] || [[ -L "$libpath" ]]; then
+                cp -L "$libpath" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+            fi
+        done
+    done
+
+    # Polkit configuration and rules
+    if [[ -d /usr/share/polkit-1 ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share/polkit-1"
+        cp -a /usr/share/polkit-1/. "${LIVE_ROOT}/usr/share/polkit-1/" 2>/dev/null || true
+        log_info "  Added Polkit rules"
+    fi
+    if [[ -d /etc/polkit-1 ]]; then
+        mkdir -p "${LIVE_ROOT}/etc/polkit-1"
+        cp -a /etc/polkit-1/. "${LIVE_ROOT}/etc/polkit-1/" 2>/dev/null || true
+    fi
+
+    # Polkit D-Bus service file
+    if [[ -f /usr/share/dbus-1/system-services/org.freedesktop.PolicyKit1.service ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share/dbus-1/system-services"
+        cp /usr/share/dbus-1/system-services/org.freedesktop.PolicyKit1.service \
+           "${LIVE_ROOT}/usr/share/dbus-1/system-services/" 2>/dev/null || true
+    fi
+
+    # Create polkitd user (if not exists in passwd)
+    if ! grep -q "^polkitd:" "${LIVE_ROOT}/etc/passwd" 2>/dev/null; then
+        echo "polkitd:x:27:27:PolicyKit Daemon:/:/sbin/nologin" >> "${LIVE_ROOT}/etc/passwd"
+        echo "polkitd:x:27:" >> "${LIVE_ROOT}/etc/group"
+    fi
+
+    # Create polkit directories
+    mkdir -p "${LIVE_ROOT}/var/lib/polkit-1" 2>/dev/null || true
+
+    # -------------------------------------------------------------------------
+    # XDG Desktop Portal + Hyprland backend
+    # -------------------------------------------------------------------------
+    log_info "Installing XDG Desktop Portal..."
+
+    # Portal binaries (different distros put these in different places)
+    for bin_path in /usr/libexec/xdg-desktop-portal /usr/lib/xdg-desktop-portal; do
+        if [[ -f "$bin_path" ]]; then
+            mkdir -p "${LIVE_ROOT}/usr/libexec"
+            cp "$bin_path" "${LIVE_ROOT}/usr/libexec/" 2>/dev/null || true
+            chmod +x "${LIVE_ROOT}/usr/libexec/xdg-desktop-portal"
+            log_info "  Added xdg-desktop-portal"
+            break
+        fi
+    done
+
+    # Hyprland portal backend
+    for bin_path in /usr/libexec/xdg-desktop-portal-hyprland /usr/lib/xdg-desktop-portal-hyprland; do
+        if [[ -f "$bin_path" ]]; then
+            mkdir -p "${LIVE_ROOT}/usr/libexec"
+            cp "$bin_path" "${LIVE_ROOT}/usr/libexec/" 2>/dev/null || true
+            chmod +x "${LIVE_ROOT}/usr/libexec/xdg-desktop-portal-hyprland"
+            log_info "  Added xdg-desktop-portal-hyprland"
+            break
+        fi
+    done
+
+    # Portal configuration
+    if [[ -d /usr/share/xdg-desktop-portal ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share/xdg-desktop-portal"
+        cp -a /usr/share/xdg-desktop-portal/. "${LIVE_ROOT}/usr/share/xdg-desktop-portal/" 2>/dev/null || true
+        log_info "  Added portal config"
+    fi
+
+    # Hyprland portal config
+    if [[ -d /usr/share/xdg-desktop-portal-hyprland ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share/xdg-desktop-portal-hyprland"
+        cp -a /usr/share/xdg-desktop-portal-hyprland/. "${LIVE_ROOT}/usr/share/xdg-desktop-portal-hyprland/" 2>/dev/null || true
+    fi
+
+    # Portal D-Bus service files
+    for svc in org.freedesktop.portal.Desktop.service org.freedesktop.impl.portal.desktop.hyprland.service; do
+        if [[ -f "/usr/share/dbus-1/services/${svc}" ]]; then
+            mkdir -p "${LIVE_ROOT}/usr/share/dbus-1/services"
+            cp "/usr/share/dbus-1/services/${svc}" "${LIVE_ROOT}/usr/share/dbus-1/services/" 2>/dev/null || true
+        fi
+    done
+
+    # Create XDG portal config for Hyprland
+    mkdir -p "${LIVE_ROOT}/etc/xdg/xdg-desktop-portal"
+    cat > "${LIVE_ROOT}/etc/xdg/xdg-desktop-portal/hyprland-portals.conf" << 'EOF'
+[preferred]
+default=hyprland;gtk
+org.freedesktop.impl.portal.Screenshot=hyprland
+org.freedesktop.impl.portal.ScreenCast=hyprland
+EOF
+
+    log_success "Desktop services installed"
 }
 
 copy_ca_certificates() {
@@ -1015,7 +1260,7 @@ EOF
     echo "raven-linux" > "${LIVE_ROOT}/etc/hostname"
 
 	    # /etc/hosts
-	    cat > "${LIVE_ROOT}/etc/hosts" << EOF
+	    cat > "${LIVE_ROOT}/etc/hosts" <<- EOF
 	127.0.0.1   localhost
 	::1         localhost
 	127.0.1.1   raven-linux.localdomain raven-linux
@@ -1536,6 +1781,7 @@ main() {
     copy_diagnostics_tools
     copy_networking_tools
     copy_wayland_tools
+    copy_desktop_services
     copy_ca_certificates
     copy_firmware
     setup_pam_and_nss

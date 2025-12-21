@@ -66,15 +66,16 @@ func (p *RavenPanel) activate() {
 	p.window.SetDefaultSize(-1, panelHeight)
 	p.window.SetDecorated(false)
 
+	// Initialize layer shell BEFORE window is realized
+	// This MUST happen before SetChild/Present
+	p.initLayerShell()
+
 	// Apply dark theme CSS
 	p.applyCSS()
 
 	// Create the panel content
 	content := p.createPanelContent()
 	p.window.SetChild(content)
-
-	// Initialize layer shell for proper panel behavior
-	p.initLayerShell()
 
 	// Start clock update
 	go p.updateClock()

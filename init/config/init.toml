@@ -100,6 +100,16 @@ restart = false
 enabled = true
 critical = false
 
+# PolicyKit authorization daemon (requires D-Bus)
+[[services]]
+name = "polkitd"
+description = "PolicyKit authorization daemon"
+exec = "/usr/lib/polkit-1/polkitd"
+args = ["--no-debug"]
+restart = true
+enabled = true
+critical = false
+
 
 # =============================================================================
 # Additional mount points (beyond the essential ones)

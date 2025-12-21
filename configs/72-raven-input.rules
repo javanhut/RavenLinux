@@ -1,0 +1,33 @@
+# RavenLinux Input Device Access Rules
+# This file adds uaccess tags to keyboard/mouse/touchpad devices
+# so that elogind can grant the logged-in user access to them.
+#
+# Without these rules, input devices are only accessible to users
+# in the "input" group, which breaks Wayland compositors like Hyprland.
+
+ACTION=="remove", GOTO="raven_input_end"
+
+# Grant uaccess to all input subsystem devices that are keyboards
+SUBSYSTEM=="input", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"
+
+# Grant uaccess to all input subsystem devices that are mice
+SUBSYSTEM=="input", ENV{ID_INPUT_MOUSE}=="1", TAG+="uaccess"
+
+# Grant uaccess to all input subsystem devices that are touchpads
+SUBSYSTEM=="input", ENV{ID_INPUT_TOUCHPAD}=="1", TAG+="uaccess"
+
+# Grant uaccess to all input subsystem devices that are touchscreens
+SUBSYSTEM=="input", ENV{ID_INPUT_TOUCHSCREEN}=="1", TAG+="uaccess"
+
+# Grant uaccess to all input subsystem devices that are pointing sticks
+SUBSYSTEM=="input", ENV{ID_INPUT_POINTINGSTICK}=="1", TAG+="uaccess"
+
+# Grant uaccess to tablets and stylus devices
+SUBSYSTEM=="input", ENV{ID_INPUT_TABLET}=="1", TAG+="uaccess"
+SUBSYSTEM=="input", ENV{ID_INPUT_TABLET_PAD}=="1", TAG+="uaccess"
+
+# Also grant access to event devices directly for complete coverage
+SUBSYSTEM=="input", KERNEL=="event*", TAG+="uaccess"
+SUBSYSTEM=="input", KERNEL=="mouse*", TAG+="uaccess"
+
+LABEL="raven_input_end"
