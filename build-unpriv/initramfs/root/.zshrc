@@ -1,0 +1,8 @@
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export LD_LIBRARY_PATH=/lib:/usr/lib:/lib64:/usr/lib64
+export HOME=/root
+export TERM=linux
+export RAVEN_LINUX=1
+PROMPT='[%n@raven-linux]# '
+alias ls='ls --color=auto'
+alias ll='ls -la'

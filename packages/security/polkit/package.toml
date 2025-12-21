@@ -1,0 +1,75 @@
+[package]
+name = "polkit"
+version = "126"
+description = "Toolkit for defining and handling authorizations - allows unprivileged processes to communicate with privileged processes"
+license = "LGPL-2.0-or-later"
+homepage = "https://github.com/polkit-org/polkit"
+repository = "https://github.com/polkit-org/polkit"
+maintainers = ["RavenLinux Team"]
+categories = ["security", "system", "authorization"]
+
+[source]
+type = "tarball"
+url = "https://github.com/polkit-org/polkit/archive/126/polkit-126.tar.gz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "meson"
+configure_flags = [
+    "--prefix=/usr",
+    "--buildtype=release",
+    "-D man=false",
+    "-D session_tracking=elogind",
+    "-D systemdsystemunitdir=/tmp",
+    "-D tests=false",
+    "-D gtk_doc=false",
+    "-D introspection=false",
+    "-D os_type=lfs"
+]
+build_flags = []
+env = {}
+pre_build = [
+    "groupadd -fg 27 polkitd || true",
+    "useradd -c 'PolicyKit Daemon Owner' -d /etc/polkit-1 -u 27 -g polkitd -s /bin/false polkitd || true"
+]
+post_build = [
+    "rm -vf /tmp/*.service || true"
+]
+pre_install = []
+post_install = []
+
+[dependencies]
+runtime = ["glib2", "duktape", "linux-pam", "elogind", "dbus"]
+build = ["meson", "ninja", "glib2", "duktape", "linux-pam", "elogind"]
+
+[install]
+files = []
+symlinks = []
+directories = [
+    "/etc/polkit-1",
+    "/etc/polkit-1/rules.d",
+    "/usr/include/polkit-1",
+    "/usr/lib/polkit-1",
+    "/usr/share/polkit-1",
+    "/usr/share/polkit-1/actions",
+    "/usr/share/polkit-1/rules.d"
+]
+
+[users]
+# Create polkitd user and group
+groups = [
+    { name = "polkitd", gid = 27 }
+]
+users = [
+    { name = "polkitd", uid = 27, gid = 27, comment = "PolicyKit Daemon Owner", home = "/etc/polkit-1", shell = "/bin/false" }
+]
+
+[service]
+# Service definition for init system
+name = "polkitd"
+description = "PolicyKit Authorization Service"
+type = "dbus"
+dbus_name = "org.freedesktop.PolicyKit1"
+exec = "/usr/lib/polkit-1/polkitd"
+user = "polkitd"
+group = "polkitd"

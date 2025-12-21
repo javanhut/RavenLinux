@@ -1,0 +1,47 @@
+[package]
+name = "glib2"
+version = "2.86.3"
+description = "Low-level core library for GNOME/GTK+ - data structures, portability wrappers, event loop, threads, dynamic loading, object system"
+license = "LGPL-2.1-or-later"
+homepage = "https://wiki.gnome.org/Projects/GLib"
+repository = "https://gitlab.gnome.org/GNOME/glib"
+maintainers = ["RavenLinux Team"]
+categories = ["security", "libraries", "core"]
+
+[source]
+type = "tarball"
+url = "https://download.gnome.org/sources/glib/2.86/glib-2.86.3.tar.xz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "meson"
+configure_flags = [
+    "--prefix=/usr",
+    "--buildtype=release",
+    "-D introspection=disabled",
+    "-D glib_debug=disabled",
+    "-D man-pages=disabled",
+    "-D sysprof=disabled",
+    "-D tests=false"
+]
+build_flags = []
+env = {}
+pre_build = []
+post_build = []
+pre_install = []
+post_install = []
+
+[dependencies]
+runtime = ["libffi", "pcre2", "zlib"]
+build = ["meson", "ninja", "python"]
+
+[install]
+files = []
+symlinks = []
+directories = [
+    "/usr/include/glib-2.0",
+    "/usr/include/gio-unix-2.0",
+    "/usr/lib/glib-2.0",
+    "/usr/lib/gio",
+    "/usr/share/glib-2.0"
+]

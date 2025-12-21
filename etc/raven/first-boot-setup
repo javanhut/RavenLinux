@@ -1,0 +1,118 @@
+#!/bin/sh
+# /etc/raven/first-boot-setup
+# First boot user setup for RavenLinux
+#
+# This script runs on first boot to:
+# - Allow changing the default root password
+# - Create new user accounts with sudo access
+# - Add users to appropriate groups
+
+FIRST_BOOT_FLAG="/etc/.raven-first-boot-done"
+
+# Only run if first boot flag doesn't exist
+if [ -f "$FIRST_BOOT_FLAG" ]; then
+    exit 0
+fi
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+clear
+echo ""
+echo "${BLUE}========================================"
+echo "  RavenLinux First Boot Setup"
+echo "========================================${NC}"
+echo ""
+echo "Welcome to RavenLinux!"
+echo ""
+echo "${YELLOW}Default credentials:${NC}"
+echo "  Username: ${GREEN}root${NC}"
+echo "  Password: ${GREEN}raven${NC}"
+echo ""
+echo "For security, you should change the root password."
+echo ""
+
+# Ask to change root password
+printf "Change root password now? [Y/n]: "
+read -r change_root
+case "$change_root" in
+    [Nn]*)
+        echo "${YELLOW}Keeping default root password.${NC}"
+        echo "You can change it later with: passwd root"
+        ;;
+    *)
+        echo ""
+        echo "Enter new password for root:"
+        if passwd root; then
+            echo "${GREEN}Root password changed successfully.${NC}"
+        else
+            echo "${RED}Failed to change root password.${NC}"
+        fi
+        ;;
+esac
+
+echo ""
+
+# Ask to create a new user
+printf "Create a new user account? [y/N]: "
+read -r create_user
+case "$create_user" in
+    [Yy]*)
+        printf "Enter username: "
+        read -r new_username
+
+        if [ -z "$new_username" ]; then
+            echo "${RED}No username provided, skipping user creation.${NC}"
+        elif id "$new_username" >/dev/null 2>&1; then
+            echo "${RED}User '$new_username' already exists.${NC}"
+        else
+            # Determine default shell (prefer bash)
+            default_shell="/bin/sh"
+            if [ -x /bin/bash ]; then
+                default_shell="/bin/bash"
+            fi
+
+            # Create user with home directory and add to useful groups
+            if useradd -m -G wheel,audio,video,input -s "$default_shell" "$new_username" 2>/dev/null; then
+                echo "${GREEN}User '$new_username' created.${NC}"
+                echo ""
+                echo "Set password for $new_username:"
+                if passwd "$new_username"; then
+                    echo ""
+                    echo "${GREEN}User '$new_username' created successfully!${NC}"
+                    echo "  - Home directory: /home/$new_username"
+                    echo "  - Shell: $default_shell"
+                    echo "  - Groups: wheel, audio, video, input"
+                    echo "  - This user can use ${BLUE}sudo${NC} to run commands as root."
+                else
+                    echo "${RED}Failed to set password for '$new_username'.${NC}"
+                fi
+            else
+                echo "${RED}Failed to create user '$new_username'.${NC}"
+            fi
+        fi
+        ;;
+    *)
+        echo "Skipping user creation."
+        ;;
+esac
+
+# Create flag file to prevent running again
+touch "$FIRST_BOOT_FLAG"
+
+echo ""
+echo "${BLUE}========================================"
+echo "  First boot setup complete!"
+echo "========================================${NC}"
+echo ""
+echo "You can always:"
+echo "  - Change passwords with: ${GREEN}passwd [username]${NC}"
+echo "  - Create users with:     ${GREEN}useradd -m -G wheel [username]${NC}"
+echo "  - Modify groups with:    ${GREEN}usermod -aG [group] [username]${NC}"
+echo ""
+echo "Press Enter to continue..."
+read -r _

@@ -1,13 +1,20 @@
 //! Service management for RavenInit
 
+use std::ffi::CString;
+use std::os::unix::io::RawFd;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use nix::fcntl::{open, OFlag};
 use nix::sys::signal::{self, Signal};
-use nix::unistd::Pid;
+use nix::sys::stat::Mode;
+use nix::unistd::{self, dup2, execvp, fork, setsid, ForkResult, Pid};
 
 use crate::config::ServiceConfig;
+
+// TIOCSCTTY ioctl to set controlling terminal
+nix::ioctl_write_int_bad!(tiocsctty, libc::TIOCSCTTY);
 
 /// Service state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +70,12 @@ impl Service {
     }
 
     fn do_start(&mut self) -> Result<()> {
+        // Check if this service needs TTY handling
+        if let Some(tty_path) = self.config.tty.clone() {
+            return self.do_start_with_tty(&tty_path);
+        }
+
+        // Standard service spawning (no TTY)
         let mut cmd = Command::new(&self.config.exec);
 
         // Add arguments
@@ -94,6 +107,122 @@ impl Service {
         log::debug!("Service {} started with PID {}", self.config.name, pid);
 
         Ok(())
+    }
+
+    /// Start a service with proper TTY session and job control setup
+    fn do_start_with_tty(&mut self, tty_path: &str) -> Result<()> {
+        log::debug!(
+            "Starting service {} with TTY {}",
+            self.config.name,
+            tty_path
+        );
+
+        // Prepare command and arguments as CStrings for execvp
+        let exec_cstr = CString::new(self.config.exec.as_str())
+            .with_context(|| format!("Invalid exec path: {}", self.config.exec))?;
+
+        let mut args_cstr: Vec<CString> = Vec::with_capacity(self.config.args.len() + 1);
+        args_cstr.push(exec_cstr.clone());
+        for arg in &self.config.args {
+            args_cstr.push(
+                CString::new(arg.as_str())
+                    .with_context(|| format!("Invalid argument: {}", arg))?,
+            );
+        }
+
+        // Prepare environment
+        let env_vars: Vec<(String, String)> = self.config.environment.clone().into_iter().collect();
+
+        let tty_path_owned = tty_path.to_string();
+
+        // Fork the process
+        match unsafe { fork() } {
+            Ok(ForkResult::Parent { child }) => {
+                // Parent process - just record the child PID
+                self.pid = Some(child);
+                self.child = None; // We don't have a Child handle when using fork directly
+                self.state = ServiceState::Running;
+                self.exit_status = None;
+                self.exit_signal = None;
+
+                log::info!(
+                    "Service {} started with PID {} on TTY {}",
+                    self.config.name,
+                    child,
+                    tty_path_owned
+                );
+
+                Ok(())
+            }
+            Ok(ForkResult::Child) => {
+                // Child process - set up TTY and exec
+
+                // 1. Create a new session (become session leader)
+                if let Err(e) = setsid() {
+                    log::error!("setsid() failed: {}", e);
+                    std::process::exit(1);
+                }
+
+                // 2. Open the TTY device
+                let tty_fd: RawFd = match open(
+                    tty_path_owned.as_str(),
+                    OFlag::O_RDWR | OFlag::O_NOCTTY,
+                    Mode::empty(),
+                ) {
+                    Ok(fd) => fd,
+                    Err(e) => {
+                        log::error!("Failed to open TTY {}: {}", tty_path_owned, e);
+                        std::process::exit(1);
+                    }
+                };
+
+                // 3. Set this TTY as the controlling terminal
+                // TIOCSCTTY with arg 0 means "don't steal if already controlled"
+                if let Err(e) = unsafe { tiocsctty(tty_fd, 0) } {
+                    log::error!("TIOCSCTTY failed: {}", e);
+                    // Continue anyway - some systems may not require this
+                }
+
+                // 4. Duplicate TTY fd to stdin/stdout/stderr
+                if let Err(e) = dup2(tty_fd, 0) {
+                    log::error!("dup2 stdin failed: {}", e);
+                }
+                if let Err(e) = dup2(tty_fd, 1) {
+                    log::error!("dup2 stdout failed: {}", e);
+                }
+                if let Err(e) = dup2(tty_fd, 2) {
+                    log::error!("dup2 stderr failed: {}", e);
+                }
+
+                // Close the original fd if it's not 0, 1, or 2
+                if tty_fd > 2 {
+                    let _ = unistd::close(tty_fd);
+                }
+
+                // 5. Set the foreground process group to our process group
+                let our_pid = unistd::getpid();
+                let ret = unsafe { libc::tcsetpgrp(0, our_pid.as_raw()) };
+                if ret < 0 {
+                    log::error!("tcsetpgrp failed: {}", std::io::Error::last_os_error());
+                    // Continue anyway
+                }
+
+                // 6. Set environment variables
+                for (key, value) in env_vars {
+                    std::env::set_var(&key, &value);
+                }
+
+                // 7. Exec the service
+                let _ = execvp(&exec_cstr, &args_cstr);
+
+                // If we get here, exec failed
+                log::error!("execvp failed for {}", self.config.exec);
+                std::process::exit(1);
+            }
+            Err(e) => {
+                anyhow::bail!("fork() failed: {}", e);
+            }
+        }
     }
 
     /// Get service name

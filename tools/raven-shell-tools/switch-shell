@@ -6,7 +6,7 @@
 set -e
 
 SHELLS_FILE="/etc/shells"
-SUPPORTED_SHELLS="zsh bash fish"
+SUPPORTED_SHELLS="bash fish"
 
 # Colors
 RED='\033[0;31m'
@@ -36,7 +36,6 @@ print_usage() {
     echo ""
     echo "Examples:"
     echo "  switch-shell bash    # Switch to bash"
-    echo "  switch-shell zsh     # Switch to zsh"
     echo "  switch-shell fish    # Switch to fish"
 }
 
@@ -48,10 +47,6 @@ copy_config() {
 
     # Determine source config
     case $source_shell in
-        zsh)
-            source_rc="$HOME/.zshrc"
-            [ ! -f "$source_rc" ] && source_rc="/etc/zsh/zshrc"
-            ;;
         bash)
             source_rc="$HOME/.bashrc"
             [ ! -f "$source_rc" ] && source_rc="/etc/bash/bashrc"
@@ -64,9 +59,6 @@ copy_config() {
 
     # Determine target config
     case $target_shell in
-        zsh)
-            target_rc="$HOME/.zshrc"
-            ;;
         bash)
             target_rc="$HOME/.bashrc"
             ;;
@@ -81,11 +73,11 @@ copy_config() {
         echo -e "${YELLOW}Creating $target_rc from $source_rc...${NC}"
 
         if [ "$target_shell" = "fish" ] && [ "$source_shell" != "fish" ]; then
-            # Convert bash/zsh syntax to fish
+            # Convert bash syntax to fish
             convert_to_fish "$source_rc" "$target_rc"
         elif [ "$target_shell" != "fish" ] && [ "$source_shell" = "fish" ]; then
-            # Convert fish to bash/zsh
-            convert_from_fish "$source_rc" "$target_rc" "$target_shell"
+            # Convert fish to bash
+            convert_from_fish "$source_rc" "$target_rc"
         else
             # Same shell family, just copy with header
             {
@@ -99,9 +91,6 @@ copy_config() {
     elif [ ! -f "$target_rc" ]; then
         # No source to copy from, use system default
         case $target_shell in
-            zsh)
-                [ -f /etc/zsh/zshrc ] && cp /etc/zsh/zshrc "$target_rc"
-                ;;
             bash)
                 [ -f /etc/bash/bashrc ] && cp /etc/bash/bashrc "$target_rc"
                 ;;
@@ -119,7 +108,7 @@ convert_to_fish() {
     local target=$2
 
     cat > "$target" << 'FISHHEAD'
-# RavenLinux fish config (converted from bash/zsh)
+# RavenLinux fish config (converted from bash)
 # Some settings may need manual adjustment
 
 FISHHEAD
@@ -155,7 +144,6 @@ FISHTAIL
 convert_from_fish() {
     local source=$1
     local target=$2
-    local target_shell=$3
 
     cat > "$target" << 'BASHHEAD'
 # RavenLinux config (converted from fish)
@@ -185,11 +173,7 @@ PS1='[\u@raven-linux]# '
 # Load local config if exists
 BASHTAIL
 
-    if [ "$target_shell" = "zsh" ]; then
-        echo '[ -f ~/.zshrc.local ] && source ~/.zshrc.local' >> "$target"
-    else
-        echo '[ -f ~/.bashrc.local ] && source ~/.bashrc.local' >> "$target"
-    fi
+    echo '[ -f ~/.bashrc.local ] && source ~/.bashrc.local' >> "$target"
 }
 
 get_current_shell() {
@@ -206,7 +190,7 @@ TARGET_SHELL=$1
 
 # Validate shell name
 case $TARGET_SHELL in
-    zsh|bash|fish)
+    bash|fish)
         ;;
     *)
         echo -e "${RED}Error: Unknown shell '$TARGET_SHELL'${NC}"

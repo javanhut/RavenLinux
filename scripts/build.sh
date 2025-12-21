@@ -39,7 +39,7 @@ export RAVEN_VERSION="2025.12"
 export RAVEN_ARCH="${RAVEN_ARCH:-x86_64}"
 export RAVEN_TARGET="${RAVEN_ARCH}-raven-linux-musl"
 export RAVEN_JOBS="${RAVEN_JOBS:-$(nproc)}"
-export RAVEN_REQUIRE_COMPOSITOR="${RAVEN_REQUIRE_COMPOSITOR:-1}"
+# NOTE: RAVEN_REQUIRE_COMPOSITOR removed - using Hyprland (copied from host)
 
 # Directory structure
 TOOLCHAIN_DIR="${RAVEN_BUILD}/toolchain"
@@ -69,10 +69,17 @@ setup_directories() {
     mkdir -p "${SOURCES_DIR}"
     mkdir -p "${RAVEN_LOG_DIR}"
 
-    # Create sysroot directory structure
-    mkdir -p "${SYSROOT_DIR}"/{bin,boot,dev,etc,home,lib,mnt,opt,proc,root,run,sbin,sys,tmp,usr,var}
-    mkdir -p "${SYSROOT_DIR}"/usr/{bin,include,lib,share,src}
-    mkdir -p "${SYSROOT_DIR}"/var/{cache,lib,log,tmp}
+    # Create sysroot directory structure (only if writable).
+    # Some users may have an old sysroot created as root; stage4 can still run
+    # from a read-only sysroot by copying it into an ISO workspace.
+    if [[ -d "${SYSROOT_DIR}" ]] && [[ ! -w "${SYSROOT_DIR}" ]]; then
+        log_warn "Sysroot is not writable: ${SYSROOT_DIR}"
+        log_warn "Skipping sysroot directory creation. To rebuild sysroot stages, delete/chown it or set RAVEN_BUILD to a new directory."
+    else
+        mkdir -p "${SYSROOT_DIR}"/{bin,boot,dev,etc,home,lib,mnt,opt,proc,root,run,sbin,sys,tmp,usr,var}
+        mkdir -p "${SYSROOT_DIR}"/usr/{bin,include,lib,share,src}
+        mkdir -p "${SYSROOT_DIR}"/var/{cache,lib,log,tmp}
+    fi
 
     log_success "Build directories created"
 }
@@ -159,6 +166,40 @@ build_sudo_rs() {
     done
 }
 
+# Build raven-terminal into build/bin/
+build_raven_terminal() {
+    log_section "Building raven-terminal"
+
+    if [[ -f "${RAVEN_BUILD}/bin/raven-terminal" ]]; then
+        log_info "raven-terminal already built, skipping"
+        return 0
+    fi
+
+    if ! command -v go &>/dev/null; then
+        log_warn "Go not found, skipping raven-terminal build"
+        return 0
+    fi
+
+    local src_dir="${RAVEN_ROOT}/tools/raven-terminal"
+
+    if [[ ! -d "${src_dir}" ]]; then
+        log_warn "raven-terminal source not found at ${src_dir}, skipping"
+        return 0
+    fi
+
+    mkdir -p "${RAVEN_BUILD}/bin"
+
+    log_step "Compiling raven-terminal..."
+    (cd "${src_dir}" && run_logged go build -o "${RAVEN_BUILD}/bin/raven-terminal" .)
+
+    if [[ -f "${RAVEN_BUILD}/bin/raven-terminal" ]]; then
+        chmod +x "${RAVEN_BUILD}/bin/raven-terminal"
+        log_success "Built ${RAVEN_BUILD}/bin/raven-terminal"
+    else
+        log_warn "Failed to build raven-terminal"
+    fi
+}
+
 # Stage 0: Build cross-compilation toolchain
 build_stage0() {
     log_section "Stage 0: Building Cross Toolchain"
@@ -177,6 +218,7 @@ build_stage1() {
 
     if [[ -f "${RAVEN_ROOT}/scripts/stages/stage1-base.sh" ]]; then
         build_sudo_rs
+        build_raven_terminal
         run_logged source "${RAVEN_ROOT}/scripts/stages/stage1-base.sh"
     else
         log_warn "Stage 1 script not found, skipping"
@@ -205,6 +247,17 @@ build_stage3() {
     fi
 }
 
+# Build security packages (elogind, polkit, accountsservice)
+build_security() {
+    log_section "Building Security Packages"
+
+    if [[ -f "${RAVEN_ROOT}/scripts/build-security.sh" ]]; then
+        run_logged "${RAVEN_ROOT}/scripts/build-security.sh" all
+    else
+        log_warn "build-security.sh not found, skipping"
+    fi
+}
+
 # Stage 4: Generate ISO
 build_stage4() {
     log_section "Stage 4: Generating ISO"
@@ -228,6 +281,7 @@ Stages:
     stage1      Build base system with cross toolchain
     stage2      Native rebuild of entire system
     stage3      Build additional packages
+    security    Build security packages (elogind, polkit, accountsservice)
     stage4      Generate bootable ISO image
 
 Options:
@@ -294,7 +348,7 @@ main() {
                 export RAVEN_NO_LOG=1
                 shift
                 ;;
-            all|stage0|stage1|stage2|stage3|stage4)
+            all|stage0|stage1|stage2|stage3|security|stage4)
                 stage="$1"
                 shift
                 ;;
@@ -332,6 +386,7 @@ main() {
             build_stage1
             build_stage2
             build_stage3
+            build_security
             build_stage4
             ;;
         stage0)
@@ -345,6 +400,9 @@ main() {
             ;;
         stage3)
             build_stage3
+            ;;
+        security)
+            build_security
             ;;
         stage4)
             build_stage4

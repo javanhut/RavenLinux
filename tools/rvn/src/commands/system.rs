@@ -169,7 +169,7 @@ async fn show_info() -> Result<()> {
     println!();
     println!("{}: RavenDE 0.1.0", "Desktop".bright_white());
     println!("{}: Wayland", "Display Server".bright_white());
-    println!("{}: raven-compositor", "Compositor".bright_white());
+    println!("{}: Hyprland", "Compositor".bright_white());
     println!();
     println!("{}: {}", "Hostname".bright_white(), "raven");
     println!("{}: {}", "Uptime".bright_white(), "2 days, 4 hours");

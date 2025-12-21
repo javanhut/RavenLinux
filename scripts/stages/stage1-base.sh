@@ -194,8 +194,10 @@ setup_sysroot() {
         done
     fi
 
-    # Install sudo-rs (sudo/su/visudo)
-    if [[ -f "${BUILD_DIR}/bin/sudo" ]]; then
+    # Install sudo-rs bits (su/visudo). We intentionally do not ship sudo by default.
+    # Set RAVEN_ENABLE_SUDO=1 to include sudo in the sysroot.
+    rm -f "${SYSROOT_DIR}/bin/sudo" "${SYSROOT_DIR}/usr/bin/sudo" 2>/dev/null || true
+    if [[ "${RAVEN_ENABLE_SUDO:-0}" == "1" ]] && [[ -f "${BUILD_DIR}/bin/sudo" ]]; then
         cp "${BUILD_DIR}/bin/sudo" "${SYSROOT_DIR}/bin/sudo"
         chmod 4755 "${SYSROOT_DIR}/bin/sudo" 2>/dev/null || chmod 755 "${SYSROOT_DIR}/bin/sudo"
     fi

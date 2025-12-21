@@ -1,0 +1,46 @@
+#!/bin/sh
+
+uid=""
+if command -v id >/dev/null 2>&1; then
+    uid="$(id -u 2>/dev/null || true)"
+fi
+
+case "$uid" in
+    ''|*[!0-9]*) uid="" ;;
+esac
+
+if [ -z "$uid" ] && [ -r /proc/self/status ]; then
+    while IFS= read -r line; do
+        case "$line" in
+            Uid:*)
+                set -- $line
+                uid="$2"
+                break
+                ;;
+        esac
+    done < /proc/self/status
+fi
+
+case "$uid" in
+    ''|*[!0-9]*) uid="" ;;
+esac
+
+if [ -z "$uid" ]; then
+    uid="${UID:-}"
+fi
+
+name=""
+if [ -n "$uid" ] && [ -r /etc/passwd ]; then
+    while IFS=: read -r pw_name _ pw_uid _ _ _ _; do
+        if [ "$pw_uid" = "$uid" ]; then
+            name="$pw_name"
+            break
+        fi
+    done < /etc/passwd
+fi
+
+if [ -z "$name" ]; then
+    name="${USER:-${LOGNAME:-unknown}}"
+fi
+
+printf '%s\n' "$name"

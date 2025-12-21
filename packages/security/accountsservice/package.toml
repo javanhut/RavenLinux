@@ -1,0 +1,70 @@
+[package]
+name = "accountsservice"
+version = "23.13.9"
+description = "D-Bus interfaces for querying and manipulating user account information"
+license = "GPL-3.0-or-later"
+homepage = "https://www.freedesktop.org/wiki/Software/AccountsService"
+repository = "https://gitlab.freedesktop.org/accountsservice/accountsservice"
+maintainers = ["RavenLinux Team"]
+categories = ["security", "system", "accounts"]
+
+[source]
+type = "tarball"
+url = "https://www.freedesktop.org/software/accountsservice/accountsservice-23.13.9.tar.xz"
+sha256 = "placeholder-sha256-hash"
+
+[build]
+system = "meson"
+configure_flags = [
+    "--prefix=/usr",
+    "--buildtype=release",
+    "-D admin_group=wheel",
+    "-D elogind=true",
+    "-D systemdsystemunitdir=no",
+    "-D gtk_doc=false",
+    "-D introspection=false",
+    "-D vapi=false",
+    "-D docbook=false"
+]
+build_flags = []
+env = {}
+pre_build = [
+    "mv tests/dbusmock tests/dbusmock-tests || true",
+    "sed -e '/accounts_service\\.py/s/dbusmock/dbusmock-tests/' -e 's/assertEquals/assertEqual/' -i tests/test-libaccountsservice.py || true"
+]
+post_build = []
+pre_install = []
+post_install = []
+
+[dependencies]
+runtime = ["polkit", "elogind", "glib2", "dbus"]
+build = ["meson", "ninja", "polkit", "elogind", "glib2"]
+
+[install]
+files = []
+symlinks = []
+directories = [
+    "/usr/include/accountsservice-1.0",
+    "/usr/share/accountsservice",
+    "/var/lib/AccountsService",
+    "/var/lib/AccountsService/users",
+    "/var/lib/AccountsService/icons"
+]
+
+[config]
+# Polkit rules for accountsservice - allow wheel/adm group as administrators
+polkit_rules = [
+    { name = "40-adm.rules", content = """
+polkit.addAdminRule(function(action, subject) {
+   return ["unix-group:wheel", "unix-group:adm", "unix-group:sudo"];
+});
+""" }
+]
+
+[service]
+# Service definition for init system
+name = "accounts-daemon"
+description = "Accounts Service"
+type = "dbus"
+dbus_name = "org.freedesktop.Accounts"
+exec = "/usr/libexec/accounts-daemon"

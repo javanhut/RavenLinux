@@ -152,9 +152,7 @@ EOF
 
     # If earlier build stages weren't run, create minimal auth/NSS files so sudo/login work.
     local default_shell="/bin/sh"
-    if [[ -x "${SYSROOT_DIR}/bin/zsh" ]]; then
-        default_shell="/bin/zsh"
-    elif [[ -x "${SYSROOT_DIR}/bin/bash" ]]; then
+    if [[ -x "${SYSROOT_DIR}/bin/bash" ]]; then
         default_shell="/bin/bash"
     fi
 
@@ -208,27 +206,28 @@ EOF
         mkdir -p "${SYSROOT_DIR}/etc/pam.d" "${SYSROOT_DIR}/etc/security" "${SYSROOT_DIR}/etc/security/limits.d"
         cat > "${SYSROOT_DIR}/etc/pam.d/sudo" << 'EOF'
 #%PAM-1.0
-auth       required     pam_env.so
+auth       sufficient   pam_rootok.so
 auth       required     pam_unix.so nullok try_first_pass
+account    sufficient   pam_rootok.so
 account    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
 session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
 EOF
         cat > "${SYSROOT_DIR}/etc/pam.d/su" << 'EOF'
 #%PAM-1.0
-auth       required     pam_env.so
+auth       sufficient   pam_rootok.so
 auth       required     pam_unix.so nullok try_first_pass
+account    sufficient   pam_rootok.so
 account    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
 session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
 EOF
         cat > "${SYSROOT_DIR}/etc/pam.d/login" << 'EOF'
 #%PAM-1.0
-auth       required     pam_env.so
 auth       required     pam_unix.so nullok try_first_pass
 account    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
 session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
 EOF
         cat > "${SYSROOT_DIR}/etc/pam.d/passwd" << 'EOF'
 #%PAM-1.0
@@ -284,6 +283,27 @@ fix_auth_perms() {
     done
 }
 fix_auth_perms || true
+
+# Create /dev/log syslog socket (required by PAM/sudo for audit logging)
+# Without this, sudo fails with "PAM error: Authentication service cannot retrieve authentication info"
+start_syslog_socket() {
+    [ -S /dev/log ] && return 0
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c '
+import socket, os
+try:
+    os.unlink("/dev/log")
+except: pass
+s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+s.bind("/dev/log")
+os.chmod("/dev/log", 0o666)
+while True:
+    try: s.recv(4096)
+    except: pass
+' >/dev/null 2>&1 &
+    fi
+}
+start_syslog_socket
 
 # Set hostname (use /proc method as fallback if hostname binary is missing)
 if command -v hostname >/dev/null 2>&1; then
@@ -613,14 +633,7 @@ install_packages_to_sysroot() {
         cp "${PROJECT_ROOT}/configs/raven-x11-session" "${SYSROOT_DIR}/bin/raven-x11-session" 2>/dev/null || true
         chmod +x "${SYSROOT_DIR}/bin/raven-x11-session" 2>/dev/null || true
     fi
-    if [[ -f "${PROJECT_ROOT}/configs/weston/weston.ini" ]]; then
-        mkdir -p "${SYSROOT_DIR}/etc/xdg/weston"
-        cp "${PROJECT_ROOT}/configs/weston/weston.ini" "${SYSROOT_DIR}/etc/xdg/weston/weston.ini" 2>/dev/null || true
-        chmod 644 "${SYSROOT_DIR}/etc/xdg/weston/weston.ini" 2>/dev/null || true
-        log_info "  Installed /etc/xdg/weston/weston.ini"
-    fi
-
-    # Fontconfig + fonts (Weston terminal/shell uses it; missing config causes warnings).
+    # Fontconfig + fonts (needed for terminal/shell; missing config causes warnings).
     if [[ -d "/etc/fonts" ]]; then
         mkdir -p "${SYSROOT_DIR}/etc/fonts"
         cp -a "/etc/fonts/." "${SYSROOT_DIR}/etc/fonts/" 2>/dev/null || true
@@ -642,7 +655,7 @@ install_packages_to_sysroot() {
     fi
     mkdir -p "${SYSROOT_DIR}/var/cache/fontconfig" 2>/dev/null || true
 
-    # Cursor themes (missing dnd cursors produce warnings in weston-desktop-shell).
+    # Cursor themes (needed for proper cursor display in Wayland compositors).
     if [[ -d "/usr/share/icons" ]]; then
         mkdir -p "${SYSROOT_DIR}/usr/share/icons"
         for theme in default breeze_cursors Adwaita hicolor; do
@@ -753,7 +766,7 @@ setup_ravenboot() {
 setup_grub() {
     log_step "Setting up GRUB bootloader..."
 
-    # Create GRUB config with submenus
+    # Create GRUB config with clean menu structure
     cat > "${ISO_ROOT}/boot/grub/grub.cfg" << 'EOF'
 set default=0
 set timeout=5
@@ -767,34 +780,22 @@ set gfxpayload=keep
 set color_normal=cyan/black
 set color_highlight=white/blue
 
+# Default: Graphical mode with Raven Compositor
 menuentry "Raven Linux" --class raven {
+    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=tty0
+    initrd /boot/initramfs.img
+}
+
+# Serial console mode (for VMs, headless, debugging)
+menuentry "Raven Linux (Serial)" --class raven {
     linux /boot/vmlinuz rdinit=/init quiet loglevel=3 console=ttyS0,115200 console=tty0
     initrd /boot/initramfs.img
 }
 
+# Graphical options submenu
 submenu "Raven Linux (Graphical) >" --class raven {
-    menuentry "Raven Desktop (Wayland)" --class raven {
-        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=weston console=ttyS0,115200 console=tty0
-        initrd /boot/initramfs.img
-    }
-
-    menuentry "Raven Compositor (Wayland)" --class raven {
-        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=ttyS0,115200 console=tty0
-        initrd /boot/initramfs.img
-    }
-
-    menuentry "Hyprland (Wayland)" --class raven {
-        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=hyprland console=ttyS0,115200 console=tty0
-        initrd /boot/initramfs.img
-    }
-
-    menuentry "Weston (Wayland)" --class raven {
-        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=weston console=ttyS0,115200 console=tty0
-        initrd /boot/initramfs.img
-    }
-
-    menuentry "X11" --class raven {
-        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=x11 console=ttyS0,115200 console=tty0
+    menuentry "Raven Compositor" --class raven {
+        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=tty0
         initrd /boot/initramfs.img
     }
 
@@ -803,12 +804,13 @@ submenu "Raven Linux (Graphical) >" --class raven {
     }
 }
 
-menuentry "Raven Linux (Recovery)" --class raven {
-    linux /boot/vmlinuz rdinit=/init single console=ttyS0,115200 console=tty0
-    initrd /boot/initramfs.img
-}
-
+# System options submenu
 submenu "System >" --class raven {
+    menuentry "Recovery Mode" --class raven {
+        linux /boot/vmlinuz rdinit=/init single console=ttyS0,115200 console=tty0
+        initrd /boot/initramfs.img
+    }
+
     menuentry "Reboot" --class restart {
         reboot
     }

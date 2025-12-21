@@ -1,7 +1,7 @@
 #!/bin/bash
 # shell-reload - Reload the current shell's configuration
 # Usage: shell-reload
-# This reloads ~/.zshrc, ~/.bashrc, or ~/.config/fish/config.fish
+# This reloads ~/.bashrc or ~/.config/fish/config.fish
 
 # Colors
 RED='\033[0;31m'
@@ -15,35 +15,10 @@ CURRENT_SHELL=$(basename "$SHELL")
 
 # Also check $0 in case we're in a different shell than login shell
 RUNNING_SHELL=$(basename "$0" 2>/dev/null || echo "$CURRENT_SHELL")
-if [ "$RUNNING_SHELL" = "shell-reload" ] || [ "$RUNNING_SHELL" = "-bash" ] || [ "$RUNNING_SHELL" = "-zsh" ]; then
+if [ "$RUNNING_SHELL" = "shell-reload" ] || [ "$RUNNING_SHELL" = "-bash" ]; then
     # Script is being executed, use $SHELL
     RUNNING_SHELL=$CURRENT_SHELL
 fi
-
-reload_zsh() {
-    local config=""
-
-    # Check for config files in order of preference
-    if [ -f "$HOME/.zshrc" ]; then
-        config="$HOME/.zshrc"
-    elif [ -f "/etc/zsh/zshrc" ]; then
-        config="/etc/zsh/zshrc"
-    fi
-
-    if [ -n "$config" ]; then
-        echo -e "${BLUE}Reloading zsh configuration...${NC}"
-        echo -e "Source: ${GREEN}$config${NC}"
-        # For zsh, we need to use zsh to source the file
-        zsh -c "source '$config'" 2>/dev/null
-        echo -e "${GREEN}Done!${NC}"
-        echo ""
-        echo -e "${YELLOW}Note:${NC} For full effect, run: ${BLUE}source $config${NC}"
-        echo "Or restart your shell with: ${BLUE}exec zsh${NC}"
-    else
-        echo -e "${RED}No zsh configuration found${NC}"
-        return 1
-    fi
-}
 
 reload_bash() {
     local config=""
@@ -111,7 +86,6 @@ print_usage() {
     echo ""
     echo "Examples:"
     echo "  shell-reload        # Reload current shell config"
-    echo "  shell-reload zsh    # Reload zsh config"
     echo "  shell-reload bash   # Reload bash config"
     echo "  shell-reload fish   # Reload fish config"
     echo ""
@@ -126,9 +100,6 @@ case $TARGET_SHELL in
         print_usage
         exit 0
         ;;
-    zsh)
-        reload_zsh
-        ;;
     bash)
         reload_bash
         ;;
@@ -137,7 +108,7 @@ case $TARGET_SHELL in
         ;;
     *)
         echo -e "${RED}Unknown shell: $TARGET_SHELL${NC}"
-        echo "Supported shells: zsh, bash, fish"
+        echo "Supported shells: bash, fish"
         exit 1
         ;;
 esac

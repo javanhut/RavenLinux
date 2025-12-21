@@ -103,126 +103,11 @@ build_rvn() {
 }
 
 # =============================================================================
-# Build raven-compositor (Wayland compositor)
+# Hyprland compositor (copied from host in build-live-iso.sh)
 # =============================================================================
-build_compositor() {
-    log_step "Building raven-compositor..."
-
-    local compositor_dir="${PROJECT_ROOT}/desktop/compositor"
-    local vendor_dir="${BUILD_DIR}/vendor/raven-compositor"
-    local require_compositor="${RAVEN_REQUIRE_COMPOSITOR:-1}"
-    local build_log="${LOGS_DIR}/raven-compositor.log"
-    local vendor_log="${LOGS_DIR}/raven-compositor-vendor.log"
-
-    if [[ ! -d "${compositor_dir}" ]]; then
-        log_warn "raven-compositor source not found"
-        return 0
-    fi
-
-    if ! command -v cargo &>/dev/null; then
-        log_warn "Cargo not found, skipping raven-compositor build"
-        [[ "${require_compositor}" == "1" ]] && return 1 || return 0
-    fi
-
-    cd "${compositor_dir}"
-
-    vendor_compositor() {
-        rm -rf "${vendor_dir}"
-        mkdir -p "${vendor_dir}" 2>/dev/null || true
-
-        log_info "Vendoring Rust dependencies (raven-compositor)..."
-        if cargo vendor --locked --offline "${vendor_dir}" > "${vendor_dir}/cargo-config.toml" 2>&1 | tee "${vendor_log}"; then
-            touch "${vendor_dir}/.cargo-vendor-ok" 2>/dev/null || true
-            log_success "Dependencies vendored -> ${vendor_dir}"
-            return 0
-        fi
-
-        log_warn "Offline vendoring failed; retrying with network..."
-        if cargo vendor --locked "${vendor_dir}" > "${vendor_dir}/cargo-config.toml" 2>&1 | tee "${vendor_log}"; then
-            touch "${vendor_dir}/.cargo-vendor-ok" 2>/dev/null || true
-            log_success "Dependencies vendored -> ${vendor_dir}"
-            return 0
-        fi
-
-        return 1
-    }
-
-    # Preflight native deps (keep aligned with `desktop/compositor/Cargo.toml`).
-    if command -v pkg-config &>/dev/null; then
-        local missing=()
-        local pcs=(
-            libdrm
-            wayland-client
-            wayland-server
-            xkbcommon
-        )
-        for pc in "${pcs[@]}"; do
-            if ! pkg-config --exists "${pc}" 2>/dev/null; then
-                missing+=("${pc}")
-            fi
-        done
-        if [[ ${#missing[@]} -gt 0 ]]; then
-            log_error "Missing system libraries for raven-compositor: ${missing[*]}"
-            log_error "Install the -dev packages for these (and ensure pkg-config can find them)."
-            [[ "${require_compositor}" == "1" ]] && return 1 || return 0
-        fi
-    else
-        log_warn "pkg-config not found; raven-compositor may fail to build due to missing system libs"
-    fi
-
-    # Ensure a lockfile exists (required for `--locked`/vendoring).
-    if [[ ! -f Cargo.lock ]]; then
-        log_info "Generating Cargo.lock (raven-compositor)..."
-        if cargo generate-lockfile 2>&1 | tee "${LOGS_DIR}/raven-compositor-lock.log"; then
-            log_success "Generated Cargo.lock"
-        else
-            log_warn "Failed to generate Cargo.lock (likely no network)"
-            [[ "${require_compositor}" == "1" ]] && return 1 || return 0
-        fi
-    fi
-
-    # Prefer vendored deps (offline/reproducible). If not present, try to create them.
-    if [[ ! -f "${vendor_dir}/.cargo-vendor-ok" ]]; then
-        if ! vendor_compositor; then
-            log_warn "Failed to vendor deps (likely no network); attempting build with existing cache..."
-            [[ "${require_compositor}" == "1" ]] && return 1 || true
-        fi
-    fi
-
-    if CARGO_TARGET_DIR=target-user cargo build --release --locked --offline \
-        --config "source.crates-io.replace-with=\"vendored-sources\"" \
-        --config "source.vendored-sources.directory=\"${vendor_dir}\"" \
-        2>&1 | tee "${build_log}"; then
-        mkdir -p "${PACKAGES_DIR}/bin" "${SYSROOT_DIR}/bin"
-        cp target-user/release/raven-compositor "${PACKAGES_DIR}/bin/"
-        cp target-user/release/raven-compositor "${SYSROOT_DIR}/bin/"
-        log_success "raven-compositor built"
-    else
-        # If vendored sources were modified/corrupted, re-vendor and retry once.
-        if rg -n "listed checksum of .* has changed" "${build_log}" >/dev/null 2>&1; then
-            log_warn "Vendored sources checksum mismatch detected; re-vendoring and retrying..."
-            if vendor_compositor; then
-                if CARGO_TARGET_DIR=target-user cargo build --release --locked --offline \
-                    --config "source.crates-io.replace-with=\"vendored-sources\"" \
-                    --config "source.vendored-sources.directory=\"${vendor_dir}\"" \
-                    2>&1 | tee "${build_log}"; then
-                    mkdir -p "${PACKAGES_DIR}/bin" "${SYSROOT_DIR}/bin"
-                    cp target-user/release/raven-compositor "${PACKAGES_DIR}/bin/"
-                    cp target-user/release/raven-compositor "${SYSROOT_DIR}/bin/"
-                    log_success "raven-compositor built"
-                    cd "${PROJECT_ROOT}"
-                    return 0
-                fi
-            fi
-        fi
-
-        log_warn "Failed to build raven-compositor (Wayland entry will fall back to shell)"
-        log_warn "See: ${build_log}"
-        [[ "${require_compositor}" == "1" ]] && return 1 || return 0
-    fi
-
-    cd "${PROJECT_ROOT}"
-}
+# NOTE: raven-compositor has been replaced with Hyprland.
+# Hyprland binary is copied from the host system during ISO build.
+# See scripts/build-live-iso.sh copy_wayland_tools() function.
 
 # =============================================================================
 # Build raven-installer (Go with Gio UI)
@@ -326,13 +211,35 @@ build_wifi_tools() {
             log_warn "Go not found, skipping raven-wifi GUI build"
         else
             cd "${wifi_gui_dir}"
-            go mod tidy 2>/dev/null || true
+            log_info "Downloading dependencies for raven-wifi GUI..."
+            go mod download 2>/dev/null || go mod tidy 2>/dev/null || true
 
-            if CGO_ENABLED=1 go build -o raven-wifi . 2>&1 | tee "${LOGS_DIR}/wifi-gui.log"; then
+            log_info "Compiling raven-wifi GUI with Wayland support..."
+            
+            # CGO flags to ensure Wayland backend is linked
+            local cgo_cflags=""
+            local cgo_ldflags=""
+
+            # Add Wayland and XKB flags if available
+            if pkg-config --exists wayland-client wayland-egl xkbcommon 2>/dev/null; then
+                cgo_cflags="$(pkg-config --cflags wayland-client wayland-egl xkbcommon 2>/dev/null || true)"
+                cgo_ldflags="$(pkg-config --libs wayland-client wayland-egl xkbcommon 2>/dev/null || true)"
+                log_info "Building with Wayland support: ${cgo_ldflags}"
+            else
+                log_warn "Wayland libraries not found, building with X11 fallback only"
+            fi
+
+            if env CGO_ENABLED=1 \
+                CGO_CFLAGS="${cgo_cflags}" \
+                CGO_LDFLAGS="${cgo_ldflags}" \
+                go build -ldflags="-s -w" -o raven-wifi . 2>&1 | tee "${LOGS_DIR}/wifi-gui.log"; then
+                
                 mkdir -p "${PACKAGES_DIR}/bin" "${SYSROOT_DIR}/bin"
                 cp raven-wifi "${PACKAGES_DIR}/bin/"
                 cp raven-wifi "${SYSROOT_DIR}/bin/"
-                log_success "raven-wifi (GUI) built"
+                chmod +x "${PACKAGES_DIR}/bin/raven-wifi"
+                chmod +x "${SYSROOT_DIR}/bin/raven-wifi"
+                log_success "raven-wifi (GUI) built and installed"
             else
                 log_warn "Failed to build raven-wifi GUI"
             fi
@@ -779,7 +686,9 @@ build_ncurses() {
         --with-default-terminfo-dir=/usr/share/terminfo
 
     make -j$(nproc)
-    make DESTDIR="${SYSROOT_DIR}" install
+    # LD_LIBRARY_PATH is needed so the freshly-built tic can find libtinfow.so.6
+    # when compiling the terminfo database during install
+    LD_LIBRARY_PATH="${SYSROOT_DIR}/usr/lib" make DESTDIR="${SYSROOT_DIR}" install
 
     # Create non-wide symlinks for compatibility
     cd "${SYSROOT_DIR}/usr/lib"
@@ -1720,108 +1629,21 @@ RUSTPROFILE
 }
 
 # =============================================================================
-# Build All Shells (zsh, fish, bash) with Dependencies
+# Build Shells (bash, fish) with Dependencies
 # =============================================================================
 build_shells() {
     log_step "Building shells..."
 
-    # Build/install zsh
-    build_zsh
+    # Ensure bash is available (usually from base system)
+    build_bash
 
     # Build/install fish
     build_fish
 
-    # Ensure bash is available (usually from base system)
-    build_bash
-
-    # Set zsh as default shell
+    # Set bash as default shell
     set_default_shell
 
-    log_success "All shells built"
-}
-
-# Build zsh with dependencies
-build_zsh() {
-    log_info "Building zsh..."
-
-    local zsh_ver="5.9"
-    local cache_dir="${BUILD_DIR}/sources"
-    mkdir -p "${cache_dir}"
-
-    # Check if already installed
-    if [[ -f "${SYSROOT_DIR}/usr/bin/zsh" ]]; then
-        log_info "zsh already installed"
-        return 0
-    fi
-
-    # Try to copy from host first
-    if command -v zsh &>/dev/null; then
-        local host_zsh=$(command -v zsh)
-        log_info "Copying host zsh and dependencies..."
-
-        mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/bin"
-        mkdir -p "${SYSROOT_DIR}/usr/lib" "${SYSROOT_DIR}/usr/share/zsh"
-
-        # Copy zsh binary
-        cp "${host_zsh}" "${SYSROOT_DIR}/usr/bin/zsh"
-        chmod 755 "${SYSROOT_DIR}/usr/bin/zsh"
-        ln -sf ../usr/bin/zsh "${SYSROOT_DIR}/bin/zsh"
-
-        # Copy zsh libraries and completions
-        for dir in /usr/share/zsh /usr/lib/zsh; do
-            if [[ -d "${dir}" ]]; then
-                cp -r "${dir}"/* "${SYSROOT_DIR}${dir}/" 2>/dev/null || true
-            fi
-        done
-
-        # Copy required shared libraries
-        copy_binary_deps "${host_zsh}"
-
-        log_success "zsh ${zsh_ver} installed from host"
-        return 0
-    fi
-
-    # Download and build from source
-    local zsh_tarball="zsh-${zsh_ver}.tar.xz"
-    local zsh_url="https://sourceforge.net/projects/zsh/files/zsh/${zsh_ver}/${zsh_tarball}/download"
-
-    if [[ ! -f "${cache_dir}/${zsh_tarball}" ]]; then
-        log_info "Downloading zsh ${zsh_ver}..."
-        if curl -fsSL -o "${cache_dir}/${zsh_tarball}" -L "${zsh_url}"; then
-            log_info "Downloaded zsh"
-        else
-            log_warn "Failed to download zsh"
-            return 1
-        fi
-    fi
-
-    # Extract and build (use a writable copy to avoid leftover root-owned trees)
-    local zsh_src="${cache_dir}/zsh-${zsh_ver}-src"
-    if [[ ! -d "${zsh_src}" ]]; then
-        rm -rf "${zsh_src}"
-        mkdir -p "${zsh_src}"
-        tar -xJf "${cache_dir}/${zsh_tarball}" --strip-components=1 -C "${zsh_src}"
-    fi
-
-    cd "${zsh_src}"
-    # Clean previous build if exists to ensure fresh configure with new flags
-    make distclean 2>/dev/null || make clean 2>/dev/null || true
-
-    if ./configure --prefix=/usr --enable-multibyte --enable-pcre --with-tcsetpgrp; then
-        # Disable termcap module - it conflicts with ncurses' boolcodes type definition
-        # The termcap module defines boolcodes as 'char *[]' but ncurses uses 'const char * const[]'
-        if [[ -f config.modules ]]; then
-            sed -i 's/name=zsh\/termcap.* link=[^ ]*/name=zsh\/termcap modfile=Src\/Modules\/termcap.mdd link=no/' config.modules
-        fi
-    fi
-
-    if make -j$(nproc) && make DESTDIR="${SYSROOT_DIR}" install; then
-        ln -sf ../usr/bin/zsh "${SYSROOT_DIR}/bin/zsh"
-        log_success "zsh ${zsh_ver} built and installed"
-    else
-        log_warn "zsh build failed"
-    fi
-    cd "${PROJECT_ROOT}"
+    log_success "Shells built"
 }
 
 # Build fish with dependencies
@@ -1955,9 +1777,10 @@ build_bash() {
     cd "${bash_src}"
 
     # Set up environment to find our built libraries (ncurses, readline)
+    # -std=gnu89 required for bash's old K&R style C code to compile with modern GCC
     export LDFLAGS="-L${SYSROOT_DIR}/usr/lib -Wl,-rpath,${SYSROOT_DIR}/usr/lib"
     export CPPFLAGS="-I${SYSROOT_DIR}/usr/include -I${SYSROOT_DIR}/usr/include/ncursesw"
-    export CFLAGS="-I${SYSROOT_DIR}/usr/include -I${SYSROOT_DIR}/usr/include/ncursesw"
+    export CFLAGS="-I${SYSROOT_DIR}/usr/include -I${SYSROOT_DIR}/usr/include/ncursesw -std=gnu89"
 
     # Configure bash
     # --without-bash-malloc: use glibc malloc (better for compatibility)
@@ -2265,17 +2088,15 @@ copy_lib_family() {
     done
 }
 
-# Set zsh as the default shell
+# Set bash as the default shell
 set_default_shell() {
-    log_info "Setting zsh as default shell..."
+    log_info "Setting bash as default shell..."
 
     # Create /etc/shells
     mkdir -p "${SYSROOT_DIR}/etc"
     cat > "${SYSROOT_DIR}/etc/shells" << 'SHELLS'
 # Valid login shells - RavenLinux
-# Default: zsh
-/bin/zsh
-/usr/bin/zsh
+# Default: bash
 /bin/bash
 /usr/bin/bash
 /bin/fish
@@ -2284,18 +2105,17 @@ set_default_shell() {
 /usr/bin/sh
 SHELLS
 
-    # Set default shell for root to zsh
+    # Set default shell for root to bash
     if [[ -f "${SYSROOT_DIR}/etc/passwd" ]]; then
-        sed -i 's|root:.*:/bin/bash|root:x:0:0:root:/root:/bin/zsh|' "${SYSROOT_DIR}/etc/passwd" 2>/dev/null || true
-        sed -i 's|root:.*:/bin/sh|root:x:0:0:root:/root:/bin/zsh|' "${SYSROOT_DIR}/etc/passwd" 2>/dev/null || true
+        sed -i 's|^root:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:.*$|root:x:0:0:root:/root:/bin/bash|' "${SYSROOT_DIR}/etc/passwd" 2>/dev/null || true
     else
-        # Create passwd with zsh as default
+        # Create passwd with bash as default
         cat > "${SYSROOT_DIR}/etc/passwd" << 'PASSWD'
-root:x:0:0:root:/root:/bin/zsh
+root:x:0:0:root:/root:/bin/bash
 PASSWD
     fi
 
-    # Create /etc/default/useradd to set zsh as default for new users
+    # Create /etc/default/useradd to set bash as default for new users
     mkdir -p "${SYSROOT_DIR}/etc/default"
     cat > "${SYSROOT_DIR}/etc/default/useradd" << 'USERADD'
 # Default values for useradd
@@ -2303,12 +2123,12 @@ GROUP=100
 HOME=/home
 INACTIVE=-1
 EXPIRE=
-SHELL=/bin/zsh
+SHELL=/bin/bash
 SKEL=/etc/skel
 CREATE_MAIL_SPOOL=yes
 USERADD
 
-    log_success "zsh set as default shell"
+    log_success "bash set as default shell"
 }
 
 # =============================================================================
@@ -2340,22 +2160,6 @@ install_shell_tools() {
 
     # Copy shell configurations
     local configs_dir="${PROJECT_ROOT}/configs"
-
-    # zsh configs
-    if [[ -d "${configs_dir}/zsh" ]]; then
-        mkdir -p "${SYSROOT_DIR}/etc/zsh"
-        cp "${configs_dir}/zsh/"* "${SYSROOT_DIR}/etc/zsh/" 2>/dev/null || true
-        chmod 644 "${SYSROOT_DIR}/etc/zsh/"* 2>/dev/null || true
-        # Also create user skeleton
-        mkdir -p "${SYSROOT_DIR}/etc/skel"
-        cp "${configs_dir}/zsh/zshrc" "${SYSROOT_DIR}/etc/skel/.zshrc" 2>/dev/null || true
-        cp "${configs_dir}/zsh/zshenv" "${SYSROOT_DIR}/etc/skel/.zshenv" 2>/dev/null || true
-        # Copy to root home
-        mkdir -p "${SYSROOT_DIR}/root"
-        cp "${configs_dir}/zsh/zshrc" "${SYSROOT_DIR}/root/.zshrc" 2>/dev/null || true
-        cp "${configs_dir}/zsh/zshenv" "${SYSROOT_DIR}/root/.zshenv" 2>/dev/null || true
-        log_info "Installed zsh configs"
-    fi
 
     # bash configs
     if [[ -d "${configs_dir}/bash" ]]; then
@@ -2436,7 +2240,7 @@ build_fzf() {
 
     # Download shell integration scripts
     mkdir -p "${SYSROOT_DIR}/usr/share/fzf"
-    for script in completion.bash completion.zsh key-bindings.bash key-bindings.zsh key-bindings.fish; do
+    for script in completion.bash completion.fish key-bindings.bash key-bindings.fish; do
         local script_url="https://raw.githubusercontent.com/junegunn/fzf/${fzf_ver}/shell/${script}"
         curl -fsSL -o "${SYSROOT_DIR}/usr/share/fzf/${script}" "${script_url}" 2>/dev/null || true
     done
@@ -2557,7 +2361,7 @@ print_summary() {
 
     echo ""
     echo -e "${CYAN}Shells:${NC}"
-    for shell in zsh bash fish; do
+    for shell in bash fish; do
         if [[ -f "${SYSROOT_DIR}/usr/bin/${shell}" ]] || [[ -f "${SYSROOT_DIR}/bin/${shell}" ]]; then
             echo -e "  ${GREEN}[OK]${NC} ${shell}"
         else
@@ -2621,16 +2425,16 @@ print_summary() {
     [[ -f "${SYSROOT_DIR}/etc/xdg/nvim/init.lua" ]] && echo -e "  ${GREEN}[OK]${NC} Neovim config"
     [[ -f "${SYSROOT_DIR}/etc/vim/vimrc" ]] && echo -e "  ${GREEN}[OK]${NC} Vim config"
     [[ -f "${SYSROOT_DIR}/etc/shells" ]] && echo -e "  ${GREEN}[OK]${NC} /etc/shells"
-    [[ -f "${SYSROOT_DIR}/etc/zsh/zshrc" ]] && echo -e "  ${GREEN}[OK]${NC} zshrc"
+    [[ -f "${SYSROOT_DIR}/etc/bashrc" ]] && echo -e "  ${GREEN}[OK]${NC} bashrc"
     [[ -f "${SYSROOT_DIR}/etc/fish/config.fish" ]] && echo -e "  ${GREEN}[OK]${NC} fish config"
-    [[ -f "${SYSROOT_DIR}/root/.zshrc" ]] && echo -e "  ${GREEN}[OK]${NC} root zshrc"
+    [[ -f "${SYSROOT_DIR}/root/.bashrc" ]] && echo -e "  ${GREEN}[OK]${NC} root bashrc"
 
     # Check default shell
     echo ""
-    if grep -q "/bin/zsh" "${SYSROOT_DIR}/etc/passwd" 2>/dev/null; then
-        echo -e "  ${GREEN}[OK]${NC} Default shell: zsh"
+    if grep -q "/bin/bash" "${SYSROOT_DIR}/etc/passwd" 2>/dev/null; then
+        echo -e "  ${GREEN}[OK]${NC} Default shell: bash"
     else
-        echo -e "  ${YELLOW}[--]${NC} Default shell: not set to zsh"
+        echo -e "  ${YELLOW}[--]${NC} Default shell: not set to bash"
     fi
     echo ""
 }
@@ -2654,13 +2458,13 @@ main() {
     # Build custom RavenLinux tools
     build_go_packages
     build_rvn
-    build_compositor
+    # NOTE: Hyprland compositor is copied from host in build-live-iso.sh
     build_installer
     build_usb_creator
     build_wifi_tools
     build_bootloader
 
-    # Build shells (zsh, fish, bash) - MUST come early as default shell
+    # Build shells (bash, fish) - MUST come early as default shell
     build_shells
 
     # Build and install development tools

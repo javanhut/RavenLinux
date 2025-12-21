@@ -80,7 +80,7 @@ setup_live_root() {
 
     rm -rf "${LIVE_ROOT}"
     mkdir -p "${LIVE_ROOT}"/{bin,sbin,lib,lib64,usr/{bin,sbin,lib,lib64,share},etc,var,tmp,root,home,dev,proc,sys,run,mnt,opt}
-    mkdir -p "${LIVE_ROOT}"/usr/share/{fonts,icons,themes,backgrounds,zsh}
+    mkdir -p "${LIVE_ROOT}"/usr/share/{fonts,icons,themes,backgrounds}
     mkdir -p "${LIVE_ROOT}"/etc/{skel,xdg,rvn}
     mkdir -p "${LIVE_ROOT}"/var/{log,cache,lib,tmp}
 
@@ -248,6 +248,13 @@ copy_diagnostics_tools() {
         cp -a "/usr/lib/udev" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
         log_info "  Copied /usr/lib/udev"
     fi
+
+    # Copy custom RavenLinux udev rules for input device access
+    if [[ -f "${RAVEN_ROOT}/configs/72-raven-input.rules" ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/lib/udev/rules.d"
+        cp "${RAVEN_ROOT}/configs/72-raven-input.rules" "${LIVE_ROOT}/usr/lib/udev/rules.d/" 2>/dev/null || true
+        log_info "  Copied custom input device udev rules"
+    fi
     if [[ -d "/etc/udev" ]]; then
         mkdir -p "${LIVE_ROOT}/etc"
         cp -a "/etc/udev" "${LIVE_ROOT}/etc/" 2>/dev/null || true
@@ -285,12 +292,17 @@ copy_diagnostics_tools() {
 copy_sudo_rs() {
     log_step "Installing sudo-rs..."
 
-    if [[ -f "${RAVEN_BUILD}/bin/sudo" ]]; then
-        cp "${RAVEN_BUILD}/bin/sudo" "${LIVE_ROOT}/bin/sudo"
-        chmod 4755 "${LIVE_ROOT}/bin/sudo" 2>/dev/null || chmod 755 "${LIVE_ROOT}/bin/sudo" || true
-    else
-        log_warn "sudo-rs not found at ${RAVEN_BUILD}/bin/sudo (run ./scripts/build.sh stage1)"
-        return 0
+    # Do not ship sudo by default (avoid stale SUID artifacts across rebuilds).
+    # Set RAVEN_ENABLE_SUDO=1 to include it.
+    rm -f "${LIVE_ROOT}/bin/sudo" "${LIVE_ROOT}/usr/bin/sudo" 2>/dev/null || true
+    if [[ "${RAVEN_ENABLE_SUDO:-0}" == "1" ]]; then
+        if [[ -f "${RAVEN_BUILD}/bin/sudo" ]]; then
+            cp "${RAVEN_BUILD}/bin/sudo" "${LIVE_ROOT}/bin/sudo"
+            chmod 4755 "${LIVE_ROOT}/bin/sudo" 2>/dev/null || chmod 755 "${LIVE_ROOT}/bin/sudo" || true
+        else
+            log_warn "sudo-rs not found at ${RAVEN_BUILD}/bin/sudo (run ./scripts/build.sh stage1)"
+            return 0
+        fi
     fi
 
     if [[ -f "${RAVEN_BUILD}/bin/su" ]]; then
@@ -365,19 +377,7 @@ EOF
 copy_shells() {
     log_step "Copying shells..."
 
-    local have_zsh=false
     local have_bash=false
-
-    # Copy zsh from host
-    if command -v zsh &>/dev/null; then
-        cp "$(which zsh)" "${LIVE_ROOT}/bin/zsh" && have_zsh=true
-
-        # Copy zsh configuration files
-        mkdir -p "${LIVE_ROOT}/usr/share/zsh"
-        cp -r /usr/share/zsh/* "${LIVE_ROOT}/usr/share/zsh/" 2>/dev/null || true
-
-        log_info "  Added zsh"
-    fi
 
     # Copy bash from host
     if command -v bash &>/dev/null; then
@@ -385,15 +385,12 @@ copy_shells() {
         log_info "  Added bash"
     fi
 
-    # Create sh symlink - prefer zsh, fall back to bash
-    if [[ "$have_zsh" == true ]]; then
-        ln -sf zsh "${LIVE_ROOT}/bin/sh"
-        log_info "  /bin/sh -> zsh"
-    elif [[ "$have_bash" == true ]]; then
+    # Create sh symlink - prefer bash
+    if [[ "$have_bash" == true ]]; then
         ln -sf bash "${LIVE_ROOT}/bin/sh"
         log_info "  /bin/sh -> bash"
     else
-        log_warn "  WARNING: No shell available for /bin/sh!"
+        log_warn "  WARNING: bash not found for /bin/sh!"
     fi
 
     log_success "Shells installed"
@@ -553,21 +550,6 @@ copy_wayland_tools() {
         log_warn "seatd not found - install with: sudo pacman -S seatd"
     fi
 
-    # weston as fallback compositor
-    if command -v weston &>/dev/null; then
-        cp "$(which weston)" "${LIVE_ROOT}/bin/"
-        log_info "  Added weston"
-
-        # Copy weston runtime modules/backends (weston 14 uses libweston-$major)
-        for d in /usr/lib/weston /usr/lib64/weston /usr/share/weston \
-            /usr/lib/libweston-* /usr/lib64/libweston-*; do
-            [[ -d "$d" ]] || continue
-            mkdir -p "${LIVE_ROOT}${d}"
-            cp -a "${d}/." "${LIVE_ROOT}${d}/" 2>/dev/null || true
-            log_info "  Copied $(basename "$d") runtime data"
-        done
-    fi
-
     # X11/Xwayland support (for legacy apps under Wayland, or optional Xorg)
     if command -v Xwayland &>/dev/null; then
         cp "$(which Xwayland)" "${LIVE_ROOT}/bin/"
@@ -608,15 +590,42 @@ copy_wayland_tools() {
         fi
     done
 
-    # Hyprland (optional)
+    # Hyprland (primary compositor - required)
     if command -v Hyprland &>/dev/null; then
         cp "$(which Hyprland)" "${LIVE_ROOT}/bin/"
         log_info "  Added Hyprland"
+
+        # Copy hyprctl
+        if command -v hyprctl &>/dev/null; then
+            cp "$(which hyprctl)" "${LIVE_ROOT}/bin/"
+            log_info "  Added hyprctl"
+        fi
+
+        # Copy Hyprland ecosystem libraries
+        for lib in libaquamarine libhyprcursor libhyprgraphics libhyprlang libhyprutils; do
+            for libpath in /usr/lib/${lib}.so*; do
+                if [[ -f "$libpath" ]] || [[ -L "$libpath" ]]; then
+                    cp -L "$libpath" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+                fi
+            done
+        done
+        log_info "  Added Hyprland ecosystem libraries"
+
+        # Copy additional dependencies
+        for lib in libdisplay-info libliftoff libre2 libtomlplusplus; do
+            for libpath in /usr/lib/${lib}.so*; do
+                if [[ -f "$libpath" ]] || [[ -L "$libpath" ]]; then
+                    cp -L "$libpath" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+                fi
+            done
+        done
+    else
+        log_error "Hyprland not found on host system!"
+        log_error "Install with: sudo pacman -S hyprland"
+        exit 1
     fi
-    if command -v hyprctl &>/dev/null; then
-        cp "$(which hyprctl)" "${LIVE_ROOT}/bin/"
-        log_info "  Added hyprctl"
-    fi
+
+    # Copy Hyprland data directories
     for hypr_dir in /usr/share/hyprland /usr/share/hypr; do
         [[ -d "${hypr_dir}" ]] || continue
         mkdir -p "${LIVE_ROOT}${hypr_dir}"
@@ -627,6 +636,19 @@ copy_wayland_tools() {
         mkdir -p "${LIVE_ROOT}/usr/share/wayland-sessions"
         cp -a "/usr/share/wayland-sessions/hyprland.desktop" "${LIVE_ROOT}/usr/share/wayland-sessions/" 2>/dev/null || true
         log_info "  Copied hyprland.desktop"
+    fi
+
+    # Copy Raven hyprland.conf
+    if [[ -f "${PROJECT_ROOT}/configs/hyprland.conf" ]]; then
+        mkdir -p "${LIVE_ROOT}/etc/hypr"
+        cp "${PROJECT_ROOT}/configs/hyprland.conf" "${LIVE_ROOT}/etc/hypr/hyprland.conf"
+        # Also install to skel for user home dirs
+        mkdir -p "${LIVE_ROOT}/etc/skel/.config/hypr"
+        cp "${PROJECT_ROOT}/configs/hyprland.conf" "${LIVE_ROOT}/etc/skel/.config/hypr/hyprland.conf"
+        # Install to root's config directory (Hyprland looks here when running as root)
+        mkdir -p "${LIVE_ROOT}/root/.config/hypr"
+        cp "${PROJECT_ROOT}/configs/hyprland.conf" "${LIVE_ROOT}/root/.config/hypr/hyprland.conf"
+        log_info "  Added Raven hyprland.conf"
     fi
 
     # openvt for starting compositor on VT
@@ -642,12 +664,7 @@ copy_wayland_tools() {
         log_info "  Added raven-wayland-session"
     fi
 
-    # Copy raven-compositor if built
-    if [[ -f "${RAVEN_BUILD}/packages/bin/raven-compositor" ]]; then
-        cp "${RAVEN_BUILD}/packages/bin/raven-compositor" "${LIVE_ROOT}/bin/"
-        chmod +x "${LIVE_ROOT}/bin/raven-compositor"
-        log_info "  Added raven-compositor"
-    fi
+    # NOTE: raven-compositor removed - using Hyprland instead (copied above)
 
     # Copy libseat library
     for lib in /usr/lib/libseat.so* /lib/libseat.so*; do
@@ -722,6 +739,25 @@ copy_wayland_tools() {
         log_info "  Added xkeyboard-config (alt location)"
     fi
 
+    # XWayland invokes /usr/bin/xkbcomp at runtime to compile keymaps.
+    # If missing, XWayland will fail to start with keyboard initialization errors.
+    if [[ -x "/usr/bin/xkbcomp" ]]; then
+        mkdir -p "${LIVE_ROOT}/bin" "${LIVE_ROOT}/usr/bin"
+        cp -a "/usr/bin/xkbcomp" "${LIVE_ROOT}/bin/xkbcomp" 2>/dev/null || true
+        ln -sf ../../bin/xkbcomp "${LIVE_ROOT}/usr/bin/xkbcomp" 2>/dev/null || true
+
+        # Copy runtime libs for xkbcomp (live root does not run stage2's copy_libraries).
+        timeout 2 ldd /usr/bin/xkbcomp 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
+            [[ -z "$lib" || ! -f "$lib" ]] && continue
+            mkdir -p "${LIVE_ROOT}$(dirname "$lib")"
+            cp -L "$lib" "${LIVE_ROOT}${lib}" 2>/dev/null || true
+        done || true
+
+        log_info "  Added xkbcomp for XWayland"
+    else
+        log_warn "  /usr/bin/xkbcomp not found on host; XWayland may fail to start"
+    fi
+
     # Copy libxkbcommon
     for lib in /usr/lib/libxkbcommon*.so*; do
         if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
@@ -731,6 +767,193 @@ copy_wayland_tools() {
     done
 
     log_success "Wayland tools installed"
+}
+
+# =============================================================================
+# Copy Desktop Services (PipeWire, Polkit, XDG Desktop Portal)
+# =============================================================================
+copy_desktop_services() {
+    log_step "Copying desktop services (pipewire, polkit, portals)..."
+
+    # -------------------------------------------------------------------------
+    # PipeWire - Audio/Video server
+    # -------------------------------------------------------------------------
+    log_info "Installing PipeWire..."
+
+    # PipeWire binaries
+    for bin in pipewire pipewire-pulse wireplumber pw-cli pw-cat pw-dump pw-top; do
+        if command -v "$bin" &>/dev/null; then
+            cp "$(which "$bin")" "${LIVE_ROOT}/usr/bin/" 2>/dev/null || true
+            log_info "  Added $bin"
+        fi
+    done
+
+    # PipeWire libraries
+    for lib in libpipewire-0.3.so* libwireplumber-0.5.so* libspa-0.2.so*; do
+        for libpath in /usr/lib/${lib}; do
+            if [[ -f "$libpath" ]] || [[ -L "$libpath" ]]; then
+                cp -L "$libpath" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+            fi
+        done
+    done
+
+    # PipeWire SPA plugins (audio backends, format converters)
+    if [[ -d /usr/lib/spa-0.2 ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/lib/spa-0.2"
+        cp -a /usr/lib/spa-0.2/. "${LIVE_ROOT}/usr/lib/spa-0.2/" 2>/dev/null || true
+        log_info "  Added SPA plugins"
+    fi
+
+    # PipeWire modules
+    if [[ -d /usr/lib/pipewire-0.3 ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/lib/pipewire-0.3"
+        cp -a /usr/lib/pipewire-0.3/. "${LIVE_ROOT}/usr/lib/pipewire-0.3/" 2>/dev/null || true
+        log_info "  Added PipeWire modules"
+    fi
+
+    # WirePlumber modules
+    if [[ -d /usr/lib/wireplumber-0.5 ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/lib/wireplumber-0.5"
+        cp -a /usr/lib/wireplumber-0.5/. "${LIVE_ROOT}/usr/lib/wireplumber-0.5/" 2>/dev/null || true
+        log_info "  Added WirePlumber modules"
+    fi
+
+    # PipeWire configuration
+    if [[ -d /usr/share/pipewire ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share/pipewire"
+        cp -a /usr/share/pipewire/. "${LIVE_ROOT}/usr/share/pipewire/" 2>/dev/null || true
+        log_info "  Added PipeWire config"
+    fi
+    if [[ -d /etc/pipewire ]]; then
+        mkdir -p "${LIVE_ROOT}/etc/pipewire"
+        cp -a /etc/pipewire/. "${LIVE_ROOT}/etc/pipewire/" 2>/dev/null || true
+    fi
+
+    # WirePlumber configuration
+    if [[ -d /usr/share/wireplumber ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share/wireplumber"
+        cp -a /usr/share/wireplumber/. "${LIVE_ROOT}/usr/share/wireplumber/" 2>/dev/null || true
+        log_info "  Added WirePlumber config"
+    fi
+    if [[ -d /etc/wireplumber ]]; then
+        mkdir -p "${LIVE_ROOT}/etc/wireplumber"
+        cp -a /etc/wireplumber/. "${LIVE_ROOT}/etc/wireplumber/" 2>/dev/null || true
+    fi
+
+    # -------------------------------------------------------------------------
+    # Polkit - Privilege escalation
+    # -------------------------------------------------------------------------
+    log_info "Installing Polkit..."
+
+    # Polkit daemon
+    if [[ -f /usr/lib/polkit-1/polkitd ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/lib/polkit-1"
+        cp /usr/lib/polkit-1/polkitd "${LIVE_ROOT}/usr/lib/polkit-1/" 2>/dev/null || true
+        chmod +x "${LIVE_ROOT}/usr/lib/polkit-1/polkitd"
+        log_info "  Added polkitd"
+    fi
+
+    # Polkit binaries
+    for bin in pkaction pkcheck pkexec pkttyagent; do
+        if command -v "$bin" &>/dev/null; then
+            cp "$(which "$bin")" "${LIVE_ROOT}/usr/bin/" 2>/dev/null || true
+        fi
+    done
+
+    # Polkit libraries
+    for lib in libpolkit-gobject-1.so* libpolkit-agent-1.so*; do
+        for libpath in /usr/lib/${lib}; do
+            if [[ -f "$libpath" ]] || [[ -L "$libpath" ]]; then
+                cp -L "$libpath" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+            fi
+        done
+    done
+
+    # Polkit configuration and rules
+    if [[ -d /usr/share/polkit-1 ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share/polkit-1"
+        cp -a /usr/share/polkit-1/. "${LIVE_ROOT}/usr/share/polkit-1/" 2>/dev/null || true
+        log_info "  Added Polkit rules"
+    fi
+    if [[ -d /etc/polkit-1 ]]; then
+        mkdir -p "${LIVE_ROOT}/etc/polkit-1"
+        cp -a /etc/polkit-1/. "${LIVE_ROOT}/etc/polkit-1/" 2>/dev/null || true
+    fi
+
+    # Polkit D-Bus service file
+    if [[ -f /usr/share/dbus-1/system-services/org.freedesktop.PolicyKit1.service ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share/dbus-1/system-services"
+        cp /usr/share/dbus-1/system-services/org.freedesktop.PolicyKit1.service \
+           "${LIVE_ROOT}/usr/share/dbus-1/system-services/" 2>/dev/null || true
+    fi
+
+    # Create polkitd user (if not exists in passwd)
+    if ! grep -q "^polkitd:" "${LIVE_ROOT}/etc/passwd" 2>/dev/null; then
+        echo "polkitd:x:27:27:PolicyKit Daemon:/:/sbin/nologin" >> "${LIVE_ROOT}/etc/passwd"
+        echo "polkitd:x:27:" >> "${LIVE_ROOT}/etc/group"
+    fi
+
+    # Create polkit directories
+    mkdir -p "${LIVE_ROOT}/var/lib/polkit-1" 2>/dev/null || true
+
+    # -------------------------------------------------------------------------
+    # XDG Desktop Portal + Hyprland backend
+    # -------------------------------------------------------------------------
+    log_info "Installing XDG Desktop Portal..."
+
+    # Portal binaries (different distros put these in different places)
+    for bin_path in /usr/libexec/xdg-desktop-portal /usr/lib/xdg-desktop-portal; do
+        if [[ -f "$bin_path" ]]; then
+            mkdir -p "${LIVE_ROOT}/usr/libexec"
+            cp "$bin_path" "${LIVE_ROOT}/usr/libexec/" 2>/dev/null || true
+            chmod +x "${LIVE_ROOT}/usr/libexec/xdg-desktop-portal"
+            log_info "  Added xdg-desktop-portal"
+            break
+        fi
+    done
+
+    # Hyprland portal backend
+    for bin_path in /usr/libexec/xdg-desktop-portal-hyprland /usr/lib/xdg-desktop-portal-hyprland; do
+        if [[ -f "$bin_path" ]]; then
+            mkdir -p "${LIVE_ROOT}/usr/libexec"
+            cp "$bin_path" "${LIVE_ROOT}/usr/libexec/" 2>/dev/null || true
+            chmod +x "${LIVE_ROOT}/usr/libexec/xdg-desktop-portal-hyprland"
+            log_info "  Added xdg-desktop-portal-hyprland"
+            break
+        fi
+    done
+
+    # Portal configuration
+    if [[ -d /usr/share/xdg-desktop-portal ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share/xdg-desktop-portal"
+        cp -a /usr/share/xdg-desktop-portal/. "${LIVE_ROOT}/usr/share/xdg-desktop-portal/" 2>/dev/null || true
+        log_info "  Added portal config"
+    fi
+
+    # Hyprland portal config
+    if [[ -d /usr/share/xdg-desktop-portal-hyprland ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share/xdg-desktop-portal-hyprland"
+        cp -a /usr/share/xdg-desktop-portal-hyprland/. "${LIVE_ROOT}/usr/share/xdg-desktop-portal-hyprland/" 2>/dev/null || true
+    fi
+
+    # Portal D-Bus service files
+    for svc in org.freedesktop.portal.Desktop.service org.freedesktop.impl.portal.desktop.hyprland.service; do
+        if [[ -f "/usr/share/dbus-1/services/${svc}" ]]; then
+            mkdir -p "${LIVE_ROOT}/usr/share/dbus-1/services"
+            cp "/usr/share/dbus-1/services/${svc}" "${LIVE_ROOT}/usr/share/dbus-1/services/" 2>/dev/null || true
+        fi
+    done
+
+    # Create XDG portal config for Hyprland
+    mkdir -p "${LIVE_ROOT}/etc/xdg/xdg-desktop-portal"
+    cat > "${LIVE_ROOT}/etc/xdg/xdg-desktop-portal/hyprland-portals.conf" << 'EOF'
+[preferred]
+default=hyprland;gtk
+org.freedesktop.impl.portal.Screenshot=hyprland
+org.freedesktop.impl.portal.ScreenCast=hyprland
+EOF
+
+    log_success "Desktop services installed"
 }
 
 copy_ca_certificates() {
@@ -771,29 +994,30 @@ setup_pam_and_nss() {
 
     cat > "${LIVE_ROOT}/etc/pam.d/sudo" << 'EOF'
 #%PAM-1.0
-auth       required     pam_env.so
+auth       sufficient   pam_rootok.so
 auth       required     pam_unix.so nullok try_first_pass
+account    sufficient   pam_rootok.so
 account    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
 session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
 EOF
 
     cat > "${LIVE_ROOT}/etc/pam.d/su" << 'EOF'
 #%PAM-1.0
-auth       required     pam_env.so
+auth       sufficient   pam_rootok.so
 auth       required     pam_unix.so nullok try_first_pass
+account    sufficient   pam_rootok.so
 account    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
 session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
 EOF
 
     cat > "${LIVE_ROOT}/etc/pam.d/login" << 'EOF'
 #%PAM-1.0
-auth       required     pam_env.so
 auth       required     pam_unix.so nullok try_first_pass
 account    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
 session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
 EOF
 
     cat > "${LIVE_ROOT}/etc/pam.d/passwd" << 'EOF'
@@ -806,6 +1030,34 @@ EOF
 # Minimal defaults (RavenLinux). Add custom limits in /etc/security/limits.d/.
 EOF
     mkdir -p "${LIVE_ROOT}/etc/security/limits.d"
+
+    # pam_env.so expects these files. Some distros treat missing files as errors.
+    if [[ ! -f "${LIVE_ROOT}/etc/environment" ]]; then
+        cat > "${LIVE_ROOT}/etc/environment" << 'EOF'
+# /etc/environment
+# System-wide environment variables
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+EOF
+    fi
+
+    if [[ ! -f "${LIVE_ROOT}/etc/security/pam_env.conf" ]]; then
+        cat > "${LIVE_ROOT}/etc/security/pam_env.conf" << 'EOF'
+# /etc/security/pam_env.conf
+# Environment variables set by pam_env module
+# Format: VARIABLE [DEFAULT=value] [OVERRIDE=value]
+EOF
+    fi
+
+    # Fallback for PAM-aware programs that don't ship their own config.
+    if [[ ! -f "${LIVE_ROOT}/etc/pam.d/other" ]]; then
+        cat > "${LIVE_ROOT}/etc/pam.d/other" << 'EOF'
+#%PAM-1.0
+auth        required     pam_deny.so
+account     required     pam_deny.so
+password    required     pam_deny.so
+session     required     pam_deny.so
+EOF
+    fi
 
     local host_security_dirs=()
     for d in \
@@ -826,6 +1078,10 @@ EOF
         pam_warn.so
         pam_limits.so
         pam_loginuid.so
+        pam_rootok.so
+        pam_nologin.so
+        pam_securetty.so
+        pam_wheel.so
     )
 
     local copied_any=0
@@ -848,6 +1104,24 @@ EOF
     else
         log_info "  Added PAM modules"
     fi
+
+    # PAM helper binaries (unix_chkpwd is critical for password verification).
+    mkdir -p "${LIVE_ROOT}/sbin" "${LIVE_ROOT}/usr/sbin"
+    local pam_helpers=(unix_chkpwd unix_update)
+    local helper_dirs=(/usr/sbin /sbin /usr/bin /usr/lib /usr/lib/security /lib/security)
+    for helper in "${pam_helpers[@]}"; do
+        local src=""
+        for d in "${helper_dirs[@]}"; do
+            if [[ -x "${d}/${helper}" ]]; then
+                src="${d}/${helper}"
+                break
+            fi
+        done
+        [[ -n "$src" ]] || continue
+        cp -L "$src" "${LIVE_ROOT}/sbin/${helper}" 2>/dev/null || true
+        chmod 4755 "${LIVE_ROOT}/sbin/${helper}" 2>/dev/null || true
+        log_info "  Added PAM helper: ${helper} (SUID)"
+    done
 
     # NSS modules (dlopened by glibc)
     mkdir -p "${LIVE_ROOT}/lib" "${LIVE_ROOT}/usr/lib"
@@ -988,17 +1262,41 @@ EOF
     # /etc/hostname
     echo "raven-linux" > "${LIVE_ROOT}/etc/hostname"
 
-    # /etc/hosts
-    cat > "${LIVE_ROOT}/etc/hosts" << EOF
-127.0.0.1   localhost
-::1         localhost
-127.0.1.1   raven-linux.localdomain raven-linux
-EOF
+	    # /etc/hosts
+	    cat > "${LIVE_ROOT}/etc/hosts" <<- EOF
+	127.0.0.1   localhost
+	::1         localhost
+	127.0.1.1   raven-linux.localdomain raven-linux
+	EOF
 
-    # /etc/raven/init.toml (service configuration for raven-init)
-    mkdir -p "${LIVE_ROOT}/etc/raven"
-    if [[ -f "${PROJECT_ROOT}/etc/raven/init.toml" ]]; then
-        cp "${PROJECT_ROOT}/etc/raven/init.toml" "${LIVE_ROOT}/etc/raven/init.toml"
+	    # /bin/raven-shell: used by agetty --skip-login as a PAM-free rescue shell
+	    mkdir -p "${LIVE_ROOT}/bin"
+	    if [[ -f "${PROJECT_ROOT}/etc/raven/raven-shell" ]]; then
+	        cp "${PROJECT_ROOT}/etc/raven/raven-shell" "${LIVE_ROOT}/bin/raven-shell" 2>/dev/null || true
+	    else
+	        cat > "${LIVE_ROOT}/bin/raven-shell" << 'EOF'
+#!/bin/sh
+# When agetty is used with --skip-login, there may be no login(1) to set up a
+# sane environment. Ensure basic defaults so the shell can run external commands.
+export PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+export HOME="${HOME:-/root}"
+export USER="${USER:-root}"
+export LOGNAME="${LOGNAME:-root}"
+export TERM="${TERM:-linux}"
+export PAGER="${PAGER:-cat}"
+
+if [ -x /bin/bash ]; then
+    exec /bin/bash -l -i
+fi
+exec /bin/sh -i
+EOF
+	    fi
+	    chmod 0755 "${LIVE_ROOT}/bin/raven-shell" 2>/dev/null || true
+
+	    # /etc/raven/init.toml (service configuration for raven-init)
+	    mkdir -p "${LIVE_ROOT}/etc/raven"
+	    if [[ -f "${PROJECT_ROOT}/etc/raven/init.toml" ]]; then
+	        cp "${PROJECT_ROOT}/etc/raven/init.toml" "${LIVE_ROOT}/etc/raven/init.toml"
     elif [[ -f "${PROJECT_ROOT}/init/config/init.toml" ]]; then
         cp "${PROJECT_ROOT}/init/config/init.toml" "${LIVE_ROOT}/etc/raven/init.toml"
     fi
@@ -1016,23 +1314,23 @@ enable_udev = true
 enable_network = true
 log_level = "info"
 
-[[services]]
-name = "getty-tty1"
-description = "Getty login on tty1"
-exec = "/sbin/agetty"
-args = ["--noclear", "--autologin", "root", "tty1", "linux"]
-restart = true
-enabled = true
-critical = false
+	[[services]]
+	name = "getty-tty1"
+	description = "Getty login on tty1"
+	exec = "/bin/agetty"
+	args = ["--noclear", "--skip-login", "--login-program", "/bin/raven-shell", "tty1", "linux"]
+	restart = true
+	enabled = true
+	critical = false
 
 [[services]]
-name = "getty-ttyS0"
-description = "Serial console getty on ttyS0"
-exec = "/sbin/agetty"
-args = ["--noclear", "--autologin", "root", "-L", "115200", "ttyS0", "vt102"]
-restart = true
-enabled = false
-critical = false
+	name = "getty-ttyS0"
+	description = "Serial console getty on ttyS0"
+	exec = "/bin/agetty"
+	args = ["--noclear", "--skip-login", "--login-program", "/bin/raven-shell", "-L", "115200", "ttyS0", "vt102"]
+	restart = true
+	enabled = false
+	critical = false
 
 [[services]]
 name = "dbus"
@@ -1072,8 +1370,8 @@ EOF
 
     # /etc/passwd
     cat > "${LIVE_ROOT}/etc/passwd" << EOF
-root:x:0:0:root:/root:/bin/zsh
-raven:x:1000:1000:Raven User:/home/raven:/bin/zsh
+root:x:0:0:root:/root:/bin/bash
+raven:x:1000:1000:Raven User:/home/raven:/bin/bash
 nobody:x:65534:65534:Nobody:/:/bin/false
 EOF
 
@@ -1100,7 +1398,6 @@ EOF
     cat > "${LIVE_ROOT}/etc/shells" << EOF
 /bin/sh
 /bin/bash
-/bin/zsh
 EOF
 
     # /etc/sudoers (wheel group allowed by default)
@@ -1167,36 +1464,35 @@ export EDITOR=vem
 export VISUAL=vem
 export RAVEN_LINUX=1
 
-# Source zsh config if using zsh
-if [ -n "$ZSH_VERSION" ]; then
-    [ -f /etc/zsh/zshrc ] && . /etc/zsh/zshrc
+# Source bashrc for interactive bash shells
+if [ -n "$BASH_VERSION" ] && [ -f /etc/bashrc ]; then
+    case $- in
+        *i*) . /etc/bashrc ;;
+    esac
 fi
 EOF
 
-    # /etc/zsh/zshrc (system-wide zsh config)
-    mkdir -p "${LIVE_ROOT}/etc/zsh"
-    cat > "${LIVE_ROOT}/etc/zsh/zshrc" << 'EOF'
-# RavenLinux ZSH Configuration
+    # /etc/bashrc (system-wide bash config)
+    mkdir -p "${LIVE_ROOT}/etc/bash"
+    if [[ -f "${PROJECT_ROOT}/configs/bash/bashrc" ]]; then
+        cp "${PROJECT_ROOT}/configs/bash/bashrc" "${LIVE_ROOT}/etc/bash/bashrc"
+        cp "${PROJECT_ROOT}/configs/bash/bashrc" "${LIVE_ROOT}/etc/bashrc"
+    else
+        cat > "${LIVE_ROOT}/etc/bashrc" << 'EOF'
+# RavenLinux default bashrc (generated)
+case $- in
+    *i*) ;;
+      *) return ;;
+esac
 
-# History
-HISTFILE=~/.zsh_history
+HISTFILE=~/.bash_history
 HISTSIZE=10000
-SAVEHIST=10000
-setopt SHARE_HISTORY
-setopt HIST_IGNORE_DUPS
+HISTFILESIZE=10000
+HISTCONTROL=ignoreboth:erasedups
+shopt -s histappend
 
-# Completion
-autoload -Uz compinit
-compinit
+PS1='[\u@raven-linux]# '
 
-# Prompt
-autoload -Uz promptinit
-promptinit
-
-# Custom prompt
-PROMPT='[%n@raven-linux]# '
-
-# Aliases
 alias ls='ls --color=auto'
 alias ll='ls -la'
 alias la='ls -A'
@@ -1205,23 +1501,26 @@ alias grep='grep --color=auto'
 alias ..='cd ..'
 alias ...='cd ../..'
 
-# Keybindings (vim-like)
-bindkey -v
-bindkey '^R' history-incremental-search-backward
-
-# Environment
-export PATH=/bin:/sbin:/usr/bin:/usr/sbin:$HOME/.local/bin
+export PATH="$HOME/.local/bin:$PATH"
 export EDITOR=vem
 export VISUAL=vem
 EOF
+        cp "${LIVE_ROOT}/etc/bashrc" "${LIVE_ROOT}/etc/bash/bashrc"
+    fi
 
     # Create raven user home directory
     mkdir -p "${LIVE_ROOT}/home/raven"
-    cp "${LIVE_ROOT}/etc/zsh/zshrc" "${LIVE_ROOT}/home/raven/.zshrc"
+    cp "${LIVE_ROOT}/etc/bashrc" "${LIVE_ROOT}/home/raven/.bashrc"
+    cat > "${LIVE_ROOT}/home/raven/.bash_profile" << 'EOF'
+if [ -f ~/.bashrc ]; then
+    . ~/.bashrc
+fi
+EOF
     chown -R 1000:1000 "${LIVE_ROOT}/home/raven" 2>/dev/null || true
 
-    # Root's zshrc
-    cp "${LIVE_ROOT}/etc/zsh/zshrc" "${LIVE_ROOT}/root/.zshrc"
+    # Root's bashrc
+    cp "${LIVE_ROOT}/etc/bashrc" "${LIVE_ROOT}/root/.bashrc"
+    cp "${LIVE_ROOT}/home/raven/.bash_profile" "${LIVE_ROOT}/root/.bash_profile" 2>/dev/null || true
 
     log_success "Configuration files created"
 }
@@ -1285,13 +1584,13 @@ create_squashfs() {
 
     local pseudo="${ISO_DIR}/squashfs.pseudo"
     : > "${pseudo}"
-    [[ -e "${LIVE_ROOT}/bin/sudo" ]] && echo "bin/sudo m 4755 0 0" >> "${pseudo}"
     [[ -e "${LIVE_ROOT}/bin/su" ]] && echo "bin/su m 4755 0 0" >> "${pseudo}"
     [[ -e "${LIVE_ROOT}/etc/shadow" ]] && echo "etc/shadow m 600 0 0" >> "${pseudo}"
 
     run_logged mksquashfs "${LIVE_ROOT}" "${ISO_DIR}/iso-root/raven/filesystem.squashfs" \
         -comp zstd -Xcompression-level 15 \
         -pf "${pseudo}" -pseudo-override \
+        -e bin/sudo usr/bin/sudo \
         -b 1M -no-duplicates -quiet
 
     log_success "Squashfs created"
@@ -1326,11 +1625,6 @@ menuentry "Raven Linux Live" --class raven {
 }
 
 menuentry "Raven Linux Live (Wayland)" --class raven {
-    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=weston
-    initrd /boot/initramfs.img
-}
-
-menuentry "Raven Linux Live (Wayland - Raven Compositor WIP)" --class raven {
     linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven
     initrd /boot/initramfs.img
 }
@@ -1430,7 +1724,7 @@ print_summary() {
     echo ""
     echo "  Included:"
     echo "    - Linux Kernel 6.17.11"
-    echo "    - Zsh (default shell)"
+    echo "    - Bash (default shell)"
     echo "    - Vem (text editor)"
     echo "    - Carrion (programming language)"
     echo "    - Ivaldi (version control)"
@@ -1490,6 +1784,7 @@ main() {
     copy_diagnostics_tools
     copy_networking_tools
     copy_wayland_tools
+    copy_desktop_services
     copy_ca_certificates
     copy_firmware
     setup_pam_and_nss

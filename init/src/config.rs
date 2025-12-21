@@ -28,11 +28,12 @@ impl Default for InitConfig {
                 ServiceConfig {
                     name: "getty-tty1".to_string(),
                     description: "Getty on tty1".to_string(),
-                    exec: "/sbin/agetty".to_string(),
+                    exec: "/bin/agetty".to_string(),
                     args: vec![
                         "--noclear".to_string(),
-                        "--autologin".to_string(),
-                        "root".to_string(),
+                        "--skip-login".to_string(),
+                        "--login-program".to_string(),
+                        "/bin/raven-shell".to_string(),
                         "tty1".to_string(),
                         "linux".to_string(),
                     ],
@@ -40,6 +41,7 @@ impl Default for InitConfig {
                     enabled: true,
                     critical: false,
                     environment: HashMap::new(),
+                    tty: Some("/dev/tty1".to_string()),
                 },
             ],
             mounts: Vec::new(),
@@ -145,6 +147,11 @@ pub struct ServiceConfig {
     /// Environment variables
     #[serde(default)]
     pub environment: HashMap<String, String>,
+
+    /// TTY device for this service (e.g., "/dev/tty1")
+    /// If set, the service will be spawned with proper session and job control
+    #[serde(default)]
+    pub tty: Option<String>,
 }
 
 /// Mount point configuration

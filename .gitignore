@@ -6,6 +6,7 @@
 # Rust build artifacts
 # -----------------------------------------------------------------------------
 **/target/
+**/target-user/
 **/*.rs.bk
 Cargo.lock
 
@@ -21,7 +22,7 @@ Cargo.lock
 # -----------------------------------------------------------------------------
 /build/
 !/build/.gitkeep
-
+*/release/*
 # Temporary build directories
 /tmp/
 *.tmp/

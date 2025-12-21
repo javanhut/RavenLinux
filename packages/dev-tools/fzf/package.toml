@@ -24,9 +24,8 @@ pre_install = []
 post_install = [
     "mkdir -p /usr/share/fzf",
     "cp shell/completion.bash /usr/share/fzf/",
-    "cp shell/completion.zsh /usr/share/fzf/",
+    "cp shell/completion.fish /usr/share/fzf/",
     "cp shell/key-bindings.bash /usr/share/fzf/",
-    "cp shell/key-bindings.zsh /usr/share/fzf/",
     "cp shell/key-bindings.fish /usr/share/fzf/"
 ]
 

@@ -17,31 +17,39 @@ import (
 
 // Styles
 var (
+	// Main container box
+	mainBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#00BCD4")).
+			Padding(1, 2).
+			Width(70)
+
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#00BCD4")).
-			MarginBottom(1)
+			Background(lipgloss.Color("#1a1a2e")).
+			Padding(0, 2)
 
 	subtitleStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#888")).
-			MarginBottom(1)
+			Foreground(lipgloss.Color("#666"))
 
 	selectedStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#000")).
+			Foreground(lipgloss.Color("#1a1a2e")).
 			Background(lipgloss.Color("#00BCD4")).
 			Padding(0, 1)
 
 	normalStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFF")).
+			Foreground(lipgloss.Color("#e0e0e0")).
 			Padding(0, 1)
 
 	dimStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#666")).
+			Foreground(lipgloss.Color("#555")).
 			Padding(0, 1)
 
 	connectedStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#4CAF50")).
+			Bold(true).
 			Padding(0, 1)
 
 	wirelessStyle = lipgloss.NewStyle().
@@ -72,14 +80,41 @@ var (
 			Bold(true)
 
 	helpStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#666")).
-			MarginTop(1)
+			Foreground(lipgloss.Color("#555")).
+			Italic(true)
 
 	infoBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#444")).
-			Padding(0, 1).
-			MarginTop(1)
+			Padding(0, 1)
+
+	// Section header style
+	sectionStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#00BCD4")).
+			BorderBottom(true).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("#333"))
+
+	// Status badge styles
+	badgeOK = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#1a1a2e")).
+		Background(lipgloss.Color("#4CAF50")).
+		Padding(0, 1)
+
+	badgeWarn = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#1a1a2e")).
+			Background(lipgloss.Color("#FFC107")).
+			Padding(0, 1)
+
+	badgeOff = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#888")).
+			Background(lipgloss.Color("#333")).
+			Padding(0, 1)
+
+	// Divider
+	dividerStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#333"))
 )
 
 // NetInterface represents a network interface
@@ -415,51 +450,81 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) View() string {
 	var s strings.Builder
+	var content strings.Builder
 
-	// Header
-	s.WriteString(titleStyle.Render("🌐 Raven Network Manager"))
+	// Header with logo
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#00BCD4")).
+		Render("  RAVEN WIFI  ")
+
 	s.WriteString("\n")
+	s.WriteString(lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(lipgloss.Color("#00BCD4")).
+		Padding(0, 1).
+		Render(header))
+	s.WriteString("\n\n")
 
-	// System status bar
+	// System status bar (compact)
 	s.WriteString(m.renderSystemStatus())
+	s.WriteString("\n")
+	s.WriteString(dividerStyle.Render(strings.Repeat("─", 60)))
 	s.WriteString("\n\n")
 
 	switch m.state {
 	case stateInterfaces:
-		s.WriteString(m.renderInterfaceList())
+		content.WriteString(m.renderInterfaceList())
 
 	case stateInterfaceInfo:
-		s.WriteString(m.renderInterfaceInfo())
+		content.WriteString(m.renderInterfaceInfo())
 
 	case stateScanning:
-		s.WriteString(fmt.Sprintf("Scanning on %s...\n", m.selectedIface.Name))
-		s.WriteString("Please wait.\n")
+		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#00BCD4")).Render("◐ "))
+		content.WriteString(fmt.Sprintf("Scanning on %s...\n\n", m.selectedIface.Name))
+		content.WriteString(dimStyle.Render("  Looking for available networks..."))
 
 	case stateNetworkList:
-		s.WriteString(m.renderNetworkList())
+		content.WriteString(m.renderNetworkList())
 
 	case statePassword:
-		s.WriteString(fmt.Sprintf("Connect to: %s\n\n", m.currentSSID))
-		s.WriteString("Password: ")
-		s.WriteString(strings.Repeat("•", len(m.password)))
-		s.WriteString("█\n")
-		s.WriteString(helpStyle.Render("\nEnter: Connect • Esc: Cancel"))
+		content.WriteString(sectionStyle.Render("Connect to Network"))
+		content.WriteString("\n\n")
+		content.WriteString(fmt.Sprintf("  Network: %s\n\n", lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00BCD4")).Render(m.currentSSID)))
+		content.WriteString("  Password: ")
+		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#00BCD4")).Render(strings.Repeat("●", len(m.password))))
+		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#00BCD4")).Blink(true).Render("│"))
+		content.WriteString("\n\n")
+		content.WriteString(helpStyle.Render("  Enter: Connect  •  Esc: Cancel"))
 
 	case stateConnecting:
-		s.WriteString(fmt.Sprintf("Connecting to %s...\n", m.currentSSID))
-		s.WriteString("Please wait.\n")
+		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#00BCD4")).Render("◐ "))
+		content.WriteString(fmt.Sprintf("Connecting to %s...\n\n", lipgloss.NewStyle().Bold(true).Render(m.currentSSID)))
+		content.WriteString(dimStyle.Render("  Establishing connection and obtaining IP..."))
 
 	case stateSuccess:
-		s.WriteString(successStyle.Render("✓ " + m.message))
-		s.WriteString("\n\n")
-		s.WriteString("Network saved for future connections.\n")
-		s.WriteString(helpStyle.Render("\nPress Enter or 'q' to exit, 'b' to go back"))
+		successBox := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#4CAF50")).
+			Padding(1, 2).
+			Render(successStyle.Render("✓ ") + m.message + "\n\n" + dimStyle.Render("Network saved for future connections."))
+		content.WriteString(successBox)
+		content.WriteString("\n\n")
+		content.WriteString(helpStyle.Render("Enter/q: Exit  •  b: Back"))
 
 	case stateError:
-		s.WriteString(errorStyle.Render("✗ Error: " + m.message))
-		s.WriteString("\n")
-		s.WriteString(helpStyle.Render("\nPress 'r' to retry, 'b' to go back, 'q' to quit"))
+		errorBox := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#F44336")).
+			Padding(1, 2).
+			Render(errorStyle.Render("✗ Error\n\n") + m.message)
+		content.WriteString(errorBox)
+		content.WriteString("\n\n")
+		content.WriteString(helpStyle.Render("r: Retry  •  b: Back  •  q: Quit"))
 	}
+
+	s.WriteString(content.String())
+	s.WriteString("\n")
 
 	return s.String()
 }
@@ -468,41 +533,51 @@ func (m model) renderSystemStatus() string {
 	var parts []string
 
 	if m.sysStatus.DBusRunning {
-		parts = append(parts, successStyle.Render("D-Bus ✓"))
+		parts = append(parts, badgeOK.Render("D-Bus"))
 	} else {
-		parts = append(parts, errorStyle.Render("D-Bus ✗"))
+		parts = append(parts, badgeOff.Render("D-Bus"))
 	}
 
 	if m.sysStatus.IWDRunning {
-		parts = append(parts, successStyle.Render("iwd ✓"))
+		parts = append(parts, badgeOK.Render("iwd"))
+	} else if m.sysStatus.WPARunning {
+		parts = append(parts, badgeOff.Render("iwd"))
 	} else {
-		parts = append(parts, warnStyle.Render("iwd ✗"))
+		parts = append(parts, badgeWarn.Render("iwd"))
 	}
 
 	if m.sysStatus.WPARunning {
-		parts = append(parts, successStyle.Render("wpa ✓"))
+		parts = append(parts, badgeOK.Render("wpa"))
+	} else if m.sysStatus.IWDRunning {
+		parts = append(parts, badgeOff.Render("wpa"))
 	} else {
-		parts = append(parts, dimStyle.Render("wpa ✗"))
+		parts = append(parts, badgeWarn.Render("wpa"))
 	}
 
-	return subtitleStyle.Render("Services: " + strings.Join(parts, " "))
+	return subtitleStyle.Render("Status: ") + strings.Join(parts, " ")
 }
 
 func (m model) renderInterfaceList() string {
 	var s strings.Builder
 
 	if len(m.interfaces) == 0 {
-		s.WriteString(errorStyle.Render("No network interfaces found!\n\n"))
-		s.WriteString("This is unusual. Possible causes:\n")
-		s.WriteString("• Network drivers not loaded\n")
-		s.WriteString("• /sys/class/net not mounted\n")
-		s.WriteString("• Hardware not detected\n\n")
-		s.WriteString("Try: ls /sys/class/net\n")
-		s.WriteString(helpStyle.Render("\nr: Refresh • q: Quit"))
+		errorBox := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#F44336")).
+			Padding(1, 2).
+			Render(errorStyle.Render("No network interfaces found!\n\n") +
+				"Possible causes:\n" +
+				dimStyle.Render("  • Network drivers not loaded\n") +
+				dimStyle.Render("  • /sys/class/net not mounted\n") +
+				dimStyle.Render("  • Hardware not detected"))
+		s.WriteString(errorBox)
+		s.WriteString("\n\n")
+		s.WriteString(helpStyle.Render("r: Refresh  •  q: Quit"))
 		return s.String()
 	}
 
-	s.WriteString("Network Interfaces:\n\n")
+	s.WriteString(sectionStyle.Render("Select Interface"))
+	s.WriteString("\n\n")
 
 	// Count by type
 	wireless := 0
@@ -514,51 +589,54 @@ func (m model) renderInterfaceList() string {
 			ethernet++
 		}
 	}
-	s.WriteString(dimStyle.Render(fmt.Sprintf("Found: %d wireless, %d ethernet, %d total\n\n",
+	s.WriteString(dimStyle.Render(fmt.Sprintf("  %d wireless • %d ethernet • %d total\n\n",
 		wireless, ethernet, len(m.interfaces))))
 
 	for i, iface := range m.interfaces {
 		line := m.formatInterfaceLine(iface)
 
 		if i == m.ifaceCursor {
-			s.WriteString(selectedStyle.Render("> " + line))
+			s.WriteString(selectedStyle.Render(" ▶ " + line))
 		} else if iface.IsWireless {
-			s.WriteString(wirelessStyle.Render("  " + line))
+			s.WriteString(wirelessStyle.Render("   " + line))
 		} else if iface.Type == "ethernet" {
-			s.WriteString(ethernetStyle.Render("  " + line))
+			s.WriteString(ethernetStyle.Render("   " + line))
 		} else {
-			s.WriteString(dimStyle.Render("  " + line))
+			s.WriteString(dimStyle.Render("   " + line))
 		}
 		s.WriteString("\n")
 	}
 
-	s.WriteString(helpStyle.Render("\n↑/↓: Navigate • Enter: Select/Scan • i: Info • u/d: Up/Down • r: Refresh • q: Quit"))
+	s.WriteString("\n")
+	s.WriteString(helpStyle.Render("↑↓: Navigate  •  Enter: Select  •  i: Info  •  u/d: Up/Down  •  r: Refresh  •  q: Quit"))
 	return s.String()
 }
 
 func (m model) formatInterfaceLine(iface NetInterface) string {
-	// Icon based on type
-	icon := "?"
+	// Type indicator (text-based for better terminal compatibility)
+	typeStr := ""
 	switch iface.Type {
 	case "wireless":
-		icon = "📶"
+		typeStr = "wifi"
 	case "ethernet":
-		icon = "🔌"
+		typeStr = "eth "
 	case "loopback":
-		icon = "🔄"
+		typeStr = "lo  "
 	case "virtual":
-		icon = "🌐"
+		typeStr = "virt"
+	default:
+		typeStr = "    "
 	}
 
-	// State indicator
+	// State indicator with visual cue
 	stateStr := ""
 	if iface.State == "up" {
-		stateStr = "UP"
+		stateStr = "▲ UP"
 		if iface.IP != "" {
-			stateStr += " " + iface.IP
+			stateStr = "▲ " + iface.IP
 		}
 	} else {
-		stateStr = "DOWN"
+		stateStr = "▼ DOWN"
 	}
 
 	// Driver info
@@ -567,64 +645,82 @@ func (m model) formatInterfaceLine(iface NetInterface) string {
 		driverStr = fmt.Sprintf("[%s]", iface.Driver)
 	}
 
-	return fmt.Sprintf("%s %-12s %-8s %s %s", icon, iface.Name, stateStr, driverStr, iface.DevicePath)
+	return fmt.Sprintf("[%s] %-10s  %-16s  %s", typeStr, iface.Name, stateStr, driverStr)
 }
 
 func (m model) renderInterfaceInfo() string {
 	var s strings.Builder
 	iface := m.selectedIface
 
-	s.WriteString(fmt.Sprintf("Interface: %s\n", iface.Name))
-	s.WriteString(strings.Repeat("─", 40))
+	s.WriteString(sectionStyle.Render("Interface Details"))
 	s.WriteString("\n\n")
 
+	// Format info in a clean table
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#888")).Width(14)
+	valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00BCD4"))
+
 	info := [][]string{
+		{"Name", iface.Name},
 		{"Type", iface.Type},
-		{"MAC Address", iface.MAC},
+		{"MAC", iface.MAC},
 		{"State", iface.State},
 		{"Driver", iface.Driver},
-		{"Device Path", iface.DevicePath},
 		{"IP Address", iface.IP},
-		{"Has Carrier", fmt.Sprintf("%v", iface.HasCarrier)},
+		{"Carrier", fmt.Sprintf("%v", iface.HasCarrier)},
 	}
 
 	for _, row := range info {
 		label := row[0]
 		value := row[1]
 		if value == "" {
-			value = "(none)"
+			value = "—"
 		}
-		s.WriteString(fmt.Sprintf("  %-15s: %s\n", label, value))
+		s.WriteString("  ")
+		s.WriteString(labelStyle.Render(label + ":"))
+		s.WriteString("  ")
+		s.WriteString(valueStyle.Render(value))
+		s.WriteString("\n")
 	}
 
 	s.WriteString("\n")
 
 	// Show additional info for wireless
 	if iface.IsWireless {
-		s.WriteString(infoBoxStyle.Render("This is a wireless interface. Press 's' to scan for networks."))
+		tipBox := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#00BCD4")).
+			Padding(0, 1).
+			Render("Press 's' to scan for WiFi networks")
+		s.WriteString(tipBox)
 		s.WriteString("\n")
 	}
 
 	// Show warnings
 	if iface.IsWireless && !m.sysStatus.DBusRunning {
 		s.WriteString("\n")
-		s.WriteString(warnStyle.Render("⚠ D-Bus is not running. iwd/iwctl will not work."))
-		s.WriteString("\n")
-		s.WriteString(dimStyle.Render("  Fix: start dbus-daemon (or enable it in /etc/raven/init.toml if using raven-init)"))
+		warnBox := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#FFC107")).
+			Padding(0, 1).
+			Render(warnStyle.Render("⚠ D-Bus not running") + "\n" + dimStyle.Render("iwd/iwctl requires D-Bus"))
+		s.WriteString(warnBox)
 	}
 
 	if iface.IsWireless && !m.sysStatus.IWDRunning && !m.sysStatus.WPARunning {
 		s.WriteString("\n")
-		s.WriteString(warnStyle.Render("⚠ No WiFi daemon running (iwd or wpa_supplicant)."))
-		s.WriteString("\n")
-		s.WriteString(dimStyle.Render("  Fix: start iwd (or enable it in /etc/raven/init.toml if using raven-init)"))
+		warnBox := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#FFC107")).
+			Padding(0, 1).
+			Render(warnStyle.Render("⚠ No WiFi daemon") + "\n" + dimStyle.Render("Start iwd or wpa_supplicant"))
+		s.WriteString(warnBox)
 	}
 
-	help := "\nEsc/b: Back"
+	help := "\nb: Back"
 	if iface.IsWireless {
-		help += " • s: Scan Networks"
+		help += "  •  s: Scan"
 	}
-	help += " • u: Bring Up • d: Bring Down • q: Quit"
+	help += "  •  u: Up  •  d: Down  •  q: Quit"
 	s.WriteString(helpStyle.Render(help))
 
 	return s.String()
@@ -633,71 +729,81 @@ func (m model) renderInterfaceInfo() string {
 func (m model) renderNetworkList() string {
 	var s strings.Builder
 
-	s.WriteString(fmt.Sprintf("Interface: %s", m.selectedIface.Name))
+	// Header with interface info
+	ifaceInfo := fmt.Sprintf("Interface: %s", m.selectedIface.Name)
 	if m.selectedIface.Driver != "" {
-		s.WriteString(fmt.Sprintf(" [%s]", m.selectedIface.Driver))
+		ifaceInfo += fmt.Sprintf(" [%s]", m.selectedIface.Driver)
 	}
+	s.WriteString(dimStyle.Render(ifaceInfo))
 	s.WriteString("\n\n")
 
 	// Show any error from scanning
 	if m.lastError != "" {
-		s.WriteString(warnStyle.Render("⚠ Scan issues: "))
-		// Truncate long errors
 		errMsg := m.lastError
-		if len(errMsg) > 60 {
-			errMsg = errMsg[:60] + "..."
+		if len(errMsg) > 50 {
+			errMsg = errMsg[:50] + "..."
 		}
+		s.WriteString(warnStyle.Render("⚠ "))
 		s.WriteString(dimStyle.Render(errMsg))
 		s.WriteString("\n\n")
 	}
 
 	if len(m.networks) == 0 {
-		s.WriteString("No networks found.\n\n")
-		s.WriteString(dimStyle.Render("Possible reasons:\n"))
-		s.WriteString(dimStyle.Render("• No WiFi networks in range\n"))
-		s.WriteString(dimStyle.Render("• Interface not fully up\n"))
-		s.WriteString(dimStyle.Render("• Driver issues\n"))
-		if !m.sysStatus.IWDRunning {
-			s.WriteString(warnStyle.Render("• iwd daemon not running\n"))
-		}
-		s.WriteString(helpStyle.Render("\nr: Rescan • i: Interface Info • b: Back • q: Quit"))
+		emptyBox := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#444")).
+			Padding(1, 2).
+			Render("No networks found.\n\n" +
+				dimStyle.Render("  • No WiFi networks in range\n") +
+				dimStyle.Render("  • Interface not fully up\n") +
+				dimStyle.Render("  • Driver issues"))
+		s.WriteString(emptyBox)
+		s.WriteString("\n\n")
+		s.WriteString(helpStyle.Render("r: Rescan  •  i: Info  •  b: Back  •  q: Quit"))
 		return s.String()
 	}
 
-	// Show connected network
+	// Show connected status
 	for _, net := range m.networks {
 		if net.Connected {
-			s.WriteString(successStyle.Render(fmt.Sprintf("✓ Connected to: %s", net.SSID)))
+			connBox := lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("#4CAF50")).
+				Padding(0, 1).
+				Render(successStyle.Render("✓ Connected: ") + net.SSID)
+			s.WriteString(connBox)
 			s.WriteString("\n\n")
 			break
 		}
 	}
 
-	s.WriteString("Available Networks:\n\n")
+	s.WriteString(sectionStyle.Render("Available Networks"))
+	s.WriteString("\n\n")
 
 	for i, net := range m.networks {
 		signal := getSignalBars(net.Signal)
-		lock := "🔓"
+		lock := "○"
 		if net.Security != "" && net.Security != "Open" {
-			lock = "🔒"
+			lock = "●"
 		}
 
-		line := fmt.Sprintf("%s %s %s", signal, lock, net.SSID)
+		line := fmt.Sprintf("%s  %s  %s", signal, lock, net.SSID)
 		if net.Connected {
-			line += " (connected)"
+			line += "  ✓"
 		}
 
 		if i == m.netCursor {
-			s.WriteString(selectedStyle.Render("> " + line))
+			s.WriteString(selectedStyle.Render(" ▶ " + line))
 		} else if net.Connected {
-			s.WriteString(connectedStyle.Render("  " + line))
+			s.WriteString(connectedStyle.Render("   " + line))
 		} else {
-			s.WriteString(normalStyle.Render("  " + line))
+			s.WriteString(normalStyle.Render("   " + line))
 		}
 		s.WriteString("\n")
 	}
 
-	s.WriteString(helpStyle.Render("\n↑/↓: Navigate • Enter: Connect • r: Rescan • D: Disconnect • i: Info • b: Back • q: Quit"))
+	s.WriteString("\n")
+	s.WriteString(helpStyle.Render("↑↓: Navigate  •  Enter: Connect  •  r: Rescan  •  D: Disconnect  •  b: Back  •  q: Quit"))
 	return s.String()
 }
 
@@ -854,12 +960,9 @@ func isWPARunning() bool {
 
 func scanNetworks(iface string, status SystemStatus) tea.Cmd {
 	return func() tea.Msg {
-		ensureWiFiDaemons()
+		// Ensure WiFi daemon is running (also brings up interface)
+		ensureWiFiDaemons(iface)
 		status = getSystemStatus()
-
-		// Ensure interface is up
-		exec.Command("ip", "link", "set", iface, "up").Run()
-		exec.Command("rfkill", "unblock", "wifi").Run()
 
 		// Give it a moment
 		time.Sleep(500 * time.Millisecond)
@@ -868,7 +971,7 @@ func scanNetworks(iface string, status SystemStatus) tea.Cmd {
 		var lastErr error
 
 		// Try iwd if available and running
-		if status.DBusRunning && status.IWDRunning {
+		if status.IWDRunning {
 			if _, err := exec.LookPath("iwctl"); err == nil {
 				networks, lastErr = scanWithIWD(iface)
 			}
@@ -1092,44 +1195,33 @@ func getCurrentSSID(iface string) string {
 
 func connectToNetwork(iface, ssid, password string, status SystemStatus) tea.Cmd {
 	return func() tea.Msg {
-		ensureWiFiDaemons()
+		// Ensure WiFi daemon is running (also brings up interface)
+		ensureWiFiDaemons(iface)
 		status = getSystemStatus()
 
-		var lastErr error
+		var err error
 
-		// Try iwd first if available
-		if status.DBusRunning && status.IWDRunning {
-			if _, err := exec.LookPath("iwctl"); err == nil {
-				if err := connectWithIWD(iface, ssid, password); err == nil {
-					time.Sleep(3 * time.Second)
-					requestDHCP(iface)
-					time.Sleep(2 * time.Second)
-
-					if getCurrentSSID(iface) == ssid {
-						return connectDoneMsg{success: true, sysStatus: status}
-					}
-				} else {
-					lastErr = err
-				}
-			}
+		// Use best available method
+		if status.IWDRunning {
+			err = connectWithIWD(iface, ssid, password)
+		} else {
+			err = connectWithWPA(iface, ssid, password)
 		}
 
-		// Try wpa_supplicant
-		if err := connectWithWPA(iface, ssid, password); err == nil {
-			time.Sleep(3 * time.Second)
-			requestDHCP(iface)
-			time.Sleep(2 * time.Second)
-
-			if getCurrentSSID(iface) == ssid {
-				return connectDoneMsg{success: true, sysStatus: status}
-			}
-		} else if lastErr == nil {
-			lastErr = err
+		if err != nil {
+			return connectDoneMsg{success: false, err: err, sysStatus: status}
 		}
 
-		if lastErr != nil {
-			return connectDoneMsg{success: false, err: lastErr, sysStatus: status}
+		// Wait for association + get IP
+		time.Sleep(3 * time.Second)
+		requestDHCP(iface)
+		time.Sleep(2 * time.Second)
+
+		// Verify connection
+		if getCurrentSSID(iface) == ssid {
+			return connectDoneMsg{success: true, sysStatus: status}
 		}
+
 		return connectDoneMsg{success: false, err: fmt.Errorf("connection verification failed"), sysStatus: status}
 	}
 }
@@ -1214,28 +1306,52 @@ func getSystemStatus() SystemStatus {
 	}
 }
 
-func ensureWiFiDaemons() {
-	// D-Bus is required for iwd/iwctl.
-	if !isDBusRunning() {
-		if _, err := exec.LookPath("dbus-daemon"); err == nil {
-			_ = os.MkdirAll("/run/dbus", 0755)
-			if _, err := exec.LookPath("dbus-uuidgen"); err == nil {
-				exec.Command("dbus-uuidgen", "--ensure=/etc/machine-id").Run()
+func ensureWiFiDaemons(iface string) {
+	// Bring up interface first
+	exec.Command("rfkill", "unblock", "wifi").Run()
+	exec.Command("ip", "link", "set", iface, "up").Run()
+	time.Sleep(200 * time.Millisecond)
+
+	// Try iwd first (preferred - simpler, modern)
+	if _, err := exec.LookPath("iwd"); err == nil && !isIWDRunning() {
+		// Ensure D-Bus is running (required by iwd)
+		if !isDBusRunning() {
+			if _, err := exec.LookPath("dbus-daemon"); err == nil {
+				_ = os.MkdirAll("/run/dbus", 0755)
+				if _, err := exec.LookPath("dbus-uuidgen"); err == nil {
+					exec.Command("dbus-uuidgen", "--ensure=/etc/machine-id").Run()
+				}
+				_ = exec.Command("dbus-daemon", "--system", "--fork", "--nopidfile").Start()
+				time.Sleep(150 * time.Millisecond)
 			}
-			_ = exec.Command("dbus-daemon", "--system", "--fork", "--nopidfile").Start()
-			time.Sleep(150 * time.Millisecond)
+		}
+
+		_ = os.MkdirAll("/var/lib/iwd", 0755)
+		if _, err := os.Stat("/usr/libexec/iwd"); err == nil {
+			_ = exec.Command("/usr/libexec/iwd").Start()
+		} else {
+			_ = exec.Command("iwd").Start()
+		}
+		time.Sleep(300 * time.Millisecond)
+
+		if isIWDRunning() {
+			return // iwd started successfully
 		}
 	}
 
-	// Start iwd if present (preferred WiFi backend).
-	if isDBusRunning() && !isIWDRunning() {
-		if _, err := os.Stat("/usr/libexec/iwd"); err == nil {
-			_ = exec.Command("/usr/libexec/iwd").Start()
-			time.Sleep(150 * time.Millisecond)
-		} else if _, err := exec.LookPath("iwd"); err == nil {
-			_ = exec.Command("iwd").Start()
-			time.Sleep(150 * time.Millisecond)
+	// Fallback to wpa_supplicant
+	if _, err := exec.LookPath("wpa_supplicant"); err == nil && !isWPARunning() {
+		_ = os.MkdirAll("/etc/wpa_supplicant", 0755)
+		_ = os.MkdirAll("/run/wpa_supplicant", 0755)
+
+		configPath := "/etc/wpa_supplicant/wpa_supplicant.conf"
+		if _, err := os.Stat(configPath); os.IsNotExist(err) {
+			baseConfig := "ctrl_interface=/run/wpa_supplicant\nupdate_config=1\n"
+			os.WriteFile(configPath, []byte(baseConfig), 0600)
 		}
+
+		exec.Command("wpa_supplicant", "-B", "-i", iface, "-c", configPath).Run()
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 

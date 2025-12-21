@@ -1,0 +1,24 @@
+#!/bin/sh
+# Minimal login shell wrapper for RavenLinux.
+# Used by agetty with --skip-login to provide an interactive rescue shell
+# without depending on /bin/login + PAM.
+
+# When agetty is used with --skip-login, there may be no login(1) to set up a
+# sane environment. Ensure basic defaults so the shell can run external commands.
+export PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+export HOME="${HOME:-/root}"
+export USER="${USER:-root}"
+export LOGNAME="${LOGNAME:-root}"
+export TERM="${TERM:-linux}"
+export PAGER="${PAGER:-cat}"
+
+# Run first-boot setup if needed (prompts for password change and user creation)
+if [ ! -f /etc/.raven-first-boot-done ] && [ -x /etc/raven/first-boot-setup ]; then
+    /etc/raven/first-boot-setup
+fi
+
+# Prefer bash
+if [ -x /bin/bash ]; then
+    exec /bin/bash -l -i
+fi
+exec /bin/sh -i

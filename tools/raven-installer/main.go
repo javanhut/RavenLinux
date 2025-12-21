@@ -282,11 +282,11 @@ A modern, developer-focused Linux distribution featuring:`)
 		}),
 		layout.Rigid(layout.Spacer{Height: unit.Dp(15)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			features := material.Body1(th, `Vem - GPU-accelerated text editor
+				features := material.Body1(th, `Vem - GPU-accelerated text editor
 Carrion - Modern programming language
 Ivaldi - Next-generation version control
 rvn - Raven package manager
-Zsh with custom configuration`)
+Bash with custom configuration`)
 			features.Color = colorAccent
 			features.Alignment = text.Middle
 			return features.Layout(gtx)

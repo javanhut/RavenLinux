@@ -28,22 +28,24 @@ log_level = "info"
 # Services
 # =============================================================================
 
-# Getty on tty1 (main console)
+# tty1: PAM-free rescue shell (avoids /bin/login issues during bring-up)
 [[services]]
 name = "getty-tty1"
 description = "Getty login on tty1"
-exec = "/sbin/agetty"
-args = ["--noclear", "--autologin", "root", "tty1", "linux"]
+exec = "/bin/agetty"
+args = ["--noclear", "--skip-login", "--login-program", "/bin/raven-shell", "tty1", "linux"]
+tty = "/dev/tty1"
 restart = true
 enabled = true
 critical = false
 
-# Getty on tty2
+# tty2: real login prompt (/bin/login + PAM) for testing authentication
 [[services]]
 name = "getty-tty2"
 description = "Getty login on tty2"
-exec = "/sbin/agetty"
+exec = "/bin/agetty"
 args = ["tty2", "linux"]
+tty = "/dev/tty2"
 restart = true
 enabled = true
 critical = false

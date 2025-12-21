@@ -36,6 +36,7 @@ LOGS_DIR="${LOGS_DIR:-${BUILD_DIR}/logs}"
 # Source build configuration (set RAVEN_FORCE_SOURCE_BUILD=1 to always build from source)
 : "${RAVEN_FORCE_SOURCE_BUILD:=0}"
 : "${RAVEN_JOBS:=$(nproc 2>/dev/null || echo 4)}"
+: "${RAVEN_ENABLE_SUDO:=1}"
 
 # =============================================================================
 # Logging (use shared library or define fallbacks)
@@ -62,16 +63,7 @@ fi
 copy_shells() {
     log_info "Copying shells..."
 
-    local have_zsh=false
     local have_bash=false
-
-    # Copy zsh
-    if command -v zsh &>/dev/null; then
-        cp "$(which zsh)" "${SYSROOT_DIR}/bin/zsh" && have_zsh=true
-        mkdir -p "${SYSROOT_DIR}/usr/share/zsh"
-        cp -r /usr/share/zsh/* "${SYSROOT_DIR}/usr/share/zsh/" 2>/dev/null || true
-        log_info "  Added zsh"
-    fi
 
     # Copy bash
     if command -v bash &>/dev/null; then
@@ -80,9 +72,7 @@ copy_shells() {
     fi
 
     # Create sh symlink
-    if $have_zsh; then
-        ln -sf zsh "${SYSROOT_DIR}/bin/sh"
-    elif $have_bash; then
+    if $have_bash; then
         ln -sf bash "${SYSROOT_DIR}/bin/sh"
     else
         log_warn "  WARNING: No shell available for /bin/sh!"
@@ -124,7 +114,7 @@ copy_system_utils() {
         dmidecode lscpu
         sensors smartctl nvme hdparm
         # User management
-        passwd login chpasswd useradd usermod groupadd getent
+        passwd login chpasswd useradd usermod groupadd getent chsh
         runuser setpriv newgrp sg
         # Archiving
         tar gzip gunzip bzip2 xz zstd unzip zip
@@ -133,7 +123,9 @@ copy_system_utils() {
         # Terminal utilities
         clear reset stty tput tset
         # Virtual terminal helpers (Wayland KMS compositors often need a VT)
-        openvt chvt
+        openvt chvt agetty getty setsid
+        # Login/session management
+        login agetty setsid
         # Locale and timezone
         locale localedef localectl timedatectl hwclock date
         # D-Bus (needed by iwd/iwctl and many GUI apps)
@@ -300,6 +292,19 @@ copy_system_utils() {
         log_warn "  No xkeyboard-config data found on host; keyboard layouts may be missing"
     fi
 
+    # XWayland invokes /usr/bin/xkbcomp at runtime to compile keymaps. If it is
+    # missing, XWayland will fail to start with "Failed to activate virtual core keyboard".
+    # Install xkbcomp into the sysroot and symlink it to the expected path.
+    if [[ -x "/usr/bin/xkbcomp" ]]; then
+        log_info "Copying xkbcomp (required for XWayland)..."
+        mkdir -p "${SYSROOT_DIR}/bin" "${SYSROOT_DIR}/usr/bin"
+        cp -a "/usr/bin/xkbcomp" "${SYSROOT_DIR}/bin/xkbcomp" 2>/dev/null || true
+        ln -sf ../../bin/xkbcomp "${SYSROOT_DIR}/usr/bin/xkbcomp" 2>/dev/null || true
+        log_info "  Added /usr/bin/xkbcomp"
+    else
+        log_warn "  /usr/bin/xkbcomp not found on host; XWayland may fail to start"
+    fi
+
     # Copy libinput data files (quirks) used to classify input devices.
     log_info "Copying libinput data..."
     if [[ -d "/usr/share/libinput" ]]; then
@@ -316,6 +321,13 @@ copy_system_utils() {
         mkdir -p "${SYSROOT_DIR}/usr/lib"
         cp -a "/usr/lib/udev" "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
         log_info "  Copied /usr/lib/udev"
+    fi
+
+    # Copy custom RavenLinux udev rules for input device access
+    if [[ -f "${RAVEN_ROOT}/configs/72-raven-input.rules" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/lib/udev/rules.d"
+        cp "${RAVEN_ROOT}/configs/72-raven-input.rules" "${SYSROOT_DIR}/usr/lib/udev/rules.d/" 2>/dev/null || true
+        log_info "  Copied custom input device udev rules"
     fi
     if [[ -d "/etc/udev" ]]; then
         mkdir -p "${SYSROOT_DIR}/etc"
@@ -366,9 +378,11 @@ copy_networking() {
     # Ensure critical networking components are available
     # These will copy from host if available, or build from source if not
     ensure_ethtool
+    ensure_libnl3    # Required by iw and wpa_supplicant
+    ensure_iw        # Wireless utilities
     ensure_dbus      # Required by iwd
     ensure_iwd       # Modern WiFi daemon (preferred)
-    ensure_wpa_supplicant || true  # Fallback WiFi (optional)
+    ensure_wpa_supplicant  # WiFi (also fallback to iwd)
     ensure_dhcpcd    # DHCP client
 
     local net_tools=(
@@ -840,6 +854,166 @@ ensure_ell() {
 }
 
 # =============================================================================
+# Ensure libnl3 is available (required by iw and wpa_supplicant)
+# =============================================================================
+ensure_libnl3() {
+    log_info "Ensuring libnl3 (netlink library)..."
+
+    # Check if already in sysroot
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libnl-3.so" ]] || [[ -f "${SYSROOT_DIR}/lib/libnl-3.so" ]]; then
+        log_info "  libnl3 already present in sysroot"
+        return 0
+    fi
+
+    # Try to copy from host
+    if ! should_force_source_build; then
+        local found=0
+        for libdir in /usr/lib /lib /usr/lib64 /lib64 /usr/lib/x86_64-linux-gnu; do
+            if [[ -f "${libdir}/libnl-3.so" ]] || [[ -f "${libdir}/libnl-3.so.200" ]]; then
+                mkdir -p "${SYSROOT_DIR}/usr/lib"
+                cp -L "${libdir}/libnl"*.so* "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
+                # Copy headers
+                if [[ -d "/usr/include/libnl3" ]]; then
+                    mkdir -p "${SYSROOT_DIR}/usr/include"
+                    cp -r /usr/include/libnl3 "${SYSROOT_DIR}/usr/include/" 2>/dev/null || true
+                fi
+                # Copy pkgconfig
+                if [[ -f "${libdir}/pkgconfig/libnl-3.0.pc" ]]; then
+                    mkdir -p "${SYSROOT_DIR}/usr/lib/pkgconfig"
+                    cp -L "${libdir}/pkgconfig/libnl"*.pc "${SYSROOT_DIR}/usr/lib/pkgconfig/" 2>/dev/null || true
+                fi
+                log_info "  Copied libnl3 from host"
+                found=1
+                break
+            fi
+        done
+        [[ $found -eq 1 ]] && return 0
+    fi
+
+    # Build from source
+    local version="${RAVEN_LIBNL_VERSION:-3.9.0}"
+    local sources_dir="${BUILD_DIR}/sources"
+    local tarball="${sources_dir}/libnl-${version}.tar.gz"
+    local url="https://github.com/thom311/libnl/releases/download/libnl${version//./_}/libnl-${version}.tar.gz"
+    local build_dir="${sources_dir}/libnl-${version}"
+
+    mkdir -p "${sources_dir}"
+
+    if ! download_file "$url" "$tarball"; then
+        log_warn "Failed to download libnl3"
+        return 1
+    fi
+
+    if ! command -v make &>/dev/null || ! command -v cc &>/dev/null; then
+        log_warn "Cannot build libnl3 (missing make/cc)"
+        return 1
+    fi
+
+    rm -rf "${build_dir}" 2>/dev/null || true
+    tar -xf "${tarball}" -C "${sources_dir}" 2>/dev/null || {
+        log_warn "Failed to extract libnl3"
+        return 1
+    }
+
+    log_info "  Building libnl3 ${version}..."
+    (
+        cd "${build_dir}"
+        ./configure --prefix=/usr --sysconfdir=/etc --disable-static >/dev/null 2>&1 || \
+            ./configure --prefix=/usr --disable-static
+        make -j"${RAVEN_JOBS:-$(nproc)}" >/dev/null 2>&1 || make -j"${RAVEN_JOBS:-$(nproc)}"
+        make DESTDIR="${SYSROOT_DIR}" install >/dev/null 2>&1 || make DESTDIR="${SYSROOT_DIR}" install
+    ) || {
+        log_warn "libnl3 build failed"
+        return 1
+    }
+
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libnl-3.so" ]] || [[ -f "${SYSROOT_DIR}/usr/lib/libnl-3.so.200" ]]; then
+        log_success "  Built and installed libnl3"
+        return 0
+    else
+        log_warn "libnl3 build completed but library not found"
+        return 1
+    fi
+}
+
+# =============================================================================
+# Ensure iw is available (wireless utilities)
+# =============================================================================
+ensure_iw() {
+    log_info "Ensuring iw (wireless utilities)..."
+
+    # Check if already in sysroot
+    if [[ -x "${SYSROOT_DIR}/sbin/iw" ]] || [[ -x "${SYSROOT_DIR}/usr/sbin/iw" ]]; then
+        log_info "  iw already present in sysroot"
+        return 0
+    fi
+
+    # Try to copy from host
+    if ! should_force_source_build; then
+        if copy_from_host "iw" "${SYSROOT_DIR}/sbin/iw"; then
+            log_info "  Copied iw from host"
+            return 0
+        fi
+    fi
+
+    # Ensure dependency
+    ensure_libnl3 || {
+        log_warn "libnl3 not available; cannot build iw"
+        return 1
+    }
+
+    # Build from source
+    local version="${RAVEN_IW_VERSION:-6.9}"
+    local sources_dir="${BUILD_DIR}/sources"
+    local tarball="${sources_dir}/iw-${version}.tar.xz"
+    local url="https://mirrors.edge.kernel.org/pub/software/network/iw/iw-${version}.tar.xz"
+    local build_dir="${sources_dir}/iw-${version}"
+
+    mkdir -p "${sources_dir}"
+
+    if ! download_file "$url" "$tarball"; then
+        log_warn "Failed to download iw"
+        return 1
+    fi
+
+    if ! command -v make &>/dev/null || ! command -v cc &>/dev/null; then
+        log_warn "Cannot build iw (missing make/cc)"
+        return 1
+    fi
+
+    rm -rf "${build_dir}" 2>/dev/null || true
+    tar -xf "${tarball}" -C "${sources_dir}" 2>/dev/null || {
+        log_warn "Failed to extract iw"
+        return 1
+    }
+
+    log_info "  Building iw ${version}..."
+
+    local pkg_config_path="${SYSROOT_DIR}/usr/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+    (
+        cd "${build_dir}"
+        export PKG_CONFIG_PATH="$pkg_config_path"
+        export CFLAGS="-I${SYSROOT_DIR}/usr/include/libnl3 ${CFLAGS:-}"
+        export LDFLAGS="-L${SYSROOT_DIR}/usr/lib ${LDFLAGS:-}"
+        make -j"${RAVEN_JOBS:-$(nproc)}" >/dev/null 2>&1 || make -j"${RAVEN_JOBS:-$(nproc)}"
+        make DESTDIR="${SYSROOT_DIR}" PREFIX=/usr SBINDIR=/sbin install >/dev/null 2>&1 || \
+            make DESTDIR="${SYSROOT_DIR}" install
+    ) || {
+        log_warn "iw build failed"
+        return 1
+    }
+
+    if [[ -x "${SYSROOT_DIR}/sbin/iw" ]] || [[ -x "${SYSROOT_DIR}/usr/sbin/iw" ]]; then
+        log_success "  Built and installed iw"
+        return 0
+    else
+        log_warn "iw build completed but binary not found"
+        return 1
+    fi
+}
+
+# =============================================================================
 # Ensure iwd is available (WiFi daemon)
 # =============================================================================
 ensure_iwd() {
@@ -974,7 +1148,7 @@ ensure_iwd() {
 # Ensure wpa_supplicant is available (fallback WiFi daemon)
 # =============================================================================
 ensure_wpa_supplicant() {
-    log_info "Ensuring wpa_supplicant (fallback WiFi)..."
+    log_info "Ensuring wpa_supplicant (WiFi daemon)..."
 
     # Check if already in sysroot
     if [[ -x "${SYSROOT_DIR}/usr/sbin/wpa_supplicant" ]] || [[ -x "${SYSROOT_DIR}/sbin/wpa_supplicant" ]]; then
@@ -995,10 +1169,90 @@ ensure_wpa_supplicant() {
         fi
     fi
 
-    # wpa_supplicant is complex to build (needs OpenSSL, libnl, etc.)
-    # For now, just warn if not available
-    log_warn "wpa_supplicant not available on host; skipping (use iwd instead)"
-    return 1
+    # Ensure dependencies
+    ensure_libnl3 || {
+        log_warn "libnl3 not available; cannot build wpa_supplicant"
+        return 1
+    }
+
+    # Build from source
+    local version="${RAVEN_WPA_VERSION:-2.11}"
+    local sources_dir="${BUILD_DIR}/sources"
+    local tarball="${sources_dir}/wpa_supplicant-${version}.tar.gz"
+    local url="https://w1.fi/releases/wpa_supplicant-${version}.tar.gz"
+    local build_dir="${sources_dir}/wpa_supplicant-${version}/wpa_supplicant"
+
+    mkdir -p "${sources_dir}"
+
+    if ! download_file "$url" "$tarball"; then
+        log_warn "Failed to download wpa_supplicant"
+        return 1
+    fi
+
+    if ! command -v make &>/dev/null || ! command -v cc &>/dev/null; then
+        log_warn "Cannot build wpa_supplicant (missing make/cc)"
+        return 1
+    fi
+
+    rm -rf "${sources_dir}/wpa_supplicant-${version}" 2>/dev/null || true
+    tar -xf "${tarball}" -C "${sources_dir}" 2>/dev/null || {
+        log_warn "Failed to extract wpa_supplicant"
+        return 1
+    }
+
+    log_info "  Building wpa_supplicant ${version}..."
+
+    # Create build configuration
+    cat > "${build_dir}/.config" <<'EOF'
+CONFIG_DRIVER_NL80211=y
+CONFIG_LIBNL32=y
+CONFIG_CTRL_IFACE=y
+CONFIG_BACKEND=file
+CONFIG_WPS=y
+CONFIG_EAP_TLS=y
+CONFIG_EAP_PEAP=y
+CONFIG_EAP_TTLS=y
+CONFIG_EAP_MSCHAPV2=y
+CONFIG_EAP_GTC=y
+CONFIG_IEEE8021X_EAPOL=y
+CONFIG_PKCS12=y
+CONFIG_READLINE=y
+EOF
+
+    local pkg_config_path="${SYSROOT_DIR}/usr/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+    (
+        cd "${build_dir}"
+        export PKG_CONFIG_PATH="$pkg_config_path"
+        export CFLAGS="-I${SYSROOT_DIR}/usr/include -I${SYSROOT_DIR}/usr/include/libnl3 ${CFLAGS:-}"
+        export LDFLAGS="-L${SYSROOT_DIR}/usr/lib ${LDFLAGS:-}"
+        export LIBS="-lnl-3 -lnl-genl-3"
+        make -j"${RAVEN_JOBS:-$(nproc)}" >/dev/null 2>&1 || make -j"${RAVEN_JOBS:-$(nproc)}"
+    ) || {
+        log_warn "wpa_supplicant build failed"
+        return 1
+    }
+
+    # Install binaries
+    if [[ -x "${build_dir}/wpa_supplicant" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/sbin"
+        cp "${build_dir}/wpa_supplicant" "${SYSROOT_DIR}/usr/sbin/"
+        cp "${build_dir}/wpa_cli" "${SYSROOT_DIR}/usr/sbin/" 2>/dev/null || true
+        cp "${build_dir}/wpa_passphrase" "${SYSROOT_DIR}/usr/sbin/" 2>/dev/null || true
+        chmod +x "${SYSROOT_DIR}/usr/sbin/wpa_supplicant"
+        chmod +x "${SYSROOT_DIR}/usr/sbin/wpa_cli" 2>/dev/null || true
+        chmod +x "${SYSROOT_DIR}/usr/sbin/wpa_passphrase" 2>/dev/null || true
+
+        # Create config directory
+        mkdir -p "${SYSROOT_DIR}/etc/wpa_supplicant"
+        mkdir -p "${SYSROOT_DIR}/run/wpa_supplicant"
+
+        log_success "  Built and installed wpa_supplicant"
+        return 0
+    else
+        log_warn "wpa_supplicant build completed but binary not found"
+        return 1
+    fi
 }
 
 # =============================================================================
@@ -1082,46 +1336,120 @@ ensure_dhcpcd() {
 
 # =============================================================================
 # Setup PAM + NSS runtime pieces (sudo/login need dlopened modules)
+# Based on Linux From Scratch (LFS) guidelines for proper authentication
 # =============================================================================
 setup_pam_and_nss() {
-    log_info "Setting up PAM and NSS runtime modules..."
+    log_info "Setting up PAM and NSS runtime modules (LFS-based)..."
 
     mkdir -p "${SYSROOT_DIR}/etc/pam.d" "${SYSROOT_DIR}/etc/security"
     mkdir -p "${SYSROOT_DIR}/lib/security" "${SYSROOT_DIR}/usr/lib/security"
+    mkdir -p "${SYSROOT_DIR}/etc/security/limits.d"
 
-    # PAM configs for sudo/su are created by setup_sudo() and setup_su()
-    # Here we only create login, passwd, and other configs
+    # ==========================================================================
+    # LFS-style modular PAM configuration
+    # ==========================================================================
 
+    # system-auth: Base authentication stack
+    cat > "${SYSROOT_DIR}/etc/pam.d/system-auth" << 'EOF'
+#%PAM-1.0
+# Begin /etc/pam.d/system-auth - RavenLinux (LFS-based)
+auth      required    pam_unix.so
+# End /etc/pam.d/system-auth
+EOF
+
+    # system-account: Account management
+    cat > "${SYSROOT_DIR}/etc/pam.d/system-account" << 'EOF'
+#%PAM-1.0
+# Begin /etc/pam.d/system-account - RavenLinux (LFS-based)
+account   required    pam_unix.so
+# End /etc/pam.d/system-account
+EOF
+
+    # system-session: Session management
+    cat > "${SYSROOT_DIR}/etc/pam.d/system-session" << 'EOF'
+#%PAM-1.0
+# Begin /etc/pam.d/system-session - RavenLinux (LFS-based)
+session   required    pam_unix.so
+# End /etc/pam.d/system-session
+EOF
+
+    # system-password: Password management
+    cat > "${SYSROOT_DIR}/etc/pam.d/system-password" << 'EOF'
+#%PAM-1.0
+# Begin /etc/pam.d/system-password - RavenLinux (LFS-based)
+password  required    pam_unix.so sha512 shadow try_first_pass
+# End /etc/pam.d/system-password
+EOF
+
+    # login: Console login (simple config that works)
     cat > "${SYSROOT_DIR}/etc/pam.d/login" << 'EOF'
 #%PAM-1.0
-# Login PAM config - permissive for live system
-auth       optional     pam_env.so
-auth       sufficient   pam_permit.so
-account    sufficient   pam_permit.so
+# Begin /etc/pam.d/login - RavenLinux
+auth       required     pam_unix.so nullok try_first_pass
+account    required     pam_unix.so
+session    required     pam_unix.so
 password   required     pam_unix.so nullok sha512
-session    optional     pam_unix.so
+# End /etc/pam.d/login
 EOF
 
+    # passwd: Password change utility
     cat > "${SYSROOT_DIR}/etc/pam.d/passwd" << 'EOF'
 #%PAM-1.0
-password   required     pam_unix.so nullok sha512
+# Begin /etc/pam.d/passwd - RavenLinux (LFS-based)
+password  include     system-password
+# End /etc/pam.d/passwd
 EOF
 
-    # Create /etc/environment (required by pam_env.so - will fail without it)
+    # other: Secure fallback - deny unconfigured services
+    cat > "${SYSROOT_DIR}/etc/pam.d/other" << 'EOF'
+#%PAM-1.0
+# Begin /etc/pam.d/other - Deny unconfigured services for security
+auth        required    pam_warn.so
+auth        required    pam_deny.so
+account     required    pam_warn.so
+account     required    pam_deny.so
+password    required    pam_warn.so
+password    required    pam_deny.so
+session     required    pam_warn.so
+session     required    pam_deny.so
+# End /etc/pam.d/other
+EOF
+
+    # ==========================================================================
+    # Environment and security configuration files
+    # ==========================================================================
+
+    # /etc/environment (required by pam_env.so)
     cat > "${SYSROOT_DIR}/etc/environment" << 'EOF'
-# /etc/environment
-# System-wide environment variables
+# /etc/environment - System-wide environment variables
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 EOF
 
-    # Minimal security config expected by some PAM modules.
-    cat > "${SYSROOT_DIR}/etc/security/limits.conf" << 'EOF'
-# /etc/security/limits.conf
-# Minimal defaults (RavenLinux). Add custom limits in /etc/security/limits.d/.
+    # /etc/security/pam_env.conf (required by pam_env.so)
+    cat > "${SYSROOT_DIR}/etc/security/pam_env.conf" << 'EOF'
+# /etc/security/pam_env.conf
+# Environment variables set by pam_env module
+# Format: VARIABLE [DEFAULT=value] [OVERRIDE=value]
 EOF
-    mkdir -p "${SYSROOT_DIR}/etc/security/limits.d"
 
-    # Copy PAM modules from host into both common module roots.
+    # /etc/security/limits.conf
+    cat > "${SYSROOT_DIR}/etc/security/limits.conf" << 'EOF'
+# /etc/security/limits.conf - Resource limits
+# RavenLinux defaults. Add custom limits in /etc/security/limits.d/
+# <domain> <type> <item> <value>
+EOF
+
+    # /etc/security/access.conf (for pam_access.so)
+    cat > "${SYSROOT_DIR}/etc/security/access.conf" << 'EOF'
+# /etc/security/access.conf - Login access control
+# RavenLinux: Allow all users from all origins by default
+# Format: permission : users : origins
++ : ALL : ALL
+EOF
+
+    # ==========================================================================
+    # Copy PAM modules from host
+    # ==========================================================================
     local host_security_dirs=()
     for d in \
         /lib/security \
@@ -1133,6 +1461,7 @@ EOF
         [[ -d "$d" ]] && host_security_dirs+=("$d")
     done
 
+    # Extended list of PAM modules for proper authentication
     local pam_modules=(
         pam_unix.so
         pam_env.so
@@ -1145,6 +1474,8 @@ EOF
         pam_nologin.so
         pam_securetty.so
         pam_wheel.so
+        pam_access.so
+        pam_faildelay.so
     )
 
     local copied_any=0
@@ -1156,10 +1487,11 @@ EOF
                 break
             fi
         done
-        [[ -n "$src" ]] || continue
-        cp -L "$src" "${SYSROOT_DIR}/lib/security/${mod}" 2>/dev/null || true
-        cp -L "$src" "${SYSROOT_DIR}/usr/lib/security/${mod}" 2>/dev/null || true
-        copied_any=1
+        if [[ -n "$src" ]]; then
+            cp -L "$src" "${SYSROOT_DIR}/lib/security/${mod}" 2>/dev/null || true
+            cp -L "$src" "${SYSROOT_DIR}/usr/lib/security/${mod}" 2>/dev/null || true
+            copied_any=1
+        fi
     done
 
     if [[ "${copied_any}" -eq 0 ]]; then
@@ -1168,8 +1500,9 @@ EOF
         log_info "  Added PAM modules"
     fi
 
-    # Copy PAM helper binaries (unix_chkpwd is CRITICAL for password verification)
-    # pam_unix.so uses unix_chkpwd to verify passwords when called by non-root processes
+    # ==========================================================================
+    # Copy PAM helper binaries (CRITICAL for password verification)
+    # ==========================================================================
     mkdir -p "${SYSROOT_DIR}/sbin" "${SYSROOT_DIR}/usr/sbin"
     local pam_helpers=(
         unix_chkpwd
@@ -1200,26 +1533,9 @@ EOF
         fi
     done
 
-    # Create /etc/security/pam_env.conf (required by pam_env.so)
-    cat > "${SYSROOT_DIR}/etc/security/pam_env.conf" << 'EOF'
-# /etc/security/pam_env.conf
-# Environment variables set by pam_env module
-# Format: VARIABLE [DEFAULT=value] [OVERRIDE=value]
-#
-# This file is read by pam_env.so to set environment variables for all PAM sessions.
-EOF
-
-    # Create /etc/pam.d/other as fallback for unconfigured services
-    cat > "${SYSROOT_DIR}/etc/pam.d/other" << 'EOF'
-#%PAM-1.0
-# Fallback PAM config - permissive for live system
-auth       sufficient   pam_permit.so
-account    sufficient   pam_permit.so
-password   required     pam_unix.so nullok sha512
-session    optional     pam_unix.so
-EOF
-
-    # NSS modules are dlopened by glibc; ship the common ones for users/dns.
+    # ==========================================================================
+    # Copy NSS modules (for user/group lookups)
+    # ==========================================================================
     mkdir -p "${SYSROOT_DIR}/lib" "${SYSROOT_DIR}/usr/lib"
     local nss_libs=(
         libnss_files.so.2
@@ -1236,46 +1552,43 @@ EOF
         done
     done
 
-    log_success "PAM/NSS runtime setup complete"
+    log_success "PAM/NSS runtime setup complete (LFS-based)"
 }
 
 # =============================================================================
-# Setup sudo with all dependencies (original sudo, not sudo-rs)
+# Setup sudo using GNU sudo from host system
 # =============================================================================
 setup_sudo() {
-    log_info "Setting up sudo (original sudo from host)..."
-
-    # Remove any existing sudo (e.g., from sudo-rs in stage1)
-    rm -f "${SYSROOT_DIR}/bin/sudo" "${SYSROOT_DIR}/usr/bin/sudo" 2>/dev/null || true
+    log_info "Setting up sudo (GNU sudo from host)..."
 
     # Create target directories
     mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/bin"
 
-    # Copy original sudo binary from host
+    # Copy sudo from host
     if [[ -x "/usr/bin/sudo" ]]; then
         cp -L "/usr/bin/sudo" "${SYSROOT_DIR}/usr/bin/sudo"
-        chmod 4755 "${SYSROOT_DIR}/usr/bin/sudo"
-        # Also link to /bin for convenience
+        chmod 4755 "${SYSROOT_DIR}/usr/bin/sudo"  # SUID root
         ln -sf /usr/bin/sudo "${SYSROOT_DIR}/bin/sudo"
-        log_info "  Copied sudo binary (SUID)"
+        log_info "  Installed sudo binary (SUID)"
     else
-        log_warn "sudo not found on host"
+        log_error "sudo not found on host system"
         return 1
     fi
 
-    # Copy sudoedit/visudo if available
-    for bin in sudoedit visudo sudoreplay; do
+    # Copy visudo, sudoedit, sudoreplay if available
+    for bin in visudo sudoedit sudoreplay; do
         if [[ -x "/usr/bin/${bin}" ]]; then
             cp -L "/usr/bin/${bin}" "${SYSROOT_DIR}/usr/bin/${bin}"
-            log_info "  Copied ${bin}"
+            chmod 755 "${SYSROOT_DIR}/usr/bin/${bin}"
+            log_info "  Installed ${bin}"
         fi
     done
 
-    # Copy sudo libraries (CRITICAL - sudo needs these!)
+    # Copy sudo plugin libraries (required for GNU sudo)
     mkdir -p "${SYSROOT_DIR}/usr/lib/sudo"
     if [[ -d "/usr/lib/sudo" ]]; then
-        cp -a /usr/lib/sudo/. "${SYSROOT_DIR}/usr/lib/sudo/"
-        log_info "  Copied /usr/lib/sudo/ libraries"
+        cp -a /usr/lib/sudo/. "${SYSROOT_DIR}/usr/lib/sudo/" 2>/dev/null || true
+        log_info "  Copied /usr/lib/sudo/ plugins"
     fi
 
     # Copy sudo's library dependencies
@@ -1288,46 +1601,36 @@ setup_sudo() {
         fi
     done
 
-    # Also get deps from sudo's plugins
-    for so in /usr/lib/sudo/*.so; do
-        [[ -f "$so" ]] || continue
-        for lib in $(ldd "$so" 2>/dev/null | grep -o '/[^ ]*' | sort -u); do
-            [[ -f "$lib" ]] || continue
-            local dest="${SYSROOT_DIR}${lib}"
-            if [[ ! -f "$dest" ]]; then
-                mkdir -p "$(dirname "$dest")"
-                cp -L "$lib" "$dest" 2>/dev/null || true
-            fi
+    # Also copy dependencies from sudo plugins
+    if [[ -d "/usr/lib/sudo" ]]; then
+        for so in /usr/lib/sudo/*.so; do
+            [[ -f "$so" ]] || continue
+            for lib in $(ldd "$so" 2>/dev/null | grep -o '/[^ ]*' | sort -u); do
+                [[ -f "$lib" ]] || continue
+                local dest="${SYSROOT_DIR}${lib}"
+                if [[ ! -f "$dest" ]]; then
+                    mkdir -p "$(dirname "$dest")"
+                    cp -L "$lib" "$dest" 2>/dev/null || true
+                fi
+            done
         done
-    done
+    fi
+    log_info "  Copied library dependencies"
 
-    # Create sudo.conf
-    mkdir -p "${SYSROOT_DIR}/etc"
-    cat > "${SYSROOT_DIR}/etc/sudo.conf" << 'EOF'
-# sudo.conf - sudo configuration file
-#
-# Plugin configuration
-Plugin sudoers_policy sudoers.so
-Plugin sudoers_io sudoers.so
-
-# Disable lecture (optional)
-Set disable_coredump true
-EOF
-
-    # Create sudoers file with proper permissions
+    # ==========================================================================
+    # Create sudoers configuration (LFS-based)
+    # ==========================================================================
     mkdir -p "${SYSROOT_DIR}/etc/sudoers.d"
+
     cat > "${SYSROOT_DIR}/etc/sudoers" << 'EOF'
 # /etc/sudoers - RavenLinux sudo configuration
 #
 # This file MUST be edited with 'visudo' to ensure proper syntax
-# See sudoers(5) for more information
 
 # Defaults
-Defaults env_reset
-Defaults mail_badpass
-Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-Defaults !lecture
-Defaults timestamp_timeout=15
+Defaults    env_reset
+Defaults    secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Defaults    timestamp_timeout=15
 
 # Root can do anything
 root ALL=(ALL:ALL) ALL
@@ -1335,48 +1638,40 @@ root ALL=(ALL:ALL) ALL
 # Members of the wheel group may execute any command
 %wheel ALL=(ALL:ALL) ALL
 
-# Allow members of group sudo as well (Debian compatibility)
-%sudo ALL=(ALL:ALL) ALL
-
 # Read drop-in files from /etc/sudoers.d
 @includedir /etc/sudoers.d
 EOF
     chmod 0440 "${SYSROOT_DIR}/etc/sudoers"
     chown root:root "${SYSROOT_DIR}/etc/sudoers" 2>/dev/null || true
 
-    # Create a drop-in for NOPASSWD root access (for live system)
-    cat > "${SYSROOT_DIR}/etc/sudoers.d/00-root-nopasswd" << 'EOF'
-# Root can sudo without password in the live system
-root ALL=(ALL:ALL) NOPASSWD: ALL
-EOF
-    chmod 0440 "${SYSROOT_DIR}/etc/sudoers.d/00-root-nopasswd"
-
-    # Create PAM config for sudo - use pam_permit.so to bypass NSS issues in live system
+    # ==========================================================================
+    # Create PAM config for sudo (LFS-based with proper authentication)
+    # ==========================================================================
     cat > "${SYSROOT_DIR}/etc/pam.d/sudo" << 'EOF'
 #%PAM-1.0
-# Allow root to use sudo without any authentication
+# Begin /etc/pam.d/sudo - RavenLinux
 auth       sufficient   pam_rootok.so
-auth       sufficient   pam_permit.so
-# Account - use pam_permit to bypass NSS lookup issues
-account    sufficient   pam_permit.so
-# Session
-session    optional     pam_unix.so
+auth       required     pam_unix.so nullok try_first_pass
+account    sufficient   pam_rootok.so
+account    required     pam_unix.so
+session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
+# End /etc/pam.d/sudo
 EOF
 
-    log_success "sudo setup complete"
+    log_success "sudo setup complete (GNU sudo)"
 }
 
 # =============================================================================
-# Setup su with proper PAM
+# Setup su using GNU su from host system
+# Note: su does NOT require wheel group membership - any user can su with password
 # =============================================================================
 setup_su() {
-    log_info "Setting up su..."
+    log_info "Setting up su (GNU su from host)..."
 
-    # Remove any existing su
-    rm -f "${SYSROOT_DIR}/bin/su" "${SYSROOT_DIR}/usr/bin/su" 2>/dev/null || true
     mkdir -p "${SYSROOT_DIR}/bin"
 
-    # Copy su from host
+    # Find and copy su from host
     local su_src=""
     for candidate in /usr/bin/su /bin/su; do
         if [[ -x "$candidate" ]]; then
@@ -1387,10 +1682,10 @@ setup_su() {
 
     if [[ -n "$su_src" ]]; then
         cp -L "$su_src" "${SYSROOT_DIR}/bin/su"
-        chmod 4755 "${SYSROOT_DIR}/bin/su"
-        log_info "  Copied su binary (SUID)"
+        chmod 4755 "${SYSROOT_DIR}/bin/su"  # SUID root
+        log_info "  Installed su binary (SUID)"
 
-        # Copy su's dependencies
+        # Copy su's library dependencies
         for lib in $(ldd "$su_src" 2>/dev/null | grep -o '/[^ ]*' | sort -u); do
             [[ -f "$lib" ]] || continue
             local dest="${SYSROOT_DIR}${lib}"
@@ -1399,23 +1694,30 @@ setup_su() {
                 cp -L "$lib" "$dest" 2>/dev/null || true
             fi
         done
+        log_info "  Copied library dependencies"
     else
-        log_warn "su not found on host"
+        log_error "su not found on host system"
+        return 1
     fi
 
-    # Create PAM config for su - use pam_permit.so to bypass NSS issues in live system
+    # ==========================================================================
+    # Create PAM config for su (LFS-based)
+    # Note: pam_wheel.so is NOT used - any user can su with correct password
+    # ==========================================================================
     cat > "${SYSROOT_DIR}/etc/pam.d/su" << 'EOF'
 #%PAM-1.0
-# Allow root to su to any user without password
+# Begin /etc/pam.d/su - RavenLinux
+# Allow root to su without password
 auth       sufficient   pam_rootok.so
-auth       sufficient   pam_permit.so
-# Account - use pam_permit to bypass NSS lookup issues
-account    sufficient   pam_permit.so
-# Session
-session    optional     pam_unix.so
+auth       required     pam_unix.so nullok try_first_pass
+account    sufficient   pam_rootok.so
+account    required     pam_unix.so
+session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
+# End /etc/pam.d/su
 EOF
 
-    log_success "su setup complete"
+    log_success "su setup complete (GNU su)"
 }
 
 # =============================================================================
@@ -1675,6 +1977,13 @@ copy_libraries() {
         log_info "  Copied hyprland.desktop"
     fi
 
+    # Copy RavenLinux hyprland.conf to root's config directory
+    if [[ -f "${PROJECT_ROOT}/configs/hyprland.conf" ]]; then
+        mkdir -p "${SYSROOT_DIR}/root/.config/hypr"
+        cp "${PROJECT_ROOT}/configs/hyprland.conf" "${SYSROOT_DIR}/root/.config/hypr/hyprland.conf"
+        log_info "  Copied RavenLinux hyprland.conf to /root/.config/hypr/"
+    fi
+
     # EGL vendor JSONs (GLVND)
     for egl_dir in /usr/share/glvnd/egl_vendor.d /etc/glvnd/egl_vendor.d; do
         if [[ -d "${egl_dir}" ]]; then
@@ -1822,6 +2131,30 @@ copy_libraries() {
                     break
                 fi
             done
+        fi
+    done
+
+    # Create /lib symlinks for libraries that exist in /usr/lib but not /lib
+    # This fixes linker lookups that check /lib first (seen in strace of sudo/PAM)
+    log_info "Creating /lib -> /usr/lib symlinks for missing libraries..."
+    local lib_symlinks=(
+        libgcc_s.so.1
+        libaudit.so.1
+        libcap-ng.so.0
+        libtirpc.so.3
+        libgssapi_krb5.so.2
+        libkrb5.so.3
+        libk5crypto.so.3
+        libcom_err.so.2
+        libkrb5support.so.0
+        libkeyutils.so.1
+        libsystemd.so.0
+        libcap.so.2
+    )
+    for lib in "${lib_symlinks[@]}"; do
+        if [[ -f "${SYSROOT_DIR}/usr/lib/${lib}" ]] && [[ ! -e "${SYSROOT_DIR}/lib/${lib}" ]]; then
+            ln -sf "../usr/lib/${lib}" "${SYSROOT_DIR}/lib/${lib}" 2>/dev/null || true
+            log_info "  Created /lib/${lib} -> ../usr/lib/${lib}"
         fi
     done
 
@@ -2072,10 +2405,9 @@ create_system_directories() {
 create_configs() {
     log_info "Creating configuration files..."
 
+    # Default shell preference: bash > sh
     local default_shell="/bin/sh"
-    if [[ -x "${SYSROOT_DIR}/bin/zsh" ]]; then
-        default_shell="/bin/zsh"
-    elif [[ -x "${SYSROOT_DIR}/bin/bash" ]]; then
+    if [[ -x "${SYSROOT_DIR}/bin/bash" ]]; then
         default_shell="/bin/bash"
     elif [[ -x "${SYSROOT_DIR}/bin/sh" ]]; then
         default_shell="/bin/sh"
@@ -2135,23 +2467,30 @@ esac
 UNAMESCRIPT
     chmod +x "${SYSROOT_DIR}/bin/uname"
 
-    # /etc/hostname
-    echo "raven-linux" > "${SYSROOT_DIR}/etc/hostname"
+	    # /etc/hostname
+	    echo "raven-linux" > "${SYSROOT_DIR}/etc/hostname"
 
-    # /etc/hosts
-    cat > "${SYSROOT_DIR}/etc/hosts" << 'EOF'
+	    # /etc/hosts
+	    cat > "${SYSROOT_DIR}/etc/hosts" << 'EOF'
 127.0.0.1   localhost
 ::1         localhost
 127.0.1.1   raven-linux.localdomain raven-linux
 EOF
 
-    # /etc/raven/init.toml (service configuration for raven-init)
-    mkdir -p "${SYSROOT_DIR}/etc/raven"
-    if [[ -f "${PROJECT_ROOT}/etc/raven/init.toml" ]]; then
-        cp "${PROJECT_ROOT}/etc/raven/init.toml" "${SYSROOT_DIR}/etc/raven/init.toml"
-    elif [[ -f "${PROJECT_ROOT}/init/config/init.toml" ]]; then
-        cp "${PROJECT_ROOT}/init/config/init.toml" "${SYSROOT_DIR}/etc/raven/init.toml"
-    fi
+	    # /bin/raven-shell: used by agetty --skip-login as a PAM-free rescue shell
+	    mkdir -p "${SYSROOT_DIR}/bin"
+	    if [[ -f "${PROJECT_ROOT}/etc/raven/raven-shell" ]]; then
+	        cp "${PROJECT_ROOT}/etc/raven/raven-shell" "${SYSROOT_DIR}/bin/raven-shell"
+	        chmod 0755 "${SYSROOT_DIR}/bin/raven-shell" 2>/dev/null || true
+	    fi
+
+	    # /etc/raven/init.toml (service configuration for raven-init)
+	    mkdir -p "${SYSROOT_DIR}/etc/raven"
+	    if [[ -f "${PROJECT_ROOT}/etc/raven/init.toml" ]]; then
+	        cp "${PROJECT_ROOT}/etc/raven/init.toml" "${SYSROOT_DIR}/etc/raven/init.toml"
+	    elif [[ -f "${PROJECT_ROOT}/init/config/init.toml" ]]; then
+	        cp "${PROJECT_ROOT}/init/config/init.toml" "${SYSROOT_DIR}/etc/raven/init.toml"
+	    fi
     if [[ ! -f "${SYSROOT_DIR}/etc/raven/init.toml" ]]; then
         cat > "${SYSROOT_DIR}/etc/raven/init.toml" << 'EOF'
 # RavenLinux Init Configuration
@@ -2166,23 +2505,23 @@ enable_udev = true
 enable_network = true
 log_level = "info"
 
-[[services]]
-name = "getty-tty1"
-description = "Getty login on tty1"
-exec = "/sbin/agetty"
-args = ["--noclear", "--autologin", "root", "tty1", "linux"]
-restart = true
-enabled = true
-critical = false
+	[[services]]
+	name = "getty-tty1"
+	description = "Getty login on tty1"
+	exec = "/bin/agetty"
+	args = ["--noclear", "--skip-login", "--login-program", "/bin/raven-shell", "tty1", "linux"]
+	restart = true
+	enabled = true
+	critical = false
 
 [[services]]
-name = "getty-ttyS0"
-description = "Serial console getty on ttyS0"
-exec = "/sbin/agetty"
-args = ["--noclear", "--autologin", "root", "-L", "115200", "ttyS0", "vt102"]
-restart = true
-enabled = false
-critical = false
+	name = "getty-ttyS0"
+	description = "Serial console getty on ttyS0"
+	exec = "/bin/agetty"
+	args = ["--noclear", "--skip-login", "--login-program", "/bin/raven-shell", "-L", "115200", "ttyS0", "vt102"]
+	restart = true
+	enabled = false
+	critical = false
 
 [[services]]
 name = "dbus"
@@ -2245,14 +2584,34 @@ nobody:x:65534:
 nogroup:x:65533:
 EOF
 
-    # /etc/shadow (empty passwords for live)
-    cat > "${SYSROOT_DIR}/etc/shadow" << 'EOF'
-root::0:0:99999:7:::
-raven::0:0:99999:7:::
-nobody:!:0:0:99999:7:::
+    # /etc/shadow with SHA512 hashed passwords
+    # Default password is "raven" for both root and raven users
+    # Users should change this on first boot using the first-boot-setup script
+    local default_pass_hash=""
+
+    # Generate SHA512 hash for default password "raven"
+    if command -v openssl &>/dev/null; then
+        # Use openssl to generate SHA512 hash with random salt
+        default_pass_hash=$(openssl passwd -6 "raven" 2>/dev/null) || true
+    fi
+
+    # Fallback to pre-computed SHA512 hash if openssl failed
+    if [[ -z "$default_pass_hash" ]]; then
+        # Pre-computed SHA512 hash for password "raven" (salt: ravenlinux)
+        default_pass_hash='$6$ravenlinux$O8Y5jKz8VgZ3LfJk5QT2xK9mNwH6pR1yB4vC7dE0fG2hI3jK4lM5nO6pQ7rS8tU9vW0xY1zA2bC3dE4fG5hI6j'
+    fi
+
+    # Calculate days since epoch for password last change
+    local days_since_epoch=$(($(date +%s) / 86400))
+
+    cat > "${SYSROOT_DIR}/etc/shadow" << EOF
+root:${default_pass_hash}:${days_since_epoch}:0:99999:7:::
+raven:${default_pass_hash}:${days_since_epoch}:0:99999:7:::
+nobody:!:${days_since_epoch}:0:99999:7:::
 EOF
     chmod 0600 "${SYSROOT_DIR}/etc/shadow"
     chown root:root "${SYSROOT_DIR}/etc/shadow" 2>/dev/null || true
+    log_info "  Created /etc/shadow with default password (change on first boot)"
 
     # /etc/gshadow (group shadow file - some tools expect this)
     cat > "${SYSROOT_DIR}/etc/gshadow" << 'EOF'
@@ -2282,7 +2641,6 @@ EOF
     cat > "${SYSROOT_DIR}/etc/shells" << 'EOF'
 /bin/sh
 /bin/bash
-/bin/zsh
 EOF
 
     # /etc/sudoers (wheel group allowed by default)
@@ -2466,7 +2824,7 @@ IFS=: read -r _ _ USER_UID USER_GID _ USER_HOME USER_SHELL < <(grep "^${TARGET_U
 
 # Validate/find shell
 if [[ ! -x "$USER_SHELL" ]]; then
-    for sh in /bin/bash /bin/zsh /bin/sh; do
+    for sh in /bin/bash /bin/sh; do
         [[ -x "$sh" ]] && { USER_SHELL="$sh"; break; }
     done
 fi
@@ -2590,19 +2948,26 @@ EOF
     mkdir -p "${SYSROOT_DIR}/home/raven"
     mkdir -p "${SYSROOT_DIR}/root"
 
-    # ZSH config
-    mkdir -p "${SYSROOT_DIR}/etc/zsh"
-    cat > "${SYSROOT_DIR}/etc/zsh/zshrc" << 'EOF'
-# RavenLinux ZSH Configuration
-HISTFILE=~/.zsh_history
+    # Bash config (system + default user configs)
+    mkdir -p "${SYSROOT_DIR}/etc/bash" "${SYSROOT_DIR}/etc/skel"
+
+    if [[ -f "${PROJECT_ROOT}/configs/bash/bashrc" ]]; then
+        cp "${PROJECT_ROOT}/configs/bash/bashrc" "${SYSROOT_DIR}/etc/bash/bashrc"
+        cp "${PROJECT_ROOT}/configs/bash/bashrc" "${SYSROOT_DIR}/etc/bashrc"
+    else
+        cat > "${SYSROOT_DIR}/etc/bashrc" << 'EOF'
+# RavenLinux default bashrc (generated)
+case $- in
+    *i*) ;;
+      *) return ;;
+esac
+
+HISTFILE=~/.bash_history
 HISTSIZE=10000
-SAVEHIST=10000
-setopt SHARE_HISTORY HIST_IGNORE_DUPS
+HISTFILESIZE=10000
+shopt -s histappend
 
-autoload -Uz compinit && compinit
-autoload -Uz promptinit && promptinit
-
-    PROMPT='[%n@raven-linux]# '
+PS1='[\u@raven-linux]# '
 
 alias ls='ls --color=auto'
 alias ll='ls -la'
@@ -2610,15 +2975,25 @@ alias la='ls -A'
 alias grep='grep --color=auto'
 alias ..='cd ..'
 
-bindkey -v
-bindkey '^R' history-incremental-search-backward
-
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin:$HOME/.local/bin
 export EDITOR=vem
+export VISUAL=vem
 EOF
+        cp "${SYSROOT_DIR}/etc/bashrc" "${SYSROOT_DIR}/etc/bash/bashrc"
+    fi
 
-    cp "${SYSROOT_DIR}/etc/zsh/zshrc" "${SYSROOT_DIR}/home/raven/.zshrc"
-    cp "${SYSROOT_DIR}/etc/zsh/zshrc" "${SYSROOT_DIR}/root/.zshrc"
+    cp "${SYSROOT_DIR}/etc/bashrc" "${SYSROOT_DIR}/etc/skel/.bashrc" 2>/dev/null || true
+    cp "${SYSROOT_DIR}/etc/bashrc" "${SYSROOT_DIR}/home/raven/.bashrc" 2>/dev/null || true
+    cp "${SYSROOT_DIR}/etc/bashrc" "${SYSROOT_DIR}/root/.bashrc" 2>/dev/null || true
+
+    cat > "${SYSROOT_DIR}/etc/skel/.bash_profile" << 'EOF'
+# RavenLinux bash_profile (generated)
+if [ -f ~/.bashrc ]; then
+    . ~/.bashrc
+fi
+EOF
+    cp "${SYSROOT_DIR}/etc/skel/.bash_profile" "${SYSROOT_DIR}/home/raven/.bash_profile" 2>/dev/null || true
+    cp "${SYSROOT_DIR}/etc/skel/.bash_profile" "${SYSROOT_DIR}/root/.bash_profile" 2>/dev/null || true
 
     # /etc/login.defs - shadow password suite configuration
     cat > "${SYSROOT_DIR}/etc/login.defs" << 'EOF'
@@ -2963,7 +3338,11 @@ main() {
     copy_system_utils
     copy_networking
     setup_pam_and_nss
-    setup_sudo
+    if [[ "${RAVEN_ENABLE_SUDO}" == "1" ]]; then
+        setup_sudo
+    else
+        rm -f "${SYSROOT_DIR}/bin/sudo" "${SYSROOT_DIR}/usr/bin/sudo" 2>/dev/null || true
+    fi
     setup_su
     copy_ca_certificates
     copy_firmware
