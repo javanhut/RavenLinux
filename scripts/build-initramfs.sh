@@ -54,6 +54,25 @@ done
 # Functions
 # =============================================================================
 
+check_dependencies() {
+    local missing=()
+    
+    for cmd in cpio gzip find; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing+=("$cmd")
+        fi
+    done
+    
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "ERROR: Missing required tools: ${missing[*]}"
+        echo ""
+        echo "On Arch Linux, install with:"
+        echo "  sudo pacman -S cpio gzip findutils"
+        echo ""
+        exit 1
+    fi
+}
+
 fixup_soname_symlink() {
     local dir="$1"
     local soname="$2"
@@ -946,6 +965,9 @@ print_summary() {
 # =============================================================================
 
 main() {
+    # Check required tools before anything else
+    check_dependencies
+
     # Initialize logging
     init_logging "build-initramfs" "RavenLinux Initramfs Build"
     enable_logging_trap

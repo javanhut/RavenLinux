@@ -268,23 +268,54 @@ build_bootloader() {
         return 0
     fi
 
-    # Check for UEFI target
-    if ! rustup target list --installed 2>/dev/null | grep -q "x86_64-unknown-uefi"; then
-        log_info "Adding UEFI target..."
-        rustup target add x86_64-unknown-uefi 2>/dev/null || {
-            log_warn "Failed to add UEFI target"
-            return 0
-        }
-    fi
-
     cd "${bootloader_dir}"
 
-    if cargo build --target x86_64-unknown-uefi --release 2>&1 | tee "${LOGS_DIR}/bootloader.log"; then
-        mkdir -p "${PACKAGES_DIR}/boot"
-        cp target/x86_64-unknown-uefi/release/raven-boot.efi "${PACKAGES_DIR}/boot/"
-        log_success "RavenBoot bootloader built"
+    # Determine build method based on available tooling
+    local build_cmd=""
+    local rust_sysroot
+    rust_sysroot="$(rustc --print sysroot 2>/dev/null)" || true
+
+    if command -v rustup &>/dev/null; then
+        # rustup is available - use target add method
+        if ! rustup target list --installed 2>/dev/null | grep -q "x86_64-unknown-uefi"; then
+            log_info "Adding UEFI target via rustup..."
+            rustup target add x86_64-unknown-uefi 2>/dev/null || {
+                log_warn "Failed to add UEFI target via rustup"
+                cd "${PROJECT_ROOT}"
+                return 0
+            }
+        fi
+        build_cmd="cargo build --target x86_64-unknown-uefi --release"
+    elif [[ -d "${rust_sysroot}/lib/rustlib/src/rust/library" ]] || \
+         [[ -d "/usr/lib/rustlib/src/rust/library" ]]; then
+        # System Rust with rust-src installed - use build-std
+        log_info "Using -Z build-std for UEFI target (system Rust)..."
+        build_cmd="cargo +nightly build --target x86_64-unknown-uefi --release -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem"
+        
+        # If nightly isn't available, try with stable and RUSTC_BOOTSTRAP
+        if ! cargo +nightly --version &>/dev/null; then
+            log_info "Nightly not available, using RUSTC_BOOTSTRAP=1..."
+            build_cmd="RUSTC_BOOTSTRAP=1 cargo build --target x86_64-unknown-uefi --release -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem"
+        fi
     else
-        log_warn "Failed to build bootloader"
+        log_warn "Cannot build UEFI bootloader: need either rustup or rust-src package"
+        log_warn "Install with: sudo pacman -S rust-src"
+        cd "${PROJECT_ROOT}"
+        return 0
+    fi
+
+    log_info "Build command: ${build_cmd}"
+
+    if eval "${build_cmd}" 2>&1 | tee "${LOGS_DIR}/bootloader.log"; then
+        mkdir -p "${PACKAGES_DIR}/boot"
+        if [[ -f target/x86_64-unknown-uefi/release/raven-boot.efi ]]; then
+            cp target/x86_64-unknown-uefi/release/raven-boot.efi "${PACKAGES_DIR}/boot/"
+            log_success "RavenBoot bootloader built"
+        else
+            log_warn "Bootloader binary not found after build"
+        fi
+    else
+        log_warn "Failed to build bootloader - check ${LOGS_DIR}/bootloader.log"
     fi
 
     cd "${PROJECT_ROOT}"

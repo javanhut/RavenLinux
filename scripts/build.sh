@@ -10,8 +10,13 @@
 #   -j, --jobs N    Number of parallel jobs (default: nproc)
 #   -a, --arch ARCH Target architecture (default: x86_64)
 #   -c, --clean     Clean build directory before building
+#   --check-deps    Check and install missing dependencies before building
 #   --no-log        Disable file logging
 #   -h, --help      Show this help message
+#
+# Note: 
+#   - Automatically checks for missing dependencies and offers to install them
+#   - If build directory exists with root ownership, prompts for sudo to fix
 #
 # Stages:
 #   all      Build everything (default)
@@ -59,6 +64,69 @@ source "${SCRIPT_DIR}/lib/logging.sh"
 # =============================================================================
 # Functions
 # =============================================================================
+
+# Check for required build dependencies
+check_build_dependencies() {
+    if [[ "${SKIP_DEP_CHECK:-false}" == "true" ]]; then
+        return 0
+    fi
+    
+    if [[ -f "${SCRIPT_DIR}/check-deps.sh" ]]; then
+        # Run in quiet mode first to check if anything is missing
+        local missing
+        missing=$("${SCRIPT_DIR}/check-deps.sh" -q 2>&1) || true
+        
+        if [[ -n "$missing" ]]; then
+            echo ""
+            echo "Some build dependencies are missing."
+            echo ""
+            # Run interactively to show details and offer installation
+            "${SCRIPT_DIR}/check-deps.sh"
+            local result=$?
+            if [[ $result -ne 0 ]]; then
+                echo ""
+                echo "Cannot proceed without required dependencies."
+                echo "Please install them and try again."
+                exit 1
+            fi
+        fi
+    fi
+}
+
+# Check and fix build directory permissions if owned by root
+fix_build_permissions() {
+    local current_user
+    current_user="$(id -un)"
+    
+    # Skip if running as root
+    if [[ "$current_user" == "root" ]]; then
+        return 0
+    fi
+    
+    # Check if build directory exists and is owned by someone else
+    if [[ -d "${RAVEN_BUILD}" ]]; then
+        local owner
+        owner="$(stat -c '%U' "${RAVEN_BUILD}" 2>/dev/null || echo "unknown")"
+        
+        if [[ "$owner" != "$current_user" ]]; then
+            echo ""
+            echo "Build directory '${RAVEN_BUILD}' is owned by '$owner'."
+            echo "You are running as '$current_user'."
+            echo ""
+            echo "This will cause permission errors. Fixing ownership..."
+            echo ""
+            
+            if sudo chown -R "${current_user}:$(id -gn)" "${RAVEN_BUILD}"; then
+                echo "Ownership fixed successfully."
+                echo ""
+            else
+                echo "ERROR: Failed to fix permissions. Please run manually:"
+                echo "  sudo chown -R ${current_user}:$(id -gn) ${RAVEN_BUILD}"
+                exit 1
+            fi
+        fi
+    fi
+}
 
 setup_directories() {
     log_step "Setting up build directories..."
@@ -288,6 +356,7 @@ Options:
     -j, --jobs N    Number of parallel jobs (default: $(nproc))
     -a, --arch ARCH Target architecture (default: x86_64)
     -c, --clean     Clean build directory before building
+    --skip-deps     Skip automatic dependency check
     --no-log        Disable file logging
     -h, --help      Show this help message
 
@@ -348,6 +417,10 @@ main() {
                 export RAVEN_NO_LOG=1
                 shift
                 ;;
+            --skip-deps)
+                SKIP_DEP_CHECK=true
+                shift
+                ;;
             all|stage0|stage1|stage2|stage3|security|stage4)
                 stage="$1"
                 shift
@@ -359,6 +432,12 @@ main() {
                 ;;
         esac
     done
+
+    # Check for required dependencies first
+    check_build_dependencies
+
+    # Fix build directory permissions before anything else
+    fix_build_permissions
 
     # Initialize logging
     init_logging "build" "RavenLinux Full Build - Stage: ${stage}"
