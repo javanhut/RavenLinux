@@ -322,7 +322,9 @@ func (m *RavenMenu) createUI() *gtk.Box {
 	logoutBtn.SetLabel("Logout")
 	logoutBtn.AddCSSClass("power-button")
 	logoutBtn.ConnectClicked(func() {
-		exec.Command("pkill", "-TERM", "raven-compositor").Start()
+		m.window.Close()
+		// Use hyprctl for Hyprland, fallback to other methods
+		exec.Command("sh", "-c", "hyprctl dispatch exit || pkill -TERM Hyprland || loginctl terminate-session self").Start()
 	})
 	powerBox.Append(logoutBtn)
 
@@ -330,7 +332,8 @@ func (m *RavenMenu) createUI() *gtk.Box {
 	rebootBtn.SetLabel("Reboot")
 	rebootBtn.AddCSSClass("power-button")
 	rebootBtn.ConnectClicked(func() {
-		exec.Command("reboot").Start()
+		m.window.Close()
+		exec.Command("sh", "-c", "systemctl reboot || reboot").Start()
 	})
 	powerBox.Append(rebootBtn)
 
@@ -339,7 +342,8 @@ func (m *RavenMenu) createUI() *gtk.Box {
 	shutdownBtn.AddCSSClass("power-button")
 	shutdownBtn.AddCSSClass("shutdown")
 	shutdownBtn.ConnectClicked(func() {
-		exec.Command("poweroff").Start()
+		m.window.Close()
+		exec.Command("sh", "-c", "systemctl poweroff || poweroff").Start()
 	})
 	powerBox.Append(shutdownBtn)
 

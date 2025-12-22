@@ -787,10 +787,13 @@ func (m *RavenSettingsMenu) createPanelPage() *gtk.ScrolledWindow {
 	content.Append(sectionTitle)
 
 	// Panel position
-	positions := []string{"top", "bottom"}
-	posDropdown := gtk.NewDropDown(gtk.NewStringList([]string{"Top", "Bottom"}), nil)
-	if m.settings.PanelPosition == "bottom" {
-		posDropdown.SetSelected(1)
+	positions := []string{"top", "bottom", "left", "right"}
+	posDropdown := gtk.NewDropDown(gtk.NewStringList([]string{"Top", "Bottom", "Left", "Right"}), nil)
+	for i, pos := range positions {
+		if pos == m.settings.PanelPosition {
+			posDropdown.SetSelected(uint(i))
+			break
+		}
 	}
 	posDropdown.Connect("notify::selected", func() {
 		idx := posDropdown.Selected()
@@ -799,7 +802,7 @@ func (m *RavenSettingsMenu) createPanelPage() *gtk.ScrolledWindow {
 			m.saveSettings()
 		}
 	})
-	content.Append(m.createSettingRow("Panel Position", "Where to display the panel", posDropdown))
+	content.Append(m.createSettingRow("Panel Position", "Where to display the panel (requires restart)", posDropdown))
 
 	// Panel height
 	heightAdj := gtk.NewAdjustment(float64(m.settings.PanelHeight), 24, 64, 1, 4, 0)

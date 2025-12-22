@@ -55,8 +55,11 @@ Cargo.lock
 /linux-*/
 *.ko
 *.o
-*.mod
+*.ko.mod
 *.mod.c
+# Explicitly allow go.mod files
+!go.mod
+!**/go.mod
 *.order
 *.symvers
 .tmp_versions/
