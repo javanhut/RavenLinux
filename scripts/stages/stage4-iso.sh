@@ -593,6 +593,133 @@ copy_kernel_modules() {
 }
 
 # =============================================================================
+# Build and install Raven desktop components (shell, menu, desktop, settings)
+# =============================================================================
+build_desktop_components() {
+    log_step "Building Raven desktop components..."
+
+    if ! command -v go &>/dev/null; then
+        log_warn "Go not found, skipping desktop component build"
+        return 0
+    fi
+
+    local desktop_dir="${PROJECT_ROOT}/desktop"
+    mkdir -p "${SYSROOT_DIR}/bin"
+    mkdir -p "${SYSROOT_DIR}/root/.config/hypr"
+    mkdir -p "${SYSROOT_DIR}/root/.config/raven/scripts"
+
+    # Build raven-shell (panel/taskbar)
+    if [[ -d "${desktop_dir}/raven-shell" ]]; then
+        log_info "  Building raven-shell..."
+        cd "${desktop_dir}/raven-shell"
+        if CGO_ENABLED=1 go build -o raven-shell . 2>&1; then
+            cp raven-shell "${SYSROOT_DIR}/bin/"
+            chmod +x "${SYSROOT_DIR}/bin/raven-shell"
+            log_info "  Installed raven-shell"
+        else
+            log_warn "  Failed to build raven-shell"
+        fi
+        cd "${PROJECT_ROOT}"
+    fi
+
+    # Build raven-desktop (background/icons)
+    if [[ -d "${desktop_dir}/raven-desktop" ]]; then
+        log_info "  Building raven-desktop..."
+        cd "${desktop_dir}/raven-desktop"
+        if CGO_ENABLED=1 go build -o raven-desktop . 2>&1; then
+            cp raven-desktop "${SYSROOT_DIR}/bin/"
+            chmod +x "${SYSROOT_DIR}/bin/raven-desktop"
+            log_info "  Installed raven-desktop"
+        else
+            log_warn "  Failed to build raven-desktop"
+        fi
+        cd "${PROJECT_ROOT}"
+    fi
+
+    # Build raven-menu (application launcher)
+    if [[ -d "${desktop_dir}/raven-menu" ]]; then
+        log_info "  Building raven-menu..."
+        cd "${desktop_dir}/raven-menu"
+        if CGO_ENABLED=1 go build -o raven-menu . 2>&1; then
+            cp raven-menu "${SYSROOT_DIR}/bin/"
+            chmod +x "${SYSROOT_DIR}/bin/raven-menu"
+            log_info "  Installed raven-menu"
+        else
+            log_warn "  Failed to build raven-menu"
+        fi
+        cd "${PROJECT_ROOT}"
+    fi
+
+    # Build raven-settings-menu (settings application)
+    if [[ -d "${desktop_dir}/raven-settings-menu" ]]; then
+        log_info "  Building raven-settings-menu..."
+        cd "${desktop_dir}/raven-settings-menu"
+        if CGO_ENABLED=1 go build -o raven-settings-menu . 2>&1; then
+            cp raven-settings-menu "${SYSROOT_DIR}/bin/"
+            chmod +x "${SYSROOT_DIR}/bin/raven-settings-menu"
+            log_info "  Installed raven-settings-menu"
+        else
+            log_warn "  Failed to build raven-settings-menu"
+        fi
+        cd "${PROJECT_ROOT}"
+    fi
+
+    # Install Hyprland configuration from desktop/config
+    if [[ -f "${desktop_dir}/config/hypr/hyprland.conf" ]]; then
+        cp "${desktop_dir}/config/hypr/hyprland.conf" "${SYSROOT_DIR}/root/.config/hypr/hyprland.conf"
+        mkdir -p "${SYSROOT_DIR}/etc/hypr"
+        cp "${desktop_dir}/config/hypr/hyprland.conf" "${SYSROOT_DIR}/etc/hypr/hyprland.conf"
+        log_info "  Installed Hyprland config"
+    fi
+
+    # Install Raven scripts
+    if [[ -d "${desktop_dir}/config/raven/scripts" ]]; then
+        cp "${desktop_dir}/config/raven/scripts"/*.sh "${SYSROOT_DIR}/root/.config/raven/scripts/" 2>/dev/null || true
+        chmod +x "${SYSROOT_DIR}/root/.config/raven/scripts"/*.sh 2>/dev/null || true
+        log_info "  Installed Raven scripts"
+    fi
+
+    # Install default Raven settings
+    if [[ ! -f "${SYSROOT_DIR}/root/.config/raven/settings.json" ]]; then
+        cat > "${SYSROOT_DIR}/root/.config/raven/settings.json" << 'EOF'
+{
+  "theme": "dark",
+  "accent_color": "#009688",
+  "font_size": 14,
+  "icon_theme": "Papirus-Dark",
+  "cursor_theme": "Adwaita",
+  "panel_opacity": 0.95,
+  "enable_animations": true,
+  "wallpaper_path": "",
+  "wallpaper_mode": "fill",
+  "show_desktop_icons": false,
+  "panel_position": "top",
+  "panel_height": 38,
+  "show_clock": true,
+  "clock_format": "24h",
+  "show_workspaces": true,
+  "border_width": 2,
+  "gap_size": 8,
+  "focus_follows_mouse": false,
+  "titlebar_buttons": "close,minimize,maximize",
+  "keyboard_layout": "us",
+  "mouse_speed": 0.5,
+  "touchpad_natural_scroll": true,
+  "touchpad_tap_to_click": true,
+  "screen_timeout": 300,
+  "suspend_timeout": 900,
+  "lid_close_action": "suspend",
+  "master_volume": 80,
+  "mute_on_lock": false
+}
+EOF
+        log_info "  Created default Raven settings"
+    fi
+
+    log_success "Raven desktop components built and installed"
+}
+
+# =============================================================================
 # Copy Hyprland compositor and dependencies from host
 # =============================================================================
 copy_wayland_compositor() {
@@ -616,13 +743,17 @@ copy_wayland_compositor() {
             fi
         done || true
 
-        # Copy Hyprland config
+        # Copy Hyprland config (check desktop/config first, then configs/)
         mkdir -p "${SYSROOT_DIR}/etc/hypr"
         mkdir -p "${SYSROOT_DIR}/root/.config/hypr"
-        if [[ -f "${PROJECT_ROOT}/configs/hyprland.conf" ]]; then
+        if [[ -f "${PROJECT_ROOT}/desktop/config/hypr/hyprland.conf" ]]; then
+            cp "${PROJECT_ROOT}/desktop/config/hypr/hyprland.conf" "${SYSROOT_DIR}/etc/hypr/hyprland.conf"
+            cp "${PROJECT_ROOT}/desktop/config/hypr/hyprland.conf" "${SYSROOT_DIR}/root/.config/hypr/hyprland.conf"
+            log_info "  Copied hyprland.conf from desktop/config"
+        elif [[ -f "${PROJECT_ROOT}/configs/hyprland.conf" ]]; then
             cp "${PROJECT_ROOT}/configs/hyprland.conf" "${SYSROOT_DIR}/etc/hypr/hyprland.conf"
             cp "${PROJECT_ROOT}/configs/hyprland.conf" "${SYSROOT_DIR}/root/.config/hypr/hyprland.conf"
-            log_info "  Copied hyprland.conf"
+            log_info "  Copied hyprland.conf from configs"
         fi
 
         # Copy hyprctl if available
@@ -1191,6 +1322,7 @@ main() {
     create_live_init
     copy_boot_files
     copy_kernel_modules
+    build_desktop_components
     copy_wayland_compositor
     create_squashfs
     setup_ravenboot || true  # Continue even if RavenBoot not available

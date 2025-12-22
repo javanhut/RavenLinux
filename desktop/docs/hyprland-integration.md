@@ -197,9 +197,45 @@ All components use GTK4 with consistent CSS theming:
 ## Troubleshooting
 
 ### Panel not appearing
-1. Check if gtk4-layer-shell is installed
+1. Check if gtk4-layer-shell is installed: `ls /usr/lib/libgtk4-layer-shell*`
 2. Verify Hyprland is running: `hyprctl version`
 3. Check logs: `journalctl --user -f`
+4. Check if binary runs manually: `/bin/raven-shell 2>&1`
+
+### Live ISO Issues
+
+If desktop components don't render in the live ISO:
+
+1. **Check library dependencies**:
+   ```bash
+   ldd /bin/raven-shell
+   ldd /bin/raven-desktop
+   ```
+   Look for "not found" libraries.
+
+2. **Check Wayland session log**:
+   ```bash
+   cat /run/raven-wayland-session.log
+   ```
+
+3. **Manually start components**:
+   ```bash
+   # In a terminal within Hyprland
+   raven-shell 2>&1 | tee /tmp/shell.log &
+   raven-desktop 2>&1 | tee /tmp/desktop.log &
+   ```
+
+4. **Verify environment**:
+   ```bash
+   echo $WAYLAND_DISPLAY
+   echo $XDG_RUNTIME_DIR
+   ls -la $XDG_RUNTIME_DIR/wayland-*
+   ```
+
+5. **Check Hyprland config loaded**:
+   ```bash
+   cat ~/.config/hypr/hyprland.conf | grep exec-once
+   ```
 
 ### Dock not showing windows
 1. Verify hyprctl works: `hyprctl clients -j`
