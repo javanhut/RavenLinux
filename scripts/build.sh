@@ -326,6 +326,17 @@ build_security() {
     fi
 }
 
+# Build desktop environment (raven-shell, raven-menu, raven-desktop, raven-settings-menu)
+build_desktop() {
+    log_section "Building Desktop Environment"
+
+    if [[ -f "${RAVEN_ROOT}/scripts/build-desktop-local.sh" ]]; then
+        run_logged "${RAVEN_ROOT}/scripts/build-desktop-local.sh"
+    else
+        log_warn "build-desktop-local.sh not found, skipping"
+    fi
+}
+
 # Stage 4: Generate ISO
 build_stage4() {
     log_section "Stage 4: Generating ISO"
@@ -350,6 +361,7 @@ Stages:
     stage2      Native rebuild of entire system
     stage3      Build additional packages
     security    Build security packages (elogind, polkit, accountsservice)
+    desktop     Build desktop environment (raven-shell, raven-menu, etc.)
     stage4      Generate bootable ISO image
 
 Options:
@@ -421,7 +433,7 @@ main() {
                 SKIP_DEP_CHECK=true
                 shift
                 ;;
-            all|stage0|stage1|stage2|stage3|security|stage4)
+            all|stage0|stage1|stage2|stage3|security|desktop|stage4)
                 stage="$1"
                 shift
                 ;;
@@ -466,6 +478,7 @@ main() {
             build_stage2
             build_stage3
             build_security
+            build_desktop
             build_stage4
             ;;
         stage0)
@@ -482,6 +495,9 @@ main() {
             ;;
         security)
             build_security
+            ;;
+        desktop)
+            build_desktop
             ;;
         stage4)
             build_stage4

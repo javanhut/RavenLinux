@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,13 +39,22 @@ type DesktopIcon struct {
 	Y    int
 }
 
+// RavenSettings holds shared settings
+type RavenSettings struct {
+	WallpaperPath    string `json:"wallpaper_path"`
+	WallpaperMode    string `json:"wallpaper_mode"`
+	ShowDesktopIcons bool   `json:"show_desktop_icons"`
+}
+
 // RavenDesktop is the desktop background with icons
 type RavenDesktop struct {
-	app      *gtk.Application
-	window   *gtk.Window
-	iconGrid *gtk.FlowBox
-	icons    []DesktopIcon
-	popover  *gtk.PopoverMenu
+	app          *gtk.Application
+	window       *gtk.Window
+	iconGrid     *gtk.FlowBox
+	icons        []DesktopIcon
+	popover      *gtk.PopoverMenu
+	settings     RavenSettings
+	settingsPath string
 }
 
 func main() {
@@ -64,6 +74,9 @@ func main() {
 }
 
 func (d *RavenDesktop) activate() {
+	// Load shared settings
+	d.loadSettings()
+
 	d.window = gtk.NewWindow()
 	d.window.SetTitle("Raven Desktop")
 	d.window.SetDecorated(false)
@@ -86,6 +99,22 @@ func (d *RavenDesktop) activate() {
 
 	d.window.SetApplication(d.app)
 	d.window.Present()
+}
+
+func (d *RavenDesktop) loadSettings() {
+	d.settingsPath = filepath.Join(os.Getenv("HOME"), ".config", "raven", "settings.json")
+
+	// Default settings
+	d.settings = RavenSettings{
+		WallpaperPath:    "",
+		WallpaperMode:    "fill",
+		ShowDesktopIcons: true,
+	}
+
+	data, err := os.ReadFile(d.settingsPath)
+	if err == nil {
+		json.Unmarshal(data, &d.settings)
+	}
 }
 
 func (d *RavenDesktop) initLayerShell() {
@@ -158,11 +187,15 @@ func (d *RavenDesktop) createUI() *gtk.Overlay {
 	bg.SetHExpand(true)
 	bg.SetVExpand(true)
 
-	// Try to load wallpaper
-	wallpaperPaths := []string{
+	// Try to load wallpaper from settings first, then fallback
+	wallpaperPaths := []string{}
+	if d.settings.WallpaperPath != "" {
+		wallpaperPaths = append(wallpaperPaths, d.settings.WallpaperPath)
+	}
+	wallpaperPaths = append(wallpaperPaths,
 		"/usr/share/backgrounds/raven-wallpaper.png",
 		"/usr/share/backgrounds/default.png",
-	}
+	)
 
 	var picture *gtk.Picture
 	for _, path := range wallpaperPaths {
@@ -294,13 +327,13 @@ func (d *RavenDesktop) setupContextMenu() {
 
 	settingsAction := gio.NewSimpleAction("settings", nil)
 	settingsAction.ConnectActivate(func(v *glib.Variant) {
-		// Settings not implemented yet
+		d.launchApp("raven-settings-menu")
 	})
 	d.app.AddAction(settingsAction)
 
 	wallpaperAction := gio.NewSimpleAction("wallpaper", nil)
 	wallpaperAction.ConnectActivate(func(v *glib.Variant) {
-		// Wallpaper selector not implemented yet
+		d.launchApp("waypaper || raven-settings-menu")
 	})
 	d.app.AddAction(wallpaperAction)
 
