@@ -593,6 +593,97 @@ copy_kernel_modules() {
 }
 
 # =============================================================================
+# Copy Hyprland compositor and dependencies from host
+# =============================================================================
+copy_wayland_compositor() {
+    log_step "Copying Wayland compositor from host..."
+
+    # Copy Hyprland if available
+    if command -v Hyprland &>/dev/null; then
+        local hyprland_bin
+        hyprland_bin="$(which Hyprland)"
+        cp "$hyprland_bin" "${SYSROOT_DIR}/bin/"
+        chmod +x "${SYSROOT_DIR}/bin/Hyprland"
+        log_info "  Copied Hyprland"
+
+        # Copy Hyprland libraries
+        ldd "$hyprland_bin" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
+            [[ -z "$lib" || ! -f "$lib" ]] && continue
+            dest="${SYSROOT_DIR}${lib}"
+            if [[ ! -f "$dest" ]]; then
+                mkdir -p "$(dirname "$dest")"
+                cp -L "$lib" "$dest" 2>/dev/null || true
+            fi
+        done || true
+
+        # Copy Hyprland config
+        mkdir -p "${SYSROOT_DIR}/etc/hypr"
+        mkdir -p "${SYSROOT_DIR}/root/.config/hypr"
+        if [[ -f "${PROJECT_ROOT}/configs/hyprland.conf" ]]; then
+            cp "${PROJECT_ROOT}/configs/hyprland.conf" "${SYSROOT_DIR}/etc/hypr/hyprland.conf"
+            cp "${PROJECT_ROOT}/configs/hyprland.conf" "${SYSROOT_DIR}/root/.config/hypr/hyprland.conf"
+            log_info "  Copied hyprland.conf"
+        fi
+
+        # Copy hyprctl if available
+        if command -v hyprctl &>/dev/null; then
+            cp "$(which hyprctl)" "${SYSROOT_DIR}/bin/"
+            log_info "  Copied hyprctl"
+        fi
+
+        # Copy Hyprland data files
+        if [[ -d /usr/share/hyprland ]]; then
+            mkdir -p "${SYSROOT_DIR}/usr/share/hyprland"
+            cp -a /usr/share/hyprland/. "${SYSROOT_DIR}/usr/share/hyprland/" 2>/dev/null || true
+            log_info "  Copied /usr/share/hyprland"
+        fi
+
+        # Copy wayland-protocols
+        if [[ -d /usr/share/wayland-protocols ]]; then
+            mkdir -p "${SYSROOT_DIR}/usr/share/wayland-protocols"
+            cp -a /usr/share/wayland-protocols/. "${SYSROOT_DIR}/usr/share/wayland-protocols/" 2>/dev/null || true
+            log_info "  Copied wayland-protocols"
+        fi
+
+        # Copy XKB keyboard layouts
+        if [[ -d /usr/share/X11/xkb ]]; then
+            mkdir -p "${SYSROOT_DIR}/usr/share/X11/xkb"
+            cp -a /usr/share/X11/xkb/. "${SYSROOT_DIR}/usr/share/X11/xkb/" 2>/dev/null || true
+            log_info "  Copied XKB layouts"
+        fi
+
+        log_success "Hyprland compositor copied"
+    else
+        log_warn "Hyprland not found on host - install with: sudo pacman -S hyprland"
+    fi
+
+    # Copy seatd if available
+    if command -v seatd &>/dev/null; then
+        cp "$(which seatd)" "${SYSROOT_DIR}/bin/" 2>/dev/null || true
+        log_info "  Copied seatd"
+    fi
+
+    # Copy Xwayland if available
+    if command -v Xwayland &>/dev/null; then
+        local xwayland_bin
+        xwayland_bin="$(which Xwayland)"
+        if [[ ! -f "${SYSROOT_DIR}/bin/Xwayland" ]]; then
+            cp "$xwayland_bin" "${SYSROOT_DIR}/bin/"
+            log_info "  Copied Xwayland"
+            # Copy Xwayland libraries
+            ldd "$xwayland_bin" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
+                [[ -z "$lib" || ! -f "$lib" ]] && continue
+                dest="${SYSROOT_DIR}${lib}"
+                if [[ ! -f "$dest" ]]; then
+                    mkdir -p "$(dirname "$dest")"
+                    cp -L "$lib" "$dest" 2>/dev/null || true
+                fi
+            done || true
+        fi
+    fi
+}
+
+# =============================================================================
 # Install packages to sysroot
 # =============================================================================
 install_packages_to_sysroot() {
@@ -648,11 +739,20 @@ install_packages_to_sysroot() {
         cp -a "/usr/share/fontconfig/." "${SYSROOT_DIR}/usr/share/fontconfig/" 2>/dev/null || true
         log_info "  Copied /usr/share/fontconfig"
     fi
-    if [[ -d "/usr/share/fonts" ]]; then
-        mkdir -p "${SYSROOT_DIR}/usr/share/fonts"
-        cp -a "/usr/share/fonts/." "${SYSROOT_DIR}/usr/share/fonts/" 2>/dev/null || true
-        log_info "  Copied /usr/share/fonts"
+    # Copy only JetBrains Mono Nerd Font
+    mkdir -p "${SYSROOT_DIR}/usr/share/fonts/TTF"
+    find /usr/share/fonts -type f \( -iname "*JetBrains*Nerd*" -o -iname "*JetBrainsMono*Nerd*" \) \
+        -exec cp {} "${SYSROOT_DIR}/usr/share/fonts/TTF/" \; 2>/dev/null || true
+    # Fallback: check common nerd fonts location
+    if [[ -d "/usr/share/fonts/TTF" ]]; then
+        cp /usr/share/fonts/TTF/*JetBrains*Nerd* "${SYSROOT_DIR}/usr/share/fonts/TTF/" 2>/dev/null || true
     fi
+    if [[ -d "/usr/share/fonts/OTF" ]]; then
+        cp /usr/share/fonts/OTF/*JetBrains*Nerd* "${SYSROOT_DIR}/usr/share/fonts/TTF/" 2>/dev/null || true
+    fi
+    local font_count
+    font_count=$(find "${SYSROOT_DIR}/usr/share/fonts" -type f 2>/dev/null | wc -l)
+    log_info "  Copied JetBrains Mono Nerd Font (${font_count} files)"
     mkdir -p "${SYSROOT_DIR}/var/cache/fontconfig" 2>/dev/null || true
 
     # Cursor themes (needed for proper cursor display in Wayland compositors).
@@ -688,6 +788,48 @@ install_packages_to_sysroot() {
 }
 
 # =============================================================================
+# Clean up sysroot to reduce ISO size
+# =============================================================================
+cleanup_sysroot() {
+    log_step "Cleaning up sysroot to reduce size..."
+
+    local before_size
+    before_size=$(du -sh "${SYSROOT_DIR}" 2>/dev/null | cut -f1)
+
+    # Remove unnecessary files to reduce squashfs size
+    rm -rf "${SYSROOT_DIR}/usr/share/doc" 2>/dev/null || true
+    rm -rf "${SYSROOT_DIR}/usr/share/man" 2>/dev/null || true
+    rm -rf "${SYSROOT_DIR}/usr/share/info" 2>/dev/null || true
+    rm -rf "${SYSROOT_DIR}/usr/share/locale"/*/ 2>/dev/null || true
+    rm -rf "${SYSROOT_DIR}/usr/include" 2>/dev/null || true
+    rm -rf "${SYSROOT_DIR}/usr/share/gtk-doc" 2>/dev/null || true
+    rm -rf "${SYSROOT_DIR}/usr/share/help" 2>/dev/null || true
+    
+    # Remove static libraries
+    find "${SYSROOT_DIR}" -name "*.a" -delete 2>/dev/null || true
+    
+    # Remove .pyc files
+    find "${SYSROOT_DIR}" -name "*.pyc" -delete 2>/dev/null || true
+    find "${SYSROOT_DIR}" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+    
+    # Strip binaries (reduce size significantly)
+    find "${SYSROOT_DIR}/bin" "${SYSROOT_DIR}/sbin" "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/usr/sbin" \
+        -type f -executable 2>/dev/null | while read -r bin; do
+        strip --strip-unneeded "$bin" 2>/dev/null || true
+    done
+    
+    # Strip shared libraries
+    find "${SYSROOT_DIR}" -name "*.so*" -type f 2>/dev/null | while read -r lib; do
+        strip --strip-unneeded "$lib" 2>/dev/null || true
+    done
+
+    local after_size
+    after_size=$(du -sh "${SYSROOT_DIR}" 2>/dev/null | cut -f1)
+    log_info "  Sysroot size: ${before_size} -> ${after_size}"
+    log_success "Sysroot cleaned up"
+}
+
+# =============================================================================
 # Create squashfs filesystem
 # =============================================================================
 create_squashfs() {
@@ -698,6 +840,9 @@ create_squashfs() {
 
     # Install packages to sysroot before creating squashfs
     install_packages_to_sysroot
+
+    # Clean up to reduce size
+    cleanup_sysroot
 
     local pseudo="${LOGS_DIR}/squashfs.pseudo"
     : > "${pseudo}"
@@ -972,12 +1117,14 @@ generate_iso() {
         # Fallback to simpler EFI-only ISO
         log_warn "Hybrid ISO failed, creating EFI-only ISO..."
         xorriso -as mkisofs \
+            -iso-level 3 \
             -R -J -joliet-long \
             -volid "${ISO_LABEL}" \
             -output "${ISO_OUTPUT}" \
             -eltorito-alt-boot \
             -e boot/efiboot.img \
             -no-emul-boot \
+            -isohybrid-gpt-basdat \
             "${ISO_ROOT}" 2>&1 | tee "${LOGS_DIR}/xorriso.log"
     fi
 
@@ -1044,6 +1191,7 @@ main() {
     create_live_init
     copy_boot_files
     copy_kernel_modules
+    copy_wayland_compositor
     create_squashfs
     setup_ravenboot || true  # Continue even if RavenBoot not available
     setup_grub  # GRUB as fallback for BIOS

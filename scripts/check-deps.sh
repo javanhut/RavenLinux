@@ -92,6 +92,11 @@ DEPENDENCIES=(
     "mcopy:mtools:-:-:-:-:-:Copy files to FAT images"
     "mmd:mtools:-:-:-:-:-:Create directories in FAT images"
     
+    # Wayland compositor and display server
+    "Hyprland:hyprland:hyprland:hyprland:hyprland:hyprland:hyprland:Hyprland Wayland compositor"
+    "Xwayland:xorg-xwayland:xwayland:xorg-x11-server-Xwayland:xwayland:xorg-server-xwayland:xwayland:XWayland X11 compatibility"
+    "seatd:seatd:seatd:seatd:seatd:seatd:seatd:Seat management daemon"
+    
     # Build systems
     "cargo:rust:-:rust-cargo:cargo:rust:rust:Rust package manager"
     "rust-src:rust-src:rustc-src:rust-src:rust-src:rust-src:rust-src:Rust source for cross-compilation"
