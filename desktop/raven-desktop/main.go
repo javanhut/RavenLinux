@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"unsafe"
 
+	"raven-desktop/fuzzy"
+
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
@@ -67,7 +69,7 @@ type RavenDesktop struct {
 	settings       RavenSettings
 	settingsPath   string
 	pinnedAppsPath string
-	fuzzyFinder    *FuzzyFinder
+	fuzzyFinder    *fuzzy.Finder
 }
 
 func main() {
@@ -259,6 +261,7 @@ func (d *RavenDesktop) createUI() *gtk.Overlay {
 	// Icon grid
 	d.iconGrid = gtk.NewFlowBox()
 	d.iconGrid.SetSelectionMode(gtk.SelectionSingle)
+	d.iconGrid.SetActivateOnSingleClick(false) // Double-click to activate
 	d.iconGrid.SetHomogeneous(true)
 	d.iconGrid.SetRowSpacing(16)
 	d.iconGrid.SetColumnSpacing(16)
@@ -270,6 +273,7 @@ func (d *RavenDesktop) createUI() *gtk.Overlay {
 	d.iconGrid.SetMinChildrenPerLine(1)
 	d.iconGrid.SetVAlign(gtk.AlignStart)
 	d.iconGrid.SetHAlign(gtk.AlignStart)
+	d.iconGrid.SetCanFocus(true)
 
 	// Add icons
 	for i, icon := range d.icons {
@@ -294,6 +298,8 @@ func (d *RavenDesktop) createIconWidget(icon DesktopIcon, index int) *gtk.Box {
 	box := gtk.NewBox(gtk.OrientationVertical, 4)
 	box.AddCSSClass("desktop-icon")
 	box.SetHAlign(gtk.AlignCenter)
+	box.SetFocusable(true)
+	box.SetCanFocus(true)
 
 	// Icon image
 	var image *gtk.Image
@@ -332,14 +338,31 @@ func (d *RavenDesktop) createIconWidget(icon DesktopIcon, index int) *gtk.Box {
 	label.SetJustify(gtk.JustifyCenter)
 	box.Append(label)
 
+	// Add left-click handler for selection
+	iconIdx := index
+	leftClick := gtk.NewGestureClick()
+	leftClick.SetButton(1) // Left click
+	leftClick.ConnectPressed(func(nPress int, x, y float64) {
+		// Select this icon in the FlowBox
+		child := d.iconGrid.ChildAtIndex(iconIdx)
+		if child != nil {
+			d.iconGrid.SelectChild(child)
+		}
+		// Double-click to launch
+		if nPress == 2 {
+			d.launchApp(d.icons[iconIdx].Exec)
+		}
+	})
+	box.AddController(leftClick)
+
 	// Add right-click menu for unpinning
 	iconName := icon.Name // Capture for closure
-	gestureClick := gtk.NewGestureClick()
-	gestureClick.SetButton(3) // Right click
-	gestureClick.ConnectPressed(func(nPress int, x, y float64) {
+	rightClick := gtk.NewGestureClick()
+	rightClick.SetButton(3) // Right click
+	rightClick.ConnectPressed(func(nPress int, x, y float64) {
 		d.showIconContextMenu(box, iconName, x, y)
 	})
-	box.AddController(gestureClick)
+	box.AddController(rightClick)
 
 	return box
 }
@@ -506,14 +529,18 @@ func (d *RavenDesktop) setWallpaper(path string) {
 
 func (d *RavenDesktop) showFuzzyFinder() {
 	if d.fuzzyFinder == nil {
-		d.fuzzyFinder = NewFuzzyFinder(d)
+		d.fuzzyFinder = fuzzy.New(d.window, func(name, exec, icon string) {
+			d.pinApp(DesktopIcon{Name: name, Exec: exec, Icon: icon})
+		})
 	}
 	d.fuzzyFinder.Show(false)
 }
 
 func (d *RavenDesktop) showFuzzyFinderForPinning() {
 	if d.fuzzyFinder == nil {
-		d.fuzzyFinder = NewFuzzyFinder(d)
+		d.fuzzyFinder = fuzzy.New(d.window, func(name, exec, icon string) {
+			d.pinApp(DesktopIcon{Name: name, Exec: exec, Icon: icon})
+		})
 	}
 	d.fuzzyFinder.Show(true)
 }

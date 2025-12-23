@@ -1,4 +1,4 @@
-package main
+package fuzzy
 
 import (
 	"bufio"
@@ -13,53 +13,58 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
 
-// SearchResultType represents the type of search result
-type SearchResultType int
+// ResultType represents the type of search result
+type ResultType int
 
 const (
-	ResultTypeApp SearchResultType = iota
+	ResultTypeApp ResultType = iota
 	ResultTypeFile
 	ResultTypeCommand
 )
 
-// SearchResult represents a single search result
-type SearchResult struct {
+// Result represents a single search result
+type Result struct {
 	Name        string
 	Description string
 	Path        string
 	Exec        string
 	Icon        string
-	Type        SearchResultType
+	Type        ResultType
 	Score       int
 }
 
-// FuzzyFinder provides a fuzzy search interface for apps, files, and commands
-type FuzzyFinder struct {
-	desktop      *RavenDesktop
+// PinCallback is called when an app should be pinned to the desktop
+type PinCallback func(name, exec, icon string)
+
+// Finder provides a fuzzy search interface for apps, files, and commands
+type Finder struct {
+	parentWindow *gtk.Window
 	window       *gtk.Window
 	searchEntry  *gtk.Entry
 	resultsList  *gtk.ListBox
-	results      []SearchResult
-	allApps      []SearchResult
-	allCommands  []SearchResult
+	results      []Result
+	allApps      []Result
+	allCommands  []Result
 	pinMode      bool
 	mutex        sync.Mutex
 	selectedIdx  int
+	pinCallback  PinCallback
 }
 
-// NewFuzzyFinder creates a new fuzzy finder instance
-func NewFuzzyFinder(desktop *RavenDesktop) *FuzzyFinder {
-	f := &FuzzyFinder{
-		desktop: desktop,
+// New creates a new fuzzy finder instance
+func New(parent *gtk.Window, pinCallback PinCallback) *Finder {
+	f := &Finder{
+		parentWindow: parent,
+		pinCallback:  pinCallback,
 	}
 	f.buildIndex()
 	f.createUI()
 	return f
 }
 
-func (f *FuzzyFinder) buildIndex() {
-	f.allApps = []SearchResult{}
-	f.allCommands = []SearchResult{}
+func (f *Finder) buildIndex() {
+	f.allApps = []Result{}
+	f.allCommands = []Result{}
 
 	// Index applications from .desktop files
 	appDirs := []string{
@@ -103,7 +108,7 @@ func (f *FuzzyFinder) buildIndex() {
 			// Check if executable
 			if info.Mode()&0111 != 0 {
 				seenCommands[name] = true
-				f.allCommands = append(f.allCommands, SearchResult{
+				f.allCommands = append(f.allCommands, Result{
 					Name:        name,
 					Description: "Command",
 					Path:        filepath.Join(p, name),
@@ -116,8 +121,8 @@ func (f *FuzzyFinder) buildIndex() {
 	}
 }
 
-func (f *FuzzyFinder) parseDesktopFile(path string) SearchResult {
-	result := SearchResult{
+func (f *Finder) parseDesktopFile(path string) Result {
+	result := Result{
 		Type: ResultTypeApp,
 		Path: path,
 	}
@@ -172,11 +177,11 @@ func (f *FuzzyFinder) parseDesktopFile(path string) SearchResult {
 	return result
 }
 
-func (r *SearchResult) isHidden() bool {
+func (r *Result) isHidden() bool {
 	return r.Name == ""
 }
 
-func (f *FuzzyFinder) createUI() {
+func (f *Finder) createUI() {
 	f.window = gtk.NewWindow()
 	f.window.SetTitle("Fuzzy Finder")
 	f.window.SetDefaultSize(600, 400)
@@ -299,7 +304,8 @@ func (f *FuzzyFinder) createUI() {
 	})
 }
 
-func (f *FuzzyFinder) Show(pinMode bool) {
+// Show displays the fuzzy finder window
+func (f *Finder) Show(pinMode bool) {
 	f.pinMode = pinMode
 	f.searchEntry.SetText("")
 	f.selectedIdx = 0
@@ -313,28 +319,32 @@ func (f *FuzzyFinder) Show(pinMode bool) {
 	// Show initial results (all apps)
 	f.search("")
 
-	f.window.SetTransientFor(f.desktop.window)
+	if f.parentWindow != nil {
+		f.window.SetTransientFor(f.parentWindow)
+	}
 	f.window.Present()
 	f.searchEntry.GrabFocus()
 }
 
-func (f *FuzzyFinder) Hide() {
+// Hide hides the fuzzy finder window
+func (f *Finder) Hide() {
 	f.window.Hide()
 }
 
-func (f *FuzzyFinder) search(query string) {
+func (f *Finder) search(query string) {
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
 
-	f.results = []SearchResult{}
+	f.results = []Result{}
 	query = strings.ToLower(strings.TrimSpace(query))
 
 	// Search applications
 	for _, app := range f.allApps {
 		score := f.fuzzyMatch(query, app.Name)
 		if score > 0 {
-			app.Score = score + 100 // Boost apps
-			f.results = append(f.results, app)
+			appCopy := app
+			appCopy.Score = score + 100 // Boost apps
+			f.results = append(f.results, appCopy)
 		}
 	}
 
@@ -344,8 +354,9 @@ func (f *FuzzyFinder) search(query string) {
 		for _, cmd := range f.allCommands {
 			score := f.fuzzyMatch(query, cmd.Name)
 			if score > 0 {
-				cmd.Score = score
-				f.results = append(f.results, cmd)
+				cmdCopy := cmd
+				cmdCopy.Score = score
+				f.results = append(f.results, cmdCopy)
 			}
 		}
 
@@ -368,7 +379,7 @@ func (f *FuzzyFinder) search(query string) {
 	f.updateResultsList()
 }
 
-func (f *FuzzyFinder) fuzzyMatch(query, target string) int {
+func (f *Finder) fuzzyMatch(query, target string) int {
 	if query == "" {
 		return 1 // Show all when query is empty
 	}
@@ -406,7 +417,7 @@ func (f *FuzzyFinder) fuzzyMatch(query, target string) int {
 	return 0
 }
 
-func (f *FuzzyFinder) searchFiles(query string) {
+func (f *Finder) searchFiles(query string) {
 	// Search in common directories
 	searchDirs := []string{
 		os.Getenv("HOME"),
@@ -455,7 +466,7 @@ func (f *FuzzyFinder) searchFiles(query string) {
 					}
 				}
 
-				f.results = append(f.results, SearchResult{
+				f.results = append(f.results, Result{
 					Name:        name,
 					Description: dir,
 					Path:        path,
@@ -469,7 +480,7 @@ func (f *FuzzyFinder) searchFiles(query string) {
 	}
 }
 
-func (f *FuzzyFinder) updateResultsList() {
+func (f *Finder) updateResultsList() {
 	// Clear existing rows
 	for {
 		row := f.resultsList.RowAtIndex(0)
@@ -495,7 +506,7 @@ func (f *FuzzyFinder) updateResultsList() {
 	}
 }
 
-func (f *FuzzyFinder) createResultRow(result SearchResult) *gtk.Box {
+func (f *Finder) createResultRow(result Result) *gtk.Box {
 	row := gtk.NewBox(gtk.OrientationHorizontal, 12)
 	row.SetMarginTop(4)
 	row.SetMarginBottom(4)
@@ -541,7 +552,7 @@ func (f *FuzzyFinder) createResultRow(result SearchResult) *gtk.Box {
 	return row
 }
 
-func (f *FuzzyFinder) selectNext() {
+func (f *Finder) selectNext() {
 	if len(f.results) == 0 {
 		return
 	}
@@ -555,7 +566,7 @@ func (f *FuzzyFinder) selectNext() {
 	}
 }
 
-func (f *FuzzyFinder) selectPrev() {
+func (f *Finder) selectPrev() {
 	if len(f.results) == 0 {
 		return
 	}
@@ -569,23 +580,20 @@ func (f *FuzzyFinder) selectPrev() {
 	}
 }
 
-func (f *FuzzyFinder) activateSelected() {
+func (f *Finder) activateSelected() {
 	if f.selectedIdx >= 0 && f.selectedIdx < len(f.results) {
 		f.activateResult(f.results[f.selectedIdx])
 	}
 }
 
-func (f *FuzzyFinder) activateResult(result SearchResult) {
+func (f *Finder) activateResult(result Result) {
 	f.Hide()
 
 	if f.pinMode && result.Type == ResultTypeApp {
-		// Pin the app to desktop
-		icon := DesktopIcon{
-			Name: result.Name,
-			Exec: result.Exec,
-			Icon: result.Icon,
+		// Pin the app to desktop via callback
+		if f.pinCallback != nil {
+			f.pinCallback(result.Name, result.Exec, result.Icon)
 		}
-		f.desktop.pinApp(icon)
 	} else {
 		// Launch the app/command/file
 		go func() {
