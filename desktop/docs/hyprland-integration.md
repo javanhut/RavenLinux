@@ -145,19 +145,59 @@ exec-once = ~/.config/raven/scripts/set-wallpaper.sh
 
 ### Key Bindings
 
+#### Applications
 | Binding | Action |
 |---------|--------|
-| `Super + Return` | Open terminal |
-| `Super + D` | Open raven-menu |
+| `Super + T` | Open raven-terminal |
+| `Super + M` | Open raven-menu |
+| `Super + S` | Open raven-settings-menu |
+| `Super + F` | Open fuzzy finder / launcher |
+| `Super + P` | Open power menu |
+| `Super + K` | Show keybindings overlay |
+| `Super + W` | Open WiFi settings |
 | `Super + Space` | Open launcher |
+| `Super + I` | Open settings (alternative) |
+| `Super + Shift + E` | Open file manager |
+
+#### Window Management
+| Binding | Action |
+|---------|--------|
 | `Super + Q` | Close window |
-| `Super + Shift + Q` | Exit Hyprland |
-| `Super + F` | Fullscreen |
 | `Super + V` | Toggle floating |
-| `Super + 1-0` | Switch workspace |
-| `Super + Shift + 1-0` | Move to workspace |
-| `Super + I` | Open settings |
+| `Super + Shift + F` | Fullscreen |
+| `Super + Ctrl + F` | Fullscreen (mode 1) |
+| `Super + Shift + P` | Pseudo-tile |
+| `Super + J` | Toggle split |
+| `Super + R` | Enter resize mode |
+
+#### Focus & Movement
+| Binding | Action |
+|---------|--------|
+| `Super + Arrow Keys` | Move focus |
+| `Super + H/J/K/L` | Move focus (vim-style) |
+| `Super + Shift + Arrows` | Move window |
+| `Super + Shift + H/J/K/L` | Move window (vim-style) |
+| `Super + Mouse Drag` | Move window |
+| `Super + Right Click Drag` | Resize window |
+
+#### Workspaces
+| Binding | Action |
+|---------|--------|
+| `Super + 1-0` | Switch workspace 1-10 |
+| `Super + Shift + 1-0` | Move window to workspace |
+| `Super + Tab` | Next workspace |
+| `Super + Shift + Tab` | Previous workspace |
+| `Super + Scroll` | Cycle workspaces |
+
+#### System
+| Binding | Action |
+|---------|--------|
 | `Super + Escape` | Lock screen |
+| `Super + Shift + Q` | Exit Hyprland |
+| `Print` | Screenshot region to clipboard |
+| `Shift + Print` | Screenshot full to clipboard |
+| `Super + Print` | Screenshot region to file |
+| `Super + Shift + Print` | Screenshot full to file |
 
 ### Window Rules
 ```conf

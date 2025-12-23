@@ -187,18 +187,21 @@ $mainMod = SUPER
 
 # Application launchers
 bind = $mainMod, T, exec, raven-terminal
-bind = $mainMod, D, exec, raven-menu
+bind = $mainMod, M, exec, raven-menu
+bind = $mainMod, S, exec, raven-settings-menu
+bind = $mainMod, F, exec, raven-launcher
+bind = $mainMod, P, exec, raven-power
+bind = $mainMod, K, exec, raven-keybindings
 bind = $mainMod, Space, exec, raven-launcher
-bind = $mainMod, F, exec, raven-files 
 bind = $mainMod, W, exec, raven-wifi
 
 # Window management
 bind = $mainMod, Q, killactive,
 bind = $mainMod SHIFT, Q, exit,
-bind = $mainMod, F, fullscreen, 0
-bind = $mainMod SHIFT, F, fullscreen, 1
+bind = $mainMod SHIFT, F, fullscreen, 0
+bind = $mainMod CTRL, F, fullscreen, 1
 bind = $mainMod, V, togglefloating,
-bind = $mainMod, P, pseudo,
+bind = $mainMod SHIFT, P, pseudo,
 bind = $mainMod, J, togglesplit,
 
 # Focus movement
@@ -299,8 +302,11 @@ bind = $mainMod SHIFT, Print, exec, grim ~/Pictures/Screenshots/$(date +%Y%m%d_%
 # Lock screen
 bind = $mainMod, Escape, exec, hyprlock || swaylock || loginctl lock-session
 
-# Settings
+# Settings (alternative binding)
 bind = $mainMod, I, exec, raven-settings-menu
+
+# File manager
+bind = $mainMod SHIFT, E, exec, raven-file-manager
 EOF
 }
 

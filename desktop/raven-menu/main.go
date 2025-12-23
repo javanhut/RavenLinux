@@ -483,10 +483,11 @@ func (m *RavenMenu) loadApplications() {
 	// Add built-in Raven apps
 	ravenApps := []Application{
 		{Name: "Raven Terminal", Exec: "raven-terminal", Comment: "Terminal emulator", Category: "System"},
+		{Name: "Raven Files", Exec: "raven-file-manager", Comment: "File manager", Category: "System"},
 		{Name: "Raven WiFi", Exec: "raven-wifi", Comment: "WiFi network manager", Category: "Network"},
+		{Name: "Raven Settings", Exec: "raven-settings-menu", Comment: "System settings", Category: "System"},
 		{Name: "Raven Installer", Exec: "raven-installer", Comment: "Install RavenLinux", Category: "System"},
 		{Name: "Raven Launcher", Exec: "raven-launcher", Comment: "Application launcher", Category: "Utilities"},
-		{Name: "File Manager", Exec: "raven-terminal -e ranger", Comment: "Browse files with ranger", Category: "System"},
 		{Name: "System Monitor", Exec: "raven-terminal -e htop", Comment: "Process viewer", Category: "System"},
 		{Name: "Text Editor", Exec: "raven-terminal -e nvim", Comment: "Neovim text editor", Category: "Development"},
 	}

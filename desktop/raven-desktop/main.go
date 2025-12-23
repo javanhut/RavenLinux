@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"unsafe"
 
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
@@ -32,11 +35,16 @@ import "C"
 
 // DesktopIcon represents an icon on the desktop
 type DesktopIcon struct {
-	Name string
-	Exec string
-	Icon string
-	X    int
-	Y    int
+	Name string `json:"name"`
+	Exec string `json:"exec"`
+	Icon string `json:"icon"`
+	X    int    `json:"x"`
+	Y    int    `json:"y"`
+}
+
+// PinnedAppsConfig holds the list of pinned desktop apps
+type PinnedAppsConfig struct {
+	PinnedApps []DesktopIcon `json:"pinned_apps"`
 }
 
 // RavenSettings holds shared settings
@@ -48,13 +56,18 @@ type RavenSettings struct {
 
 // RavenDesktop is the desktop background with icons
 type RavenDesktop struct {
-	app          *gtk.Application
-	window       *gtk.Window
-	iconGrid     *gtk.FlowBox
-	icons        []DesktopIcon
-	popover      *gtk.PopoverMenu
-	settings     RavenSettings
-	settingsPath string
+	app            *gtk.Application
+	window         *gtk.Window
+	iconGrid       *gtk.FlowBox
+	overlay        *gtk.Overlay
+	bgBox          *gtk.Box
+	bgPicture      *gtk.Picture
+	icons          []DesktopIcon
+	popover        *gtk.PopoverMenu
+	settings       RavenSettings
+	settingsPath   string
+	pinnedAppsPath string
+	fuzzyFinder    *FuzzyFinder
 }
 
 func main() {
@@ -97,12 +110,42 @@ func (d *RavenDesktop) activate() {
 	// Set up right-click menu
 	d.setupContextMenu()
 
+	// Set up signal handler for fuzzy finder shortcut
+	d.setupSignalHandler()
+
 	d.window.SetApplication(d.app)
 	d.window.Present()
 }
 
+func (d *RavenDesktop) setupSignalHandler() {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGUSR1, syscall.SIGUSR2)
+
+	go func() {
+		for sig := range sigChan {
+			switch sig {
+			case syscall.SIGUSR1:
+				// Open fuzzy finder
+				glib.IdleAdd(func() {
+					d.showFuzzyFinder()
+				})
+			case syscall.SIGUSR2:
+				// Open fuzzy finder in pin mode
+				glib.IdleAdd(func() {
+					d.showFuzzyFinderForPinning()
+				})
+			}
+		}
+	}()
+}
+
 func (d *RavenDesktop) loadSettings() {
-	d.settingsPath = filepath.Join(os.Getenv("HOME"), ".config", "raven", "settings.json")
+	configDir := filepath.Join(os.Getenv("HOME"), ".config", "raven")
+	d.settingsPath = filepath.Join(configDir, "settings.json")
+	d.pinnedAppsPath = filepath.Join(configDir, "pinned-apps.json")
+
+	// Ensure config directory exists
+	os.MkdirAll(configDir, 0755)
 
 	// Default settings
 	d.settings = RavenSettings{
@@ -179,13 +222,13 @@ func (d *RavenDesktop) applyCSS() {
 }
 
 func (d *RavenDesktop) createUI() *gtk.Overlay {
-	overlay := gtk.NewOverlay()
+	d.overlay = gtk.NewOverlay()
 
 	// Background
-	bg := gtk.NewBox(gtk.OrientationVertical, 0)
-	bg.AddCSSClass("desktop-bg")
-	bg.SetHExpand(true)
-	bg.SetVExpand(true)
+	d.bgBox = gtk.NewBox(gtk.OrientationVertical, 0)
+	d.bgBox.AddCSSClass("desktop-bg")
+	d.bgBox.SetHExpand(true)
+	d.bgBox.SetVExpand(true)
 
 	// Try to load wallpaper from settings first, then fallback
 	wallpaperPaths := []string{}
@@ -197,22 +240,21 @@ func (d *RavenDesktop) createUI() *gtk.Overlay {
 		"/usr/share/backgrounds/default.png",
 	)
 
-	var picture *gtk.Picture
 	for _, path := range wallpaperPaths {
 		if _, err := os.Stat(path); err == nil {
-			picture = gtk.NewPictureForFilename(path)
-			picture.SetContentFit(gtk.ContentFitCover)
-			picture.SetHExpand(true)
-			picture.SetVExpand(true)
+			d.bgPicture = gtk.NewPictureForFilename(path)
+			d.bgPicture.SetContentFit(gtk.ContentFitCover)
+			d.bgPicture.SetHExpand(true)
+			d.bgPicture.SetVExpand(true)
 			break
 		}
 	}
 
-	if picture != nil {
-		bg.Append(picture)
+	if d.bgPicture != nil {
+		d.bgBox.Append(d.bgPicture)
 	}
 
-	overlay.SetChild(bg)
+	d.overlay.SetChild(d.bgBox)
 
 	// Icon grid
 	d.iconGrid = gtk.NewFlowBox()
@@ -230,8 +272,8 @@ func (d *RavenDesktop) createUI() *gtk.Overlay {
 	d.iconGrid.SetHAlign(gtk.AlignStart)
 
 	// Add icons
-	for _, icon := range d.icons {
-		iconWidget := d.createIconWidget(icon)
+	for i, icon := range d.icons {
+		iconWidget := d.createIconWidget(icon, i)
 		d.iconGrid.Append(iconWidget)
 	}
 
@@ -243,12 +285,12 @@ func (d *RavenDesktop) createUI() *gtk.Overlay {
 		}
 	})
 
-	overlay.AddOverlay(d.iconGrid)
+	d.overlay.AddOverlay(d.iconGrid)
 
-	return overlay
+	return d.overlay
 }
 
-func (d *RavenDesktop) createIconWidget(icon DesktopIcon) *gtk.Box {
+func (d *RavenDesktop) createIconWidget(icon DesktopIcon, index int) *gtk.Box {
 	box := gtk.NewBox(gtk.OrientationVertical, 4)
 	box.AddCSSClass("desktop-icon")
 	box.SetHAlign(gtk.AlignCenter)
@@ -290,7 +332,34 @@ func (d *RavenDesktop) createIconWidget(icon DesktopIcon) *gtk.Box {
 	label.SetJustify(gtk.JustifyCenter)
 	box.Append(label)
 
+	// Add right-click menu for unpinning
+	iconName := icon.Name // Capture for closure
+	gestureClick := gtk.NewGestureClick()
+	gestureClick.SetButton(3) // Right click
+	gestureClick.ConnectPressed(func(nPress int, x, y float64) {
+		d.showIconContextMenu(box, iconName, x, y)
+	})
+	box.AddController(gestureClick)
+
 	return box
+}
+
+func (d *RavenDesktop) showIconContextMenu(parent *gtk.Box, iconName string, x, y float64) {
+	menu := gio.NewMenu()
+	menu.Append("Unpin from Desktop", "app.unpin."+strings.ReplaceAll(iconName, " ", "_"))
+
+	// Create action for unpinning this specific icon
+	actionName := "unpin." + strings.ReplaceAll(iconName, " ", "_")
+	unpinAction := gio.NewSimpleAction(actionName, nil)
+	unpinAction.ConnectActivate(func(v *glib.Variant) {
+		d.unpinApp(iconName)
+	})
+	d.app.AddAction(unpinAction)
+
+	popover := gtk.NewPopoverMenuFromModel(menu)
+	popover.SetParent(parent)
+	popover.SetPosition(gtk.PosBottom)
+	popover.Popup()
 }
 
 func (d *RavenDesktop) setupContextMenu() {
@@ -301,18 +370,20 @@ func (d *RavenDesktop) setupContextMenu() {
 	section1 := gio.NewMenu()
 	section1.Append("Open Terminal", "app.terminal")
 	section1.Append("Open File Manager", "app.files")
+	section1.Append("Open Fuzzy Finder", "app.fuzzy")
 	menu.AppendSection("", section1)
 
 	section2 := gio.NewMenu()
+	section2.Append("Pin Application...", "app.pin")
+	section2.Append("Change Wallpaper...", "app.wallpaper")
 	section2.Append("Raven Settings", "app.settings")
-	section2.Append("Change Wallpaper", "app.wallpaper")
 	menu.AppendSection("", section2)
 
 	section3 := gio.NewMenu()
 	section3.Append("Refresh Desktop", "app.refresh")
 	menu.AppendSection("", section3)
 
-	// Create actions using simpler approach
+	// Create actions
 	termAction := gio.NewSimpleAction("terminal", nil)
 	termAction.ConnectActivate(func(v *glib.Variant) {
 		d.launchApp("raven-terminal")
@@ -325,6 +396,18 @@ func (d *RavenDesktop) setupContextMenu() {
 	})
 	d.app.AddAction(filesAction)
 
+	fuzzyAction := gio.NewSimpleAction("fuzzy", nil)
+	fuzzyAction.ConnectActivate(func(v *glib.Variant) {
+		d.showFuzzyFinder()
+	})
+	d.app.AddAction(fuzzyAction)
+
+	pinAction := gio.NewSimpleAction("pin", nil)
+	pinAction.ConnectActivate(func(v *glib.Variant) {
+		d.showFuzzyFinderForPinning()
+	})
+	d.app.AddAction(pinAction)
+
 	settingsAction := gio.NewSimpleAction("settings", nil)
 	settingsAction.ConnectActivate(func(v *glib.Variant) {
 		d.launchApp("raven-settings-menu")
@@ -333,14 +416,14 @@ func (d *RavenDesktop) setupContextMenu() {
 
 	wallpaperAction := gio.NewSimpleAction("wallpaper", nil)
 	wallpaperAction.ConnectActivate(func(v *glib.Variant) {
-		d.launchApp("waypaper || raven-settings-menu")
+		d.showWallpaperChooser()
 	})
 	d.app.AddAction(wallpaperAction)
 
 	refreshAction := gio.NewSimpleAction("refresh", nil)
 	refreshAction.ConnectActivate(func(v *glib.Variant) {
 		d.loadIcons()
-		// Refresh grid
+		d.refreshIconGrid()
 	})
 	d.app.AddAction(refreshAction)
 
@@ -357,32 +440,200 @@ func (d *RavenDesktop) setupContextMenu() {
 	d.window.AddController(gestureClick)
 }
 
-func (d *RavenDesktop) loadIcons() {
-	d.icons = []DesktopIcon{
-		{Name: "Terminal", Exec: "raven-terminal", Icon: "utilities-terminal"},
-		{Name: "Files", Exec: "raven-terminal -e ranger", Icon: "system-file-manager"},
-		{Name: "WiFi", Exec: "raven-wifi", Icon: "network-wireless"},
-		{Name: "Installer", Exec: "raven-installer", Icon: "system-software-install"},
-		{Name: "App Launcher", Exec: "raven-launcher", Icon: "system-search"},
-		{Name: "System Monitor", Exec: "raven-terminal -e htop", Icon: "utilities-system-monitor"},
+func (d *RavenDesktop) showWallpaperChooser() {
+	dialog := gtk.NewFileChooserNative(
+		"Select Wallpaper",
+		d.window,
+		gtk.FileChooserActionOpen,
+		"Select",
+		"Cancel",
+	)
+
+	// Add image filter
+	filter := gtk.NewFileFilter()
+	filter.SetName("Images")
+	filter.AddMIMEType("image/png")
+	filter.AddMIMEType("image/jpeg")
+	filter.AddMIMEType("image/jpg")
+	filter.AddMIMEType("image/webp")
+	filter.AddPattern("*.png")
+	filter.AddPattern("*.jpg")
+	filter.AddPattern("*.jpeg")
+	filter.AddPattern("*.webp")
+	dialog.AddFilter(filter)
+
+	// Set default location
+	picturesDir := filepath.Join(os.Getenv("HOME"), "Pictures")
+	if _, err := os.Stat(picturesDir); err == nil {
+		picturesFile := gio.NewFileForPath(picturesDir)
+		dialog.SetCurrentFolder(picturesFile)
 	}
 
-	// Load from ~/Desktop if exists
+	dialog.ConnectResponse(func(response int) {
+		if response == int(gtk.ResponseAccept) {
+			file := dialog.File()
+			if file != nil {
+				path := file.Path()
+				d.setWallpaper(path)
+			}
+		}
+	})
+
+	dialog.Show()
+}
+
+func (d *RavenDesktop) setWallpaper(path string) {
+	// Update settings
+	d.settings.WallpaperPath = path
+
+	// Save settings
+	data, err := json.MarshalIndent(d.settings, "", "  ")
+	if err == nil {
+		os.WriteFile(d.settingsPath, data, 0644)
+	}
+
+	// Update the background picture
+	if d.bgPicture != nil {
+		d.bgBox.Remove(d.bgPicture)
+	}
+
+	d.bgPicture = gtk.NewPictureForFilename(path)
+	d.bgPicture.SetContentFit(gtk.ContentFitCover)
+	d.bgPicture.SetHExpand(true)
+	d.bgPicture.SetVExpand(true)
+	d.bgBox.Append(d.bgPicture)
+}
+
+func (d *RavenDesktop) showFuzzyFinder() {
+	if d.fuzzyFinder == nil {
+		d.fuzzyFinder = NewFuzzyFinder(d)
+	}
+	d.fuzzyFinder.Show(false)
+}
+
+func (d *RavenDesktop) showFuzzyFinderForPinning() {
+	if d.fuzzyFinder == nil {
+		d.fuzzyFinder = NewFuzzyFinder(d)
+	}
+	d.fuzzyFinder.Show(true)
+}
+
+func (d *RavenDesktop) loadIcons() {
+	d.icons = []DesktopIcon{}
+
+	// Load pinned apps from config
+	d.loadPinnedApps()
+
+	// Also load from ~/Desktop if exists (for .desktop files placed there)
 	desktopDir := filepath.Join(os.Getenv("HOME"), "Desktop")
 	if _, err := os.Stat(desktopDir); err == nil {
 		files, _ := filepath.Glob(filepath.Join(desktopDir, "*.desktop"))
 		for _, file := range files {
-			// Parse desktop file and add icon
-			// Simplified - just use filename
-			name := filepath.Base(file)
-			name = name[:len(name)-8] // Remove .desktop
-			d.icons = append(d.icons, DesktopIcon{
-				Name: name,
-				Exec: "gtk-launch " + name,
-				Icon: "application-x-executable",
-			})
+			icon := parseDesktopFile(file)
+			if icon.Name != "" {
+				d.icons = append(d.icons, icon)
+			}
 		}
 	}
+}
+
+func (d *RavenDesktop) loadPinnedApps() {
+	data, err := os.ReadFile(d.pinnedAppsPath)
+	if err != nil {
+		return
+	}
+
+	var config PinnedAppsConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return
+	}
+
+	d.icons = append(d.icons, config.PinnedApps...)
+}
+
+func (d *RavenDesktop) savePinnedApps() error {
+	config := PinnedAppsConfig{
+		PinnedApps: d.icons,
+	}
+
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(d.pinnedAppsPath, data, 0644)
+}
+
+func (d *RavenDesktop) pinApp(icon DesktopIcon) {
+	// Check if already pinned
+	for _, existing := range d.icons {
+		if existing.Name == icon.Name {
+			return
+		}
+	}
+
+	d.icons = append(d.icons, icon)
+	d.savePinnedApps()
+	d.refreshIconGrid()
+}
+
+func (d *RavenDesktop) unpinApp(name string) {
+	newIcons := []DesktopIcon{}
+	for _, icon := range d.icons {
+		if icon.Name != name {
+			newIcons = append(newIcons, icon)
+		}
+	}
+	d.icons = newIcons
+	d.savePinnedApps()
+	d.refreshIconGrid()
+}
+
+func (d *RavenDesktop) refreshIconGrid() {
+	// Remove all children
+	for {
+		child := d.iconGrid.ChildAtIndex(0)
+		if child == nil {
+			break
+		}
+		d.iconGrid.Remove(child)
+	}
+
+	// Re-add icons
+	for i, icon := range d.icons {
+		iconWidget := d.createIconWidget(icon, i)
+		d.iconGrid.Append(iconWidget)
+	}
+}
+
+// parseDesktopFile reads a .desktop file and extracts icon info
+func parseDesktopFile(path string) DesktopIcon {
+	icon := DesktopIcon{}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return icon
+	}
+
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Name=") {
+			icon.Name = strings.TrimPrefix(line, "Name=")
+		} else if strings.HasPrefix(line, "Exec=") {
+			exec := strings.TrimPrefix(line, "Exec=")
+			// Remove field codes like %f, %u, etc.
+			exec = strings.ReplaceAll(exec, "%f", "")
+			exec = strings.ReplaceAll(exec, "%F", "")
+			exec = strings.ReplaceAll(exec, "%u", "")
+			exec = strings.ReplaceAll(exec, "%U", "")
+			icon.Exec = strings.TrimSpace(exec)
+		} else if strings.HasPrefix(line, "Icon=") {
+			icon.Icon = strings.TrimPrefix(line, "Icon=")
+		}
+	}
+
+	return icon
 }
 
 func (d *RavenDesktop) launchApp(cmd string) {
