@@ -50,6 +50,8 @@ else
     log_step() { echo -e "${CYAN}[STEP]${NC} $1"; }
 fi
 
+source "${PROJECT_ROOT}/scripts/lib/hyprland-config.sh"
+
 # =============================================================================
 # Check dependencies
 # =============================================================================
@@ -664,13 +666,11 @@ build_desktop_components() {
         cd "${PROJECT_ROOT}"
     fi
 
-    # Install Hyprland configuration from desktop/config
-    if [[ -f "${desktop_dir}/config/hypr/hyprland.conf" ]]; then
-        cp "${desktop_dir}/config/hypr/hyprland.conf" "${SYSROOT_DIR}/root/.config/hypr/hyprland.conf"
-        mkdir -p "${SYSROOT_DIR}/etc/hypr"
-        cp "${desktop_dir}/config/hypr/hyprland.conf" "${SYSROOT_DIR}/etc/hypr/hyprland.conf"
-        log_info "  Installed Hyprland config"
-    fi
+    # Install Hyprland configuration
+    install_hyprland_config \
+        "${SYSROOT_DIR}/root/.config/hypr/hyprland.conf" \
+        "${SYSROOT_DIR}/etc/hypr/hyprland.conf"
+    log_info "  Installed Hyprland config"
 
     # Install Raven scripts
     if [[ -d "${desktop_dir}/config/raven/scripts" ]]; then
@@ -743,17 +743,12 @@ copy_wayland_compositor() {
             fi
         done || true
 
-        # Copy Hyprland config (check desktop/config first, then configs/)
-        mkdir -p "${SYSROOT_DIR}/etc/hypr"
-        mkdir -p "${SYSROOT_DIR}/root/.config/hypr"
-        if [[ -f "${PROJECT_ROOT}/desktop/config/hypr/hyprland.conf" ]]; then
-            cp "${PROJECT_ROOT}/desktop/config/hypr/hyprland.conf" "${SYSROOT_DIR}/etc/hypr/hyprland.conf"
-            cp "${PROJECT_ROOT}/desktop/config/hypr/hyprland.conf" "${SYSROOT_DIR}/root/.config/hypr/hyprland.conf"
-            log_info "  Copied hyprland.conf from desktop/config"
-        elif [[ -f "${PROJECT_ROOT}/configs/hyprland.conf" ]]; then
-            cp "${PROJECT_ROOT}/configs/hyprland.conf" "${SYSROOT_DIR}/etc/hypr/hyprland.conf"
-            cp "${PROJECT_ROOT}/configs/hyprland.conf" "${SYSROOT_DIR}/root/.config/hypr/hyprland.conf"
-            log_info "  Copied hyprland.conf from configs"
+        # Ensure Hyprland config exists (build-time template)
+        if [[ ! -f "${SYSROOT_DIR}/etc/hypr/hyprland.conf" ]]; then
+            install_hyprland_config \
+                "${SYSROOT_DIR}/etc/hypr/hyprland.conf" \
+                "${SYSROOT_DIR}/root/.config/hypr/hyprland.conf"
+            log_info "  Installed Hyprland config"
         fi
 
         # Copy hyprctl if available
@@ -761,6 +756,14 @@ copy_wayland_compositor() {
             cp "$(which hyprctl)" "${SYSROOT_DIR}/bin/"
             log_info "  Copied hyprctl"
         fi
+
+        # Copy Hyprland GUI utilities (if installed)
+        for guiutil in hyprland-welcome hyprland-update-screen hyprland-donate-screen hyprland-dialog hyprland-run; do
+            if command -v "${guiutil}" &>/dev/null; then
+                cp "$(which "${guiutil}")" "${SYSROOT_DIR}/bin/" 2>/dev/null || true
+                log_info "  Copied ${guiutil}"
+            fi
+        done
 
         # Copy Hyprland data files
         if [[ -d /usr/share/hyprland ]]; then
@@ -870,20 +873,19 @@ install_packages_to_sysroot() {
         cp -a "/usr/share/fontconfig/." "${SYSROOT_DIR}/usr/share/fontconfig/" 2>/dev/null || true
         log_info "  Copied /usr/share/fontconfig"
     fi
-    # Copy only JetBrains Mono Nerd Font
-    mkdir -p "${SYSROOT_DIR}/usr/share/fonts/TTF"
-    find /usr/share/fonts -type f \( -iname "*JetBrains*Nerd*" -o -iname "*JetBrainsMono*Nerd*" \) \
-        -exec cp {} "${SYSROOT_DIR}/usr/share/fonts/TTF/" \; 2>/dev/null || true
-    # Fallback: check common nerd fonts location
-    if [[ -d "/usr/share/fonts/TTF" ]]; then
-        cp /usr/share/fonts/TTF/*JetBrains*Nerd* "${SYSROOT_DIR}/usr/share/fonts/TTF/" 2>/dev/null || true
-    fi
-    if [[ -d "/usr/share/fonts/OTF" ]]; then
-        cp /usr/share/fonts/OTF/*JetBrains*Nerd* "${SYSROOT_DIR}/usr/share/fonts/TTF/" 2>/dev/null || true
-    fi
+    # Copy fonts from repo only (avoid pulling host system fonts).
     local font_count
-    font_count=$(find "${SYSROOT_DIR}/usr/share/fonts" -type f 2>/dev/null | wc -l)
-    log_info "  Copied JetBrains Mono Nerd Font (${font_count} files)"
+    local font_src
+    font_src="${PROJECT_ROOT}/fonts"
+    if [[ -d "${font_src}" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share/fonts"
+        find "${font_src}" -type f \( -iname "*.ttf" -o -iname "*.otf" \) \
+            -exec cp {} "${SYSROOT_DIR}/usr/share/fonts/" \; 2>/dev/null || true
+        font_count=$(find "${SYSROOT_DIR}/usr/share/fonts" -type f 2>/dev/null | wc -l)
+        log_info "  Copied custom fonts (${font_count} files)"
+    else
+        log_warn "  No custom fonts directory found at ${font_src}; skipping font copy"
+    fi
     mkdir -p "${SYSROOT_DIR}/var/cache/fontconfig" 2>/dev/null || true
 
     # Cursor themes (needed for proper cursor display in Wayland compositors).

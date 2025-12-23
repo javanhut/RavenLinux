@@ -237,6 +237,17 @@ If desktop components don't render in the live ISO:
    cat ~/.config/hypr/hyprland.conf | grep exec-once
    ```
 
+6. **Check input devices**:
+   ```bash
+   ls -la /dev/input/
+   cat /run/raven-wayland-session.log | grep -i input
+   ```
+
+7. **Check seatd is running**:
+   ```bash
+   ls -la /run/seatd.sock
+   ```
+
 ### Dock not showing windows
 1. Verify hyprctl works: `hyprctl clients -j`
 2. Check window class isn't excluded

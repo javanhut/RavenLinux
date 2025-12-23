@@ -101,6 +101,48 @@ start_seatd() {
     return 1
 }
 
+is_udevd_running() {
+    [ -S /run/udev/control ] && return 0
+    if command -v pgrep >/dev/null 2>&1; then
+        pgrep -x udevd >/dev/null 2>&1 && return 0
+    fi
+    return 1
+}
+
+start_udevd() {
+    is_udevd_running && return 0
+
+    udevd_cmd=""
+    if [ -x /sbin/udevd ]; then
+        udevd_cmd="/sbin/udevd"
+    elif [ -x /usr/lib/systemd/systemd-udevd ]; then
+        udevd_cmd="/usr/lib/systemd/systemd-udevd"
+    elif [ -x /usr/lib/udev/udevd ]; then
+        udevd_cmd="/usr/lib/udev/udevd"
+    fi
+
+    if [ -n "$udevd_cmd" ]; then
+        log "Starting udevd..."
+        "$udevd_cmd" --daemon >>"$LOGFILE" 2>&1 || true
+    else
+        log "udevd not found"
+    fi
+}
+
+trigger_udev_input() {
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm trigger --action=add --subsystem-match=input 2>/dev/null || true
+        udevadm settle 2>/dev/null || true
+    fi
+}
+
+load_input_modules() {
+    if command -v modprobe >/dev/null 2>&1; then
+        log "Loading input modules..."
+        modprobe -a uinput usbhid hid_generic i8042 psmouse virtio_input evdev atkbd serio_raw 2>/dev/null || true
+    fi
+}
+
 wait_for_wayland_socket() {
     pid="$1"
     i=0
@@ -257,6 +299,47 @@ if [ ! -d /dev/dri ]; then
 fi
 
 start_seatd || true
+
+# Ensure input devices are accessible
+# This is critical for keyboard and mouse to work
+log "Checking input devices..."
+if [ ! -d /dev/input ]; then
+    log "WARNING: /dev/input not found - creating input device directory"
+    mkdir -p /dev/input
+fi
+
+if ! ls /dev/input/event* >/dev/null 2>&1; then
+    log "No input event devices detected; attempting udev + module load"
+    start_udevd || true
+    load_input_modules || true
+    trigger_udev_input || true
+    sleep 0.5
+fi
+
+if ls /dev/input/event* >/dev/null 2>&1; then
+    log "Input devices found:"
+    ls -la /dev/input/ 2>&1 | tee -a "$LOGFILE" || true
+
+    # Fix permissions on input devices if running as root
+    if [ "$(id -u)" -eq 0 ]; then
+        chmod 666 /dev/input/event* 2>/dev/null || true
+        chmod 666 /dev/input/mouse* 2>/dev/null || true
+        chmod 666 /dev/input/mice 2>/dev/null || true
+        log "Fixed input device permissions"
+    fi
+else
+    log "WARNING: No input event devices detected after udev trigger"
+    if [ -r /proc/bus/input/devices ]; then
+        log "Kernel input device list:"
+        cat /proc/bus/input/devices 2>&1 | tee -a "$LOGFILE" || true
+    fi
+    ls -la /dev/input/ 2>&1 | tee -a "$LOGFILE" || true
+fi
+
+# Also check for /dev/uinput which some apps need
+if [ ! -e /dev/uinput ]; then
+    modprobe uinput 2>/dev/null || true
+fi
 
 preferred="${RAVEN_WAYLAND_COMPOSITOR:-}"
 if [ -z "$preferred" ]; then

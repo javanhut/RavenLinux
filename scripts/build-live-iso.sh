@@ -37,6 +37,7 @@ MINIMAL=false
 
 # Source shared logging library
 source "${SCRIPT_DIR}/lib/logging.sh"
+source "${PROJECT_ROOT}/scripts/lib/hyprland-config.sh"
 
 # =============================================================================
 # Argument Parsing
@@ -601,6 +602,14 @@ copy_wayland_tools() {
             log_info "  Added hyprctl"
         fi
 
+        # Copy Hyprland GUI utilities (if installed)
+        for guiutil in hyprland-welcome hyprland-update-screen hyprland-donate-screen hyprland-dialog hyprland-run; do
+            if command -v "${guiutil}" &>/dev/null; then
+                cp "$(which "${guiutil}")" "${LIVE_ROOT}/bin/" 2>/dev/null || true
+                log_info "  Added ${guiutil}"
+            fi
+        done
+
         # Copy Hyprland ecosystem libraries
         for lib in libaquamarine libhyprcursor libhyprgraphics libhyprlang libhyprutils; do
             for libpath in /usr/lib/${lib}.so*; do
@@ -638,25 +647,11 @@ copy_wayland_tools() {
         log_info "  Copied hyprland.desktop"
     fi
 
-    # Copy Raven hyprland.conf (check desktop/config first, then configs/)
-    local hypr_conf=""
-    if [[ -f "${PROJECT_ROOT}/desktop/config/hypr/hyprland.conf" ]]; then
-        hypr_conf="${PROJECT_ROOT}/desktop/config/hypr/hyprland.conf"
-    elif [[ -f "${PROJECT_ROOT}/configs/hyprland.conf" ]]; then
-        hypr_conf="${PROJECT_ROOT}/configs/hyprland.conf"
-    fi
-
-    if [[ -n "$hypr_conf" ]]; then
-        mkdir -p "${LIVE_ROOT}/etc/hypr"
-        cp "$hypr_conf" "${LIVE_ROOT}/etc/hypr/hyprland.conf"
-        # Also install to skel for user home dirs
-        mkdir -p "${LIVE_ROOT}/etc/skel/.config/hypr"
-        cp "$hypr_conf" "${LIVE_ROOT}/etc/skel/.config/hypr/hyprland.conf"
-        # Install to root's config directory (Hyprland looks here when running as root)
-        mkdir -p "${LIVE_ROOT}/root/.config/hypr"
-        cp "$hypr_conf" "${LIVE_ROOT}/root/.config/hypr/hyprland.conf"
-        log_info "  Added Raven hyprland.conf"
-    fi
+    install_hyprland_config \
+        "${LIVE_ROOT}/etc/hypr/hyprland.conf" \
+        "${LIVE_ROOT}/etc/skel/.config/hypr/hyprland.conf" \
+        "${LIVE_ROOT}/root/.config/hypr/hyprland.conf"
+    log_info "  Added Raven hyprland.conf"
 
     # Copy Raven scripts and default settings
     mkdir -p "${LIVE_ROOT}/root/.config/raven/scripts"
@@ -706,11 +701,61 @@ SETTINGS
         fi
     done
 
-    # Copy libinput library
+    # Copy libinput library and all its dependencies
     for lib in /usr/lib/libinput.so* /lib/libinput.so*; do
         if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
             mkdir -p "${LIVE_ROOT}/usr/lib"
             cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy libevdev (required by libinput for event device handling)
+    for lib in /usr/lib/libevdev.so* /lib/libevdev.so*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy libmtdev (multitouch device library, required by libinput)
+    for lib in /usr/lib/libmtdev.so* /lib/libmtdev.so*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy libudev (required by libinput for device discovery)
+    for lib in /usr/lib/libudev.so* /lib/libudev.so*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy libwacom (tablet support, optional but libinput links against it)
+    for lib in /usr/lib/libwacom.so* /lib/libwacom.so*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy libgudev (GObject wrapper for udev, used by libinput)
+    for lib in /usr/lib/libgudev*.so* /lib/libgudev*.so*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy libinput quirks (device-specific settings for QEMU, laptops, etc.)
+    if [[ -d "/usr/share/libinput" ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share"
+        cp -r /usr/share/libinput "${LIVE_ROOT}/usr/share/" 2>/dev/null || true
+        log_info "  Added libinput quirks"
+    fi
+
+    # Copy libinput udev helpers
+    for helper in libinput-device-group libinput-fuzz-extract libinput-fuzz-to-zero; do
+        if [[ -x "/usr/lib/udev/${helper}" ]]; then
+            mkdir -p "${LIVE_ROOT}/usr/lib/udev"
+            cp "/usr/lib/udev/${helper}" "${LIVE_ROOT}/usr/lib/udev/" 2>/dev/null || true
         fi
     done
 
@@ -746,6 +791,33 @@ SETTINGS
     if ! grep -q "^seat:" "${LIVE_ROOT}/etc/group" 2>/dev/null; then
         echo "seat:x:13:raven,root" >> "${LIVE_ROOT}/etc/group"
     fi
+
+    # Create input group for input devices (keyboard, mouse)
+    if ! grep -q "^input:" "${LIVE_ROOT}/etc/group" 2>/dev/null; then
+        echo "input:x:97:raven,root" >> "${LIVE_ROOT}/etc/group"
+    fi
+
+    # Create udev rules for input device access
+    mkdir -p "${LIVE_ROOT}/usr/lib/udev/rules.d"
+    cat > "${LIVE_ROOT}/usr/lib/udev/rules.d/70-input.rules" << 'UDEV_INPUT_EOF'
+# Input device permissions for Wayland compositors
+KERNEL=="event[0-9]*", SUBSYSTEM=="input", MODE="0660", GROUP="input"
+KERNEL=="mouse[0-9]*", SUBSYSTEM=="input", MODE="0660", GROUP="input"
+KERNEL=="mice", SUBSYSTEM=="input", MODE="0660", GROUP="input"
+KERNEL=="js[0-9]*", SUBSYSTEM=="input", MODE="0660", GROUP="input"
+
+# Allow seat access to input devices
+SUBSYSTEM=="input", TAG+="seat", TAG+="uaccess"
+UDEV_INPUT_EOF
+    log_info "  Created input device udev rules"
+
+    # Create udev rules for DRM/GPU access
+    cat > "${LIVE_ROOT}/usr/lib/udev/rules.d/70-drm.rules" << 'UDEV_DRM_EOF'
+# DRM device permissions for Wayland compositors
+KERNEL=="card[0-9]*", SUBSYSTEM=="drm", MODE="0660", GROUP="video"
+KERNEL=="renderD[0-9]*", SUBSYSTEM=="drm", MODE="0666"
+UDEV_DRM_EOF
+    log_info "  Created DRM device udev rules"
 
     # Copy xkeyboard-config for keyboard layouts
     # xkbcommon looks for /usr/share/xkeyboard-config-2 or /usr/share/X11/xkb
@@ -985,13 +1057,9 @@ build_raven_desktop() {
     done
 
     # Install Hyprland config for the live user
-    mkdir -p "${LIVE_ROOT}/root/.config/hypr"
     mkdir -p "${LIVE_ROOT}/root/.config/raven"
-
-    if [[ -f "${PROJECT_ROOT}/desktop/config/hypr/hyprland.conf" ]]; then
-        cp "${PROJECT_ROOT}/desktop/config/hypr/hyprland.conf" "${LIVE_ROOT}/root/.config/hypr/"
-        log_info "  Installed Hyprland config"
-    fi
+    install_hyprland_config "${LIVE_ROOT}/root/.config/hypr/hyprland.conf"
+    log_info "  Installed Hyprland config"
 
     # Create default settings.json
     if [[ ! -f "${LIVE_ROOT}/root/.config/raven/settings.json" ]]; then

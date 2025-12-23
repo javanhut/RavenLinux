@@ -94,6 +94,7 @@ DEPENDENCIES=(
     
     # Wayland compositor and display server
     "Hyprland:hyprland:hyprland:hyprland:hyprland:hyprland:hyprland:Hyprland Wayland compositor"
+    "hyprland-welcome:hyprland-guiutils:-:-:-:-:-:Hyprland GUI utilities"
     "Xwayland:xorg-xwayland:xwayland:xorg-x11-server-Xwayland:xwayland:xorg-server-xwayland:xwayland:XWayland X11 compatibility"
     "seatd:seatd:seatd:seatd:seatd:seatd:seatd:Seat management daemon"
     

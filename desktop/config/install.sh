@@ -6,6 +6,9 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="$HOME/.config"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+source "${PROJECT_ROOT}/scripts/lib/hyprland-config.sh"
 
 echo "Installing Raven Desktop Configuration..."
 
@@ -19,7 +22,7 @@ if [ -f "$CONFIG_DIR/hypr/hyprland.conf" ]; then
     cp "$CONFIG_DIR/hypr/hyprland.conf" "$CONFIG_DIR/hypr/hyprland.conf.backup.$(date +%Y%m%d_%H%M%S)"
 fi
 
-cp "$SCRIPT_DIR/hypr/hyprland.conf" "$CONFIG_DIR/hypr/hyprland.conf"
+write_hyprland_config "$CONFIG_DIR/hypr/hyprland.conf"
 echo "Installed Hyprland configuration"
 
 # Install Raven scripts

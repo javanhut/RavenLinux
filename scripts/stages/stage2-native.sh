@@ -57,6 +57,8 @@ else
     log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 fi
 
+source "${PROJECT_ROOT}/scripts/lib/hyprland-config.sh"
+
 # =============================================================================
 # Copy shells from host
 # =============================================================================
@@ -1977,12 +1979,9 @@ copy_libraries() {
         log_info "  Copied hyprland.desktop"
     fi
 
-    # Copy RavenLinux hyprland.conf to root's config directory
-    if [[ -f "${PROJECT_ROOT}/configs/hyprland.conf" ]]; then
-        mkdir -p "${SYSROOT_DIR}/root/.config/hypr"
-        cp "${PROJECT_ROOT}/configs/hyprland.conf" "${SYSROOT_DIR}/root/.config/hypr/hyprland.conf"
-        log_info "  Copied RavenLinux hyprland.conf to /root/.config/hypr/"
-    fi
+    # Install Hyprland configuration
+    install_hyprland_config "${SYSROOT_DIR}/root/.config/hypr/hyprland.conf"
+    log_info "  Installed Hyprland config"
 
     # EGL vendor JSONs (GLVND)
     for egl_dir in /usr/share/glvnd/egl_vendor.d /etc/glvnd/egl_vendor.d; do

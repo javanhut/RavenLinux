@@ -1,3 +1,9 @@
+#!/bin/bash
+
+write_hyprland_config() {
+    local dest="$1"
+    mkdir -p "$(dirname "$dest")"
+    cat > "$dest" << 'EOF'
 # Raven Linux - Hyprland Configuration
 # This configuration integrates all Raven desktop components
 
@@ -126,13 +132,11 @@ master {
 }
 
 # =====================
-# Gestures
+# Gestures (touchpad)
 # =====================
-gestures {
-    workspace_swipe = on
-    workspace_swipe_fingers = 3
-    workspace_swipe_distance = 300
-}
+gestures:workspace_swipe = true
+gestures:workspace_swipe_fingers = 3
+gestures:workspace_swipe_distance = 300
 
 # =====================
 # Miscellaneous
@@ -182,10 +186,10 @@ layerrule = ignorezero,raven-desktop
 $mainMod = SUPER
 
 # Application launchers
-bind = $mainMod, Return, exec, raven-terminal || kitty || alacritty || foot
+bind = $mainMod, T, exec, raven-terminal
 bind = $mainMod, D, exec, raven-menu
-bind = $mainMod, Space, exec, raven-launcher || wofi --show drun
-bind = $mainMod, E, exec, raven-files || thunar || nautilus || dolphin
+bind = $mainMod, Space, exec, raven-launcher
+bind = $mainMod, F, exec, raven-files 
 bind = $mainMod, W, exec, raven-wifi
 
 # Window management
@@ -297,3 +301,12 @@ bind = $mainMod, Escape, exec, hyprlock || swaylock || loginctl lock-session
 
 # Settings
 bind = $mainMod, I, exec, raven-settings-menu
+EOF
+}
+
+install_hyprland_config() {
+    local dest
+    for dest in "$@"; do
+        write_hyprland_config "$dest"
+    done
+}
