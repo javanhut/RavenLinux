@@ -188,8 +188,7 @@ The panel uses the following CSS classes for styling:
 
 ### Start Button
 - `.start-button`: Raven start button
-- `.raven-icon`: Raven icon styling
-- `.raven-text`: Raven text label
+- `.raven-icon`: Raven SVG icon displayed via CSS background-image
 
 ### Dock
 - `.dock-container`: The center dock wrapper
