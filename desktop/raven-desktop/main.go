@@ -72,7 +72,15 @@ type RavenDesktop struct {
 	fuzzyFinder    *fuzzy.Finder
 }
 
+var previewMode bool
+
 func main() {
+	// Check for preview/debug mode via environment variable
+	// Usage: RAVEN_PREVIEW=1 ./raven-desktop
+	if os.Getenv("RAVEN_PREVIEW") == "1" {
+		previewMode = true
+	}
+
 	app := gtk.NewApplication("org.ravenlinux.desktop", gio.ApplicationFlagsNone)
 
 	desktop := &RavenDesktop{
@@ -94,7 +102,14 @@ func (d *RavenDesktop) activate() {
 
 	d.window = gtk.NewWindow()
 	d.window.SetTitle("Raven Desktop")
-	d.window.SetDecorated(false)
+
+	if previewMode {
+		// Preview mode: run as normal window for testing
+		d.window.SetDecorated(true)
+		d.window.SetDefaultSize(1280, 720)
+	} else {
+		d.window.SetDecorated(false)
+	}
 
 	// Load desktop icons
 	d.loadIcons()
@@ -106,8 +121,10 @@ func (d *RavenDesktop) activate() {
 	content := d.createUI()
 	d.window.SetChild(content)
 
-	// Initialize layer shell for background
-	d.initLayerShell()
+	// Initialize layer shell for background (skip in preview mode)
+	if !previewMode {
+		d.initLayerShell()
+	}
 
 	// Set up right-click menu
 	d.setupContextMenu()
