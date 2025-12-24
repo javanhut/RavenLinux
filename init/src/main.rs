@@ -336,6 +336,12 @@ fn setup_environment() -> Result<()> {
     // Set TERM
     std::env::set_var("TERM", "linux");
 
+    // Ensure XDG_RUNTIME_DIR exists for Wayland/DBus consumers.
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/0".to_string());
+    std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
+    fs::create_dir_all(&runtime_dir).ok();
+    let _ = fs::set_permissions(&runtime_dir, fs::Permissions::from_mode(0o700));
+
     // Create essential directories
     fs::create_dir_all("/var/log").ok();
     fs::create_dir_all("/var/run").ok();
