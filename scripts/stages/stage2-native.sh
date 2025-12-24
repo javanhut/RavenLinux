@@ -1871,6 +1871,9 @@ copy_libraries() {
         libGLX.so libGLX.so.0
         libGLdispatch.so libGLdispatch.so.0
         libOpenGL.so libOpenGL.so.0
+        # OpenGL ES (required by Gio UI and other EGL-based apps)
+        libGLESv1_CM.so libGLESv1_CM.so.1
+        libGLESv2.so libGLESv2.so.2
         # EGL
         libEGL.so libEGL.so.1
         # Mesa GLVND vendor libraries (required by /usr/share/glvnd/egl_vendor.d/*)

@@ -39,6 +39,18 @@ env = XCURSOR_SIZE,24
 env = QT_QPA_PLATFORMTHEME,qt5ct
 env = QT_WAYLAND_DISABLE_WINDOWDECORATION,1
 
+# XDG runtime directory (critical for Wayland apps)
+env = XDG_RUNTIME_DIR,/run/user/0
+
+# Wayland/XDG session settings
+env = XDG_SESSION_TYPE,wayland
+env = XDG_CURRENT_DESKTOP,Hyprland
+env = XDG_SESSION_DESKTOP,Hyprland
+
+# Gio UI settings (for vem and other Gio-based apps)
+# Force OpenGL backend for better Hyprland compatibility
+env = GIOUI_GPU_BACKEND,opengl
+
 # =====================
 # Input Configuration
 # =====================

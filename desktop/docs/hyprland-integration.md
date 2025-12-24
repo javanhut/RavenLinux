@@ -312,7 +312,23 @@ pkg-config --exists gtk4-layer-shell-0 && echo "OK"
 ```
 
 ### Environment Variables
+
+The Hyprland configuration sets these critical environment variables for all child processes:
+
+```bash
+# Required for Wayland applications
+XDG_RUNTIME_DIR=/run/user/0      # Wayland socket location
+XDG_SESSION_TYPE=wayland
+XDG_CURRENT_DESKTOP=Hyprland
+XDG_SESSION_DESKTOP=Hyprland
+
+# Gio UI applications (vem, etc.)
+GIOUI_GPU_BACKEND=opengl         # Use OpenGL instead of Vulkan for compatibility
+```
+
+Debug environment variables:
 ```bash
 export GTK_DEBUG=interactive  # GTK inspector
 export G_MESSAGES_DEBUG=all   # GLib debug messages
+export GIOUI_DEBUG=1          # Gio UI debug output
 ```

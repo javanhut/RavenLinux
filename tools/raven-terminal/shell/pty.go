@@ -62,6 +62,12 @@ func NewPtySession(cols, rows uint16) (*PtySession, error) {
 	// The path is trimmed to avoid wrapping: show ~, and if longer than 50 chars, keep the tail with an ellipsis.
 	ps1 := "\\[\\e[0;36m\\]$(p=$PWD; home=$HOME; case \"$p\" in \"$home\"*) p=\"~${p#$home}\";; esac; max=50; if [ ${#p} -gt $max ]; then p=\"...${p: -$max}\"; fi; printf %s \"$p\")/\\[\\e[0m\\] PackageManager: \\[\\e[0;33m\\]$(if [ -f go.mod ]; then echo \"Go $(go version 2>/dev/null | awk '{print $3}')\"; elif [ -f Cargo.toml ]; then echo \"Cargo $(cargo --version 2>/dev/null | awk '{print $2}')\"; elif [ -f package.json ]; then echo \"Node $(node --version 2>/dev/null)\"; elif [ -f pyproject.toml ] || [ -f requirements.txt ] || [ -f Pipfile ]; then echo \"Python $(python3 --version 2>/dev/null | awk '{print $2}')\"; elif compgen -G \"*.cpp\" >/dev/null || compgen -G \"*.cc\" >/dev/null || compgen -G \"*.cxx\" >/dev/null; then echo \"C++ $(c++ --version 2>/dev/null | head -n1 | awk '{print $NF}')\"; elif compgen -G \"*.crl\" >/dev/null; then echo \"Carrion\"; else echo \"None\"; fi)\\[\\e[0m\\]   VCS: \\[\\e[0;32m\\]$(if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then echo \"Git\"; elif [ -e .ivaldi ]; then echo \"Ivaldi\"; else echo \"None\"; fi)\\[\\e[0m\\]\n[\\u@" + distro + "] > "
 
+	// XDG runtime directory (required for Wayland apps like vem)
+	xdgRuntimeDir := os.Getenv("XDG_RUNTIME_DIR")
+	if xdgRuntimeDir == "" {
+		xdgRuntimeDir = "/run/user/" + currentUser.Uid
+	}
+
 	// Clean environment - don't inherit from parent terminal
 	cmd.Env = []string{
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -76,6 +82,9 @@ func NewPtySession(cols, rows uint16) (*PtySession, error) {
 		"LANG=en_US.UTF-8",
 		"LC_ALL=en_US.UTF-8",
 		"PS1=" + ps1,
+		"XDG_RUNTIME_DIR=" + xdgRuntimeDir,
+		"XDG_SESSION_TYPE=wayland",
+		"WAYLAND_DISPLAY=" + os.Getenv("WAYLAND_DISPLAY"),
 	}
 
 	// Start in home directory
