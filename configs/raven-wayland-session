@@ -139,7 +139,7 @@ trigger_udev_input() {
 load_input_modules() {
     if command -v modprobe >/dev/null 2>&1; then
         log "Loading input modules..."
-        modprobe -a uinput usbhid hid_generic i8042 psmouse virtio_input evdev atkbd serio_raw 2>/dev/null || true
+        modprobe -a uinput usbhid hid_generic hid_multitouch i2c_hid i8042 psmouse virtio_input evdev atkbd serio_raw 2>/dev/null || true
     fi
 }
 

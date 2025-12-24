@@ -261,13 +261,14 @@ run_qemu() {
     local qemu_cmd=(
         qemu-system-x86_64
         -enable-kvm
-        -m 2G
+        -m 4G
         -cpu host
-        -smp 2
-        -device virtio-vga-gl
-        -display gtk,gl=on
-        -device virtio-keyboard
-        -device virtio-mouse
+        -smp 4
+        -device virtio-gpu-pci
+        -display gtk,gl=on,grab-on-hover=on
+        -device usb-ehci
+        -device usb-tablet
+        -device usb-kbd
         -kernel "$kernel"
         -initrd "$initramfs"
         -append "$cmdline"

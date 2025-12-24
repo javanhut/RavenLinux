@@ -256,6 +256,7 @@ func (d *RavenDesktop) createUI() *gtk.Overlay {
 	}
 	wallpaperPaths = append(wallpaperPaths,
 		"/usr/share/backgrounds/raven-wallpaper.png",
+		"/usr/share/backgrounds/raven-sky.ppm",
 		"/usr/share/backgrounds/default.png",
 	)
 

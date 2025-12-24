@@ -660,6 +660,17 @@ copy_wayland_tools() {
         chmod +x "${LIVE_ROOT}/root/.config/raven/scripts"/*.sh 2>/dev/null || true
         log_info "  Added Raven scripts"
     fi
+    if command -v swaybg &>/dev/null; then
+        cp "$(which swaybg)" "${LIVE_ROOT}/bin/" 2>/dev/null || true
+        log_info "  Added swaybg"
+    else
+        log_warn "  swaybg not found on host; wallpapers may not render"
+    fi
+    if [[ -d "${PROJECT_ROOT}/desktop/config/raven/backgrounds" ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share/backgrounds"
+        cp "${PROJECT_ROOT}/desktop/config/raven/backgrounds"/* "${LIVE_ROOT}/usr/share/backgrounds/" 2>/dev/null || true
+        log_info "  Added Raven wallpapers"
+    fi
 
     # Create default Raven settings
     if [[ ! -f "${LIVE_ROOT}/root/.config/raven/settings.json" ]]; then

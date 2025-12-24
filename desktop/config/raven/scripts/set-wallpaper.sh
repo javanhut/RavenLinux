@@ -39,6 +39,6 @@ if [ -f "$WALLPAPER" ]; then
     disown
 else
     # Set solid color background as fallback
-    swaybg -c "#0b0f14" &
+    swaybg -c "#87ceeb" &
     disown
 fi

@@ -80,7 +80,7 @@ decoration {
     rounding = 8
 
     blur {
-        enabled = yes
+        enabled = no
         size = 8
         passes = 2
         new_optimizations = yes
@@ -88,11 +88,11 @@ decoration {
     }
 
     active_opacity = 1.0
-    inactive_opacity = 0.95
+    inactive_opacity = 1.0
     fullscreen_opacity = 1.0
 
     shadow {
-        enabled = yes
+        enabled = no
         range = 8
         render_power = 2
         color = rgba(00000055)
@@ -102,20 +102,9 @@ decoration {
 # =====================
 # Animations
 # =====================
+# Disabled for software rendering performance
 animations {
-    enabled = yes
-
-    bezier = smoothOut, 0.36, 0, 0.66, -0.56
-    bezier = smoothIn, 0.25, 1, 0.5, 1
-    bezier = overshot, 0.4, 0.8, 0.2, 1.2
-
-    animation = windows, 1, 4, overshot, slide
-    animation = windowsOut, 1, 4, smoothOut, slide
-    animation = windowsMove, 1, 4, smoothIn, slide
-    animation = border, 1, 10, default
-    animation = fade, 1, 4, smoothIn
-    animation = fadeDim, 1, 4, smoothIn
-    animation = workspaces, 1, 4, overshot, slidevert
+    enabled = no
 }
 
 # =====================
@@ -130,13 +119,6 @@ dwindle {
 master {
     new_status = master
 }
-
-# =====================
-# Gestures (touchpad)
-# =====================
-gestures:workspace_swipe = true
-gestures:workspace_swipe_fingers = 3
-gestures:workspace_swipe_distance = 300
 
 # =====================
 # Miscellaneous
@@ -271,8 +253,8 @@ bind = $mainMod, Tab, workspace, e+1
 bind = $mainMod SHIFT, Tab, workspace, e-1
 
 # Special workspace (scratchpad)
-bind = $mainMod, S, togglespecialworkspace, scratchpad
-bind = $mainMod SHIFT, S, movetoworkspace, special:scratchpad
+bind = $mainMod, grave, togglespecialworkspace, scratchpad
+bind = $mainMod SHIFT, grave, movetoworkspace, special:scratchpad
 
 # Move/resize windows with mouse
 bindm = $mainMod, mouse:272, movewindow

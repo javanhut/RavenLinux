@@ -858,6 +858,17 @@ install_packages_to_sysroot() {
         cp "${PROJECT_ROOT}/configs/raven-x11-session" "${SYSROOT_DIR}/bin/raven-x11-session" 2>/dev/null || true
         chmod +x "${SYSROOT_DIR}/bin/raven-x11-session" 2>/dev/null || true
     fi
+    if command -v swaybg &>/dev/null; then
+        cp "$(which swaybg)" "${SYSROOT_DIR}/bin/" 2>/dev/null || true
+        log_info "  Copied swaybg"
+    else
+        log_warn "  swaybg not found on host; wallpapers may not render"
+    fi
+    if [[ -d "${PROJECT_ROOT}/desktop/config/raven/backgrounds" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share/backgrounds"
+        cp "${PROJECT_ROOT}/desktop/config/raven/backgrounds"/* "${SYSROOT_DIR}/usr/share/backgrounds/" 2>/dev/null || true
+        log_info "  Copied Raven wallpapers"
+    fi
     # Fontconfig + fonts (needed for terminal/shell; missing config causes warnings).
     if [[ -d "/etc/fonts" ]]; then
         mkdir -p "${SYSROOT_DIR}/etc/fonts"

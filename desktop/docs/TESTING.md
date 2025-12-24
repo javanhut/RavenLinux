@@ -1,6 +1,44 @@
 # Raven Desktop Environment - Testing Guide
 
-## Prerequisites
+## Quick Test with Nested Hyprland (Recommended)
+
+The fastest way to test all components together without a full build is using the nested Hyprland test script:
+
+```bash
+cd /home/javanhut/Development/CustomLinux/RavenLinux/desktop
+./test-nested.sh
+```
+
+This script:
+- Creates a temporary Hyprland configuration
+- Launches Hyprland in a nested window inside your current session
+- Auto-starts `raven-desktop` and `raven-shell` using `go run`
+- Sets up keybindings to launch other components on demand
+
+### Nested Test Keybindings
+
+| Shortcut | Action |
+|----------|--------|
+| `SUPER + Return` | Open terminal (foot) |
+| `SUPER + Space` | App launcher (raven-menu) |
+| `SUPER + E` | File manager |
+| `SUPER + S` | Settings |
+| `SUPER + Escape` | Power menu |
+| `SUPER + Q` | Close window |
+| `SUPER + M` | Exit nested session |
+
+### Requirements for Nested Testing
+
+- Running Hyprland or another Wayland compositor
+- `go` 1.23+
+- `swaybg` for wallpaper
+- GTK4 and gtk4-layer-shell development files
+
+---
+
+## Full Build Testing
+
+### Prerequisites
 
 Before building, you need to fix the permission issue with the compositor target directories:
 
@@ -61,16 +99,19 @@ qemu-system-x86_64 \
   -cpu host \
   -smp 4 \
   -drive file=/path/to/ravenlinux.img,format=raw,if=virtio \
-  -device virtio-vga-gl \
-  -display gtk,gl=on \
-  -device virtio-keyboard-pci \
-  -device virtio-mouse-pci \
+  -device virtio-gpu-pci \
+  -display gtk,gl=on,grab-on-hover=on \
+  -device usb-ehci \
+  -device usb-tablet \
+  -device usb-kbd \
   -serial mon:stdio
 ```
 
 **Important flags:**
-- `virtio-vga-gl`: Provides DRM/KMS device (required!)
+- `virtio-gpu-pci`: Provides DRM/KMS device (required!)
 - `gtk,gl=on`: GTK display with OpenGL (shows compositor output)
+- `usb-tablet`: Absolute mouse positioning (avoids grabbing issues)
+- `grab-on-hover=on`: Better mouse capture behavior
 - Don't use `-nographic` or `-display none` - you need visual output!
 
 ### Inside QEMU
@@ -218,6 +259,59 @@ To improve:
 1. Use smaller resolution in QEMU (800x600 instead of 1920x1080)
 2. Reduce window count
 3. Future: Add GPU rendering (GBM/EGL)
+
+### VM Performance Troubleshooting
+
+If you experience severe slowness, unresponsive mouse, or laggy input in QEMU:
+
+**Symptoms:**
+- Everything running slow
+- Cannot close menus
+- Terminal/vim input delayed
+- Mouse doesn't respond properly
+- Log shows: `NEEDS EXTENSION: falling back to kms_swrast`
+
+**Cause:** The VM is using software rendering (llvmpipe) instead of GPU acceleration. This happens when:
+- Running QEMU on a Wayland host (virgl passthrough may not work)
+- Host lacks proper OpenGL/virgl support
+- Missing graphics drivers
+
+**Solutions:**
+
+1. **Use the optimized test script:**
+   ```bash
+   ./scripts/test-desktop.sh
+   ```
+   This script includes performance-optimized settings.
+
+2. **Increase VM resources:**
+   ```bash
+   -m 4G    # At least 4GB RAM
+   -smp 4   # At least 4 CPU cores
+   ```
+
+3. **Use usb-tablet for mouse (already in test-desktop.sh):**
+   ```bash
+   -device usb-ehci
+   -device usb-tablet
+   ```
+   This provides absolute mouse positioning, avoiding grab issues.
+
+4. **Try different display backend (on X11 host):**
+   ```bash
+   -display sdl,gl=on
+   # or
+   -display spice-app,gl=on
+   ```
+
+5. **Disable GL if nothing works:**
+   ```bash
+   -device virtio-vga
+   -display gtk
+   ```
+   This will use pure software rendering but may be more stable.
+
+**Note:** The Hyprland configuration has been optimized for software rendering with blur, shadows, and animations disabled. This significantly improves performance in VM environments.
 
 ## Keyboard Shortcuts Reference
 

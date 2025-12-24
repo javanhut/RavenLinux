@@ -31,6 +31,17 @@ cp "$SCRIPT_DIR/raven/scripts/apply-settings.sh" "$CONFIG_DIR/raven/scripts/"
 chmod +x "$CONFIG_DIR/raven/scripts/"*.sh
 echo "Installed Raven scripts"
 
+# Install default wallpapers (system-wide if writable)
+if [ -d "$SCRIPT_DIR/raven/backgrounds" ]; then
+    if [ -w /usr/share/backgrounds ]; then
+        mkdir -p /usr/share/backgrounds
+        cp "$SCRIPT_DIR/raven/backgrounds"/* /usr/share/backgrounds/ 2>/dev/null || true
+        echo "Installed Raven wallpapers"
+    else
+        echo "Skipping wallpapers (no permission for /usr/share/backgrounds)"
+    fi
+fi
+
 # Create default settings if not exists
 if [ ! -f "$CONFIG_DIR/raven/settings.json" ]; then
     cat > "$CONFIG_DIR/raven/settings.json" << 'EOF'

@@ -1103,7 +1103,7 @@ func (p *RavenPanel) monitorProcesses() {
 
 	trackedAddresses := make(map[string]string) // Address -> dock item ID
 
-	ticker := time.NewTicker(500 * time.Millisecond) // Faster polling for better responsiveness
+	ticker := time.NewTicker(1500 * time.Millisecond) // Reduced polling for better performance under software rendering
 	for range ticker.C {
 		clients, err := getHyprlandClients()
 		if err != nil {
