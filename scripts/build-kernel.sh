@@ -648,9 +648,19 @@ main() {
     check_dependencies
     download_kernel
 
-    # Check if config exists, if not generate it
+    # Check if config exists, if not generate or restore it
     if [ ! -f "${KERNEL_BUILD_DIR}/.config" ]; then
-        generate_config
+        # If saved RavenLinux config exists, use it (preserves custom settings)
+        if [ -f "${CONFIG_DIR}/config-${KERNEL_VERSION}-raven" ]; then
+            log_info "Restoring saved RavenLinux kernel config..."
+            cp "${CONFIG_DIR}/config-${KERNEL_VERSION}-raven" "${KERNEL_BUILD_DIR}/.config"
+            cd "$KERNEL_BUILD_DIR"
+            make olddefconfig
+            log_success "Kernel config restored from ${CONFIG_DIR}/config-${KERNEL_VERSION}-raven"
+        else
+            # No saved config exists, generate new one from scratch
+            generate_config
+        fi
     fi
 
     if [ "$MENUCONFIG" = true ]; then
