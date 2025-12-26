@@ -1,0 +1,39 @@
+[package]
+name = "raven-shell"
+description = "Unified Raven Desktop shell for Hyprland"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+raven-core = { workspace = true }
+raven-components = { workspace = true }
+raven-tools = { workspace = true, optional = true }
+
+gtk4 = { workspace = true }
+glib = { workspace = true }
+tokio = { workspace = true }
+async-channel = { workspace = true }
+parking_lot = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+[features]
+default = ["desktop"]
+desktop = []
+tools = ["dep:raven-tools", "wifi", "usb", "installer"]
+wifi = []
+usb = []
+installer = []
+full = ["desktop", "tools"]
+
+[[bin]]
+name = "raven-shell"
+path = "src/main.rs"
+
+[[bin]]
+name = "raven-ctl"
+path = "src/bin/raven_ctl.rs"

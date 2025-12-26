@@ -1,0 +1,28 @@
+[package]
+name = "raven-core"
+description = "Core library for Raven Desktop shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+gtk4 = { workspace = true }
+gtk4-layer-shell = { workspace = true }
+glib = { workspace = true }
+tokio = { workspace = true }
+async-channel = { workspace = true }
+futures = { workspace = true }
+hyprland = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+notify = { workspace = true }
+dirs = { workspace = true }
+parking_lot = { workspace = true }
+ahash = { workspace = true }
+compact_str = { workspace = true }
+smallvec = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }

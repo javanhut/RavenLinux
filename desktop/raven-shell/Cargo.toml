@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/raven-shell",
+    "crates/raven-core",
+    "crates/raven-components",
+    "crates/raven-tools",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Raven Linux"]
+
+[workspace.dependencies]
+# Internal crates
+raven-core = { path = "crates/raven-core" }
+raven-components = { path = "crates/raven-components" }
+raven-tools = { path = "crates/raven-tools" }
+
+# GTK4 + Layer Shell
+gtk4 = "0.9"
+gtk4-layer-shell = "0.4"
+glib = "0.20"
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "process", "fs", "time", "net", "macros"] }
+async-channel = "2.3"
+futures = "0.3"
+
+# Hyprland IPC
+hyprland = "0.3"
+
+# Config & Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+notify = "6"
+dirs = "5"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Performance
+parking_lot = "0.12"
+ahash = "0.8"
+compact_str = { version = "0.8", features = ["serde"] }
+smallvec = { version = "1.13", features = ["serde"] }
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time
+chrono = "0.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

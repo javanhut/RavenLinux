@@ -1,0 +1,30 @@
+[package]
+name = "raven-components"
+description = "UI components for Raven Desktop shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "test-components"
+path = "src/bin/test_components.rs"
+
+[dependencies]
+raven-core = { workspace = true }
+gtk4 = { workspace = true }
+gtk4-layer-shell = { workspace = true }
+glib = { workspace = true }
+tokio = { workspace = true }
+async-channel = { workspace = true }
+compact_str = { workspace = true }
+smallvec = { workspace = true }
+ahash = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+libc = "0.2"

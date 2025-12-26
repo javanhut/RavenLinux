@@ -1,0 +1,24 @@
+[package]
+name = "raven-tools"
+description = "System tools for Raven Desktop shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "test-tools"
+path = "src/bin/test_tools.rs"
+
+[dependencies]
+raven-core = { workspace = true }
+gtk4 = { workspace = true }
+gtk4-layer-shell = { workspace = true }
+glib = { workspace = true }
+tokio = { workspace = true }
+async-channel = { workspace = true }
+compact_str = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+regex = "1"
+glob = "0.3"
