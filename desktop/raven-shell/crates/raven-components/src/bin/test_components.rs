@@ -1514,19 +1514,18 @@ fn create_filemanager_test() {
         })
     };
 
-    // Double-click to open folder or file
+    // Double-click to open folder or show Open With dialog for files
     {
         let navigate_to = navigate_to.clone();
+        let window = window.clone();
         file_list.connect_row_activated(move |_, row| {
             let path_str = row.widget_name();
             let path = PathBuf::from(path_str.as_str());
             if path.is_dir() {
                 navigate_to(path, true);
             } else {
-                // Open file with default application
-                let _ = std::process::Command::new("xdg-open")
-                    .arg(&path)
-                    .spawn();
+                // Show Open With dialog for files
+                show_open_with_dialog(&window, &path);
             }
         });
     }
