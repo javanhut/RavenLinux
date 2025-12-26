@@ -1,9 +1,9 @@
 // Test binary for desktop components
-// Usage: cargo run --bin test-components -- [menu|power|settings|keybindings|filemanager|panel]
+// Usage: cargo run --bin test-components -- [menu|power|settings|keybindings|filemanager|panel|desktop]
 
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GtkBox, Button, Label, Window,
+    Box as GtkBox, Button, GestureClick, Label, Window,
     ListBox, ListBoxRow, Orientation, ScrolledWindow, SearchEntry,
     Align, Separator,
 };
@@ -27,9 +27,10 @@ fn main() {
         "keybindings" => create_keybindings_test(),
         "filemanager" => create_filemanager_test(),
         "panel" => create_panel_test(),
+        "desktop" => create_desktop_test(),
         _ => {
             eprintln!("Unknown component: {}", component);
-            eprintln!("Usage: test-components [menu|power|settings|keybindings|filemanager|panel]");
+            eprintln!("Usage: test-components [menu|power|settings|keybindings|filemanager|panel|desktop]");
             std::process::exit(1);
         }
     }
@@ -4167,4 +4168,574 @@ fn create_panel_test() {
     *panel_window.borrow_mut() = Some(initial_panel);
 
     println!("Panel displayed on Hyprland layer shell");
+}
+
+/// Create desktop test for wallpaper and icon management
+fn create_desktop_test() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::path::PathBuf;
+
+    /// Default wallpaper search paths
+    const WALLPAPER_PATHS: &[&str] = &[
+        "/usr/share/backgrounds/raven-wallpaper.png",
+        "/usr/share/backgrounds/raven-sky.ppm",
+        "/usr/share/backgrounds/default.png",
+        "/usr/share/backgrounds/gnome/adwaita-l.jpg",
+    ];
+
+    /// Find wallpaper from default locations
+    fn find_wallpaper() -> Option<PathBuf> {
+        for path_str in WALLPAPER_PATHS {
+            let path = PathBuf::from(path_str);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    /// Parse a .desktop file for icon info
+    fn parse_desktop_file(path: &PathBuf) -> Option<(String, String, String)> {
+        let content = std::fs::read_to_string(path).ok()?;
+
+        let mut name = None;
+        let mut exec = None;
+        let mut icon = None;
+        let mut hidden = false;
+        let mut no_display = false;
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with("Name=") && name.is_none() {
+                name = Some(line.trim_start_matches("Name=").to_string());
+            } else if line.starts_with("Exec=") && exec.is_none() {
+                let cmd = line.trim_start_matches("Exec=")
+                    .replace("%f", "")
+                    .replace("%F", "")
+                    .replace("%u", "")
+                    .replace("%U", "")
+                    .replace("%c", "")
+                    .replace("%k", "")
+                    .trim()
+                    .to_string();
+                exec = Some(cmd);
+            } else if line.starts_with("Icon=") && icon.is_none() {
+                icon = Some(line.trim_start_matches("Icon=").to_string());
+            } else if line == "Hidden=true" {
+                hidden = true;
+            } else if line == "NoDisplay=true" {
+                no_display = true;
+            }
+        }
+
+        if hidden || no_display {
+            return None;
+        }
+
+        Some((
+            name.unwrap_or_else(|| "Unknown".to_string()),
+            exec?,
+            icon.unwrap_or_else(|| "application-x-executable".to_string()),
+        ))
+    }
+
+    /// Load icon image from various locations
+    fn load_icon_image(icon_name: &str) -> gtk4::Image {
+        let icon_paths = [
+            format!("/usr/share/icons/hicolor/48x48/apps/{}.png", icon_name),
+            format!("/usr/share/icons/hicolor/48x48/apps/{}.svg", icon_name),
+            format!("/usr/share/icons/hicolor/scalable/apps/{}.svg", icon_name),
+            format!("/usr/share/pixmaps/{}.png", icon_name),
+            format!("/usr/share/pixmaps/{}.svg", icon_name),
+            format!("/usr/share/icons/Adwaita/48x48/apps/{}.png", icon_name),
+        ];
+
+        for path in &icon_paths {
+            if std::path::Path::new(path).exists() {
+                return gtk4::Image::from_file(path);
+            }
+        }
+
+        gtk4::Image::from_icon_name(icon_name)
+    }
+
+    /// Create an icon widget
+    fn create_icon_widget(name: &str, exec: &str, icon_name: &str) -> GtkBox {
+        let container = GtkBox::new(Orientation::Vertical, 4);
+        container.set_halign(Align::Center);
+        container.add_css_class("desktop-icon");
+
+        // Icon image (48x48)
+        let image = load_icon_image(icon_name);
+        image.set_pixel_size(48);
+        image.add_css_class("desktop-icon-image");
+        container.append(&image);
+
+        // Label
+        let display_name = if name.len() > 12 {
+            format!("{}...", &name[..9])
+        } else {
+            name.to_string()
+        };
+        let label = Label::new(Some(&display_name));
+        label.set_max_width_chars(12);
+        label.set_wrap(true);
+        label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+        label.set_lines(2);
+        label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        label.add_css_class("desktop-icon-label");
+        container.append(&label);
+
+        // Double-click to launch
+        let click_gesture = GestureClick::new();
+        click_gesture.set_button(1);
+        let exec_cmd = exec.to_string();
+        click_gesture.connect_released(move |_gesture, n_press, _, _| {
+            if n_press == 2 {
+                println!("Launching: {}", exec_cmd);
+                let _ = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&exec_cmd)
+                    .spawn();
+            }
+        });
+        container.add_controller(click_gesture);
+
+        container
+    }
+
+    // Store references to windows
+    let wallpaper_path: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(find_wallpaper()));
+    let icon_grid: Rc<RefCell<Option<gtk4::FlowBox>>> = Rc::new(RefCell::new(None));
+
+    // Create main desktop window
+    let window = Window::builder()
+        .title("Raven Desktop")
+        .decorated(false)
+        .build();
+
+    // Initialize layer shell for desktop background
+    window.init_layer_shell();
+    window.set_layer(Layer::Background);
+
+    // Anchor to all edges for full coverage
+    window.set_anchor(Edge::Top, true);
+    window.set_anchor(Edge::Bottom, true);
+    window.set_anchor(Edge::Left, true);
+    window.set_anchor(Edge::Right, true);
+    window.set_exclusive_zone(-1);
+
+    // Create overlay for wallpaper + icons
+    let overlay = gtk4::Overlay::new();
+    overlay.add_css_class("desktop-container");
+
+    // Create wallpaper background
+    if let Some(ref path) = *wallpaper_path.borrow() {
+        let picture = gtk4::Picture::for_filename(path);
+        picture.set_hexpand(true);
+        picture.set_vexpand(true);
+        picture.set_can_shrink(true);
+        picture.add_css_class("desktop-wallpaper");
+        overlay.set_child(Some(&picture));
+    } else {
+        // Fallback: dark background
+        let bg = GtkBox::new(Orientation::Vertical, 0);
+        bg.add_css_class("desktop-background-fallback");
+        bg.set_hexpand(true);
+        bg.set_vexpand(true);
+        overlay.set_child(Some(&bg));
+    }
+
+    // Create icon grid FlowBox
+    let grid = gtk4::FlowBox::new();
+    grid.set_valign(Align::Start);
+    grid.set_halign(Align::Start);
+    grid.set_selection_mode(gtk4::SelectionMode::Single);
+    grid.set_activate_on_single_click(false);
+    grid.set_row_spacing(16);
+    grid.set_column_spacing(16);
+    grid.set_max_children_per_line(20);
+    grid.set_min_children_per_line(1);
+    grid.set_margin_top(60);
+    grid.set_margin_start(20);
+    grid.set_margin_end(20);
+    grid.add_css_class("desktop-icon-grid");
+
+    // Load icons from ~/Desktop
+    let desktop_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Desktop");
+
+    if let Ok(entries) = std::fs::read_dir(&desktop_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "desktop").unwrap_or(false) {
+                if let Some((name, exec, icon)) = parse_desktop_file(&path) {
+                    let widget = create_icon_widget(&name, &exec, &icon);
+                    grid.insert(&widget, -1);
+                }
+            } else if path.is_file() || path.is_dir() {
+                // Show regular files/folders
+                let name = path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
+
+                // Skip hidden files
+                if name.starts_with('.') {
+                    continue;
+                }
+
+                let icon = if path.is_dir() {
+                    "folder"
+                } else {
+                    "text-x-generic"
+                };
+
+                let exec = if path.is_dir() {
+                    format!("xdg-open \"{}\"", path.display())
+                } else {
+                    format!("xdg-open \"{}\"", path.display())
+                };
+
+                let widget = create_icon_widget(&name, &exec, icon);
+                grid.insert(&widget, -1);
+            }
+        }
+    }
+
+    *icon_grid.borrow_mut() = Some(grid.clone());
+    overlay.add_overlay(&grid);
+
+    // Right-click context menu on desktop
+    let right_click = GestureClick::new();
+    right_click.set_button(3);
+
+    let overlay_clone = overlay.clone();
+    let wallpaper_path_clone = wallpaper_path.clone();
+    let icon_grid_clone = icon_grid.clone();
+    let window_clone = window.clone();
+
+    right_click.connect_pressed(move |_, _, x, y| {
+        // Create context menu popup
+        let menu_window = Window::builder()
+            .title("Desktop Menu")
+            .decorated(false)
+            .default_width(200)
+            .default_height(200)
+            .build();
+
+        menu_window.init_layer_shell();
+        menu_window.set_layer(Layer::Top);
+        menu_window.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::OnDemand);
+        menu_window.set_anchor(Edge::Top, true);
+        menu_window.set_anchor(Edge::Left, true);
+        menu_window.set_margin(Edge::Top, y as i32);
+        menu_window.set_margin(Edge::Left, x as i32);
+
+        let menu_box = GtkBox::new(Orientation::Vertical, 4);
+        menu_box.add_css_class("context-menu");
+        menu_box.set_margin_top(8);
+        menu_box.set_margin_bottom(8);
+        menu_box.set_margin_start(8);
+        menu_box.set_margin_end(8);
+
+        // Change Wallpaper button
+        let change_wallpaper_btn = Button::with_label("Change Wallpaper...");
+        change_wallpaper_btn.add_css_class("context-menu-item");
+        let menu_win = menu_window.clone();
+        let overlay_ref = overlay_clone.clone();
+        let wp_path = wallpaper_path_clone.clone();
+        change_wallpaper_btn.connect_clicked(move |_| {
+            menu_win.close();
+
+            // Create file chooser dialog using FileChooserNative for compatibility
+            let dialog = gtk4::FileChooserDialog::new(
+                Some("Select Wallpaper"),
+                None::<&Window>,
+                gtk4::FileChooserAction::Open,
+                &[
+                    ("Cancel", gtk4::ResponseType::Cancel),
+                    ("Open", gtk4::ResponseType::Accept),
+                ],
+            );
+
+            dialog.init_layer_shell();
+            dialog.set_layer(Layer::Top);
+            dialog.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::OnDemand);
+
+            // Add image filter
+            let filter = gtk4::FileFilter::new();
+            filter.add_mime_type("image/*");
+            filter.set_name(Some("Image files"));
+            dialog.add_filter(&filter);
+
+            // Set initial folder to pictures or home
+            if let Some(pictures_dir) = dirs::picture_dir() {
+                let file = gtk4::gio::File::for_path(&pictures_dir);
+                let _ = dialog.set_current_folder(Some(&file));
+            }
+
+            let overlay_ref2 = overlay_ref.clone();
+            let wp_path2 = wp_path.clone();
+            dialog.connect_response(move |dlg, response| {
+                if response == gtk4::ResponseType::Accept {
+                    if let Some(file) = dlg.file() {
+                        if let Some(path) = file.path() {
+                            println!("Selected wallpaper: {}", path.display());
+
+                            // Update wallpaper
+                            let picture = gtk4::Picture::for_filename(&path);
+                            picture.set_hexpand(true);
+                            picture.set_vexpand(true);
+                            picture.set_can_shrink(true);
+                            picture.add_css_class("desktop-wallpaper");
+                            overlay_ref2.set_child(Some(&picture));
+
+                            *wp_path2.borrow_mut() = Some(path);
+                        }
+                    }
+                }
+                dlg.close();
+            });
+
+            // Escape to close
+            let dlg = dialog.clone();
+            let key_controller = gtk4::EventControllerKey::new();
+            key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+            key_controller.connect_key_pressed(move |_, key, _, _| {
+                if key == gtk4::gdk::Key::Escape {
+                    dlg.close();
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            });
+            dialog.add_controller(key_controller);
+
+            dialog.present();
+        });
+        menu_box.append(&change_wallpaper_btn);
+
+        // Separator
+        let sep1 = Separator::new(Orientation::Horizontal);
+        menu_box.append(&sep1);
+
+        // New Folder button
+        let new_folder_btn = Button::with_label("New Folder");
+        new_folder_btn.add_css_class("context-menu-item");
+        let menu_win = menu_window.clone();
+        let grid_ref = icon_grid_clone.clone();
+        new_folder_btn.connect_clicked(move |_| {
+            menu_win.close();
+
+            let desktop_dir = dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("Desktop");
+
+            // Find unique folder name
+            let mut counter = 1;
+            let mut folder_name = "New Folder".to_string();
+            let mut folder_path = desktop_dir.join(&folder_name);
+            while folder_path.exists() {
+                folder_name = format!("New Folder ({})", counter);
+                folder_path = desktop_dir.join(&folder_name);
+                counter += 1;
+            }
+
+            // Create folder
+            if std::fs::create_dir(&folder_path).is_ok() {
+                println!("Created folder: {}", folder_path.display());
+
+                // Add icon to grid
+                if let Some(ref grid) = *grid_ref.borrow() {
+                    let exec = format!("xdg-open \"{}\"", folder_path.display());
+                    let widget = create_icon_widget(&folder_name, &exec, "folder");
+                    grid.insert(&widget, -1);
+                }
+            }
+        });
+        menu_box.append(&new_folder_btn);
+
+        // New File button
+        let new_file_btn = Button::with_label("New Text File");
+        new_file_btn.add_css_class("context-menu-item");
+        let menu_win = menu_window.clone();
+        let grid_ref = icon_grid_clone.clone();
+        new_file_btn.connect_clicked(move |_| {
+            menu_win.close();
+
+            let desktop_dir = dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("Desktop");
+
+            // Find unique file name
+            let mut counter = 1;
+            let mut file_name = "New File.txt".to_string();
+            let mut file_path = desktop_dir.join(&file_name);
+            while file_path.exists() {
+                file_name = format!("New File ({}).txt", counter);
+                file_path = desktop_dir.join(&file_name);
+                counter += 1;
+            }
+
+            // Create file
+            if std::fs::write(&file_path, "").is_ok() {
+                println!("Created file: {}", file_path.display());
+
+                // Add icon to grid
+                if let Some(ref grid) = *grid_ref.borrow() {
+                    let exec = format!("xdg-open \"{}\"", file_path.display());
+                    let widget = create_icon_widget(&file_name, &exec, "text-x-generic");
+                    grid.insert(&widget, -1);
+                }
+            }
+        });
+        menu_box.append(&new_file_btn);
+
+        // Separator
+        let sep2 = Separator::new(Orientation::Horizontal);
+        menu_box.append(&sep2);
+
+        // Refresh button
+        let refresh_btn = Button::with_label("Refresh Icons");
+        refresh_btn.add_css_class("context-menu-item");
+        let menu_win = menu_window.clone();
+        let grid_ref = icon_grid_clone.clone();
+        refresh_btn.connect_clicked(move |_| {
+            menu_win.close();
+
+            if let Some(ref grid) = *grid_ref.borrow() {
+                // Clear grid
+                while let Some(child) = grid.first_child() {
+                    grid.remove(&child);
+                }
+
+                // Reload icons
+                let desktop_dir = dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("Desktop");
+
+                if let Ok(entries) = std::fs::read_dir(&desktop_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().map(|e| e == "desktop").unwrap_or(false) {
+                            if let Some((name, exec, icon)) = parse_desktop_file(&path) {
+                                let widget = create_icon_widget(&name, &exec, &icon);
+                                grid.insert(&widget, -1);
+                            }
+                        } else if path.is_file() || path.is_dir() {
+                            let name = path.file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "Unknown".to_string());
+
+                            if name.starts_with('.') {
+                                continue;
+                            }
+
+                            let icon = if path.is_dir() { "folder" } else { "text-x-generic" };
+                            let exec = format!("xdg-open \"{}\"", path.display());
+                            let widget = create_icon_widget(&name, &exec, icon);
+                            grid.insert(&widget, -1);
+                        }
+                    }
+                }
+
+                println!("Icons refreshed");
+            }
+        });
+        menu_box.append(&refresh_btn);
+
+        // Separator
+        let sep3 = Separator::new(Orientation::Horizontal);
+        menu_box.append(&sep3);
+
+        // Open Terminal Here
+        let terminal_btn = Button::with_label("Open Terminal Here");
+        terminal_btn.add_css_class("context-menu-item");
+        let menu_win = menu_window.clone();
+        terminal_btn.connect_clicked(move |_| {
+            menu_win.close();
+
+            let desktop_dir = dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("Desktop");
+
+            // Try common terminal emulators
+            let terminals = ["foot", "kitty", "alacritty", "gnome-terminal", "xterm"];
+            for term in terminals {
+                if std::process::Command::new(term)
+                    .current_dir(&desktop_dir)
+                    .spawn()
+                    .is_ok()
+                {
+                    println!("Opened terminal: {}", term);
+                    break;
+                }
+            }
+        });
+        menu_box.append(&terminal_btn);
+
+        // Display Settings
+        let display_btn = Button::with_label("Display Settings");
+        display_btn.add_css_class("context-menu-item");
+        let menu_win = menu_window.clone();
+        display_btn.connect_clicked(move |_| {
+            menu_win.close();
+            println!("Opening display settings...");
+            // Open settings window
+            let settings = build_settings_window(true);
+            settings.present();
+        });
+        menu_box.append(&display_btn);
+
+        menu_window.set_child(Some(&menu_box));
+
+        // Escape to close
+        let win = menu_window.clone();
+        let key_controller = gtk4::EventControllerKey::new();
+        key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key_controller.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk4::gdk::Key::Escape {
+                win.close();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        menu_window.add_controller(key_controller);
+
+        // Click outside to close
+        let click_close = GestureClick::new();
+        let win = menu_window.clone();
+        click_close.connect_released(move |_, _, _, _| {
+            win.close();
+        });
+
+        menu_window.present();
+    });
+    overlay.add_controller(right_click);
+
+    window.set_child(Some(&overlay));
+
+    // Escape to close desktop test
+    let win = window.clone();
+    let key_controller = gtk4::EventControllerKey::new();
+    key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    key_controller.connect_key_pressed(move |_, key, _, _| {
+        if key == gtk4::gdk::Key::Escape {
+            win.close();
+            std::process::exit(0);
+        }
+        glib::Propagation::Proceed
+    });
+    window.add_controller(key_controller);
+
+    window.connect_close_request(|_| {
+        std::process::exit(0);
+    });
+
+    window.present();
+
+    println!("Desktop displayed on Hyprland layer shell");
+    println!("Press Escape to exit");
+    println!("Right-click for context menu");
 }
