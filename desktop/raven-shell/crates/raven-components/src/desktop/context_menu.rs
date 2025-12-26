@@ -1,6 +1,7 @@
 use gtk4::prelude::*;
 use gtk4::{Box as GtkBox, Button, Label, Orientation, Separator, Window};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 use raven_core::{ComponentId, ShellCommand};
@@ -79,21 +80,143 @@ impl DesktopContextMenu {
         sep1.add_css_class("settings-menu-separator");
         menu_box.append(&sep1);
 
+        // Create Section
+        let create_label = Label::new(Some("Create"));
+        create_label.add_css_class("settings-section-label");
+        create_label.set_halign(gtk4::Align::Start);
+        menu_box.append(&create_label);
+
+        // New Folder
+        let new_folder_btn = Button::with_label("New Folder");
+        let tx = command_tx.clone();
+        let win = window.clone();
+        new_folder_btn.connect_clicked(move |_| {
+            let desktop_dir = dirs::desktop_dir()
+                .or_else(|| dirs::home_dir().map(|h| h.join("Desktop")))
+                .unwrap_or_else(|| PathBuf::from("."));
+
+            // Find unique folder name
+            let mut counter = 1;
+            let mut folder_name = "New Folder".to_string();
+            let mut folder_path = desktop_dir.join(&folder_name);
+            while folder_path.exists() {
+                folder_name = format!("New Folder ({})", counter);
+                folder_path = desktop_dir.join(&folder_name);
+                counter += 1;
+            }
+
+            // Create folder
+            if std::fs::create_dir(&folder_path).is_ok() {
+                tracing::info!("Created folder: {}", folder_path.display());
+                // Refresh desktop icons
+                let _ = tx.blocking_send(ShellCommand::ReloadConfig);
+            }
+            win.close();
+        });
+        menu_box.append(&new_folder_btn);
+
+        // New Text File
+        let new_file_btn = Button::with_label("New Text File");
+        let tx = command_tx.clone();
+        let win = window.clone();
+        new_file_btn.connect_clicked(move |_| {
+            let desktop_dir = dirs::desktop_dir()
+                .or_else(|| dirs::home_dir().map(|h| h.join("Desktop")))
+                .unwrap_or_else(|| PathBuf::from("."));
+
+            // Find unique file name
+            let mut counter = 1;
+            let mut file_name = "New File.txt".to_string();
+            let mut file_path = desktop_dir.join(&file_name);
+            while file_path.exists() {
+                file_name = format!("New File ({}).txt", counter);
+                file_path = desktop_dir.join(&file_name);
+                counter += 1;
+            }
+
+            // Create file
+            if std::fs::write(&file_path, "").is_ok() {
+                tracing::info!("Created file: {}", file_path.display());
+                // Refresh desktop icons
+                let _ = tx.blocking_send(ShellCommand::ReloadConfig);
+            }
+            win.close();
+        });
+        menu_box.append(&new_file_btn);
+
+        // Separator
+        let sep_create = Separator::new(Orientation::Horizontal);
+        sep_create.add_css_class("settings-menu-separator");
+        menu_box.append(&sep_create);
+
         // Configuration Section
         let config_label = Label::new(Some("Configuration"));
         config_label.add_css_class("settings-section-label");
         config_label.set_halign(gtk4::Align::Start);
         menu_box.append(&config_label);
 
-        // Change Wallpaper
-        let wallpaper_btn = Button::with_label("Change Wallpaper");
+        // Change Wallpaper - built-in file chooser
+        let wallpaper_btn = Button::with_label("Change Wallpaper...");
         let tx = command_tx.clone();
         let win = window.clone();
         wallpaper_btn.connect_clicked(move |_| {
-            let _ = tx.blocking_send(ShellCommand::LaunchApp(
-                "waypaper || nitrogen || gnome-control-center background".into(),
-            ));
             win.close();
+
+            // Create file chooser dialog
+            let dialog = gtk4::FileChooserDialog::new(
+                Some("Select Wallpaper"),
+                None::<&Window>,
+                gtk4::FileChooserAction::Open,
+                &[
+                    ("Cancel", gtk4::ResponseType::Cancel),
+                    ("Open", gtk4::ResponseType::Accept),
+                ],
+            );
+
+            dialog.init_layer_shell();
+            dialog.set_layer(Layer::Top);
+            dialog.set_keyboard_mode(KeyboardMode::OnDemand);
+
+            // Add image filter
+            let filter = gtk4::FileFilter::new();
+            filter.add_mime_type("image/*");
+            filter.set_name(Some("Image files"));
+            dialog.add_filter(&filter);
+
+            // Set initial folder to pictures or home
+            if let Some(pictures_dir) = dirs::picture_dir() {
+                let file = gtk4::gio::File::for_path(&pictures_dir);
+                let _ = dialog.set_current_folder(Some(&file));
+            }
+
+            let tx_clone = tx.clone();
+            dialog.connect_response(move |dlg, response| {
+                if response == gtk4::ResponseType::Accept {
+                    if let Some(file) = dlg.file() {
+                        if let Some(path) = file.path() {
+                            tracing::info!("Selected wallpaper: {}", path.display());
+                            // Send wallpaper change command
+                            let _ = tx_clone.blocking_send(ShellCommand::SetWallpaper(path));
+                        }
+                    }
+                }
+                dlg.close();
+            });
+
+            // Escape to close
+            let dlg = dialog.clone();
+            let key_controller = gtk4::EventControllerKey::new();
+            key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+            key_controller.connect_key_pressed(move |_, key, _, _| {
+                if key == gtk4::gdk::Key::Escape {
+                    dlg.close();
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            });
+            dialog.add_controller(key_controller);
+
+            dialog.present();
         });
         menu_box.append(&wallpaper_btn);
 

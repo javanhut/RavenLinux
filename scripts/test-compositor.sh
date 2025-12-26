@@ -5,9 +5,7 @@ cd /home/javanstorm/Development/CustomLinux/RavenLinux
 
 # Use the compositor from /tmp
 export PATH="/tmp/raven-compositor-build/release:$PATH"
-export PATH="$PWD/desktop/raven-shell:$PATH"
-export PATH="$PWD/desktop/raven-desktop:$PATH"
-export PATH="$PWD/desktop/raven-menu:$PATH"
+export PATH="$PWD/desktop/raven-shell/target/release:$PATH"
 export PATH="$PWD/tools/raven-terminal:$PATH"
 
 # Set up XDG_RUNTIME_DIR if not set

@@ -4414,7 +4414,6 @@ fn create_desktop_test() {
     let overlay_clone = overlay.clone();
     let wallpaper_path_clone = wallpaper_path.clone();
     let icon_grid_clone = icon_grid.clone();
-    let window_clone = window.clone();
 
     right_click.connect_pressed(move |_, _, x, y| {
         // Create context menu popup

@@ -14,33 +14,12 @@ echo ""
 # Note: Raven Desktop now uses Hyprland as the compositor
 # The raven-compositor is no longer built - install Hyprland from your package manager
 
-# Build GTK4 layer-shell components
-echo ">>> Building raven-shell (panel)..."
+# Build Rust-based desktop shell (unified panel, desktop, menu, settings)
+echo ">>> Building raven-shell (Rust workspace)..."
 cd "$PROJECT_ROOT/desktop/raven-shell"
-go build -o raven-shell main.go
+cargo build --release
 cd "$PROJECT_ROOT"
 echo "raven-shell built"
-echo ""
-
-echo ">>> Building raven-desktop (background)..."
-cd "$PROJECT_ROOT/desktop/raven-desktop"
-go build -o raven-desktop main.go
-cd "$PROJECT_ROOT"
-echo "raven-desktop built"
-echo ""
-
-echo ">>> Building raven-menu (start menu)..."
-cd "$PROJECT_ROOT/desktop/raven-menu"
-go build -o raven-menu main.go
-cd "$PROJECT_ROOT"
-echo "raven-menu built"
-echo ""
-
-echo ">>> Building raven-settings-menu..."
-cd "$PROJECT_ROOT/desktop/raven-settings-menu"
-go build -o raven-settings-menu main.go
-cd "$PROJECT_ROOT"
-echo "raven-settings-menu built"
 echo ""
 
 # Build terminal
@@ -65,10 +44,8 @@ fi
 echo "=== Build Complete ==="
 echo ""
 echo "Binaries located at:"
-echo "  - desktop/raven-shell/raven-shell"
-echo "  - desktop/raven-desktop/raven-desktop"
-echo "  - desktop/raven-menu/raven-menu"
-echo "  - desktop/raven-settings-menu/raven-settings-menu"
+echo "  - desktop/raven-shell/target/release/raven-shell"
+echo "  - desktop/raven-shell/target/release/raven-ctl"
 echo "  - tools/raven-terminal/raven-terminal"
 echo ""
 echo "Configuration installed to:"

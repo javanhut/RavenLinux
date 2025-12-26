@@ -192,6 +192,16 @@ cargo build --release --features full
 ### Phase 2: Always-On Components (Complete)
 - **PanelComponent**: Top bar with start button, dock, clock, and power/settings buttons
 - **DesktopComponent**: Full-screen background layer with wallpaper and icon grid
+  - Wallpaper display with automatic fallback to default locations
+  - Desktop icons from ~/Desktop folder and pinned apps config
+  - Double-click to launch applications
+  - Right-click context menu with:
+    - Open Terminal, Open File Manager, Applications launcher
+    - New Folder creation (auto-increments name if exists)
+    - New Text File creation (auto-increments name if exists)
+    - Change Wallpaper with built-in file chooser dialog
+    - Desktop Settings, Refresh Desktop
+  - Drag-and-drop file support
 
 ### Phase 3: Overlay Components (Complete)
 - **MenuComponent**: Application launcher with category sidebar, search, and app list

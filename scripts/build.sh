@@ -326,7 +326,7 @@ build_security() {
     fi
 }
 
-# Build desktop environment (raven-shell, raven-menu, raven-desktop, raven-settings-menu)
+# Build desktop environment (raven-shell unified Rust workspace)
 build_desktop() {
     log_section "Building Desktop Environment"
 
@@ -361,7 +361,7 @@ Stages:
     stage2      Native rebuild of entire system
     stage3      Build additional packages
     security    Build security packages (elogind, polkit, accountsservice)
-    desktop     Build desktop environment (raven-shell, raven-menu, etc.)
+    desktop     Build desktop environment (raven-shell Rust workspace)
     stage4      Generate bootable ISO image
 
 Options:
