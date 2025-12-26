@@ -1,12 +1,13 @@
 // Test binary for desktop components
-// Usage: cargo run --bin test-components -- [menu|power|settings|keybindings|filemanager]
+// Usage: cargo run --bin test-components -- [menu|power|settings|keybindings|filemanager|panel]
 
 use gtk4::prelude::*;
 use gtk4::{
     Box as GtkBox, Button, Label, Window,
     ListBox, ListBoxRow, Orientation, ScrolledWindow, SearchEntry,
-    Align,
+    Align, Separator,
 };
+use gtk4_layer_shell::{Edge, Layer, LayerShell};
 use raven_core::theme::load_css;
 use std::env;
 
@@ -25,9 +26,10 @@ fn main() {
         "settings" => create_settings_test(),
         "keybindings" => create_keybindings_test(),
         "filemanager" => create_filemanager_test(),
+        "panel" => create_panel_test(),
         _ => {
             eprintln!("Unknown component: {}", component);
-            eprintln!("Usage: test-components [menu|power|settings|keybindings|filemanager]");
+            eprintln!("Usage: test-components [menu|power|settings|keybindings|filemanager|panel]");
             std::process::exit(1);
         }
     }
@@ -37,23 +39,27 @@ fn main() {
     main_loop.run();
 }
 
-fn create_menu_test() {
+/// Build menu window - reusable by both standalone test and panel popup
+fn build_menu_window(as_layer_popup: bool) -> Window {
     use std::cell::RefCell;
     use std::rc::Rc;
-
-    println!("Creating Menu test window...");
 
     let window = Window::builder()
         .title("Raven Menu")
         .default_width(450)
         .default_height(600)
+        .decorated(!as_layer_popup)
         .build();
 
-    window.connect_close_request(|_| {
-        std::process::exit(0);
-        #[allow(unreachable_code)]
-        glib::Propagation::Proceed
-    });
+    if as_layer_popup {
+        window.init_layer_shell();
+        window.set_layer(Layer::Top);
+        window.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::OnDemand);
+        window.set_anchor(Edge::Top, true);
+        window.set_anchor(Edge::Left, true);
+        window.set_margin(Edge::Top, 42);
+        window.set_margin(Edge::Left, 8);
+    }
 
     let main_box = GtkBox::new(Orientation::Vertical, 0);
     main_box.add_css_class("menu-container");
@@ -253,24 +259,53 @@ fn create_menu_test() {
     main_box.append(&content);
 
     window.set_child(Some(&main_box));
-    window.present();
+
+    // Escape to close - use CAPTURE phase to intercept before search entry
+    let win = window.clone();
+    let key_controller = gtk4::EventControllerKey::new();
+    key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    key_controller.connect_key_pressed(move |_, key, _, _| {
+        if key == gtk4::gdk::Key::Escape {
+            win.close();
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    window.add_controller(key_controller);
+
+    window
 }
 
-fn create_power_test() {
-    println!("Creating Power Menu test window...");
-    println!("Press Escape or click outside to close");
+fn create_menu_test() {
+    println!("Creating Menu test window...");
 
-    let window = Window::builder()
-        .title("Power Menu")
-        .default_width(800)
-        .default_height(500)
-        .build();
-
+    let window = build_menu_window(false);
     window.connect_close_request(|_| {
         std::process::exit(0);
         #[allow(unreachable_code)]
         glib::Propagation::Proceed
     });
+    window.present();
+}
+
+/// Build power window - reusable by both standalone test and panel popup
+fn build_power_window(as_layer_popup: bool) -> Window {
+    let window = Window::builder()
+        .title("Power Menu")
+        .default_width(800)
+        .default_height(500)
+        .decorated(!as_layer_popup)
+        .build();
+
+    if as_layer_popup {
+        window.init_layer_shell();
+        window.set_layer(Layer::Top);
+        window.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::OnDemand);
+        window.set_anchor(Edge::Top, true);
+        window.set_anchor(Edge::Right, true);
+        window.set_margin(Edge::Top, 42);
+        window.set_margin(Edge::Right, 8);
+    }
 
     let main_box = GtkBox::new(Orientation::Vertical, 24);
     main_box.add_css_class("power-overlay");
@@ -293,15 +328,15 @@ fn create_power_test() {
     button_box.set_halign(Align::Center);
 
     let options = [
-        ("Lock", "Lock screen"),
-        ("Logout", "End session"),
-        ("Suspend", "Sleep mode"),
-        ("Hibernate", "Save to disk"),
-        ("Reboot", "Restart system"),
-        ("Shutdown", "Power off"),
+        ("Lock", "Lock screen", "swaylock"),
+        ("Logout", "End session", "swaymsg exit"),
+        ("Suspend", "Sleep mode", "systemctl suspend"),
+        ("Hibernate", "Save to disk", "systemctl hibernate"),
+        ("Reboot", "Restart system", "systemctl reboot"),
+        ("Shutdown", "Power off", "systemctl poweroff"),
     ];
 
-    for (name, desc) in options {
+    for (name, desc, command) in options {
         let btn_box = GtkBox::new(Orientation::Vertical, 8);
         btn_box.add_css_class("power-overlay-button");
         btn_box.set_size_request(100, 100);
@@ -319,6 +354,36 @@ fn create_power_test() {
         let btn = Button::new();
         btn.set_child(Some(&btn_box));
         btn.add_css_class("power-overlay-button");
+
+        // Connect click handler to execute power command
+        let cmd = command.to_string();
+        let win = window.clone();
+        btn.connect_clicked(move |_| {
+            // Execute the power command through shell for reliability
+            // Run command first, then close window
+            let cmd_clone = cmd.clone();
+
+            // Spawn command in background thread to ensure it runs
+            std::thread::spawn(move || {
+                let result = std::process::Command::new("sh")
+                    .args(["-c", &cmd_clone])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+
+                if let Err(e) = result {
+                    eprintln!("Failed to execute power command '{}': {}", cmd_clone, e);
+                }
+            });
+
+            // Close window after small delay to ensure command starts
+            let win_clone = win.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
+                win_clone.close();
+            });
+        });
+
         button_box.append(&btn);
     }
 
@@ -341,25 +406,42 @@ fn create_power_test() {
     });
     window.add_controller(key_controller);
 
-    window.present();
+    window
 }
 
-fn create_settings_test() {
-    use gtk4::{Switch, Scale, SpinButton, ColorButton};
+fn create_power_test() {
+    println!("Creating Power Menu test window...");
+    println!("Press Escape or click outside to close");
 
-    println!("Creating Settings test window...");
-
-    let window = Window::builder()
-        .title("Raven Settings")
-        .default_width(900)
-        .default_height(650)
-        .build();
-
+    let window = build_power_window(false);
     window.connect_close_request(|_| {
         std::process::exit(0);
         #[allow(unreachable_code)]
         glib::Propagation::Proceed
     });
+    window.present();
+}
+
+/// Build settings window - reusable by both standalone test and panel popup
+fn build_settings_window(as_layer_popup: bool) -> Window {
+    use gtk4::{Switch, Scale, SpinButton, ColorButton};
+
+    let window = Window::builder()
+        .title("Raven Settings")
+        .default_width(900)
+        .default_height(650)
+        .decorated(!as_layer_popup)
+        .build();
+
+    if as_layer_popup {
+        window.init_layer_shell();
+        window.set_layer(Layer::Top);
+        window.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::OnDemand);
+        window.set_anchor(Edge::Top, true);
+        window.set_anchor(Edge::Right, true);
+        window.set_margin(Edge::Top, 42);
+        window.set_margin(Edge::Right, 100);
+    }
 
     let main_box = GtkBox::new(Orientation::Horizontal, 0);
     main_box.add_css_class("settings-window");
@@ -695,22 +777,85 @@ fn create_settings_test() {
     power_page.append(&subtitle);
 
     let power_section = settings_section("Power Saving");
+    // Screen timeout dropdown: 1 min, 2 min, 5 min, 10 min, Never
     let blank_screen = gtk4::DropDown::from_strings(&["1 minute", "2 minutes", "5 minutes", "10 minutes", "Never"]);
-    blank_screen.set_selected(2);
+    blank_screen.set_selected(2); // Default to 5 minutes
+    blank_screen.connect_selected_notify(|dropdown| {
+        let seconds = match dropdown.selected() {
+            0 => 60,      // 1 minute
+            1 => 120,     // 2 minutes
+            2 => 300,     // 5 minutes
+            3 => 600,     // 10 minutes
+            _ => 0,       // Never
+        };
+        set_screen_timeout(seconds);
+    });
     power_section.append(&settings_row("Blank screen after", blank_screen.upcast_ref()));
 
+    // Auto-suspend dropdown: 15 min, 30 min, 1 hour, Never
     let auto_suspend = gtk4::DropDown::from_strings(&["15 minutes", "30 minutes", "1 hour", "Never"]);
-    auto_suspend.set_selected(1);
+    auto_suspend.set_selected(1); // Default to 30 minutes
+    auto_suspend.connect_selected_notify(|dropdown| {
+        let seconds = match dropdown.selected() {
+            0 => 900,     // 15 minutes
+            1 => 1800,    // 30 minutes
+            2 => 3600,    // 1 hour
+            _ => 0,       // Never
+        };
+        set_suspend_timeout(seconds);
+    });
     power_section.append(&settings_row("Automatic suspend", auto_suspend.upcast_ref()));
 
     power_page.append(&power_section);
 
     let battery_section = settings_section("Battery");
+
+    // Battery percentage display with current value
+    let battery_row = GtkBox::new(Orientation::Horizontal, 12);
+    battery_row.add_css_class("settings-row");
+    let battery_label = Label::new(Some("Show battery percentage"));
+    battery_label.set_hexpand(true);
+    battery_label.set_halign(Align::Start);
+    battery_row.append(&battery_label);
+
+    // Show current battery level if available
+    let battery_info = Label::new(None);
+    battery_info.add_css_class("dim-label");
+    if has_battery() {
+        if let Some(pct) = get_battery_percentage() {
+            let charging = if is_battery_charging() { " (Charging)" } else { "" };
+            battery_info.set_text(&format!("{}%{}", pct, charging));
+        }
+    } else {
+        battery_info.set_text("No battery");
+    }
+    battery_row.append(&battery_info);
+
     let show_percentage = Switch::new();
     show_percentage.set_active(true);
-    battery_section.append(&settings_row("Show battery percentage", show_percentage.upcast_ref()));
+    // Note: The actual panel component would need to read this setting
+    // For now this is stored in UI state
+    battery_row.append(&show_percentage);
+    battery_section.append(&battery_row);
 
+    // Power saver mode - connect to powerprofilesctl
     let power_saver = Switch::new();
+    // Set initial state based on current power profile
+    if has_power_profiles() {
+        if let Some(profile) = get_power_profile() {
+            power_saver.set_active(profile == "power-saver");
+        }
+        power_saver.connect_state_set(|_switch, state| {
+            if state {
+                set_power_profile("power-saver");
+            } else {
+                set_power_profile("balanced");
+            }
+            glib::Propagation::Proceed
+        });
+    } else {
+        power_saver.set_sensitive(false);
+    }
     battery_section.append(&settings_row("Power saver mode", power_saver.upcast_ref()));
 
     power_page.append(&battery_section);
@@ -841,6 +986,32 @@ fn create_settings_test() {
     main_box.append(&content_scroll);
 
     window.set_child(Some(&main_box));
+
+    // Escape to close - use CAPTURE phase
+    let win = window.clone();
+    let key_controller = gtk4::EventControllerKey::new();
+    key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    key_controller.connect_key_pressed(move |_, key, _, _| {
+        if key == gtk4::gdk::Key::Escape {
+            win.close();
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    window.add_controller(key_controller);
+
+    window
+}
+
+fn create_settings_test() {
+    println!("Creating Settings test window...");
+
+    let window = build_settings_window(false);
+    window.connect_close_request(|_| {
+        std::process::exit(0);
+        #[allow(unreachable_code)]
+        glib::Propagation::Proceed
+    });
     window.present();
 }
 
@@ -3350,4 +3521,650 @@ fn show_mount_location_dialog(
     });
 
     dialog.present();
+}
+
+// Power settings helper functions
+
+/// Set screen timeout using swayidle and dpms
+fn set_screen_timeout(seconds: i32) {
+    // Kill existing swayidle for screen timeout
+    let _ = std::process::Command::new("pkill")
+        .args(["-f", "swayidle.*dpms"])
+        .spawn();
+
+    if seconds <= 0 {
+        // Disable screen timeout - ensure dpms is on
+        let _ = std::process::Command::new("swaymsg")
+            .args(["output", "*", "dpms", "on"])
+            .spawn();
+        return;
+    }
+
+    // Start swayidle with dpms timeout
+    let timeout_str = seconds.to_string();
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("swayidle")
+            .args([
+                "-w",
+                "timeout", &timeout_str, "swaymsg output * dpms off",
+                "resume", "swaymsg output * dpms on",
+            ])
+            .spawn();
+    });
+}
+
+/// Set auto-suspend timeout using swayidle
+fn set_suspend_timeout(seconds: i32) {
+    // Kill existing swayidle for suspend
+    let _ = std::process::Command::new("pkill")
+        .args(["-f", "swayidle.*suspend"])
+        .spawn();
+
+    if seconds <= 0 {
+        // Disable auto-suspend
+        return;
+    }
+
+    // Start swayidle with suspend timeout
+    let timeout_str = seconds.to_string();
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("swayidle")
+            .args([
+                "-w",
+                "timeout", &timeout_str, "systemctl suspend",
+            ])
+            .spawn();
+    });
+}
+
+/// Check if system has a battery
+fn has_battery() -> bool {
+    let power_supply = std::path::Path::new("/sys/class/power_supply");
+    if !power_supply.exists() {
+        return false;
+    }
+
+    if let Ok(entries) = std::fs::read_dir(power_supply) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("BAT") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Get battery percentage from /sys/class/power_supply
+fn get_battery_percentage() -> Option<i32> {
+    let power_supply = std::path::Path::new("/sys/class/power_supply");
+    if !power_supply.exists() {
+        return None;
+    }
+
+    // Find battery device
+    if let Ok(entries) = std::fs::read_dir(power_supply) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("BAT") {
+                let capacity_path = entry.path().join("capacity");
+                if let Ok(content) = std::fs::read_to_string(&capacity_path) {
+                    if let Ok(percentage) = content.trim().parse::<i32>() {
+                        return Some(percentage);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback to upower
+    if let Ok(output) = std::process::Command::new("upower")
+        .args(["-i", "/org/freedesktop/UPower/devices/battery_BAT0"])
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.contains("percentage:") {
+                if let Some(pct) = line.split(':').nth(1) {
+                    let pct = pct.trim().trim_end_matches('%');
+                    if let Ok(val) = pct.parse::<i32>() {
+                        return Some(val);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Check if battery is charging
+fn is_battery_charging() -> bool {
+    let power_supply = std::path::Path::new("/sys/class/power_supply");
+    if !power_supply.exists() {
+        return false;
+    }
+
+    if let Ok(entries) = std::fs::read_dir(power_supply) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("BAT") {
+                let status_path = entry.path().join("status");
+                if let Ok(content) = std::fs::read_to_string(&status_path) {
+                    let status = content.trim().to_lowercase();
+                    return status == "charging" || status == "full";
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Get current power profile
+fn get_power_profile() -> Option<String> {
+    if let Ok(output) = std::process::Command::new("powerprofilesctl")
+        .arg("get")
+        .output()
+    {
+        if output.status.success() {
+            return Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
+        }
+    }
+    None
+}
+
+/// Set power profile using powerprofilesctl
+fn set_power_profile(profile: &str) {
+    let _ = std::process::Command::new("powerprofilesctl")
+        .args(["set", profile])
+        .spawn();
+}
+
+/// Check if powerprofilesctl is available
+fn has_power_profiles() -> bool {
+    std::process::Command::new("which")
+        .arg("powerprofilesctl")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn create_panel_test() {
+    use glib::ControlFlow;
+    use gtk4::Picture;
+    use raven_core::{save_raven_icon, ConfigPaths};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    println!("Creating Panel test window (layer shell)...");
+    println!("Use orientation buttons to move panel: Top, Bottom, Left, Right");
+
+    // Track current orientation: 0=Top, 1=Bottom, 2=Left, 3=Right
+    let orientation: Rc<RefCell<u8>> = Rc::new(RefCell::new(0));
+    let panel_window: Rc<RefCell<Option<Window>>> = Rc::new(RefCell::new(None));
+
+    // Flag to track if we're rebuilding (don't exit on close)
+    let rebuilding: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
+
+    // Track open popup windows
+    let menu_window: Rc<RefCell<Option<Window>>> = Rc::new(RefCell::new(None));
+    let settings_window: Rc<RefCell<Option<Window>>> = Rc::new(RefCell::new(None));
+    let power_window: Rc<RefCell<Option<Window>>> = Rc::new(RefCell::new(None));
+
+    // Build panel function
+    fn build_panel(
+        orient: u8,
+        menu_window: Rc<RefCell<Option<Window>>>,
+        settings_window: Rc<RefCell<Option<Window>>>,
+        power_window: Rc<RefCell<Option<Window>>>,
+        orientation: Rc<RefCell<u8>>,
+        panel_window: Rc<RefCell<Option<Window>>>,
+        rebuilding: Rc<RefCell<bool>>,
+    ) -> Window {
+        let is_vertical = orient == 2 || orient == 3; // Left or Right
+        let panel_size = 38;
+
+        let window = Window::builder()
+            .title("Raven Panel")
+            .decorated(false)
+            .build();
+
+        if is_vertical {
+            window.set_default_size(panel_size, -1);
+        } else {
+            window.set_default_size(-1, panel_size);
+        }
+
+        let rebuilding_ref = rebuilding.clone();
+        window.connect_close_request(move |_| {
+            if !*rebuilding_ref.borrow() {
+                std::process::exit(0);
+            }
+            glib::Propagation::Proceed
+        });
+
+        // Initialize layer shell
+        window.init_layer_shell();
+        window.set_layer(Layer::Top);
+        window.auto_exclusive_zone_enable();
+
+        // Set anchors based on orientation
+        window.set_anchor(Edge::Top, false);
+        window.set_anchor(Edge::Bottom, false);
+        window.set_anchor(Edge::Left, false);
+        window.set_anchor(Edge::Right, false);
+
+        match orient {
+            0 => { // Top
+                window.set_anchor(Edge::Top, true);
+                window.set_anchor(Edge::Left, true);
+                window.set_anchor(Edge::Right, true);
+            }
+            1 => { // Bottom
+                window.set_anchor(Edge::Bottom, true);
+                window.set_anchor(Edge::Left, true);
+                window.set_anchor(Edge::Right, true);
+            }
+            2 => { // Left
+                window.set_anchor(Edge::Left, true);
+                window.set_anchor(Edge::Top, true);
+                window.set_anchor(Edge::Bottom, true);
+            }
+            3 => { // Right
+                window.set_anchor(Edge::Right, true);
+                window.set_anchor(Edge::Top, true);
+                window.set_anchor(Edge::Bottom, true);
+            }
+            _ => {}
+        }
+
+        let box_orientation = if is_vertical {
+            Orientation::Vertical
+        } else {
+            Orientation::Horizontal
+        };
+
+        let separator_orientation = if is_vertical {
+            Orientation::Horizontal
+        } else {
+            Orientation::Vertical
+        };
+
+        // Main container
+        let main_box = GtkBox::new(box_orientation, 0);
+        main_box.set_homogeneous(false);
+        main_box.add_css_class("panel-container");
+
+        // Start section: Raven button with SVG icon
+        let start_box = GtkBox::new(box_orientation, 6);
+        if is_vertical {
+            start_box.set_margin_top(6);
+        } else {
+            start_box.set_margin_start(6);
+        }
+        start_box.add_css_class("panel-section");
+
+        let start_btn = Button::new();
+        start_btn.add_css_class("start-button");
+        start_btn.set_tooltip_text(Some("Raven Menu"));
+
+        // Load raven icon SVG
+        let paths = ConfigPaths::new();
+        let icon_path = save_raven_icon(&paths.icon_cache_dir);
+        let picture = Picture::for_filename(&icon_path);
+        picture.set_can_shrink(true);
+        picture.add_css_class("raven-icon");
+        picture.set_size_request(24, 24);
+
+        let icon_box = GtkBox::new(Orientation::Horizontal, 0);
+        icon_box.append(&picture);
+        start_btn.set_child(Some(&icon_box));
+
+        // Raven menu click handler
+        let menu_win_ref = menu_window.clone();
+        let settings_win_ref = settings_window.clone();
+        let power_win_ref = power_window.clone();
+        start_btn.connect_clicked(move |_| {
+            // Close other popups
+            if let Some(win) = settings_win_ref.borrow().as_ref() {
+                win.close();
+            }
+            *settings_win_ref.borrow_mut() = None;
+            if let Some(win) = power_win_ref.borrow().as_ref() {
+                win.close();
+            }
+            *power_win_ref.borrow_mut() = None;
+
+            // Toggle menu
+            if menu_win_ref.borrow().is_some() {
+                if let Some(win) = menu_win_ref.borrow().as_ref() {
+                    win.close();
+                }
+                *menu_win_ref.borrow_mut() = None;
+            } else {
+                let win = build_menu_window(true);
+                win.present();
+                *menu_win_ref.borrow_mut() = Some(win);
+            }
+        });
+        start_box.append(&start_btn);
+        main_box.append(&start_box);
+
+        // First spacer
+        let spacer1 = GtkBox::new(box_orientation, 0);
+        if is_vertical {
+            spacer1.set_vexpand(true);
+        } else {
+            spacer1.set_hexpand(true);
+        }
+        main_box.append(&spacer1);
+
+        // Center: Empty dock (apps would be added dynamically from Hyprland)
+        let dock_box = GtkBox::new(box_orientation, 4);
+        dock_box.add_css_class("dock-container");
+        // Dock is empty - apps added dynamically based on running windows
+        main_box.append(&dock_box);
+
+        // Second spacer
+        let spacer2 = GtkBox::new(box_orientation, 0);
+        if is_vertical {
+            spacer2.set_vexpand(true);
+        } else {
+            spacer2.set_hexpand(true);
+        }
+        main_box.append(&spacer2);
+
+        // End section: Clock + Settings + Power
+        let end_box = GtkBox::new(box_orientation, 6);
+        if is_vertical {
+            end_box.set_margin_bottom(6);
+        } else {
+            end_box.set_margin_end(6);
+        }
+        end_box.add_css_class("panel-section");
+
+        // Clock
+        let clock_label = Label::new(None);
+        clock_label.add_css_class("clock");
+
+        let clock_clone = clock_label.clone();
+        let now = chrono::Local::now();
+        clock_label.set_text(&now.format("%a %b %-d  %-I:%M %p").to_string());
+
+        glib::timeout_add_local(Duration::from_secs(1), move || {
+            let now = chrono::Local::now();
+            let formatted = now.format("%a %b %-d  %-I:%M %p").to_string();
+            clock_clone.set_text(&formatted);
+            ControlFlow::Continue
+        });
+
+        end_box.append(&clock_label);
+
+        let sep1 = Separator::new(separator_orientation);
+        end_box.append(&sep1);
+
+        // Settings button - opens quick settings with panel position
+        let settings_btn = Button::with_label("Settings");
+        settings_btn.add_css_class("settings-button");
+
+        let menu_win_ref = menu_window.clone();
+        let settings_win_ref = settings_window.clone();
+        let power_win_ref = power_window.clone();
+        let orientation_ref = orientation.clone();
+        let panel_window_ref = panel_window.clone();
+        let rebuilding_ref = rebuilding.clone();
+        let current_orient = orient;
+        settings_btn.connect_clicked(move |_| {
+            // Close other popups
+            if let Some(win) = menu_win_ref.borrow().as_ref() {
+                win.close();
+            }
+            *menu_win_ref.borrow_mut() = None;
+            if let Some(win) = power_win_ref.borrow().as_ref() {
+                win.close();
+            }
+            *power_win_ref.borrow_mut() = None;
+
+            // Toggle settings popup
+            if settings_win_ref.borrow().is_some() {
+                if let Some(win) = settings_win_ref.borrow().as_ref() {
+                    win.close();
+                }
+                *settings_win_ref.borrow_mut() = None;
+            } else {
+                let win = build_quick_settings_popup(
+                    current_orient,
+                    orientation_ref.clone(),
+                    panel_window_ref.clone(),
+                    menu_win_ref.clone(),
+                    settings_win_ref.clone(),
+                    power_win_ref.clone(),
+                    rebuilding_ref.clone(),
+                );
+                win.present();
+                *settings_win_ref.borrow_mut() = Some(win);
+            }
+        });
+        end_box.append(&settings_btn);
+
+        let sep2 = Separator::new(separator_orientation);
+        end_box.append(&sep2);
+
+        // Power button
+        let power_btn = Button::with_label("Power");
+        power_btn.add_css_class("power-button");
+
+        let menu_win_ref = menu_window.clone();
+        let settings_win_ref = settings_window.clone();
+        let power_win_ref = power_window.clone();
+        power_btn.connect_clicked(move |_| {
+            // Close other popups
+            if let Some(win) = menu_win_ref.borrow().as_ref() {
+                win.close();
+            }
+            *menu_win_ref.borrow_mut() = None;
+            if let Some(win) = settings_win_ref.borrow().as_ref() {
+                win.close();
+            }
+            *settings_win_ref.borrow_mut() = None;
+
+            // Toggle power menu
+            if power_win_ref.borrow().is_some() {
+                if let Some(win) = power_win_ref.borrow().as_ref() {
+                    win.close();
+                }
+                *power_win_ref.borrow_mut() = None;
+            } else {
+                let win = build_power_window(true);
+                win.present();
+                *power_win_ref.borrow_mut() = Some(win);
+            }
+        });
+        end_box.append(&power_btn);
+
+        main_box.append(&end_box);
+
+        window.set_child(Some(&main_box));
+        window
+    }
+
+    // Quick settings popup with panel position options
+    fn build_quick_settings_popup(
+        current_orient: u8,
+        orientation: Rc<RefCell<u8>>,
+        panel_window: Rc<RefCell<Option<Window>>>,
+        menu_window: Rc<RefCell<Option<Window>>>,
+        settings_window: Rc<RefCell<Option<Window>>>,
+        power_window: Rc<RefCell<Option<Window>>>,
+        rebuilding: Rc<RefCell<bool>>,
+    ) -> Window {
+        let window = Window::builder()
+            .title("Quick Settings")
+            .default_width(280)
+            .default_height(200)
+            .decorated(false)
+            .build();
+
+        window.init_layer_shell();
+        window.set_layer(Layer::Top);
+        window.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::OnDemand);
+        window.set_anchor(Edge::Top, true);
+        window.set_anchor(Edge::Right, true);
+        window.set_margin(Edge::Top, 42);
+        window.set_margin(Edge::Right, 80);
+
+        let main_box = GtkBox::new(Orientation::Vertical, 12);
+        main_box.add_css_class("quick-settings-popup");
+        main_box.set_margin_start(16);
+        main_box.set_margin_end(16);
+        main_box.set_margin_top(16);
+        main_box.set_margin_bottom(16);
+
+        // Title
+        let title = Label::new(Some("Quick Settings"));
+        title.add_css_class("quick-settings-title");
+        title.set_halign(Align::Start);
+        main_box.append(&title);
+
+        // Panel Position section
+        let position_label = Label::new(Some("Panel Position"));
+        position_label.add_css_class("settings-section-label");
+        position_label.set_halign(Align::Start);
+        position_label.set_margin_top(8);
+        main_box.append(&position_label);
+
+        let position_box = GtkBox::new(Orientation::Horizontal, 8);
+        position_box.set_halign(Align::Center);
+
+        let positions = [
+            ("Top", 0u8),
+            ("Bottom", 1u8),
+            ("Left", 2u8),
+            ("Right", 3u8),
+        ];
+
+        for (label, pos) in positions {
+            let btn = Button::with_label(label);
+            btn.add_css_class("position-btn");
+            if pos == current_orient {
+                btn.add_css_class("position-btn-active");
+            }
+
+            let orientation_clone = orientation.clone();
+            let panel_window_clone = panel_window.clone();
+            let menu_win = menu_window.clone();
+            let settings_win = settings_window.clone();
+            let power_win = power_window.clone();
+            let rebuilding_clone = rebuilding.clone();
+            let win_clone = window.clone();
+
+            btn.connect_clicked(move |_| {
+                // Close all popups
+                if let Some(win) = menu_win.borrow().as_ref() {
+                    win.close();
+                }
+                *menu_win.borrow_mut() = None;
+                if let Some(win) = settings_win.borrow().as_ref() {
+                    win.close();
+                }
+                *settings_win.borrow_mut() = None;
+                if let Some(win) = power_win.borrow().as_ref() {
+                    win.close();
+                }
+                *power_win.borrow_mut() = None;
+
+                // Close this popup
+                win_clone.close();
+
+                // Update orientation
+                *orientation_clone.borrow_mut() = pos;
+
+                // Set rebuilding flag before closing panel
+                *rebuilding_clone.borrow_mut() = true;
+
+                // Close current panel and rebuild
+                if let Some(win) = panel_window_clone.borrow().as_ref() {
+                    win.close();
+                }
+
+                let new_panel = build_panel(
+                    pos,
+                    menu_win.clone(),
+                    settings_win.clone(),
+                    power_win.clone(),
+                    orientation_clone.clone(),
+                    panel_window_clone.clone(),
+                    rebuilding_clone.clone(),
+                );
+                new_panel.present();
+                *panel_window_clone.borrow_mut() = Some(new_panel);
+
+                // Reset rebuilding flag
+                *rebuilding_clone.borrow_mut() = false;
+            });
+
+            position_box.append(&btn);
+        }
+        main_box.append(&position_box);
+
+        // Separator
+        let sep = Separator::new(Orientation::Horizontal);
+        sep.set_margin_top(8);
+        sep.set_margin_bottom(8);
+        main_box.append(&sep);
+
+        // All Settings button
+        let all_settings_btn = Button::with_label("All Settings...");
+        all_settings_btn.add_css_class("all-settings-btn");
+
+        let settings_win = settings_window.clone();
+        let win_clone = window.clone();
+        all_settings_btn.connect_clicked(move |_| {
+            // Close this popup
+            win_clone.close();
+            *settings_win.borrow_mut() = None;
+
+            // Open full settings
+            let full_settings = build_settings_window(true);
+            full_settings.present();
+            *settings_win.borrow_mut() = Some(full_settings);
+        });
+        main_box.append(&all_settings_btn);
+
+        window.set_child(Some(&main_box));
+
+        // Escape to close - use CAPTURE phase
+        let win = window.clone();
+        let key_controller = gtk4::EventControllerKey::new();
+        key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key_controller.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk4::gdk::Key::Escape {
+                win.close();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        window.add_controller(key_controller);
+
+        window
+    }
+
+    // Build initial panel (Top orientation)
+    let initial_panel = build_panel(
+        0,
+        menu_window.clone(),
+        settings_window.clone(),
+        power_window.clone(),
+        orientation.clone(),
+        panel_window.clone(),
+        rebuilding.clone(),
+    );
+    initial_panel.present();
+    *panel_window.borrow_mut() = Some(initial_panel);
+
+    println!("Panel displayed on Hyprland layer shell");
 }
