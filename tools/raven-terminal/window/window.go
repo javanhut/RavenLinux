@@ -31,10 +31,15 @@ func DefaultConfig() Config {
 
 // Window wraps a GLFW window with OpenGL context
 type Window struct {
-	glfw    *glfw.Window
-	width   int
-	height  int
-	config  Config
+	glfw         *glfw.Window
+	width        int
+	height       int
+	config       Config
+	isFullscreen bool
+	savedX       int
+	savedY       int
+	savedWidth   int
+	savedHeight  int
 }
 
 // NewWindow creates a new GLFW window with OpenGL context
@@ -120,6 +125,30 @@ func (w *Window) Clear(r, g, b, a float32) {
 // SetViewport sets the OpenGL viewport
 func (w *Window) SetViewport(width, height int) {
 	gl.Viewport(0, 0, int32(width), int32(height))
+}
+
+// ToggleFullscreen toggles between fullscreen and windowed mode
+func (w *Window) ToggleFullscreen() {
+	if w.isFullscreen {
+		// Restore windowed mode
+		w.glfw.SetMonitor(nil, w.savedX, w.savedY, w.savedWidth, w.savedHeight, 0)
+		w.isFullscreen = false
+	} else {
+		// Save current window position and size
+		w.savedX, w.savedY = w.glfw.GetPos()
+		w.savedWidth, w.savedHeight = w.glfw.GetSize()
+
+		// Enter fullscreen on primary monitor
+		monitor := glfw.GetPrimaryMonitor()
+		mode := monitor.GetVideoMode()
+		w.glfw.SetMonitor(monitor, 0, 0, mode.Width, mode.Height, mode.RefreshRate)
+		w.isFullscreen = true
+	}
+}
+
+// IsFullscreen returns whether the window is in fullscreen mode
+func (w *Window) IsFullscreen() bool {
+	return w.isFullscreen
 }
 
 // Destroy cleans up window resources

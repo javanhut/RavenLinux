@@ -166,7 +166,7 @@ cd RavenLinux
 ./scripts/dev-env.sh qemu
 
 # Console access:
-# - tty1: starts `/bin/raven-shell` via `agetty --skip-login` (PAM-free rescue shell)
+# - tty1: starts `/bin/raven-rescue` via `agetty --skip-login` (PAM-free rescue shell)
 # - tty2: starts a normal `login` prompt (use this to test PAM/password logins)
 
 # Check status

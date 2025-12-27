@@ -113,9 +113,10 @@ fn run_init() -> Result<()> {
 }
 
 fn fixup_getty_login_programs(config: &mut InitConfig) {
-    if Path::new("/bin/raven-shell").exists() {
-        return;
-    }
+    let rescue_path = "/bin/raven-rescue";
+    let legacy_path = "/bin/raven-shell";
+    let rescue_exists = Path::new(rescue_path).exists();
+    let legacy_exists = Path::new(legacy_path).exists();
 
     for svc in &mut config.services {
         if !svc.exec.ends_with("agetty") {
@@ -123,8 +124,21 @@ fn fixup_getty_login_programs(config: &mut InitConfig) {
         }
         let mut idx = 0;
         while idx + 1 < svc.args.len() {
-            if svc.args[idx] == "--login-program" && svc.args[idx + 1] == "/bin/raven-shell" {
-                svc.args[idx + 1] = "/bin/sh".to_string();
+            if svc.args[idx] == "--login-program" {
+                let login_program = svc.args[idx + 1].as_str();
+                if login_program == legacy_path {
+                    if rescue_exists {
+                        svc.args[idx + 1] = rescue_path.to_string();
+                    } else if !legacy_exists {
+                        svc.args[idx + 1] = "/bin/sh".to_string();
+                    }
+                } else if login_program == rescue_path && !rescue_exists {
+                    if legacy_exists {
+                        svc.args[idx + 1] = legacy_path.to_string();
+                    } else {
+                        svc.args[idx + 1] = "/bin/sh".to_string();
+                    }
+                }
             }
             idx += 1;
         }
@@ -442,7 +456,7 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
                 "--noclear".to_string(),
                 "--skip-login".to_string(),
                 "--login-program".to_string(),
-                "/bin/raven-shell".to_string(),
+                "/bin/raven-rescue".to_string(),
                 "tty1".to_string(),
                 "linux".to_string(),
             ],

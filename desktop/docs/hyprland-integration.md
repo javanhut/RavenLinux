@@ -240,7 +240,7 @@ All components use GTK4 with consistent CSS theming:
 1. Check if gtk4-layer-shell is installed: `ls /usr/lib/libgtk4-layer-shell*`
 2. Verify Hyprland is running: `hyprctl version`
 3. Check logs: `journalctl --user -f`
-4. Check if binary runs manually: `/bin/raven-shell 2>&1`
+4. Check if binary runs manually: `/usr/bin/raven-shell 2>&1`
 
 ### Live ISO Issues
 
@@ -248,7 +248,7 @@ If desktop components don't render in the live ISO:
 
 1. **Check library dependencies**:
    ```bash
-   ldd /bin/raven-shell
+   ldd /usr/bin/raven-shell
    ldd /bin/raven-desktop
    ```
    Look for "not found" libraries.

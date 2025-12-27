@@ -125,6 +125,12 @@ func main() {
 			activeTab.Terminal.Grid.ScrollViewUp(5)
 		case keybindings.ActionScrollDown:
 			activeTab.Terminal.Grid.ScrollViewDown(5)
+		case keybindings.ActionScrollUpLine:
+			activeTab.Terminal.Grid.ScrollViewUp(1)
+		case keybindings.ActionScrollDownLine:
+			activeTab.Terminal.Grid.ScrollViewDown(1)
+		case keybindings.ActionToggleFullscreen:
+			win.ToggleFullscreen()
 		case keybindings.ActionNewTab:
 			lineBuf.clear()
 			tabManager.NewTab()
@@ -157,6 +163,18 @@ func main() {
 		win.SetViewport(width, height)
 		cols, rows := renderer.CalculateGridSize(width, height)
 		tabManager.ResizeAll(uint16(cols), uint16(rows))
+	})
+
+	win.GLFW().SetScrollCallback(func(w *glfw.Window, xoff, yoff float64) {
+		activeTab := tabManager.ActiveTab()
+		if activeTab == nil {
+			return
+		}
+		if yoff > 0 {
+			activeTab.Terminal.Grid.ScrollViewUp(3)
+		} else if yoff < 0 {
+			activeTab.Terminal.Grid.ScrollViewDown(3)
+		}
 	})
 
 	// Main loop

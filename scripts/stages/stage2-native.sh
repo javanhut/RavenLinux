@@ -2479,11 +2479,11 @@ UNAMESCRIPT
 127.0.1.1   raven-linux.localdomain raven-linux
 EOF
 
-	    # /bin/raven-shell: used by agetty --skip-login as a PAM-free rescue shell
+	    # /bin/raven-rescue: used by agetty --skip-login as a PAM-free rescue shell
 	    mkdir -p "${SYSROOT_DIR}/bin"
-	    if [[ -f "${PROJECT_ROOT}/etc/raven/raven-shell" ]]; then
-	        cp "${PROJECT_ROOT}/etc/raven/raven-shell" "${SYSROOT_DIR}/bin/raven-shell"
-	        chmod 0755 "${SYSROOT_DIR}/bin/raven-shell" 2>/dev/null || true
+	    if [[ -f "${PROJECT_ROOT}/etc/raven/raven-rescue" ]]; then
+	        cp "${PROJECT_ROOT}/etc/raven/raven-rescue" "${SYSROOT_DIR}/bin/raven-rescue"
+	        chmod 0755 "${SYSROOT_DIR}/bin/raven-rescue" 2>/dev/null || true
 	    fi
 
 	    # /etc/raven/init.toml (service configuration for raven-init)
@@ -2511,7 +2511,7 @@ log_level = "info"
 	name = "getty-tty1"
 	description = "Getty login on tty1"
 	exec = "/bin/agetty"
-	args = ["--noclear", "--skip-login", "--login-program", "/bin/raven-shell", "tty1", "linux"]
+	args = ["--noclear", "--skip-login", "--login-program", "/bin/raven-rescue", "tty1", "linux"]
 	restart = true
 	enabled = true
 	critical = false
@@ -2520,7 +2520,7 @@ log_level = "info"
 	name = "getty-ttyS0"
 	description = "Serial console getty on ttyS0"
 	exec = "/bin/agetty"
-	args = ["--noclear", "--skip-login", "--login-program", "/bin/raven-shell", "-L", "115200", "ttyS0", "vt102"]
+	args = ["--noclear", "--skip-login", "--login-program", "/bin/raven-rescue", "-L", "115200", "ttyS0", "vt102"]
 	restart = true
 	enabled = false
 	critical = false

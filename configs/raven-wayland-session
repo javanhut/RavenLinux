@@ -3,6 +3,14 @@ set -eu
 
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 
+# GTK4 environment for Wayland
+export GDK_BACKEND=wayland
+export GTK_USE_PORTAL=1
+# Force software rendering if needed (helps in VMs)
+export GSK_RENDERER=cairo
+# Library paths
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/usr/lib:/lib"
+
 LOGFILE="/run/raven-wayland-session.log"
 SERIAL="/dev/ttyS0"
 mkdir -p /run 2>/dev/null || true
@@ -226,16 +234,28 @@ start_session_components() {
     case "$compositor" in
         hyprland*|Hyprland*)
             # Hyprland handles app autostart via hyprland.conf exec-once
-            log "Hyprland handles app autostart via config"
+            # But we also start raven-shell explicitly as a fallback
+            log "Hyprland starting - will launch raven-shell as fallback"
+            sleep 1
+            # Check if raven-shell is already running (started by exec-once)
+            if ! pgrep -x raven-shell >/dev/null 2>&1; then
+                if command -v raven-shell >/dev/null 2>&1; then
+                    log "Autostart: raven-shell (not started by Hyprland config)"
+                    raven-shell >>"$LOGFILE" 2>&1 &
+                else
+                    log "WARNING: raven-shell not found in PATH"
+                    log "PATH=$PATH"
+                    log "Checking common locations:"
+                    ls -la /usr/bin/raven-shell /bin/raven-shell 2>&1 | tee -a "$LOGFILE" || true
+                fi
+            else
+                log "raven-shell already running (started by Hyprland)"
+            fi
             ;;
         *)
             # Fallback for any other compositor
-            if command -v raven-desktop >/dev/null 2>&1; then
-                log "Autostart: raven-desktop"
-                raven-desktop >>"$LOGFILE" 2>&1 &
-            fi
             if command -v raven-shell >/dev/null 2>&1; then
-                log "Autostart: raven-shell (panel)"
+                log "Autostart: raven-shell"
                 sleep 0.2
                 raven-shell >>"$LOGFILE" 2>&1 &
             fi

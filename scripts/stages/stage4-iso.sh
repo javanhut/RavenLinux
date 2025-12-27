@@ -595,76 +595,162 @@ copy_kernel_modules() {
 }
 
 # =============================================================================
-# Build and install Raven desktop components (shell, menu, desktop, settings)
+# Build and install Raven desktop components (unified Rust shell)
 # =============================================================================
 build_desktop_components() {
     log_step "Building Raven desktop components..."
 
-    if ! command -v go &>/dev/null; then
-        log_warn "Go not found, skipping desktop component build"
+    if ! command -v cargo &>/dev/null; then
+        log_warn "Cargo not found, skipping desktop component build"
         return 0
     fi
 
     local desktop_dir="${PROJECT_ROOT}/desktop"
+    local shell_dir="${desktop_dir}/raven-shell"
     mkdir -p "${SYSROOT_DIR}/bin"
+    mkdir -p "${SYSROOT_DIR}/usr/bin"
     mkdir -p "${SYSROOT_DIR}/root/.config/hypr"
     mkdir -p "${SYSROOT_DIR}/root/.config/raven/scripts"
 
-    # Build raven-shell (panel/taskbar)
-    if [[ -d "${desktop_dir}/raven-shell" ]]; then
-        log_info "  Building raven-shell..."
-        cd "${desktop_dir}/raven-shell"
-        if CGO_ENABLED=1 go build -o raven-shell . 2>&1; then
-            cp raven-shell "${SYSROOT_DIR}/bin/"
-            chmod +x "${SYSROOT_DIR}/bin/raven-shell"
-            log_info "  Installed raven-shell"
+    # Build raven-shell (unified Rust desktop - includes panel, desktop, menu, settings, etc.)
+    if [[ -d "${shell_dir}" ]]; then
+        log_info "  Building raven-shell (Rust workspace)..."
+        cd "${shell_dir}"
+        if cargo build --release 2>&1; then
+            # Copy main binaries
+            if [[ -f "target/release/raven-shell" ]]; then
+                cp target/release/raven-shell "${SYSROOT_DIR}/usr/bin/"
+                chmod +x "${SYSROOT_DIR}/usr/bin/raven-shell"
+                # Also create symlink in /bin for compatibility
+                ln -sf /usr/bin/raven-shell "${SYSROOT_DIR}/bin/raven-shell" 2>/dev/null || true
+                log_info "  Installed raven-shell"
+            fi
+            if [[ -f "target/release/raven-ctl" ]]; then
+                cp target/release/raven-ctl "${SYSROOT_DIR}/usr/bin/"
+                chmod +x "${SYSROOT_DIR}/usr/bin/raven-ctl"
+                log_info "  Installed raven-ctl"
+            fi
         else
             log_warn "  Failed to build raven-shell"
         fi
         cd "${PROJECT_ROOT}"
+    else
+        log_warn "  raven-shell directory not found at ${shell_dir}"
     fi
 
-    # Build raven-desktop (background/icons)
-    if [[ -d "${desktop_dir}/raven-desktop" ]]; then
-        log_info "  Building raven-desktop..."
-        cd "${desktop_dir}/raven-desktop"
-        if CGO_ENABLED=1 go build -o raven-desktop . 2>&1; then
-            cp raven-desktop "${SYSROOT_DIR}/bin/"
-            chmod +x "${SYSROOT_DIR}/bin/raven-desktop"
-            log_info "  Installed raven-desktop"
-        else
-            log_warn "  Failed to build raven-desktop"
+    # Copy GTK4 layer-shell library (required for panels/docks on Wayland)
+    log_info "  Copying GTK4 layer-shell library..."
+    for lib in /usr/lib/libgtk4-layer-shell* /usr/lib64/libgtk4-layer-shell*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            mkdir -p "${SYSROOT_DIR}/usr/lib"
+            cp -L "$lib" "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
         fi
-        cd "${PROJECT_ROOT}"
+    done
+
+    # Copy GTK4 libraries and dependencies
+    log_info "  Copying GTK4 libraries..."
+    for lib in /usr/lib/libgtk-4* /usr/lib64/libgtk-4*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            mkdir -p "${SYSROOT_DIR}/usr/lib"
+            cp -L "$lib" "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy GDK-Pixbuf loaders for image rendering
+    if [[ -d /usr/lib/gdk-pixbuf-2.0 ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/lib"
+        cp -r /usr/lib/gdk-pixbuf-2.0 "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
     fi
 
-    # Build raven-menu (application launcher)
-    if [[ -d "${desktop_dir}/raven-menu" ]]; then
-        log_info "  Building raven-menu..."
-        cd "${desktop_dir}/raven-menu"
-        if CGO_ENABLED=1 go build -o raven-menu . 2>&1; then
-            cp raven-menu "${SYSROOT_DIR}/bin/"
-            chmod +x "${SYSROOT_DIR}/bin/raven-menu"
-            log_info "  Installed raven-menu"
-        else
-            log_warn "  Failed to build raven-menu"
-        fi
-        cd "${PROJECT_ROOT}"
+    # Copy GTK4 modules and settings
+    if [[ -d /usr/lib/gtk-4.0 ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/lib"
+        cp -r /usr/lib/gtk-4.0 "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
     fi
 
-    # Build raven-settings-menu (settings application)
-    if [[ -d "${desktop_dir}/raven-settings-menu" ]]; then
-        log_info "  Building raven-settings-menu..."
-        cd "${desktop_dir}/raven-settings-menu"
-        if CGO_ENABLED=1 go build -o raven-settings-menu . 2>&1; then
-            cp raven-settings-menu "${SYSROOT_DIR}/bin/"
-            chmod +x "${SYSROOT_DIR}/bin/raven-settings-menu"
-            log_info "  Installed raven-settings-menu"
-        else
-            log_warn "  Failed to build raven-settings-menu"
+    # Copy Pango modules (for text rendering)
+    for lib in /usr/lib/libpango* /usr/lib64/libpango*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            cp -L "$lib" "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
         fi
-        cd "${PROJECT_ROOT}"
+    done
+
+    # Copy Cairo libraries (for drawing)
+    for lib in /usr/lib/libcairo* /usr/lib64/libcairo*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            cp -L "$lib" "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy GLib/GObject/GIO libraries
+    for lib in /usr/lib/libglib-2.0* /usr/lib/libgobject-2.0* /usr/lib/libgio-2.0* /usr/lib/libgmodule-2.0*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            cp -L "$lib" "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy Graphene library (used by GTK4)
+    for lib in /usr/lib/libgraphene* /usr/lib64/libgraphene*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            cp -L "$lib" "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy GIO modules for various functionality
+    if [[ -d /usr/lib/gio ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/lib"
+        cp -r /usr/lib/gio "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
     fi
+
+    # Copy Epoxy library (OpenGL dispatch for GTK4)
+    for lib in /usr/lib/libepoxy* /usr/lib64/libepoxy*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            cp -L "$lib" "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy HarfBuzz libraries (text shaping)
+    for lib in /usr/lib/libharfbuzz* /usr/lib64/libharfbuzz*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            cp -L "$lib" "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy Fribidi library (bidirectional text)
+    for lib in /usr/lib/libfribidi* /usr/lib64/libfribidi*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            cp -L "$lib" "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy Fontconfig libraries
+    for lib in /usr/lib/libfontconfig* /usr/lib64/libfontconfig*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            cp -L "$lib" "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy Pixman library (pixel manipulation)
+    for lib in /usr/lib/libpixman* /usr/lib64/libpixman*; do
+        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
+            cp -L "$lib" "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
+        fi
+    done
+
+    # Copy all dependencies for built Raven binaries
+    log_info "  Resolving Raven binary dependencies..."
+    for bin in raven-shell raven-ctl; do
+        if [[ -f "${SYSROOT_DIR}/usr/bin/${bin}" ]]; then
+            timeout 2 ldd "${SYSROOT_DIR}/usr/bin/${bin}" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
+                [[ -z "$lib" || ! -f "$lib" ]] && continue
+                local dest="${SYSROOT_DIR}${lib}"
+                if [[ ! -f "$dest" ]]; then
+                    mkdir -p "$(dirname "$dest")"
+                    cp -L "$lib" "$dest" 2>/dev/null || true
+                fi
+            done || true
+        fi
+    done
 
     # Install Hyprland configuration
     install_hyprland_config \

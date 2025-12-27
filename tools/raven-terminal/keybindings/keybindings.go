@@ -13,10 +13,13 @@ const (
 	ActionInput
 	ActionScrollUp
 	ActionScrollDown
+	ActionScrollUpLine
+	ActionScrollDownLine
 	ActionNewTab
 	ActionCloseTab
 	ActionNextTab
 	ActionPrevTab
+	ActionToggleFullscreen
 )
 
 // KeyResult contains the result of processing a key
@@ -57,6 +60,15 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 
 	if shift && key == glfw.KeyPageDown {
 		return KeyResult{Action: ActionScrollDown}
+	}
+
+	// Shift+Arrow for single line scrolling
+	if shift && key == glfw.KeyUp {
+		return KeyResult{Action: ActionScrollUpLine}
+	}
+
+	if shift && key == glfw.KeyDown {
+		return KeyResult{Action: ActionScrollDownLine}
 	}
 
 	// Arrow keys
@@ -131,6 +143,11 @@ func TranslateKey(key glfw.Key, mods glfw.ModifierKey, appCursorMode bool) KeyRe
 	// Backspace
 	if key == glfw.KeyBackspace {
 		return KeyResult{Action: ActionInput, Data: []byte{0x7f}}
+	}
+
+	// Shift+Enter for fullscreen toggle
+	if shift && (key == glfw.KeyEnter || key == glfw.KeyKPEnter) {
+		return KeyResult{Action: ActionToggleFullscreen}
 	}
 
 	// Enter

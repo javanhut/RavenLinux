@@ -15,12 +15,8 @@ monitor=,preferred,auto,1
 # =====================
 # Startup Applications
 # =====================
-# Core Raven desktop components
-exec-once = raven-desktop
+# Raven unified desktop shell (includes panel, desktop, menu, settings, etc.)
 exec-once = raven-shell
-
-# Wallpaper (uses swaybg, reads from raven settings)
-exec-once = ~/.config/raven/scripts/set-wallpaper.sh
 
 # Notification daemon
 exec-once = mako || dunst || swaync
@@ -168,11 +164,9 @@ windowrulev2 = float,class:^(org.gnome.*)$,title:^(Confirm)$
 # =====================
 # Layer Rules
 # =====================
-# Raven shell components use layer-shell
+# Raven shell uses layer-shell for panel, desktop, and popups
 layerrule = blur,raven-shell
 layerrule = ignorezero,raven-shell
-layerrule = blur,raven-desktop
-layerrule = ignorezero,raven-desktop
 
 # =====================
 # Keybindings
@@ -180,14 +174,13 @@ layerrule = ignorezero,raven-desktop
 $mainMod = SUPER
 
 # Application launchers
-bind = $mainMod, T, exec, raven-terminal
-bind = $mainMod, M, exec, raven-menu
-bind = $mainMod, S, exec, raven-settings-menu
-bind = $mainMod, F, exec, raven-launcher
-bind = $mainMod, P, exec, raven-power
-bind = $mainMod, K, exec, raven-keybindings
-bind = $mainMod, Space, exec, raven-launcher
-bind = $mainMod, W, exec, raven-wifi
+bind = $mainMod, T, exec, raven-terminal || foot || kitty || alacritty
+bind = $mainMod, M, exec, raven-ctl toggle menu
+bind = $mainMod, S, exec, raven-ctl toggle settings
+bind = $mainMod, P, exec, raven-ctl toggle power
+bind = $mainMod, K, exec, raven-ctl toggle keybindings
+bind = $mainMod, Space, exec, raven-ctl toggle menu
+bind = $mainMod, E, exec, raven-ctl toggle filemanager
 
 # Window management
 bind = $mainMod, Q, killactive,
@@ -297,10 +290,10 @@ bind = $mainMod SHIFT, Print, exec, grim ~/Pictures/Screenshots/$(date +%Y%m%d_%
 bind = $mainMod, Escape, exec, hyprlock || swaylock || loginctl lock-session
 
 # Settings (alternative binding)
-bind = $mainMod, I, exec, raven-settings-menu
+bind = $mainMod, I, exec, raven-ctl toggle settings
 
 # File manager
-bind = $mainMod SHIFT, E, exec, raven-file-manager
+bind = $mainMod SHIFT, E, exec, raven-ctl toggle filemanager
 EOF
 }
 

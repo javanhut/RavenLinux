@@ -890,67 +890,40 @@ UDEV_DRM_EOF
 build_raven_desktop() {
     log_step "Building Raven desktop components..."
 
-    if ! command -v go &>/dev/null; then
-        log_warn "Go not found, skipping desktop component build"
+    if ! command -v cargo &>/dev/null; then
+        log_warn "Cargo not found, skipping desktop component build"
         return 0
     fi
 
     local desktop_dir="${PROJECT_ROOT}/desktop"
+    local shell_dir="${desktop_dir}/raven-shell"
 
-    # Build raven-shell (panel/taskbar)
-    if [[ -d "${desktop_dir}/raven-shell" ]]; then
-        log_info "  Building raven-shell..."
-        cd "${desktop_dir}/raven-shell"
-        if CGO_ENABLED=1 go build -o raven-shell . 2>&1; then
-            cp raven-shell "${LIVE_ROOT}/bin/"
-            chmod +x "${LIVE_ROOT}/bin/raven-shell"
-            log_info "  Installed raven-shell"
+    # Build raven-shell (unified Rust desktop - includes panel, desktop, menu, settings, etc.)
+    if [[ -d "${shell_dir}" ]]; then
+        log_info "  Building raven-shell (Rust workspace)..."
+        cd "${shell_dir}"
+        if cargo build --release 2>&1; then
+            # Copy main binaries
+            if [[ -f "target/release/raven-shell" ]]; then
+                mkdir -p "${LIVE_ROOT}/usr/bin"
+                cp target/release/raven-shell "${LIVE_ROOT}/usr/bin/"
+                chmod +x "${LIVE_ROOT}/usr/bin/raven-shell"
+                # Also create symlink in /bin for compatibility
+                mkdir -p "${LIVE_ROOT}/bin"
+                ln -sf /usr/bin/raven-shell "${LIVE_ROOT}/bin/raven-shell" 2>/dev/null || true
+                log_info "  Installed raven-shell"
+            fi
+            if [[ -f "target/release/raven-ctl" ]]; then
+                cp target/release/raven-ctl "${LIVE_ROOT}/usr/bin/"
+                chmod +x "${LIVE_ROOT}/usr/bin/raven-ctl"
+                log_info "  Installed raven-ctl"
+            fi
         else
             log_warn "  Failed to build raven-shell"
         fi
         cd "${PROJECT_ROOT}"
-    fi
-
-    # Build raven-desktop (background/icons)
-    if [[ -d "${desktop_dir}/raven-desktop" ]]; then
-        log_info "  Building raven-desktop..."
-        cd "${desktop_dir}/raven-desktop"
-        if CGO_ENABLED=1 go build -o raven-desktop . 2>&1; then
-            cp raven-desktop "${LIVE_ROOT}/bin/"
-            chmod +x "${LIVE_ROOT}/bin/raven-desktop"
-            log_info "  Installed raven-desktop"
-        else
-            log_warn "  Failed to build raven-desktop"
-        fi
-        cd "${PROJECT_ROOT}"
-    fi
-
-    # Build raven-menu (application launcher)
-    if [[ -d "${desktop_dir}/raven-menu" ]]; then
-        log_info "  Building raven-menu..."
-        cd "${desktop_dir}/raven-menu"
-        if CGO_ENABLED=1 go build -o raven-menu . 2>&1; then
-            cp raven-menu "${LIVE_ROOT}/bin/"
-            chmod +x "${LIVE_ROOT}/bin/raven-menu"
-            log_info "  Installed raven-menu"
-        else
-            log_warn "  Failed to build raven-menu"
-        fi
-        cd "${PROJECT_ROOT}"
-    fi
-
-    # Build raven-settings-menu (settings application)
-    if [[ -d "${desktop_dir}/raven-settings-menu" ]]; then
-        log_info "  Building raven-settings-menu..."
-        cd "${desktop_dir}/raven-settings-menu"
-        if CGO_ENABLED=1 go build -o raven-settings-menu . 2>&1; then
-            cp raven-settings-menu "${LIVE_ROOT}/bin/"
-            chmod +x "${LIVE_ROOT}/bin/raven-settings-menu"
-            log_info "  Installed raven-settings-menu"
-        else
-            log_warn "  Failed to build raven-settings-menu"
-        fi
-        cd "${PROJECT_ROOT}"
+    else
+        log_warn "  raven-shell directory not found at ${shell_dir}"
     fi
 
     # Copy GTK4 layer-shell library (required for panels/docks on Wayland)
@@ -1054,9 +1027,9 @@ build_raven_desktop() {
 
     # Copy all dependencies for built Raven binaries
     log_info "  Resolving Raven binary dependencies..."
-    for bin in raven-shell raven-desktop raven-menu raven-settings-menu; do
-        if [[ -f "${LIVE_ROOT}/bin/${bin}" ]]; then
-            timeout 2 ldd "${LIVE_ROOT}/bin/${bin}" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
+    for bin in raven-shell raven-ctl; do
+        if [[ -f "${LIVE_ROOT}/usr/bin/${bin}" ]]; then
+            timeout 2 ldd "${LIVE_ROOT}/usr/bin/${bin}" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
                 [[ -z "$lib" || ! -f "$lib" ]] && continue
                 local dest="${LIVE_ROOT}${lib}"
                 if [[ ! -f "$dest" ]]; then
@@ -1599,12 +1572,12 @@ EOF
 	127.0.1.1   raven-linux.localdomain raven-linux
 	EOF
 
-	    # /bin/raven-shell: used by agetty --skip-login as a PAM-free rescue shell
+	    # /bin/raven-rescue: used by agetty --skip-login as a PAM-free rescue shell
 	    mkdir -p "${LIVE_ROOT}/bin"
-	    if [[ -f "${PROJECT_ROOT}/etc/raven/raven-shell" ]]; then
-	        cp "${PROJECT_ROOT}/etc/raven/raven-shell" "${LIVE_ROOT}/bin/raven-shell" 2>/dev/null || true
+	    if [[ -f "${PROJECT_ROOT}/etc/raven/raven-rescue" ]]; then
+	        cp "${PROJECT_ROOT}/etc/raven/raven-rescue" "${LIVE_ROOT}/bin/raven-rescue" 2>/dev/null || true
 	    else
-	        cat > "${LIVE_ROOT}/bin/raven-shell" << 'EOF'
+	        cat > "${LIVE_ROOT}/bin/raven-rescue" << 'EOF'
 #!/bin/sh
 # When agetty is used with --skip-login, there may be no login(1) to set up a
 # sane environment. Ensure basic defaults so the shell can run external commands.
@@ -1621,7 +1594,7 @@ fi
 exec /bin/sh -i
 EOF
 	    fi
-	    chmod 0755 "${LIVE_ROOT}/bin/raven-shell" 2>/dev/null || true
+	    chmod 0755 "${LIVE_ROOT}/bin/raven-rescue" 2>/dev/null || true
 
 	    # /etc/raven/init.toml (service configuration for raven-init)
 	    mkdir -p "${LIVE_ROOT}/etc/raven"
@@ -1648,7 +1621,7 @@ log_level = "info"
 	name = "getty-tty1"
 	description = "Getty login on tty1"
 	exec = "/bin/agetty"
-	args = ["--noclear", "--skip-login", "--login-program", "/bin/raven-shell", "tty1", "linux"]
+	args = ["--noclear", "--skip-login", "--login-program", "/bin/raven-rescue", "tty1", "linux"]
 	restart = true
 	enabled = true
 	critical = false
@@ -1657,7 +1630,7 @@ log_level = "info"
 	name = "getty-ttyS0"
 	description = "Serial console getty on ttyS0"
 	exec = "/bin/agetty"
-	args = ["--noclear", "--skip-login", "--login-program", "/bin/raven-shell", "-L", "115200", "ttyS0", "vt102"]
+	args = ["--noclear", "--skip-login", "--login-program", "/bin/raven-rescue", "-L", "115200", "ttyS0", "vt102"]
 	restart = true
 	enabled = false
 	critical = false

@@ -150,12 +150,12 @@ DEPENDENCIES=(
 
 # Additional package groups (not command-based)
 # Format: "distro:packages"
-EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja wayland-protocols libxkbcommon pixman libdrm mesa libinput seatd pango cairo gdk-pixbuf2"
-EXTRA_PACKAGES_DEBIAN="build-essential linux-headers-generic libelf-dev python3-jinja2 libwayland-dev wayland-protocols libxkbcommon-dev libpixman-1-dev libdrm-dev libmesa-dev libinput-dev libseat-dev libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev"
-EXTRA_PACKAGES_FEDORA="kernel-devel elfutils-libelf-devel python3-jinja2 wayland-devel wayland-protocols-devel libxkbcommon-devel pixman-devel libdrm-devel mesa-libGL-devel libinput-devel libseat-devel pango-devel cairo-devel gdk-pixbuf2-devel"
-EXTRA_PACKAGES_SUSE="kernel-devel libelf-devel python3-Jinja2 wayland-devel wayland-protocols-devel libxkbcommon-devel pixman-devel libdrm-devel Mesa-libGL-devel libinput-devel libseat-devel pango-devel cairo-devel gdk-pixbuf-devel"
-EXTRA_PACKAGES_VOID="base-devel linux-headers elfutils-devel python3-Jinja2 wayland-devel wayland-protocols libxkbcommon-devel pixman-devel libdrm-devel mesa-devel libinput-devel seatd-devel pango-devel cairo-devel gdk-pixbuf-devel"
-EXTRA_PACKAGES_ALPINE="build-base linux-headers elfutils-dev py3-jinja2 wayland-dev wayland-protocols libxkbcommon-dev pixman-dev libdrm-dev mesa-dev libinput-dev seatd-dev pango-dev cairo-dev gdk-pixbuf-dev"
+EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja wayland-protocols libxkbcommon pixman libdrm mesa libinput seatd pango cairo gdk-pixbuf2 gtk4 gtk4-layer-shell"
+EXTRA_PACKAGES_DEBIAN="build-essential linux-headers-generic libelf-dev python3-jinja2 libwayland-dev wayland-protocols libxkbcommon-dev libpixman-1-dev libdrm-dev libmesa-dev libinput-dev libseat-dev libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev libgtk-4-dev libgtk4-layer-shell-dev"
+EXTRA_PACKAGES_FEDORA="kernel-devel elfutils-libelf-devel python3-jinja2 wayland-devel wayland-protocols-devel libxkbcommon-devel pixman-devel libdrm-devel mesa-libGL-devel libinput-devel libseat-devel pango-devel cairo-devel gdk-pixbuf2-devel gtk4 gtk4-devel gtk4-layer-shell gtk4-layer-shell-devel"
+EXTRA_PACKAGES_SUSE="kernel-devel libelf-devel python3-Jinja2 wayland-devel wayland-protocols-devel libxkbcommon-devel pixman-devel libdrm-devel Mesa-libGL-devel libinput-devel libseat-devel pango-devel cairo-devel gdk-pixbuf-devel gtk4 gtk4-devel gtk4-layer-shell gtk4-layer-shell-devel"
+EXTRA_PACKAGES_VOID="base-devel linux-headers elfutils-devel python3-Jinja2 wayland-devel wayland-protocols libxkbcommon-devel pixman-devel libdrm-devel mesa-devel libinput-devel seatd-devel pango-devel cairo-devel gdk-pixbuf-devel gtk4 gtk4-devel gtk4-layer-shell gtk4-layer-shell-devel"
+EXTRA_PACKAGES_ALPINE="build-base linux-headers elfutils-dev py3-jinja2 wayland-dev wayland-protocols libxkbcommon-dev pixman-dev libdrm-dev mesa-dev libinput-dev seatd-dev pango-dev cairo-dev gdk-pixbuf-dev gtk4.0 gtk4.0-dev gtk4-layer-shell gtk4-layer-shell-dev"
 
 # =============================================================================
 # Functions

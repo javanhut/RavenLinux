@@ -33,7 +33,7 @@ impl Default for InitConfig {
                         "--noclear".to_string(),
                         "--skip-login".to_string(),
                         "--login-program".to_string(),
-                        "/bin/raven-shell".to_string(),
+                        "/bin/raven-rescue".to_string(),
                         "tty1".to_string(),
                         "linux".to_string(),
                     ],
