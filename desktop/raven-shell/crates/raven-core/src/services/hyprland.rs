@@ -1,10 +1,13 @@
 use async_channel::Sender;
-use compact_str::CompactString;
 use hyprland::data::Clients;
 use hyprland::dispatch::{Dispatch, DispatchType, WindowIdentifier, WorkspaceIdentifierWithSpecial};
 use hyprland::event_listener::EventListener;
 use hyprland::shared::{Address, HyprData};
 use tokio::sync::mpsc;
+use anyhow::anyhow;
+use futures::FutureExt;
+use std::panic::AssertUnwindSafe;
+use std::path::Path;
 use tracing::{debug, error, info, warn};
 
 use crate::config::DockItem;
@@ -24,27 +27,45 @@ impl HyprlandService {
         }
     }
 
-    /// Check if Hyprland is running by looking for its socket
+    /// Check if Hyprland is running by looking for its socket.
+    /// Ensure HYPRLAND_INSTANCE_SIGNATURE is set for IPC clients.
     fn is_hyprland_running() -> bool {
-        if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-            if let Ok(sig) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
-                let socket_path = format!("{}/hypr/{}/.socket.sock", runtime_dir, sig);
-                return std::path::Path::new(&socket_path).exists();
+        let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") else {
+            return false;
+        };
+
+        if let Some(sig) = Self::ensure_hyprland_signature(&runtime_dir) {
+            let socket_path = format!("{}/hypr/{}/.socket.sock", runtime_dir, sig);
+            return std::path::Path::new(&socket_path).exists();
+        }
+
+        false
+    }
+
+    fn ensure_hyprland_signature(runtime_dir: &str) -> Option<String> {
+        if let Ok(sig) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
+            let socket_path = Path::new(runtime_dir)
+                .join("hypr")
+                .join(&sig)
+                .join(".socket.sock");
+            if socket_path.exists() {
+                return Some(sig);
             }
-            // Also check for any hypr directory
-            let hypr_dir = format!("{}/hypr", runtime_dir);
-            if std::path::Path::new(&hypr_dir).exists() {
-                if let Ok(entries) = std::fs::read_dir(&hypr_dir) {
-                    for entry in entries.flatten() {
-                        let socket = entry.path().join(".socket.sock");
-                        if socket.exists() {
-                            return true;
-                        }
-                    }
+        }
+
+        let hypr_dir = Path::new(runtime_dir).join("hypr");
+        let entries = std::fs::read_dir(&hypr_dir).ok()?;
+        for entry in entries.flatten() {
+            let socket = entry.path().join(".socket.sock");
+            if socket.exists() {
+                if let Some(sig) = entry.file_name().to_str() {
+                    std::env::set_var("HYPRLAND_INSTANCE_SIGNATURE", sig);
+                    return Some(sig.to_string());
                 }
             }
         }
-        false
+
+        None
     }
 
     /// Main run loop - syncs initial state, starts event listener, handles commands
@@ -93,8 +114,15 @@ impl HyprlandService {
     async fn try_connect(&self) -> anyhow::Result<()> {
         debug!("Syncing initial window state from Hyprland");
 
+        if !Self::is_hyprland_running() {
+            return Err(anyhow!("Hyprland socket not ready"));
+        }
+
         // Get all current windows
-        let clients = Clients::get_async().await?;
+        let clients = AssertUnwindSafe(Clients::get_async())
+            .catch_unwind()
+            .await
+            .map_err(|_| anyhow!("Hyprland IPC panicked while fetching clients"))??;
 
         for client in clients {
             if !DockItem::should_track(&client.class) {
@@ -190,7 +218,14 @@ impl HyprlandService {
         });
 
         debug!("Starting Hyprland event listener");
-        listener.start_listener_async().await?;
+        match AssertUnwindSafe(listener.start_listener_async())
+            .catch_unwind()
+            .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(anyhow!(err)),
+            Err(_) => return Err(anyhow!("Hyprland event listener panicked")),
+        }
 
         Ok(())
     }

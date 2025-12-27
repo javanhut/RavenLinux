@@ -1,0 +1,65 @@
+[package]
+name = "hyprland"
+edition = "2021"
+readme = "README.md"
+description = "A unoffical rust wrapper for hyprland's IPC"
+homepage = "https://github.com/hyprland-community/hyprland-rs"
+version.workspace = true
+license.workspace = true
+author.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[package.metadata.nix]
+build = true
+
+[profile.release]
+opt-level = "z"
+strip = true
+lto = true
+
+[workspace]
+members = ["hyprland-macros"]
+
+[workspace.package]
+version = "0.3.13"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/hyprland-community/hyprland-rs"
+keywords = ["hyprland", "ipc", "hypr", "wayland", "linux"]
+categories = ["api-bindings"]
+authors = ["yavko <yavornkolev@gmail.com>"]
+
+[dependencies]
+hyprland-macros = { path = "hyprland-macros", version = "0.3.4" }
+serde = {version = "1", features = ["derive"]}
+serde_json = "1"
+serde_repr = "0.1"
+hex = "0.4"
+tokio = { version = "1", features = ["full"], optional = true }
+async-net = { version = "2", optional = true }
+async-std = { version = "1", optional = true }
+futures-lite = { version = "2", optional = true }
+lazy_static = "1.4"
+regex = "1.10"
+async-trait = "0.1"
+num-traits = "0.2"
+doc-comment = "0.3"
+paste = "1"
+strum = { version = "0.26", features = ["derive"] }
+derive_more = "0.99"
+futures = "0.3"
+
+[features]
+default = ["listener", "dispatch", "data", "keyword", "config", "ctl", "tokio"]
+async-net = ["dep:async-net", "dep:futures-lite"]
+async-std = ["dep:async-std", "dep:futures-lite"]
+tokio = ["dep:tokio"]
+dispatch = []
+data = []
+ctl = []
+keyword = []
+config = ["dispatch", "keyword"]
+listener = ["data", "dispatch"]
+silent = []
