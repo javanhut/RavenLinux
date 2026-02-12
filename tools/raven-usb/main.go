@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"image"
 	"image/color"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -75,32 +77,41 @@ type AppState struct {
 	statusLog    []string
 	writeError   string
 	writeDone    bool
-	isRoot       bool
 	formatUSBOpt bool
 	writeSpeed   float64 // bytes per second for time estimation
 	startTime    time.Time
 	etaText      string
 
+	// pendingISOPath is set by the browse goroutine and applied in the main thread
+	pendingISOPath string
+
 	mu sync.Mutex
 
 	// Widgets
-	refreshBtn   widget.Clickable
-	browseBtn    widget.Clickable
-	formatCheck  widget.Bool
-	nextBtn      widget.Clickable
-	backBtn      widget.Clickable
-	exitBtn      widget.Clickable
-	startOverBtn widget.Clickable
-	deviceClicks []widget.Clickable
-	confirmCheck widget.Bool
+	refreshBtn     widget.Clickable
+	browseBtn      widget.Clickable
+	formatCheck    widget.Bool
+	nextBtn        widget.Clickable
+	backBtn        widget.Clickable
+	exitBtn        widget.Clickable
+	startOverBtn   widget.Clickable
+	deviceClicks   []widget.Clickable
+	confirmCheck   widget.Bool
+	isoPathEditor  widget.Editor
 
 	// Scroll states for pages
-	confirmScroll widget.List
-	writingScroll widget.List
+	confirmScroll  widget.List
+	writingScroll  widget.List
 	completeScroll widget.List
 }
 
 func main() {
+	// Privileged write subcommand — launched by pkexec for root operations
+	if len(os.Args) > 1 && os.Args[1] == "--privileged-write" {
+		runPrivilegedWrite(os.Args[2:])
+		return
+	}
+
 	go func() {
 		w := new(app.Window)
 		w.Option(
@@ -116,6 +127,190 @@ func main() {
 	app.Main()
 }
 
+// runPrivilegedWrite handles the actual USB write as root.
+// It communicates progress back to the parent GUI via stdout lines:
+//
+//	PROGRESS:<float>:<text>
+//	LOG:<text>
+//	ETA:<text>
+//	ERROR:<text>
+//	DONE
+func runPrivilegedWrite(args []string) {
+	var devicePath, isoPath string
+	var doFormat bool
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--device":
+			if i+1 < len(args) {
+				devicePath = args[i+1]
+				i++
+			}
+		case "--iso":
+			if i+1 < len(args) {
+				isoPath = args[i+1]
+				i++
+			}
+		case "--format":
+			doFormat = true
+		}
+	}
+
+	if devicePath == "" || isoPath == "" {
+		fmt.Println("ERROR:Missing required arguments (--device and --iso)")
+		os.Exit(1)
+	}
+
+	// Validate device path for safety
+	if !strings.HasPrefix(devicePath, "/dev/") {
+		fmt.Println("ERROR:Invalid device path — must start with /dev/")
+		os.Exit(1)
+	}
+
+	progress := func(p float64, txt string) {
+		fmt.Printf("PROGRESS:%f:%s\n", p, txt)
+	}
+	logMsg := func(msg string) {
+		fmt.Printf("LOG:%s\n", msg)
+	}
+	eta := func(txt string) {
+		fmt.Printf("ETA:%s\n", txt)
+	}
+
+	logMsg("Starting write process...")
+	progress(0.02, "Preparing...")
+
+	// Format if requested
+	if doFormat {
+		logMsg("Formatting USB...")
+		progress(0.05, "Formatting...")
+
+		// Unmount all partitions first
+		partitions, _ := filepath.Glob(devicePath + "*")
+		for _, part := range partitions {
+			exec.Command("umount", "-f", part).Run()
+		}
+		time.Sleep(500 * time.Millisecond)
+
+		if out, err := exec.Command("parted", "-s", devicePath, "mklabel", "msdos").CombinedOutput(); err != nil {
+			fmt.Printf("ERROR:Failed to create partition table: %v — %s\n", err, strings.TrimSpace(string(out)))
+			os.Exit(1)
+		}
+		if out, err := exec.Command("parted", "-s", devicePath, "mkpart", "primary", "fat32", "1MiB", "100%").CombinedOutput(); err != nil {
+			fmt.Printf("ERROR:Failed to create partition: %v — %s\n", err, strings.TrimSpace(string(out)))
+			os.Exit(1)
+		}
+		exec.Command("partprobe", devicePath).Run()
+		time.Sleep(2 * time.Second)
+
+		part := devicePath + "1"
+		if out, err := exec.Command("mkfs.vfat", "-F", "32", "-n", "RAVENUSB", part).CombinedOutput(); err != nil {
+			fmt.Printf("ERROR:Failed to format: %v — %s\n", err, strings.TrimSpace(string(out)))
+			os.Exit(1)
+		}
+		logMsg("Format complete")
+	}
+
+	// Unmount
+	logMsg("Unmounting device...")
+	progress(0.08, "Unmounting...")
+	partitions, _ := filepath.Glob(devicePath + "*")
+	for _, part := range partitions {
+		exec.Command("umount", "-f", part).Run()
+	}
+	exec.Command("sync").Run()
+	time.Sleep(500 * time.Millisecond)
+
+	progress(0.1, "Opening files...")
+
+	// Open ISO
+	info, err := os.Stat(isoPath)
+	if err != nil {
+		fmt.Printf("ERROR:Cannot read ISO: %v\n", err)
+		os.Exit(1)
+	}
+	totalSize := info.Size()
+
+	isoFile, err := os.Open(isoPath)
+	if err != nil {
+		fmt.Printf("ERROR:Cannot open ISO: %v\n", err)
+		os.Exit(1)
+	}
+	defer isoFile.Close()
+
+	// Open device
+	device, err := os.OpenFile(devicePath, os.O_WRONLY|os.O_SYNC, 0)
+	if err != nil {
+		fmt.Printf("ERROR:Cannot open device: %v\n", err)
+		os.Exit(1)
+	}
+	defer device.Close()
+
+	logMsg("Writing ISO to USB...")
+	progress(0.1, "Writing...")
+
+	buffer := make([]byte, 4*1024*1024) // 4MB buffer
+	var written int64
+	startTime := time.Now()
+	lastUpdate := startTime
+
+	for {
+		n, readErr := isoFile.Read(buffer)
+		if n > 0 {
+			_, werr := device.Write(buffer[:n])
+			if werr != nil {
+				fmt.Printf("ERROR:Write error: %v\n", werr)
+				os.Exit(1)
+			}
+			written += int64(n)
+
+			now := time.Now()
+			if now.Sub(lastUpdate) > 500*time.Millisecond {
+				lastUpdate = now
+
+				p := 0.1 + (float64(written)/float64(totalSize))*0.85
+				progressText := fmt.Sprintf("%s / %s (%.1f%%)", formatSize(uint64(written)), formatSize(uint64(totalSize)), p*100)
+				progress(p, progressText)
+
+				elapsed := now.Sub(startTime).Seconds()
+				if elapsed > 0 && written > 0 {
+					speed := float64(written) / elapsed
+					remaining := float64(totalSize - written)
+					etaSeconds := remaining / speed
+					speedMB := speed / (1024 * 1024)
+
+					if etaSeconds < 60 {
+						eta(fmt.Sprintf("Speed: %.1f MB/s  -  ETA: %d seconds", speedMB, int(etaSeconds)))
+					} else {
+						etaMinutes := etaSeconds / 60
+						eta(fmt.Sprintf("Speed: %.1f MB/s  -  ETA: %.1f minutes", speedMB, etaMinutes))
+					}
+				}
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			fmt.Printf("ERROR:Read error: %v\n", readErr)
+			os.Exit(1)
+		}
+	}
+
+	logMsg("Syncing data...")
+	progress(0.96, "Syncing...")
+	eta("Syncing to disk...")
+	device.Sync()
+	syscall.Sync()
+
+	elapsed := time.Since(startTime)
+	progress(1.0, "Complete!")
+	eta(fmt.Sprintf("Completed in %s", formatDuration(elapsed)))
+	logMsg(fmt.Sprintf("Write completed in %s", formatDuration(elapsed)))
+
+	fmt.Println("DONE")
+}
+
 func run(w *app.Window) error {
 	th := material.NewTheme()
 	th.Palette.Bg = colorBackground
@@ -126,18 +321,22 @@ func run(w *app.Window) error {
 	state := &AppState{
 		currentPage: PageSelectUSB,
 		selectedUSB: -1,
-		isRoot:      os.Geteuid() == 0,
-		confirmScroll: widget.List{List: layout.List{Axis: layout.Vertical}},
-		writingScroll: widget.List{List: layout.List{Axis: layout.Vertical}},
+		isoPathEditor: widget.Editor{
+			SingleLine: true,
+			Submit:     true,
+		},
+		confirmScroll:  widget.List{List: layout.List{Axis: layout.Vertical}},
+		writingScroll:  widget.List{List: layout.List{Axis: layout.Vertical}},
 		completeScroll: widget.List{List: layout.List{Axis: layout.Vertical}},
 	}
 
 	// Check command line for ISO path
 	if len(os.Args) > 1 {
 		path := os.Args[1]
-		if info, err := os.Stat(path); err == nil && strings.HasSuffix(strings.ToLower(path), ".iso") {
+		if info, err := os.Stat(path); err == nil && isImageFile(path) {
 			state.isoPath = path
 			state.isoSize = uint64(info.Size())
+			state.isoPathEditor.SetText(path)
 		}
 	}
 
@@ -166,6 +365,23 @@ func drawUI(gtx layout.Context, th *material.Theme, state *AppState, w *app.Wind
 
 	paint.FillShape(gtx.Ops, colorBackground, clip.Rect{Max: gtx.Constraints.Max}.Op())
 
+	// Apply pending ISO path from browse goroutine
+	if state.pendingISOPath != "" {
+		state.isoPathEditor.SetText(state.pendingISOPath)
+		state.pendingISOPath = ""
+	}
+
+	// Handle ISO path editor submit (Enter key)
+	for {
+		ev, ok := state.isoPathEditor.Update(gtx)
+		if !ok {
+			break
+		}
+		if _, isSubmit := ev.(widget.SubmitEvent); isSubmit {
+			validateEditorISOPath(state)
+		}
+	}
+
 	// Handle button clicks
 	if state.refreshBtn.Clicked(gtx) {
 		state.devices = detectUSBDevices()
@@ -188,6 +404,7 @@ func drawUI(gtx layout.Context, th *material.Theme, state *AppState, w *app.Wind
 					state.mu.Lock()
 					state.isoPath = isoPath
 					state.isoSize = uint64(info.Size())
+					state.pendingISOPath = isoPath
 					state.mu.Unlock()
 					w.Invalidate()
 				}
@@ -211,6 +428,8 @@ func drawUI(gtx layout.Context, th *material.Theme, state *AppState, w *app.Wind
 			state.formatUSBOpt = state.formatCheck.Value
 			state.currentPage = PageSelectISO
 		case PageSelectISO:
+			// Validate editor text before proceeding
+			validateEditorISOPath(state)
 			if state.isoPath != "" && state.selectedUSB >= 0 {
 				dev := state.devices[state.selectedUSB]
 				if dev.Size >= state.isoSize {
@@ -245,6 +464,7 @@ func drawUI(gtx layout.Context, th *material.Theme, state *AppState, w *app.Wind
 		state.formatUSBOpt = false
 		state.formatCheck.Value = false
 		state.confirmCheck.Value = false
+		state.isoPathEditor.SetText("")
 	}
 
 	// Main layout
@@ -331,10 +551,6 @@ func drawStepIndicator(gtx layout.Context, th *material.Theme, state *AppState) 
 
 func drawContent(gtx layout.Context, th *material.Theme, state *AppState) layout.Dimensions {
 	return layout.UniformInset(unit.Dp(20)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		if !state.isRoot {
-			return drawNotRoot(gtx, th)
-		}
-
 		switch state.currentPage {
 		case PageSelectUSB:
 			return drawPageSelectUSB(gtx, th, state)
@@ -351,31 +567,6 @@ func drawContent(gtx layout.Context, th *material.Theme, state *AppState) layout
 		}
 		return layout.Dimensions{}
 	})
-}
-
-func drawNotRoot(gtx layout.Context, th *material.Theme) layout.Dimensions {
-	return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
-		layout.Rigid(layout.Spacer{Height: unit.Dp(40)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			icon := material.H1(th, "!")
-			icon.Color = colorDanger
-			return icon.Layout(gtx)
-		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(20)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			msg := material.H5(th, "Root Access Required")
-			msg.Color = colorDanger
-			msg.Alignment = text.Middle
-			return msg.Layout(gtx)
-		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(15)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			msg := material.Body1(th, "Please run this tool with sudo:\n\nsudo raven-usb")
-			msg.Color = colorText
-			msg.Alignment = text.Middle
-			return msg.Layout(gtx)
-		}),
-	)
 }
 
 // Page 1: Select USB Device
@@ -554,23 +745,20 @@ func drawPageSelectISO(gtx layout.Context, th *material.Theme, state *AppState) 
 			subtitle.Color = colorText
 			return subtitle.Layout(gtx)
 		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(25)}.Layout),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(20)}.Layout),
+		// ISO path input with browse button
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 					return widget.Border{
-						Color: colorSurface,
-						Width: unit.Dp(2),
+						Color: colorPrimary,
+						Width: unit.Dp(1),
 					}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						return layout.UniformInset(unit.Dp(12)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							if state.isoPath == "" {
-								lbl := material.Body1(th, "No ISO selected...")
-								lbl.Color = colorDisabled
-								return lbl.Layout(gtx)
-							}
-							lbl := material.Body1(th, filepath.Base(state.isoPath))
-							lbl.Color = colorText
-							return lbl.Layout(gtx)
+						return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							ed := material.Editor(th, &state.isoPathEditor, "/path/to/image.iso")
+							ed.Color = colorTextBright
+							ed.HintColor = colorDisabled
+							return ed.Layout(gtx)
 						})
 					})
 				}),
@@ -582,7 +770,13 @@ func drawPageSelectISO(gtx layout.Context, th *material.Theme, state *AppState) 
 				}),
 			)
 		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(20)}.Layout),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			hint := material.Caption(th, "Type a path, paste, or click Browse to select an ISO/IMG file")
+			hint.Color = colorDisabled
+			return hint.Layout(gtx)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(15)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			if state.isoPath == "" {
 				return layout.Dimensions{}
@@ -861,7 +1055,9 @@ func drawFooter(gtx layout.Context, th *material.Theme, state *AppState) layout.
 					btnColor = colorPrimary
 				case PageSelectISO:
 					label = "Next"
-					enabled = state.isoPath != "" && state.selectedUSB >= 0 && state.devices[state.selectedUSB].Size >= state.isoSize
+					// Enable if editor has text or isoPath is set
+					editorText := strings.TrimSpace(state.isoPathEditor.Text())
+					enabled = (state.isoPath != "" || editorText != "") && state.selectedUSB >= 0
 					btnColor = colorPrimary
 				case PageConfirm:
 					label = "Start Writing"
@@ -882,6 +1078,22 @@ func drawFooter(gtx layout.Context, th *material.Theme, state *AppState) layout.
 }
 
 // ============ Helper Functions ============
+
+func isImageFile(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.HasSuffix(lower, ".iso") || strings.HasSuffix(lower, ".img")
+}
+
+func validateEditorISOPath(state *AppState) {
+	path := strings.TrimSpace(state.isoPathEditor.Text())
+	if path == "" {
+		return
+	}
+	if info, err := os.Stat(path); err == nil && isImageFile(path) {
+		state.isoPath = path
+		state.isoSize = uint64(info.Size())
+	}
+}
 
 func yesNo(b bool) string {
 	if b {
@@ -1007,14 +1219,16 @@ func formatSize(bytes uint64) string {
 func browseForISO() string {
 	// Try zenity first
 	cmd := exec.Command("zenity", "--file-selection", "--title=Select ISO Image",
-		"--file-filter=ISO files (*.iso)|*.iso", "--file-filter=All files|*")
+		"--filename=/",
+		"--file-filter=Disk images (*.iso *.img)|*.iso *.img",
+		"--file-filter=All files|*")
 	out, err := cmd.Output()
 	if err == nil {
 		return strings.TrimSpace(string(out))
 	}
 
 	// Try kdialog
-	cmd = exec.Command("kdialog", "--getopenfilename", ".", "*.iso|ISO Images")
+	cmd = exec.Command("kdialog", "--getopenfilename", "/", "*.iso *.img|Disk Images")
 	out, err = cmd.Output()
 	if err == nil {
 		return strings.TrimSpace(string(out))
@@ -1022,7 +1236,8 @@ func browseForISO() string {
 
 	// Try yad
 	cmd = exec.Command("yad", "--file", "--title=Select ISO Image",
-		"--file-filter=*.iso")
+		"--filename=/",
+		"--file-filter=*.iso *.img")
 	out, err = cmd.Output()
 	if err == nil {
 		return strings.TrimSpace(string(out))
@@ -1031,35 +1246,16 @@ func browseForISO() string {
 	return ""
 }
 
-func formatUSBDevice(state *AppState, w *app.Window) error {
-	dev := state.devices[state.selectedUSB]
-
-	// Unmount
-	partitions, _ := filepath.Glob(dev.Path + "*")
-	for _, part := range partitions {
-		exec.Command("umount", "-f", part).Run()
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%d seconds", int(d.Seconds()))
 	}
-	time.Sleep(500 * time.Millisecond)
-
-	// Create partition table
-	if err := exec.Command("parted", "-s", dev.Path, "mklabel", "msdos").Run(); err != nil {
-		return fmt.Errorf("failed to create partition table: %v", err)
-	}
-	if err := exec.Command("parted", "-s", dev.Path, "mkpart", "primary", "fat32", "1MiB", "100%").Run(); err != nil {
-		return fmt.Errorf("failed to create partition: %v", err)
-	}
-	exec.Command("partprobe", dev.Path).Run()
-	time.Sleep(2 * time.Second)
-
-	// Format as FAT32
-	part := dev.Path + "1"
-	if err := exec.Command("mkfs.vfat", "-F", "32", "-n", "RAVENUSB", part).Run(); err != nil {
-		return fmt.Errorf("failed to format: %v", err)
-	}
-
-	return nil
+	minutes := int(d.Minutes())
+	seconds := int(d.Seconds()) % 60
+	return fmt.Sprintf("%d min %d sec", minutes, seconds)
 }
 
+// writeToUSB launches the privileged write subprocess via pkexec and streams progress.
 func writeToUSB(state *AppState, w *app.Window) {
 	addLog := func(msg string) {
 		state.mu.Lock()
@@ -1068,17 +1264,17 @@ func writeToUSB(state *AppState, w *app.Window) {
 		w.Invalidate()
 	}
 
-	setProgress := func(p float64, text string) {
+	setProgress := func(p float64, txt string) {
 		state.mu.Lock()
 		state.progress = p
-		state.progressTxt = text
+		state.progressTxt = txt
 		state.mu.Unlock()
 		w.Invalidate()
 	}
 
-	setETA := func(text string) {
+	setETA := func(txt string) {
 		state.mu.Lock()
-		state.etaText = text
+		state.etaText = txt
 		state.mu.Unlock()
 		w.Invalidate()
 	}
@@ -1097,133 +1293,87 @@ func writeToUSB(state *AppState, w *app.Window) {
 	doFormat := state.formatUSBOpt
 	state.mu.Unlock()
 
-	addLog("Starting write process...")
-	setProgress(0.02, "Preparing...")
+	addLog("Requesting elevated privileges...")
+	setProgress(0.01, "Authenticating...")
 
-	// Format if requested
+	// Find current executable for re-invocation
+	exe, err := os.Executable()
+	if err != nil {
+		setError("Cannot determine executable path: " + err.Error())
+		return
+	}
+
+	// Build args for the privileged write subcommand
+	args := []string{exe, "--privileged-write", "--device", dev.Path, "--iso", isoPath}
 	if doFormat {
-		addLog("Formatting USB...")
-		setProgress(0.05, "Formatting...")
-		if err := formatUSBDevice(state, w); err != nil {
-			setError("Format failed: " + err.Error())
-			return
-		}
-		addLog("Format complete")
+		args = append(args, "--format")
 	}
 
-	// Unmount
-	addLog("Unmounting device...")
-	setProgress(0.08, "Unmounting...")
-	partitions, _ := filepath.Glob(dev.Path + "*")
-	for _, part := range partitions {
-		exec.Command("umount", "-f", part).Run()
-	}
-	exec.Command("sync").Run()
-	time.Sleep(500 * time.Millisecond)
-
-	setProgress(0.1, "Opening files...")
-
-	// Open ISO
-	info, err := os.Stat(isoPath)
+	// Launch via pkexec for privilege escalation
+	cmd := exec.Command("pkexec", args...)
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		setError("Cannot read ISO: " + err.Error())
+		setError("Failed to create pipe: " + err.Error())
 		return
 	}
-	totalSize := info.Size()
+	cmd.Stderr = os.Stderr
 
-	isoFile, err := os.Open(isoPath)
-	if err != nil {
-		setError("Cannot open ISO: " + err.Error())
+	if err := cmd.Start(); err != nil {
+		setError("Failed to start privileged write. Is polkit installed?\n\n" + err.Error())
 		return
 	}
-	defer isoFile.Close()
 
-	// Open device
-	device, err := os.OpenFile(dev.Path, os.O_WRONLY|os.O_SYNC, 0)
-	if err != nil {
-		setError("Cannot open device: " + err.Error())
-		return
-	}
-	defer device.Close()
+	addLog("Privileges granted, starting write...")
 
-	addLog("Writing ISO to USB...")
-	setProgress(0.1, "Writing...")
+	// Read progress from the subprocess
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		line := scanner.Text()
 
-	buffer := make([]byte, 4*1024*1024) // 4MB buffer
-	var written int64
-	startTime := time.Now()
-	lastUpdate := startTime
-
-	for {
-		n, err := isoFile.Read(buffer)
-		if n > 0 {
-			_, werr := device.Write(buffer[:n])
-			if werr != nil {
-				setError("Write error: " + werr.Error())
-				return
-			}
-			written += int64(n)
-
-			// Update progress every 500ms or so
-			now := time.Now()
-			if now.Sub(lastUpdate) > 500*time.Millisecond {
-				lastUpdate = now
-
-				progress := 0.1 + (float64(written)/float64(totalSize))*0.85
-				progressText := fmt.Sprintf("%s / %s (%.1f%%)", formatSize(uint64(written)), formatSize(uint64(totalSize)), progress*100)
-				setProgress(progress, progressText)
-
-				// Calculate ETA
-				elapsed := now.Sub(startTime).Seconds()
-				if elapsed > 0 && written > 0 {
-					speed := float64(written) / elapsed
-					remaining := float64(totalSize - written)
-					etaSeconds := remaining / speed
-					speedMB := speed / (1024 * 1024)
-
-					if etaSeconds < 60 {
-						setETA(fmt.Sprintf("Speed: %.1f MB/s  -  ETA: %d seconds", speedMB, int(etaSeconds)))
-					} else {
-						etaMinutes := etaSeconds / 60
-						setETA(fmt.Sprintf("Speed: %.1f MB/s  -  ETA: %.1f minutes", speedMB, etaMinutes))
-					}
+		if strings.HasPrefix(line, "PROGRESS:") {
+			parts := strings.SplitN(line[9:], ":", 2)
+			if len(parts) == 2 {
+				if p, parseErr := strconv.ParseFloat(parts[0], 64); parseErr == nil {
+					setProgress(p, parts[1])
 				}
 			}
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			setError("Read error: " + err.Error())
+		} else if strings.HasPrefix(line, "LOG:") {
+			addLog(line[4:])
+		} else if strings.HasPrefix(line, "ETA:") {
+			setETA(line[4:])
+		} else if strings.HasPrefix(line, "ERROR:") {
+			setError(line[6:])
+			cmd.Wait()
 			return
 		}
+		// "DONE" line is handled by successful cmd.Wait below
 	}
 
-	addLog("Syncing data...")
-	setProgress(0.96, "Syncing...")
-	setETA("Syncing to disk...")
-	device.Sync()
-	syscall.Sync()
+	if err := cmd.Wait(); err != nil {
+		state.mu.Lock()
+		alreadyErrored := state.writeError != ""
+		state.mu.Unlock()
 
-	elapsed := time.Since(startTime)
-	setProgress(1.0, "Complete!")
-	setETA(fmt.Sprintf("Completed in %s", formatDuration(elapsed)))
-	addLog(fmt.Sprintf("Write completed in %s", formatDuration(elapsed)))
+		if alreadyErrored {
+			return
+		}
+
+		// pkexec exit code 126 = user dismissed the auth dialog
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 126 {
+			setError("Authentication was cancelled")
+		} else {
+			setError("Write process failed: " + err.Error())
+		}
+		return
+	}
 
 	state.mu.Lock()
-	state.writeDone = true
-	state.currentPage = PageComplete
+	if state.writeError == "" {
+		state.writeDone = true
+		state.currentPage = PageComplete
+	}
 	state.mu.Unlock()
 	w.Invalidate()
-}
-
-func formatDuration(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%d seconds", int(d.Seconds()))
-	}
-	minutes := int(d.Minutes())
-	seconds := int(d.Seconds()) % 60
-	return fmt.Sprintf("%d min %d sec", minutes, seconds)
 }
 
 func autoScan(state *AppState, w *app.Window) {
