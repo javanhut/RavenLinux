@@ -152,7 +152,7 @@ func (kb *RavenKeybindings) initBindings() {
 
 		// System
 		{Keys: "Super + Escape", Description: "Lock Screen", Category: "System"},
-		{Keys: "Super + Shift + Q", Description: "Exit Hyprland", Category: "System"},
+		{Keys: "Super + Shift + Q", Description: "Exit Compositor", Category: "System"},
 	}
 }
 

@@ -103,10 +103,9 @@ build_rvn() {
 }
 
 # =============================================================================
-# Hyprland compositor (copied from host in build-live-iso.sh)
+# RavenCompositor (built from RavenCompositor/ with cargo)
 # =============================================================================
-# NOTE: raven-compositor has been replaced with Hyprland.
-# Hyprland binary is copied from the host system during ISO build.
+# raven-compositor is built from the RavenCompositor/ workspace.
 # See scripts/build-live-iso.sh copy_wayland_tools() function.
 
 # =============================================================================
@@ -2489,7 +2488,7 @@ main() {
     # Build custom RavenLinux tools
     build_go_packages
     build_rvn
-    # NOTE: Hyprland compositor is copied from host in build-live-iso.sh
+    # NOTE: raven-compositor is built from RavenCompositor/ workspace
     build_installer
     build_usb_creator
     build_wifi_tools

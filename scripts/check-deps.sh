@@ -93,8 +93,7 @@ DEPENDENCIES=(
     "mmd:mtools:-:-:-:-:-:Create directories in FAT images"
     
     # Wayland compositor and display server
-    "Hyprland:hyprland:hyprland:hyprland:hyprland:hyprland:hyprland:Hyprland Wayland compositor"
-    "hyprland-welcome:hyprland-guiutils:-:-:-:-:-:Hyprland GUI utilities"
+    "raven-compositor:raven-compositor:raven-compositor:raven-compositor:raven-compositor:raven-compositor:raven-compositor:Raven Wayland compositor (built from source)"
     "Xwayland:xorg-xwayland:xwayland:xorg-x11-server-Xwayland:xwayland:xorg-server-xwayland:xwayland:XWayland X11 compatibility"
     "seatd:seatd:seatd:seatd:seatd:seatd:seatd:Seat management daemon"
     "swaybg:swaybg:swaybg:swaybg:swaybg:swaybg:swaybg:Wallpaper utility for Wayland"

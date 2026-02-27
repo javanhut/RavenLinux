@@ -241,11 +241,6 @@ func focusWindow(pid int) error {
 		return nil
 	}
 
-	// Fallback: try wlr-foreign-toplevel via hyprctl (if Hyprland)
-	if err := tryHyprctl("focuswindow", pid); err == nil {
-		return nil
-	}
-
 	// Fallback: try swaymsg (if Sway)
 	if err := trySwaymsg("focus", pid); err == nil {
 		return nil
@@ -264,11 +259,6 @@ func focusWindow(pid int) error {
 func minimizeWindow(pid int) error {
 	// Try compositor IPC first
 	if err := tryCompositorIPC("minimize", pid); err == nil {
-		return nil
-	}
-
-	// Fallback: try hyprctl
-	if err := tryHyprctl("movetoworkspacesilent", pid); err == nil {
 		return nil
 	}
 
@@ -293,11 +283,6 @@ func restoreWindow(pid int) error {
 		return nil
 	}
 
-	// Fallback: try hyprctl
-	if err := tryHyprctl("focuswindow", pid); err == nil {
-		return nil
-	}
-
 	// Fallback: try swaymsg
 	if err := trySwaymsg("focus", pid); err == nil {
 		return nil
@@ -316,11 +301,6 @@ func restoreWindow(pid int) error {
 func closeWindow(pid int) error {
 	// Try compositor IPC first
 	if err := tryCompositorIPC("close", pid); err == nil {
-		return nil
-	}
-
-	// Fallback: try hyprctl
-	if err := tryHyprctl("closewindow", pid); err == nil {
 		return nil
 	}
 
@@ -369,11 +349,6 @@ func listWindows() ([]WindowInfo, error) {
 		}
 	}
 
-	// Fallback: try hyprctl
-	if windows, err := listWindowsHyprctl(); err == nil {
-		return windows, nil
-	}
-
 	// Fallback: try swaymsg
 	if windows, err := listWindowsSwaymsg(); err == nil {
 		return windows, nil
@@ -399,100 +374,12 @@ func getActiveWindow() (*WindowInfo, error) {
 		}
 	}
 
-	// Fallback: try hyprctl
-	if window, err := getActiveWindowHyprctl(); err == nil {
-		return window, nil
-	}
-
 	// Fallback: try swaymsg
 	if window, err := getActiveWindowSwaymsg(); err == nil {
 		return window, nil
 	}
 
 	return nil, fmt.Errorf("no compositor available to query active window")
-}
-
-// Hyprland support
-
-func tryHyprctl(action string, pid int) error {
-	hyprctlPath, err := exec.LookPath("hyprctl")
-	if err != nil {
-		return fmt.Errorf("hyprctl not found")
-	}
-
-	var cmd *exec.Cmd
-	switch action {
-	case "focuswindow":
-		cmd = exec.Command(hyprctlPath, "dispatch", "focuswindow", fmt.Sprintf("pid:%d", pid))
-	case "closewindow":
-		cmd = exec.Command(hyprctlPath, "dispatch", "closewindow", fmt.Sprintf("pid:%d", pid))
-	case "movetoworkspacesilent":
-		cmd = exec.Command(hyprctlPath, "dispatch", "movetoworkspacesilent", fmt.Sprintf("special,pid:%d", pid))
-	default:
-		return fmt.Errorf("unsupported action: %s", action)
-	}
-
-	return cmd.Run()
-}
-
-func listWindowsHyprctl() ([]WindowInfo, error) {
-	hyprctlPath, err := exec.LookPath("hyprctl")
-	if err != nil {
-		return nil, fmt.Errorf("hyprctl not found")
-	}
-
-	output, err := exec.Command(hyprctlPath, "clients", "-j").Output()
-	if err != nil {
-		return nil, err
-	}
-
-	var clients []struct {
-		PID       int    `json:"pid"`
-		Title     string `json:"title"`
-		Class     string `json:"class"`
-		Focusable bool   `json:"focusable"`
-	}
-	if err := json.Unmarshal(output, &clients); err != nil {
-		return nil, err
-	}
-
-	var windows []WindowInfo
-	for _, c := range clients {
-		windows = append(windows, WindowInfo{
-			PID:   c.PID,
-			Title: c.Title,
-			AppID: c.Class,
-		})
-	}
-	return windows, nil
-}
-
-func getActiveWindowHyprctl() (*WindowInfo, error) {
-	hyprctlPath, err := exec.LookPath("hyprctl")
-	if err != nil {
-		return nil, fmt.Errorf("hyprctl not found")
-	}
-
-	output, err := exec.Command(hyprctlPath, "activewindow", "-j").Output()
-	if err != nil {
-		return nil, err
-	}
-
-	var window struct {
-		PID   int    `json:"pid"`
-		Title string `json:"title"`
-		Class string `json:"class"`
-	}
-	if err := json.Unmarshal(output, &window); err != nil {
-		return nil, err
-	}
-
-	return &WindowInfo{
-		PID:     window.PID,
-		Title:   window.Title,
-		AppID:   window.Class,
-		Focused: true,
-	}, nil
 }
 
 // Sway support

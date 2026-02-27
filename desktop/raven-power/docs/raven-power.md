@@ -23,8 +23,8 @@ A fullscreen power menu overlay for the Raven desktop environment, providing qui
 
 | Option | Description | Command |
 |--------|-------------|---------|
-| Lock | Lock the screen | `hyprlock` / `swaylock` / `loginctl lock-session` |
-| Logout | End the Hyprland session | `hyprctl dispatch exit` |
+| Lock | Lock the screen | `swaylock` / `loginctl lock-session` |
+| Logout | End the compositor session | `raven-shell action quit` |
 | Suspend | Sleep the computer | `systemctl suspend` |
 | Hibernate | Hibernate to disk | `systemctl hibernate` |
 | Reboot | Restart the computer | `systemctl reboot` |
@@ -45,18 +45,18 @@ go build -o raven-power
 
 - GTK4
 - gtk4-layer-shell
-- Hyprland (compositor)
+- raven-compositor
 - systemd (for power management)
-- hyprlock/swaylock (for screen locking)
+- swaylock (for screen locking)
 
 ## Integration
 
 The power menu integrates with:
 
 - **raven-shell**: The panel's Power button can launch external power menu or use its built-in popup
-- **Hyprland**: Uses `hyprctl dispatch exit` for logout
+- **raven-compositor**: Uses `raven-shell action quit` for logout
 - **systemd**: Uses systemctl for suspend, hibernate, reboot, shutdown
-- **Screen lockers**: Supports hyprlock, swaylock, or loginctl
+- **Screen lockers**: Supports swaylock or loginctl
 
 ## Styling
 

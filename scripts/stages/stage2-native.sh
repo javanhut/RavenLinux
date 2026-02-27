@@ -57,7 +57,6 @@ else
     log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 fi
 
-source "${PROJECT_ROOT}/scripts/lib/hyprland-config.sh"
 
 # =============================================================================
 # Copy shells from host
@@ -141,8 +140,6 @@ copy_system_utils() {
         # Reference compositor (optional)
         weston
         weston-terminal
-        # Alternative compositor (optional)
-        Hyprland hyprctl
         # X11/Xwayland (optional, for legacy app support)
         Xorg Xwayland xinit startx xterm xclock xsetroot twm
         # Systemd tools (if available, for compatibility)
@@ -1967,24 +1964,9 @@ copy_libraries() {
         fi
     done
 
-    # Hyprland runtime data (if installed on host)
-    log_info "Copying Hyprland runtime data..."
-    for hypr_dir in /usr/share/hyprland /usr/share/hypr; do
-        if [[ -d "${hypr_dir}" ]]; then
-            mkdir -p "${SYSROOT_DIR}${hypr_dir}"
-            cp -a "${hypr_dir}/." "${SYSROOT_DIR}${hypr_dir}/" 2>/dev/null || true
-            log_info "  Copied ${hypr_dir}"
-        fi
-    done
-    if [[ -f "/usr/share/wayland-sessions/hyprland.desktop" ]]; then
-        mkdir -p "${SYSROOT_DIR}/usr/share/wayland-sessions"
-        cp -a "/usr/share/wayland-sessions/hyprland.desktop" "${SYSROOT_DIR}/usr/share/wayland-sessions/" 2>/dev/null || true
-        log_info "  Copied hyprland.desktop"
-    fi
-
-    # Install Hyprland configuration
-    install_hyprland_config "${SYSROOT_DIR}/root/.config/hypr/hyprland.conf"
-    log_info "  Installed Hyprland config"
+    # Wayland session data
+    log_info "Setting up Wayland session data..."
+    mkdir -p "${SYSROOT_DIR}/usr/share/wayland-sessions"
 
     # EGL vendor JSONs (GLVND)
     for egl_dir in /usr/share/glvnd/egl_vendor.d /etc/glvnd/egl_vendor.d; do

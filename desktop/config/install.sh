@@ -1,6 +1,6 @@
 #!/bin/bash
 # Raven Desktop - Configuration Installer
-# Installs Hyprland config and Raven scripts
+# Installs Raven compositor settings and scripts
 
 set -e
 
@@ -8,22 +8,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="$HOME/.config"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-source "${PROJECT_ROOT}/scripts/lib/hyprland-config.sh"
-
 echo "Installing Raven Desktop Configuration..."
 
 # Create directories
-mkdir -p "$CONFIG_DIR/hypr"
 mkdir -p "$CONFIG_DIR/raven/scripts"
-
-# Install Hyprland config
-if [ -f "$CONFIG_DIR/hypr/hyprland.conf" ]; then
-    echo "Backing up existing Hyprland config..."
-    cp "$CONFIG_DIR/hypr/hyprland.conf" "$CONFIG_DIR/hypr/hyprland.conf.backup.$(date +%Y%m%d_%H%M%S)"
-fi
-
-write_hyprland_config "$CONFIG_DIR/hypr/hyprland.conf"
-echo "Installed Hyprland configuration"
 
 # Install Raven scripts
 cp "$SCRIPT_DIR/raven/scripts/set-wallpaper.sh" "$CONFIG_DIR/raven/scripts/"
@@ -85,13 +73,12 @@ mkdir -p "$HOME/Pictures/Screenshots"
 echo ""
 echo "Raven Desktop configuration installed successfully!"
 echo ""
-echo "To use Raven Desktop with Hyprland:"
-echo "  1. Make sure Hyprland is installed"
+echo "To use Raven Desktop:"
+echo "  1. Build raven-compositor: cd RavenCompositor && cargo build --release"
 echo "  2. Install raven-shell, raven-desktop, raven-menu, raven-settings-menu"
-echo "  3. Log out and select 'Hyprland' from your display manager"
+echo "  3. Run raven-compositor --backend winit (nested) or use raven-wayland-session"
 echo ""
 echo "Required dependencies:"
-echo "  - hyprland"
 echo "  - gtk4-layer-shell"
 echo "  - swaybg (wallpaper)"
 echo "  - mako or dunst (notifications)"

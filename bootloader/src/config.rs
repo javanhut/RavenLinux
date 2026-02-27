@@ -187,15 +187,6 @@ impl Default for BootConfig {
         });
 
         graphical_entries.push(BootEntry {
-            name: String::from("Hyprland (Wayland)"),
-            kernel: String::from("\\EFI\\raven\\vmlinuz"),
-            initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
-            cmdline: String::from("rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=hyprland console=ttyS0,115200 console=tty0"),
-            entry_type: EntryType::LinuxEfi,
-            children: Vec::new(),
-        });
-
-        graphical_entries.push(BootEntry {
             name: String::from("X11"),
             kernel: String::from("\\EFI\\raven\\vmlinuz"),
             initrd: Some(String::from("\\EFI\\raven\\initrd.img")),

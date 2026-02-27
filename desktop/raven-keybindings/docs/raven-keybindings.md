@@ -74,7 +74,7 @@ A fullscreen overlay that displays all configured keyboard shortcuts for the Rav
 
 ### System
 - `Super + Escape` - Lock Screen
-- `Super + Shift + Q` - Exit Hyprland
+- `Super + Shift + Q` - Exit Compositor
 
 ## Building
 
@@ -87,8 +87,8 @@ go build -o raven-keybindings
 
 - GTK4
 - gtk4-layer-shell
-- Hyprland (compositor)
+- raven-compositor
 
 ## Configuration
 
-The keybindings displayed are hardcoded to match the Hyprland configuration in `hyprland-config.sh`. If you modify the Hyprland keybindings, update the `initBindings()` function in `main.go` accordingly.
+The keybindings displayed are hardcoded to match the raven-compositor default keybindings. If you modify the compositor keybindings in `~/.config/raven/settings.json`, update the `initBindings()` function in `main.go` accordingly.

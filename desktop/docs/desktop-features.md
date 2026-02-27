@@ -57,13 +57,7 @@ A powerful search tool for quickly finding and launching applications, files, an
 - Right-click on the desktop and select "Open Fuzzy Finder"
 
 **Via Keyboard Shortcut:**
-Add this to your Hyprland config (`~/.config/hypr/hyprland.conf`):
-
-```
-bind = SUPER, SPACE, exec, pkill -USR1 raven-desktop
-```
-
-This binds `Super + Space` to open the fuzzy finder. You can change `SUPER, SPACE` to your preferred key combination.
+The default raven-compositor keybinding is `Super + Space`. You can customize this in `~/.config/raven/settings.json` under keybindings.
 
 #### Using the Fuzzy Finder
 
@@ -157,17 +151,12 @@ The desktop also loads any `.desktop` files placed in `~/Desktop/`. These are di
 | Up Arrow | Select previous item |
 | Down Arrow | Select next item |
 
-### System-wide (Hyprland)
+### System-wide (raven-compositor)
 
-Add these bindings to your Hyprland config:
+Default keybindings configured in raven-compositor settings:
 
-```
-# Open fuzzy finder
-bind = SUPER, SPACE, exec, pkill -USR1 raven-desktop
-
-# Open fuzzy finder in pin mode
-bind = SUPER SHIFT, SPACE, exec, pkill -USR2 raven-desktop
-```
+- `Super + Space` — Open fuzzy finder
+- `Super + Shift + Space` — Open fuzzy finder in pin mode
 
 ## Signal Support
 

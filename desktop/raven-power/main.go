@@ -107,7 +107,7 @@ func (pm *RavenPower) initOptions() {
 			Description: "Lock the screen",
 			Action: func() {
 				pm.window.Close()
-				exec.Command("sh", "-c", "hyprlock || swaylock || loginctl lock-session").Start()
+				exec.Command("sh", "-c", "swaylock || loginctl lock-session").Start()
 			},
 		},
 		{
@@ -116,7 +116,7 @@ func (pm *RavenPower) initOptions() {
 			Description: "End session",
 			Action: func() {
 				pm.window.Close()
-				exec.Command("hyprctl", "dispatch", "exit").Start()
+				exec.Command("raven-shell", "action", "quit").Start()
 			},
 		},
 		{

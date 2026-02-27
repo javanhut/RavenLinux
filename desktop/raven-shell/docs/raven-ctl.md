@@ -147,17 +147,7 @@ The IPC protocol uses JSON messages:
 }
 ```
 
-### 2. Hyprland
-
-If `hyprctl` is available, `raven-ctl` uses Hyprland's IPC:
-
-- Focus: `hyprctl dispatch focuswindow pid:<pid>`
-- Close: `hyprctl dispatch closewindow pid:<pid>`
-- Minimize: `hyprctl dispatch movetoworkspacesilent special,pid:<pid>`
-- List: `hyprctl clients -j`
-- Active: `hyprctl activewindow -j`
-
-### 3. Sway
+### 2. Sway
 
 If `swaymsg` is available, `raven-ctl` uses Sway's IPC:
 
@@ -166,7 +156,7 @@ If `swaymsg` is available, `raven-ctl` uses Sway's IPC:
 - Minimize: `swaymsg [pid=<pid>] move scratchpad`
 - List/Active: `swaymsg -t get_tree`
 
-### 4. Signal Fallback
+### 3. Signal Fallback
 
 As a last resort, `raven-ctl` uses POSIX signals:
 

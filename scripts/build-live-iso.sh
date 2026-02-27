@@ -37,7 +37,6 @@ MINIMAL=false
 
 # Source shared logging library
 source "${SCRIPT_DIR}/lib/logging.sh"
-source "${PROJECT_ROOT}/scripts/lib/hyprland-config.sh"
 
 # =============================================================================
 # Argument Parsing
@@ -591,67 +590,20 @@ copy_wayland_tools() {
         fi
     done
 
-    # Hyprland (primary compositor - required)
-    if command -v Hyprland &>/dev/null; then
-        cp "$(which Hyprland)" "${LIVE_ROOT}/bin/"
-        log_info "  Added Hyprland"
-
-        # Copy hyprctl
-        if command -v hyprctl &>/dev/null; then
-            cp "$(which hyprctl)" "${LIVE_ROOT}/bin/"
-            log_info "  Added hyprctl"
-        fi
-
-        # Copy Hyprland GUI utilities (if installed)
-        for guiutil in hyprland-welcome hyprland-update-screen hyprland-donate-screen hyprland-dialog hyprland-run; do
-            if command -v "${guiutil}" &>/dev/null; then
-                cp "$(which "${guiutil}")" "${LIVE_ROOT}/bin/" 2>/dev/null || true
-                log_info "  Added ${guiutil}"
-            fi
-        done
-
-        # Copy Hyprland ecosystem libraries
-        for lib in libaquamarine libhyprcursor libhyprgraphics libhyprlang libhyprutils; do
-            for libpath in /usr/lib/${lib}.so*; do
-                if [[ -f "$libpath" ]] || [[ -L "$libpath" ]]; then
-                    cp -L "$libpath" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
-                fi
-            done
-        done
-        log_info "  Added Hyprland ecosystem libraries"
-
-        # Copy additional dependencies
-        for lib in libdisplay-info libliftoff libre2 libtomlplusplus; do
-            for libpath in /usr/lib/${lib}.so*; do
-                if [[ -f "$libpath" ]] || [[ -L "$libpath" ]]; then
-                    cp -L "$libpath" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
-                fi
-            done
-        done
+    # RavenCompositor (primary compositor)
+    local compositor_bin="${PROJECT_ROOT}/../RavenCompositor/target/release/raven-compositor"
+    local shell_bin="${PROJECT_ROOT}/../RavenCompositor/target/release/raven-shell"
+    if [[ -f "${compositor_bin}" ]]; then
+        cp "${compositor_bin}" "${LIVE_ROOT}/bin/"
+        log_info "  Added raven-compositor"
     else
-        log_error "Hyprland not found on host system!"
-        log_error "Install with: sudo pacman -S hyprland"
-        exit 1
+        log_warn "raven-compositor binary not found at ${compositor_bin}"
+        log_warn "Build with: cd RavenCompositor && cargo build --release"
     fi
-
-    # Copy Hyprland data directories
-    for hypr_dir in /usr/share/hyprland /usr/share/hypr; do
-        [[ -d "${hypr_dir}" ]] || continue
-        mkdir -p "${LIVE_ROOT}${hypr_dir}"
-        cp -a "${hypr_dir}/." "${LIVE_ROOT}${hypr_dir}/" 2>/dev/null || true
-        log_info "  Copied ${hypr_dir}"
-    done
-    if [[ -f "/usr/share/wayland-sessions/hyprland.desktop" ]]; then
-        mkdir -p "${LIVE_ROOT}/usr/share/wayland-sessions"
-        cp -a "/usr/share/wayland-sessions/hyprland.desktop" "${LIVE_ROOT}/usr/share/wayland-sessions/" 2>/dev/null || true
-        log_info "  Copied hyprland.desktop"
+    if [[ -f "${shell_bin}" ]]; then
+        cp "${shell_bin}" "${LIVE_ROOT}/bin/"
+        log_info "  Added raven-shell (Rust)"
     fi
-
-    install_hyprland_config \
-        "${LIVE_ROOT}/etc/hypr/hyprland.conf" \
-        "${LIVE_ROOT}/etc/skel/.config/hypr/hyprland.conf" \
-        "${LIVE_ROOT}/root/.config/hypr/hyprland.conf"
-    log_info "  Added Raven hyprland.conf"
 
     # Copy Raven scripts and default settings
     mkdir -p "${LIVE_ROOT}/root/.config/raven/scripts"
@@ -702,7 +654,7 @@ SETTINGS
         log_info "  Added raven-wayland-session"
     fi
 
-    # NOTE: raven-compositor removed - using Hyprland instead (copied above)
+    # raven-compositor and raven-shell binaries are copied above
 
     # Copy libseat library
     for lib in /usr/lib/libseat.so* /lib/libseat.so*; do
@@ -1067,10 +1019,8 @@ build_raven_desktop() {
         fi
     done
 
-    # Install Hyprland config for the live user
+    # Create raven config directory for the live user
     mkdir -p "${LIVE_ROOT}/root/.config/raven"
-    install_hyprland_config "${LIVE_ROOT}/root/.config/hypr/hyprland.conf"
-    log_info "  Installed Hyprland config"
 
     # Create default settings.json
     if [[ ! -f "${LIVE_ROOT}/root/.config/raven/settings.json" ]]; then
@@ -1227,7 +1177,7 @@ copy_desktop_services() {
     mkdir -p "${LIVE_ROOT}/var/lib/polkit-1" 2>/dev/null || true
 
     # -------------------------------------------------------------------------
-    # XDG Desktop Portal + Hyprland backend
+    # XDG Desktop Portal + wlr/gtk backend
     # -------------------------------------------------------------------------
     log_info "Installing XDG Desktop Portal..."
 
@@ -1242,13 +1192,22 @@ copy_desktop_services() {
         fi
     done
 
-    # Hyprland portal backend
-    for bin_path in /usr/libexec/xdg-desktop-portal-hyprland /usr/lib/xdg-desktop-portal-hyprland; do
+    # wlr portal backend (preferred), then gtk fallback
+    for bin_path in /usr/libexec/xdg-desktop-portal-wlr /usr/lib/xdg-desktop-portal-wlr; do
         if [[ -f "$bin_path" ]]; then
             mkdir -p "${LIVE_ROOT}/usr/libexec"
             cp "$bin_path" "${LIVE_ROOT}/usr/libexec/" 2>/dev/null || true
-            chmod +x "${LIVE_ROOT}/usr/libexec/xdg-desktop-portal-hyprland"
-            log_info "  Added xdg-desktop-portal-hyprland"
+            chmod +x "${LIVE_ROOT}/usr/libexec/xdg-desktop-portal-wlr"
+            log_info "  Added xdg-desktop-portal-wlr"
+            break
+        fi
+    done
+    for bin_path in /usr/libexec/xdg-desktop-portal-gtk /usr/lib/xdg-desktop-portal-gtk; do
+        if [[ -f "$bin_path" ]]; then
+            mkdir -p "${LIVE_ROOT}/usr/libexec"
+            cp "$bin_path" "${LIVE_ROOT}/usr/libexec/" 2>/dev/null || true
+            chmod +x "${LIVE_ROOT}/usr/libexec/xdg-desktop-portal-gtk"
+            log_info "  Added xdg-desktop-portal-gtk"
             break
         fi
     done
@@ -1260,27 +1219,27 @@ copy_desktop_services() {
         log_info "  Added portal config"
     fi
 
-    # Hyprland portal config
-    if [[ -d /usr/share/xdg-desktop-portal-hyprland ]]; then
-        mkdir -p "${LIVE_ROOT}/usr/share/xdg-desktop-portal-hyprland"
-        cp -a /usr/share/xdg-desktop-portal-hyprland/. "${LIVE_ROOT}/usr/share/xdg-desktop-portal-hyprland/" 2>/dev/null || true
+    # wlr portal config
+    if [[ -d /usr/share/xdg-desktop-portal-wlr ]]; then
+        mkdir -p "${LIVE_ROOT}/usr/share/xdg-desktop-portal-wlr"
+        cp -a /usr/share/xdg-desktop-portal-wlr/. "${LIVE_ROOT}/usr/share/xdg-desktop-portal-wlr/" 2>/dev/null || true
     fi
 
     # Portal D-Bus service files
-    for svc in org.freedesktop.portal.Desktop.service org.freedesktop.impl.portal.desktop.hyprland.service; do
+    for svc in org.freedesktop.portal.Desktop.service org.freedesktop.impl.portal.desktop.wlr.service org.freedesktop.impl.portal.desktop.gtk.service; do
         if [[ -f "/usr/share/dbus-1/services/${svc}" ]]; then
             mkdir -p "${LIVE_ROOT}/usr/share/dbus-1/services"
             cp "/usr/share/dbus-1/services/${svc}" "${LIVE_ROOT}/usr/share/dbus-1/services/" 2>/dev/null || true
         fi
     done
 
-    # Create XDG portal config for Hyprland
+    # Create XDG portal config for wlr
     mkdir -p "${LIVE_ROOT}/etc/xdg/xdg-desktop-portal"
-    cat > "${LIVE_ROOT}/etc/xdg/xdg-desktop-portal/hyprland-portals.conf" << 'EOF'
+    cat > "${LIVE_ROOT}/etc/xdg/xdg-desktop-portal/raven-portals.conf" << 'EOF'
 [preferred]
-default=hyprland;gtk
-org.freedesktop.impl.portal.Screenshot=hyprland
-org.freedesktop.impl.portal.ScreenCast=hyprland
+default=gtk
+org.freedesktop.impl.portal.Screenshot=wlr
+org.freedesktop.impl.portal.ScreenCast=wlr
 EOF
 
     log_success "Desktop services installed"

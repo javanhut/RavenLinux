@@ -1,36 +1,29 @@
 # Raven Desktop Environment - Testing Guide
 
-## Quick Test with Nested Hyprland (Recommended)
+## Quick Test with Nested Compositor (Recommended)
 
-The fastest way to test all components together without a full build is using the nested Hyprland test script:
+The fastest way to test all components together without a full build is using the test script:
 
 ```bash
-cd /home/javanhut/Development/CustomLinux/RavenLinux/desktop
-./test-nested.sh
+cd RavenLinux/desktop
+./test-nested.sh          # Direct mode: run on current Wayland session
+./test-nested.sh --nested # Nested mode: launch raven-compositor in a window
 ```
 
-This script:
-- Creates a temporary Hyprland configuration
-- Launches Hyprland in a nested window inside your current session
-- Auto-starts `raven-desktop` and `raven-shell` using `go run`
-- Sets up keybindings to launch other components on demand
+### Direct Mode (default)
+- Starts `raven-desktop` and `raven-shell` on your current Wayland session
+- Other components can be launched manually from a separate terminal
 
-### Nested Test Keybindings
+### Nested Mode (--nested)
+- Launches `raven-compositor` with the winit backend in a window
+- The compositor auto-starts desktop components via its autostart config
+- Use `Super+Alt+Q` to exit the nested session
 
-| Shortcut | Action |
-|----------|--------|
-| `SUPER + Return` | Open terminal (foot) |
-| `SUPER + Space` | App launcher (raven-menu) |
-| `SUPER + E` | File manager |
-| `SUPER + S` | Settings |
-| `SUPER + Escape` | Power menu |
-| `SUPER + Q` | Close window |
-| `SUPER + M` | Exit nested session |
+### Requirements for Testing
 
-### Requirements for Nested Testing
-
-- Running Hyprland or another Wayland compositor
+- Running Wayland compositor (for direct mode or nested winit backend)
 - `go` 1.23+
+- `raven-compositor` binary (for nested mode)
 - `swaybg` for wallpaper
 - GTK4 and gtk4-layer-shell development files
 
@@ -311,7 +304,7 @@ If you experience severe slowness, unresponsive mouse, or laggy input in QEMU:
    ```
    This will use pure software rendering but may be more stable.
 
-**Note:** The Hyprland configuration has been optimized for software rendering with blur, shadows, and animations disabled. This significantly improves performance in VM environments.
+**Note:** The raven-compositor uses software rendering by default, so blur, shadows, and animations are kept minimal for better VM performance.
 
 ## Keyboard Shortcuts Reference
 

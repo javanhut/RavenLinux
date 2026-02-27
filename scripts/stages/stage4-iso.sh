@@ -50,7 +50,6 @@ else
     log_step() { echo -e "${CYAN}[STEP]${NC} $1"; }
 fi
 
-source "${PROJECT_ROOT}/scripts/lib/hyprland-config.sh"
 
 # =============================================================================
 # Check dependencies
@@ -607,7 +606,6 @@ build_desktop_components() {
 
     local desktop_dir="${PROJECT_ROOT}/desktop"
     mkdir -p "${SYSROOT_DIR}/bin"
-    mkdir -p "${SYSROOT_DIR}/root/.config/hypr"
     mkdir -p "${SYSROOT_DIR}/root/.config/raven/scripts"
 
     # Build raven-shell (panel/taskbar)
@@ -666,12 +664,6 @@ build_desktop_components() {
         cd "${PROJECT_ROOT}"
     fi
 
-    # Install Hyprland configuration
-    install_hyprland_config \
-        "${SYSROOT_DIR}/root/.config/hypr/hyprland.conf" \
-        "${SYSROOT_DIR}/etc/hypr/hyprland.conf"
-    log_info "  Installed Hyprland config"
-
     # Install Raven scripts
     if [[ -d "${desktop_dir}/config/raven/scripts" ]]; then
         cp "${desktop_dir}/config/raven/scripts"/*.sh "${SYSROOT_DIR}/root/.config/raven/scripts/" 2>/dev/null || true
@@ -720,76 +712,42 @@ EOF
 }
 
 # =============================================================================
-# Copy Hyprland compositor and dependencies from host
+# Copy Wayland compositor and dependencies
 # =============================================================================
 copy_wayland_compositor() {
     log_step "Copying Wayland compositor from host..."
 
-    # Copy Hyprland if available
-    if command -v Hyprland &>/dev/null; then
-        local hyprland_bin
-        hyprland_bin="$(which Hyprland)"
-        cp "$hyprland_bin" "${SYSROOT_DIR}/bin/"
-        chmod +x "${SYSROOT_DIR}/bin/Hyprland"
-        log_info "  Copied Hyprland"
-
-        # Copy Hyprland libraries
-        ldd "$hyprland_bin" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
-            [[ -z "$lib" || ! -f "$lib" ]] && continue
-            dest="${SYSROOT_DIR}${lib}"
-            if [[ ! -f "$dest" ]]; then
-                mkdir -p "$(dirname "$dest")"
-                cp -L "$lib" "$dest" 2>/dev/null || true
-            fi
-        done || true
-
-        # Ensure Hyprland config exists (build-time template)
-        if [[ ! -f "${SYSROOT_DIR}/etc/hypr/hyprland.conf" ]]; then
-            install_hyprland_config \
-                "${SYSROOT_DIR}/etc/hypr/hyprland.conf" \
-                "${SYSROOT_DIR}/root/.config/hypr/hyprland.conf"
-            log_info "  Installed Hyprland config"
-        fi
-
-        # Copy hyprctl if available
-        if command -v hyprctl &>/dev/null; then
-            cp "$(which hyprctl)" "${SYSROOT_DIR}/bin/"
-            log_info "  Copied hyprctl"
-        fi
-
-        # Copy Hyprland GUI utilities (if installed)
-        for guiutil in hyprland-welcome hyprland-update-screen hyprland-donate-screen hyprland-dialog hyprland-run; do
-            if command -v "${guiutil}" &>/dev/null; then
-                cp "$(which "${guiutil}")" "${SYSROOT_DIR}/bin/" 2>/dev/null || true
-                log_info "  Copied ${guiutil}"
-            fi
-        done
-
-        # Copy Hyprland data files
-        if [[ -d /usr/share/hyprland ]]; then
-            mkdir -p "${SYSROOT_DIR}/usr/share/hyprland"
-            cp -a /usr/share/hyprland/. "${SYSROOT_DIR}/usr/share/hyprland/" 2>/dev/null || true
-            log_info "  Copied /usr/share/hyprland"
-        fi
-
-        # Copy wayland-protocols
-        if [[ -d /usr/share/wayland-protocols ]]; then
-            mkdir -p "${SYSROOT_DIR}/usr/share/wayland-protocols"
-            cp -a /usr/share/wayland-protocols/. "${SYSROOT_DIR}/usr/share/wayland-protocols/" 2>/dev/null || true
-            log_info "  Copied wayland-protocols"
-        fi
-
-        # Copy XKB keyboard layouts
-        if [[ -d /usr/share/X11/xkb ]]; then
-            mkdir -p "${SYSROOT_DIR}/usr/share/X11/xkb"
-            cp -a /usr/share/X11/xkb/. "${SYSROOT_DIR}/usr/share/X11/xkb/" 2>/dev/null || true
-            log_info "  Copied XKB layouts"
-        fi
-
-        log_success "Hyprland compositor copied"
+    # Copy raven-compositor and raven-shell (Rust) from build
+    local compositor_bin="${PROJECT_ROOT}/../RavenCompositor/target/release/raven-compositor"
+    local shell_bin="${PROJECT_ROOT}/../RavenCompositor/target/release/raven-shell"
+    if [[ -f "${compositor_bin}" ]]; then
+        cp "${compositor_bin}" "${SYSROOT_DIR}/bin/"
+        chmod +x "${SYSROOT_DIR}/bin/raven-compositor"
+        log_info "  Copied raven-compositor"
     else
-        log_warn "Hyprland not found on host - install with: sudo pacman -S hyprland"
+        log_warn "raven-compositor not found - build with: cd RavenCompositor && cargo build --release"
     fi
+    if [[ -f "${shell_bin}" ]]; then
+        cp "${shell_bin}" "${SYSROOT_DIR}/bin/"
+        chmod +x "${SYSROOT_DIR}/bin/raven-shell"
+        log_info "  Copied raven-shell (Rust)"
+    fi
+
+    # Copy wayland-protocols
+    if [[ -d /usr/share/wayland-protocols ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share/wayland-protocols"
+        cp -a /usr/share/wayland-protocols/. "${SYSROOT_DIR}/usr/share/wayland-protocols/" 2>/dev/null || true
+        log_info "  Copied wayland-protocols"
+    fi
+
+    # Copy XKB keyboard layouts
+    if [[ -d /usr/share/X11/xkb ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share/X11/xkb"
+        cp -a /usr/share/X11/xkb/. "${SYSROOT_DIR}/usr/share/X11/xkb/" 2>/dev/null || true
+        log_info "  Copied XKB layouts"
+    fi
+
+    log_success "RavenCompositor copied"
 
     # Copy seatd if available
     if command -v seatd &>/dev/null; then

@@ -17,7 +17,7 @@ Change orientation via Settings menu > Panel Position. Changes are applied insta
 The panel features a Raven-branded start button that opens the application menu (raven-menu).
 
 ### Running Application Tracking
-The dock automatically detects running graphical applications via Hyprland's IPC and displays them in the center dock area. Running applications are indicated by a teal underline.
+The dock automatically detects running graphical applications via raven-compositor's IPC socket and displays them in the center dock area. Running applications are indicated by a teal underline.
 
 ### Pinned Applications
 Applications can be pinned to the dock for quick access. Pinned apps remain visible even when not running and are indicated by a slightly brighter background.
@@ -26,8 +26,8 @@ Applications can be pinned to the dock for quick access. Pinned apps remain visi
 Right-click on any dock item to access:
 
 - **Pin to Dock / Unpin from Dock**: Toggle whether the application stays in the dock
-- **Minimize / Restore**: Minimize a running application to Hyprland's special workspace or restore it
-- **Close**: Close the window via Hyprland
+- **Minimize / Restore**: Minimize or restore a running application
+- **Close**: Close the window via compositor IPC
 
 ## Configuration
 
@@ -77,32 +77,28 @@ This file is shared with raven-settings-menu and other Raven components. The rel
 | "left" | Left |
 | "right" | Right |
 
-## Hyprland Integration
+## Compositor Integration
 
-The dock uses `hyprctl` to communicate with Hyprland for window management:
+The dock communicates with raven-compositor via a Unix domain socket for window management:
 
 ### Window Discovery
-Windows are discovered by polling `hyprctl clients -j` every 500ms. This returns JSON data about all open windows including:
-- Window address (unique identifier)
-- Process ID
-- Window class
+Windows are discovered by polling the compositor's `GetAllWindows` IPC command every 500ms. This returns JSON data about all open windows including:
+- App ID (application identifier)
 - Title
-- Workspace info
-- Minimized state (special workspace)
+- Workspace
 
 ### Window Operations
 
-| Action | Hyprland Command |
-|--------|------------------|
-| Focus window | `hyprctl dispatch focuswindow address:<addr>` |
-| Close window | `hyprctl dispatch closewindow address:<addr>` |
-| Minimize | `hyprctl dispatch movetoworkspacesilent special:minimized,address:<addr>` |
-| Restore | `hyprctl dispatch movetoworkspacesilent e+0,address:<addr>` |
-| Logout | `hyprctl dispatch exit` |
+| Action | Method |
+|--------|--------|
+| Focus window | Compositor IPC: `FocusWindow` |
+| Close window | Compositor IPC: `CloseWindow` |
+| Minimize | Compositor IPC: `MinimizeWindow` |
+| Logout | `raven-shell action quit` |
 
 ### Requirements
-- Hyprland compositor must be running
-- `hyprctl` must be in PATH
+- raven-compositor must be running
+- Compositor socket at `$XDG_RUNTIME_DIR/raven-compositor.sock`
 
 ## Supported Applications
 
@@ -177,8 +173,8 @@ Opens the full settings application (raven-settings, GNOME Control Center, or al
 
 The power button in the panel provides:
 
-- **Logout**: Exits Hyprland session (`hyprctl dispatch exit`)
-- **Lock Screen**: Attempts swaylock, hyprlock, or loginctl lock-session
+- **Logout**: Exits compositor session (`raven-shell action quit`)
+- **Lock Screen**: Attempts swaylock or loginctl lock-session
 - **Reboot**: System reboot via systemctl or raven-powerctl
 - **Shutdown**: System shutdown via systemctl or raven-powerctl
 

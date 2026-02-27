@@ -28,7 +28,7 @@ UEFI Boot Menu
 │  3. /bin/raven-wayland-session script executes                  │
 │     - Sets environment variables                                │
 │     - Starts seatd if needed                                    │
-│     - Launches compositor (raven-compositor or hyprland)        │
+│     - Launches raven-compositor                                │
 └─────────────────────────────────────────────────────────────────┘
     │
     ▼
@@ -41,8 +41,7 @@ UEFI Boot Menu
     ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  5. Session components start (terminal auto-launches)           │
-│     - raven-compositor: raven-desktop, raven-shell, raven-terminal │
-│     - hyprland: raven-terminal / foot                           │
+│     - raven-desktop, raven-shell, raven-terminal                │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -74,8 +73,7 @@ UEFI Boot Menu
 | Value | Compositor Started |
 |-------|-------------------|
 | `raven` or `raven-compositor` | Raven compositor (Rust/Smithay) - **default** |
-| `hyprland` or `Hyprland` | Hyprland dynamic tiling compositor |
-| (not set) | Auto-detects: prefers raven-compositor → hyprland |
+| (not set) | Defaults to raven-compositor |
 
 **Example GRUB entry:**
 ```
@@ -168,19 +166,6 @@ start_raven_compositor() {
 }
 ```
 
-#### Hyprland
-```sh
-start_hyprland() {
-    if command -v Hyprland >/dev/null 2>&1; then
-        start_compositor "Hyprland" Hyprland && return 0
-    fi
-    if command -v hyprland >/dev/null 2>&1; then
-        start_compositor "hyprland" hyprland && return 0
-    fi
-    return 1
-}
-```
-
 ---
 
 ## Session Components Auto-Launch
@@ -201,7 +186,7 @@ start_session_components() {
     fi
 
     case "$compositor" in
-        raven-compositor*|raven*)
+        *)
             # Start Raven shell components
             # Start desktop first (background layer)
             if command -v raven-desktop >/dev/null 2>&1; then
@@ -215,13 +200,6 @@ start_session_components() {
             if command -v raven-terminal >/dev/null 2>&1; then
                 sleep 0.5
                 raven-terminal &
-            fi
-            ;;
-        hyprland*|Hyprland*)
-            if command -v raven-terminal >/dev/null 2>&1; then
-                raven-terminal &
-            elif command -v foot >/dev/null 2>&1; then
-                foot &
             fi
             ;;
     esac
@@ -256,14 +234,14 @@ esac
 
 Edit `build/iso/iso-root/boot/grub/grub.cfg`:
 ```
-linux /boot/vmlinuz rdinit=/init raven.graphics=wayland raven.wayland=hyprland
+linux /boot/vmlinuz rdinit=/init raven.graphics=wayland raven.wayland=raven
 ```
 
 **Option 2: Environment variable**
 
 Set before session starts in `configs/raven-wayland-session`:
 ```sh
-export RAVEN_WAYLAND_COMPOSITOR="hyprland"
+export RAVEN_WAYLAND_COMPOSITOR="raven-compositor"
 ```
 
 ### Adding a New Compositor

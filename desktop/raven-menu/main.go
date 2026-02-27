@@ -323,8 +323,7 @@ func (m *RavenMenu) createUI() *gtk.Box {
 	logoutBtn.AddCSSClass("power-button")
 	logoutBtn.ConnectClicked(func() {
 		m.window.Close()
-		// Use hyprctl for Hyprland, fallback to other methods
-		exec.Command("sh", "-c", "hyprctl dispatch exit || pkill -TERM Hyprland || loginctl terminate-session self").Start()
+		exec.Command("sh", "-c", "raven-shell action quit || loginctl terminate-session self").Start()
 	})
 	powerBox.Append(logoutBtn)
 

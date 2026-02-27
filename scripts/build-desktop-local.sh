@@ -11,9 +11,6 @@ echo "=== Building Raven Desktop Environment ==="
 echo "Project root: $PROJECT_ROOT"
 echo ""
 
-# Note: Raven Desktop now uses Hyprland as the compositor
-# The raven-compositor is no longer built - install Hyprland from your package manager
-
 # Build GTK4 layer-shell components
 echo ">>> Building raven-shell (panel)..."
 cd "$PROJECT_ROOT/desktop/raven-shell"
@@ -51,12 +48,12 @@ cd "$PROJECT_ROOT"
 echo "raven-terminal built"
 echo ""
 
-echo "=== Installing Hyprland Configuration ==="
+echo "=== Installing Raven Configuration ==="
 echo ""
 
-# Install Hyprland config if it exists
+# Install config if it exists
 if [[ -f "$PROJECT_ROOT/desktop/config/install.sh" ]]; then
-    echo ">>> Installing Raven Hyprland configuration..."
+    echo ">>> Installing Raven desktop configuration..."
     chmod +x "$PROJECT_ROOT/desktop/config/install.sh"
     "$PROJECT_ROOT/desktop/config/install.sh"
     echo ""
@@ -72,12 +69,10 @@ echo "  - desktop/raven-settings-menu/raven-settings-menu"
 echo "  - tools/raven-terminal/raven-terminal"
 echo ""
 echo "Configuration installed to:"
-echo "  - ~/.config/hypr/hyprland.conf"
 echo "  - ~/.config/raven/settings.json"
 echo "  - ~/.config/raven/scripts/"
 echo ""
 echo "To use Raven Desktop:"
-echo "  1. Log out and select 'Hyprland' from your display manager"
-echo "  2. Or run: Hyprland"
-echo ""
-echo "Note: Raven Desktop now uses Hyprland as the compositor."
+echo "  1. Build raven-compositor: cd RavenCompositor && cargo build --release"
+echo "  2. Run: raven-compositor --backend winit  (nested)"
+echo "  3. Or use raven-wayland-session for full session"

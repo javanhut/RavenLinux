@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -123,30 +124,11 @@ const ravenIconSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 542.2
   </g>
 </svg>`
 
-// HyprlandClient represents a window from hyprctl clients -j
-type HyprlandClient struct {
-	Address   string `json:"address"`
-	Mapped    bool   `json:"mapped"`
-	Hidden    bool   `json:"hidden"`
-	At        []int  `json:"at"`
-	Size      []int  `json:"size"`
-	Workspace struct {
-		ID   int    `json:"id"`
-		Name string `json:"name"`
-	} `json:"workspace"`
-	Floating       bool   `json:"floating"`
-	Fullscreen     int    `json:"fullscreen"`
-	FullscreenMode int    `json:"fullscreenMode"`
-	FakeFullscreen bool   `json:"fakeFullscreen"`
-	Grouped        []any  `json:"grouped"`
-	Tags           []any  `json:"tags"`
-	Swallowing     string `json:"swallowing"`
-	FocusHistoryID int    `json:"focusHistoryID"`
-	PID            int    `json:"pid"`
-	Class          string `json:"class"`
-	Title          string `json:"title"`
-	InitialClass   string `json:"initialClass"`
-	InitialTitle   string `json:"initialTitle"`
+// CompositorWindow represents a window from raven-compositor IPC
+type CompositorWindow struct {
+	Title     string `json:"title"`
+	AppID     string `json:"app_id"`
+	Workspace uint32 `json:"workspace"`
 }
 
 // DockItem represents an application in the dock
@@ -159,7 +141,7 @@ type DockItem struct {
 	Running     bool   `json:"-"`
 	Minimized   bool   `json:"-"`
 	PID         int    `json:"-"`
-	Address     string `json:"-"` // Hyprland window address
+	AppID       string `json:"-"` // Compositor app_id
 	WorkspaceID int    `json:"-"` // Current workspace ID
 	button      *gtk.Button
 }
@@ -948,22 +930,10 @@ func (p *RavenPanel) togglePin(item *DockItem) {
 func (p *RavenPanel) toggleMinimize(item *DockItem) {
 	p.mu.Lock()
 	item.Minimized = !item.Minimized
-	address := item.Address
 	p.mu.Unlock()
 
-	if address == "" {
-		return
-	}
-
-	// Use Hyprland's special workspace for minimize functionality
-	if item.Minimized {
-		// Move window to special workspace (minimized)
-		exec.Command("hyprctl", "dispatch", "movetoworkspacesilent", fmt.Sprintf("special:minimized,address:%s", address)).Start()
-	} else {
-		// Bring window back from special workspace and focus it
-		exec.Command("hyprctl", "dispatch", "movetoworkspacesilent", fmt.Sprintf("e+0,address:%s", address)).Start()
-		exec.Command("hyprctl", "dispatch", "focuswindow", fmt.Sprintf("address:%s", address)).Start()
-	}
+	// Send minimize action to compositor (stub for now)
+	sendCompositorAction("MinimizeWindow")
 
 	glib.IdleAdd(func() {
 		p.renderDock()
@@ -972,32 +942,18 @@ func (p *RavenPanel) toggleMinimize(item *DockItem) {
 
 func (p *RavenPanel) focusApp(item *DockItem) {
 	p.mu.RLock()
-	address := item.Address
 	minimized := item.Minimized
 	p.mu.RUnlock()
 
-	if address == "" {
-		return
-	}
-
 	if minimized {
-		// Restore from special workspace first
+		// Restore from minimized first
 		p.toggleMinimize(item)
-	} else {
-		// Focus the window using Hyprland
-		exec.Command("hyprctl", "dispatch", "focuswindow", fmt.Sprintf("address:%s", address)).Start()
 	}
+	// Focus is handled by the compositor on restore; explicit focus not yet supported per-window
 }
 
 func (p *RavenPanel) closeApp(item *DockItem) {
-	p.mu.RLock()
-	address := item.Address
-	p.mu.RUnlock()
-
-	if address != "" {
-		// Close window using Hyprland
-		exec.Command("hyprctl", "dispatch", "closewindow", fmt.Sprintf("address:%s", address)).Start()
-	}
+	sendCompositorAction("CloseWindow")
 }
 
 func (p *RavenPanel) launchApp(cmd string) {
@@ -1051,24 +1007,77 @@ func (p *RavenPanel) RemoveRunningApp(id string) {
 	})
 }
 
-// getHyprlandClients fetches the current window list from Hyprland
-func getHyprlandClients() ([]HyprlandClient, error) {
-	output, err := exec.Command("hyprctl", "clients", "-j").Output()
+// getCompositorSocketPath returns the path to the raven-compositor socket
+func getCompositorSocketPath() string {
+	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+	if runtimeDir == "" {
+		runtimeDir = "/tmp"
+	}
+	return filepath.Join(runtimeDir, "raven-compositor.sock")
+}
+
+// getCompositorWindows fetches the current window list from raven-compositor via IPC
+func getCompositorWindows() ([]CompositorWindow, error) {
+	socketPath := getCompositorSocketPath()
+
+	conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	// Send GetAllWindows command
+	_, err = conn.Write([]byte("\"GetAllWindows\"\n"))
 	if err != nil {
 		return nil, err
 	}
 
-	var clients []HyprlandClient
-	if err := json.Unmarshal(output, &clients); err != nil {
+	// Shutdown write half
+	if uc, ok := conn.(*net.UnixConn); ok {
+		uc.CloseWrite()
+	}
+
+	// Read response
+	var buf [8192]byte
+	n, err := conn.Read(buf[:])
+	if err != nil && n == 0 {
 		return nil, err
 	}
 
-	return clients, nil
+	raw := strings.TrimSpace(string(buf[:n]))
+	if raw == "" {
+		return nil, nil
+	}
+
+	// Parse response: {"AllWindows":[...]}
+	var resp struct {
+		AllWindows []CompositorWindow `json:"AllWindows"`
+	}
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		return nil, err
+	}
+
+	return resp.AllWindows, nil
 }
 
-// monitorWindows monitors Hyprland windows and updates the dock
+// sendCompositorAction sends an action command to raven-compositor
+func sendCompositorAction(action string) {
+	socketPath := getCompositorSocketPath()
+	conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	msg := fmt.Sprintf("{\"Action\":\"%s\"}\n", action)
+	conn.Write([]byte(msg))
+}
+
+// monitorProcesses monitors compositor windows and updates the dock
 func (p *RavenPanel) monitorProcesses() {
-	// Known application class mappings (window class -> display info)
+	// Known application class mappings (app_id -> display info)
 	knownApps := map[string]struct {
 		name    string
 		command string
@@ -1098,103 +1107,79 @@ func (p *RavenPanel) monitorProcesses() {
 		"raven-shell":   true,
 		"raven-desktop": true,
 		"raven-panel":   true,
-		"":              true, // Exclude windows with no class
+		"":              true, // Exclude windows with no app_id
 	}
 
-	trackedAddresses := make(map[string]string) // Address -> dock item ID
+	trackedKeys := make(map[string]string) // "app_id:workspace" -> dock item ID
 
-	ticker := time.NewTicker(1500 * time.Millisecond) // Reduced polling for better performance under software rendering
+	ticker := time.NewTicker(1500 * time.Millisecond)
 	for range ticker.C {
-		clients, err := getHyprlandClients()
+		windows, err := getCompositorWindows()
 		if err != nil {
-			// Hyprland not running or hyprctl failed
+			// Compositor not running or IPC failed
 			continue
 		}
 
-		currentAddresses := make(map[string]bool)
+		currentKeys := make(map[string]bool)
 
-		for _, client := range clients {
+		for _, win := range windows {
 			// Skip excluded classes
-			if excludeClasses[client.Class] || excludeClasses[client.InitialClass] {
+			if excludeClasses[win.AppID] {
 				continue
 			}
 
-			// Skip unmapped/hidden windows (but not special workspace windows)
-			if !client.Mapped {
-				continue
-			}
-
-			currentAddresses[client.Address] = true
+			trackKey := fmt.Sprintf("%s:%d", win.AppID, win.Workspace)
+			currentKeys[trackKey] = true
 
 			// Check if already tracked
-			if existingID, tracked := trackedAddresses[client.Address]; tracked {
-				// Update minimized state based on workspace
-				p.mu.Lock()
-				if item, ok := p.dockItems[existingID]; ok {
-					// Check if in special workspace (minimized)
-					item.Minimized = strings.HasPrefix(client.Workspace.Name, "special:")
-					item.WorkspaceID = client.Workspace.ID
-				}
-				p.mu.Unlock()
+			if _, tracked := trackedKeys[trackKey]; tracked {
 				continue
 			}
 
 			// Determine display name and command
-			class := client.Class
-			if class == "" {
-				class = client.InitialClass
-			}
-
 			var displayName, command, icon string
-			if appInfo, ok := knownApps[class]; ok {
+			if appInfo, ok := knownApps[win.AppID]; ok {
 				displayName = appInfo.name
 				command = appInfo.command
 				icon = appInfo.icon
 			} else {
-				// Use window title or class as display name
-				displayName = client.Title
+				displayName = win.Title
 				if displayName == "" {
-					displayName = class
+					displayName = win.AppID
 				}
-				// Truncate long titles
 				if len(displayName) > 20 {
 					displayName = displayName[:17] + "..."
 				}
-				command = class
+				command = win.AppID
 				icon = "application-x-executable"
 			}
 
-			// Create unique ID using address
-			itemID := fmt.Sprintf("hypr-%s", client.Address)
-			trackedAddresses[client.Address] = itemID
+			// Create unique ID
+			itemID := fmt.Sprintf("raven-%s-%d", win.AppID, win.Workspace)
+			trackedKeys[trackKey] = itemID
 
-			// Check if minimized (in special workspace)
-			minimized := strings.HasPrefix(client.Workspace.Name, "special:")
-
-			p.addHyprlandWindow(itemID, displayName, command, icon, client.PID, client.Address, client.Workspace.ID, minimized)
+			p.addCompositorWindow(itemID, displayName, command, icon, win.AppID, int(win.Workspace))
 		}
 
 		// Remove windows that are no longer present
-		for addr, itemID := range trackedAddresses {
-			if !currentAddresses[addr] {
+		for key, itemID := range trackedKeys {
+			if !currentKeys[key] {
 				p.RemoveRunningApp(itemID)
-				delete(trackedAddresses, addr)
+				delete(trackedKeys, key)
 			}
 		}
 	}
 }
 
-// addHyprlandWindow adds a Hyprland window to the dock
-func (p *RavenPanel) addHyprlandWindow(id, name, command, icon string, pid int, address string, workspaceID int, minimized bool) {
+// addCompositorWindow adds a compositor window to the dock
+func (p *RavenPanel) addCompositorWindow(id, name, command, icon, appID string, workspaceID int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if existing, ok := p.dockItems[id]; ok {
 		existing.Running = true
-		existing.PID = pid
-		existing.Address = address
+		existing.AppID = appID
 		existing.WorkspaceID = workspaceID
-		existing.Minimized = minimized
 	} else {
 		p.dockItems[id] = &DockItem{
 			ID:          id,
@@ -1202,10 +1187,8 @@ func (p *RavenPanel) addHyprlandWindow(id, name, command, icon string, pid int, 
 			Command:     command,
 			Icon:        icon,
 			Running:     true,
-			PID:         pid,
-			Address:     address,
+			AppID:       appID,
 			WorkspaceID: workspaceID,
-			Minimized:   minimized,
 		}
 	}
 
@@ -1257,12 +1240,12 @@ func (p *RavenPanel) showPowerMenu() {
 	menuBox.SetMarginStart(8)
 	menuBox.SetMarginEnd(8)
 
-	// Logout button - exits Hyprland
+	// Logout button - exits compositor
 	logoutBtn := gtk.NewButton()
 	logoutBtn.SetLabel("Logout")
 	logoutBtn.ConnectClicked(func() {
 		p.closePowerMenu()
-		exec.Command("hyprctl", "dispatch", "exit").Start()
+		exec.Command("raven-shell", "action", "quit").Start()
 	})
 	menuBox.Append(logoutBtn)
 
@@ -1271,7 +1254,7 @@ func (p *RavenPanel) showPowerMenu() {
 	lockBtn.SetLabel("Lock Screen")
 	lockBtn.ConnectClicked(func() {
 		p.closePowerMenu()
-		exec.Command("sh", "-c", "swaylock || hyprlock || loginctl lock-session").Start()
+		exec.Command("sh", "-c", "swaylock || loginctl lock-session").Start()
 	})
 	menuBox.Append(lockBtn)
 

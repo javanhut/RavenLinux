@@ -213,10 +213,6 @@ Type=Application
 Categories=System;FileManager;
 ```
 
-### Hyprland Keybinding
+### Compositor Keybinding
 
-Add to `~/.config/hypr/hyprland.conf`:
-
-```conf
-bind = SUPER, E, exec, raven-file-manager
-```
+The default raven-compositor keybinding for the file manager is `Super + Shift + E`. This can be customized in `~/.config/raven/settings.json` under keybindings.

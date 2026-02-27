@@ -3,7 +3,7 @@
 # so that elogind can grant the logged-in user access to them.
 #
 # Without these rules, input devices are only accessible to users
-# in the "input" group, which breaks Wayland compositors like Hyprland.
+# in the "input" group, which breaks Wayland compositors like raven-compositor.
 
 ACTION=="remove", GOTO="raven_input_end"
 
