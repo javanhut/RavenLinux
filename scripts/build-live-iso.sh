@@ -35,8 +35,9 @@ SKIP_KERNEL=false
 SKIP_PACKAGES=false
 MINIMAL=false
 
-# Source shared logging library
+# Source shared libraries
 source "${SCRIPT_DIR}/lib/logging.sh"
+source "${SCRIPT_DIR}/lib/repos.sh"
 
 # =============================================================================
 # Argument Parsing
@@ -590,20 +591,17 @@ copy_wayland_tools() {
         fi
     done
 
-    # RavenCompositor (primary compositor)
-    local compositor_bin="${PROJECT_ROOT}/../RavenCompositor/target/release/raven-compositor"
-    local shell_bin="${PROJECT_ROOT}/../RavenCompositor/target/release/raven-shell"
-    if [[ -f "${compositor_bin}" ]]; then
-        cp "${compositor_bin}" "${LIVE_ROOT}/bin/"
-        log_info "  Added raven-compositor"
-    else
-        log_warn "raven-compositor binary not found at ${compositor_bin}"
-        log_warn "Build with: cd RavenCompositor && cargo build --release"
-    fi
-    if [[ -f "${shell_bin}" ]]; then
-        cp "${shell_bin}" "${LIVE_ROOT}/bin/"
-        log_info "  Added raven-shell (Rust)"
-    fi
+    # RavenCompositor (primary compositor) - fetched from GitHub via repos.sh
+    local compositor_release
+    compositor_release="$(get_repo_dir compositor)/target/release"
+    for bin in raven-compositor raven-shell raven-settings; do
+        if [[ -f "${compositor_release}/${bin}" ]]; then
+            cp "${compositor_release}/${bin}" "${LIVE_ROOT}/bin/"
+            log_info "  Added ${bin}"
+        else
+            log_warn "${bin} not found - run: ./scripts/build-packages.sh compositor"
+        fi
+    done
 
     # Copy Raven scripts and default settings
     mkdir -p "${LIVE_ROOT}/root/.config/raven/scripts"
@@ -840,173 +838,14 @@ UDEV_DRM_EOF
 # Build and install Raven desktop components
 # =============================================================================
 build_raven_desktop() {
-    log_step "Building Raven desktop components..."
+    log_step "Installing Raven desktop configuration..."
 
-    if ! command -v go &>/dev/null; then
-        log_warn "Go not found, skipping desktop component build"
-        return 0
-    fi
+    # Desktop Go apps have been removed; compositor builds raven-shell and
+    # raven-settings as Rust binaries. They are copied in copy_wayland_tools().
 
-    local desktop_dir="${PROJECT_ROOT}/desktop"
-
-    # Build raven-shell (panel/taskbar)
-    if [[ -d "${desktop_dir}/raven-shell" ]]; then
-        log_info "  Building raven-shell..."
-        cd "${desktop_dir}/raven-shell"
-        if CGO_ENABLED=1 go build -o raven-shell . 2>&1; then
-            cp raven-shell "${LIVE_ROOT}/bin/"
-            chmod +x "${LIVE_ROOT}/bin/raven-shell"
-            log_info "  Installed raven-shell"
-        else
-            log_warn "  Failed to build raven-shell"
-        fi
-        cd "${PROJECT_ROOT}"
-    fi
-
-    # Build raven-desktop (background/icons)
-    if [[ -d "${desktop_dir}/raven-desktop" ]]; then
-        log_info "  Building raven-desktop..."
-        cd "${desktop_dir}/raven-desktop"
-        if CGO_ENABLED=1 go build -o raven-desktop . 2>&1; then
-            cp raven-desktop "${LIVE_ROOT}/bin/"
-            chmod +x "${LIVE_ROOT}/bin/raven-desktop"
-            log_info "  Installed raven-desktop"
-        else
-            log_warn "  Failed to build raven-desktop"
-        fi
-        cd "${PROJECT_ROOT}"
-    fi
-
-    # Build raven-menu (application launcher)
-    if [[ -d "${desktop_dir}/raven-menu" ]]; then
-        log_info "  Building raven-menu..."
-        cd "${desktop_dir}/raven-menu"
-        if CGO_ENABLED=1 go build -o raven-menu . 2>&1; then
-            cp raven-menu "${LIVE_ROOT}/bin/"
-            chmod +x "${LIVE_ROOT}/bin/raven-menu"
-            log_info "  Installed raven-menu"
-        else
-            log_warn "  Failed to build raven-menu"
-        fi
-        cd "${PROJECT_ROOT}"
-    fi
-
-    # Build raven-settings-menu (settings application)
-    if [[ -d "${desktop_dir}/raven-settings-menu" ]]; then
-        log_info "  Building raven-settings-menu..."
-        cd "${desktop_dir}/raven-settings-menu"
-        if CGO_ENABLED=1 go build -o raven-settings-menu . 2>&1; then
-            cp raven-settings-menu "${LIVE_ROOT}/bin/"
-            chmod +x "${LIVE_ROOT}/bin/raven-settings-menu"
-            log_info "  Installed raven-settings-menu"
-        else
-            log_warn "  Failed to build raven-settings-menu"
-        fi
-        cd "${PROJECT_ROOT}"
-    fi
-
-    # Copy GTK4 layer-shell library (required for panels/docks on Wayland)
-    log_info "  Copying GTK4 layer-shell library..."
-    for lib in /usr/lib/libgtk4-layer-shell* /usr/lib64/libgtk4-layer-shell*; do
-        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
-            mkdir -p "${LIVE_ROOT}/usr/lib"
-            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
-        fi
-    done
-
-    # Copy GTK4 libraries and dependencies
-    log_info "  Copying GTK4 libraries..."
-    for lib in /usr/lib/libgtk-4* /usr/lib64/libgtk-4*; do
-        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
-            mkdir -p "${LIVE_ROOT}/usr/lib"
-            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
-        fi
-    done
-
-    # Copy GDK-Pixbuf loaders for image rendering
-    if [[ -d /usr/lib/gdk-pixbuf-2.0 ]]; then
-        mkdir -p "${LIVE_ROOT}/usr/lib"
-        cp -r /usr/lib/gdk-pixbuf-2.0 "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
-    fi
-
-    # Copy GTK4 modules and settings
-    if [[ -d /usr/lib/gtk-4.0 ]]; then
-        mkdir -p "${LIVE_ROOT}/usr/lib"
-        cp -r /usr/lib/gtk-4.0 "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
-    fi
-
-    # Copy Pango modules (for text rendering)
-    for lib in /usr/lib/libpango* /usr/lib64/libpango*; do
-        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
-            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
-        fi
-    done
-
-    # Copy Cairo libraries (for drawing)
-    for lib in /usr/lib/libcairo* /usr/lib64/libcairo*; do
-        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
-            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
-        fi
-    done
-
-    # Copy GLib/GObject/GIO libraries
-    for lib in /usr/lib/libglib-2.0* /usr/lib/libgobject-2.0* /usr/lib/libgio-2.0* /usr/lib/libgmodule-2.0*; do
-        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
-            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
-        fi
-    done
-
-    # Copy Graphene library (used by GTK4)
-    for lib in /usr/lib/libgraphene* /usr/lib64/libgraphene*; do
-        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
-            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
-        fi
-    done
-
-    # Copy GIO modules for various functionality
-    if [[ -d /usr/lib/gio ]]; then
-        mkdir -p "${LIVE_ROOT}/usr/lib"
-        cp -r /usr/lib/gio "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
-    fi
-
-    # Copy Epoxy library (OpenGL dispatch for GTK4)
-    for lib in /usr/lib/libepoxy* /usr/lib64/libepoxy*; do
-        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
-            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
-        fi
-    done
-
-    # Copy HarfBuzz libraries (text shaping)
-    for lib in /usr/lib/libharfbuzz* /usr/lib64/libharfbuzz*; do
-        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
-            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
-        fi
-    done
-
-    # Copy Fribidi library (bidirectional text)
-    for lib in /usr/lib/libfribidi* /usr/lib64/libfribidi*; do
-        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
-            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
-        fi
-    done
-
-    # Copy Fontconfig libraries
-    for lib in /usr/lib/libfontconfig* /usr/lib64/libfontconfig*; do
-        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
-            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
-        fi
-    done
-
-    # Copy Pixman library (pixel manipulation)
-    for lib in /usr/lib/libpixman* /usr/lib64/libpixman*; do
-        if [[ -f "$lib" ]] || [[ -L "$lib" ]]; then
-            cp -L "$lib" "${LIVE_ROOT}/usr/lib/" 2>/dev/null || true
-        fi
-    done
-
-    # Copy all dependencies for built Raven binaries
-    log_info "  Resolving Raven binary dependencies..."
-    for bin in raven-shell raven-desktop raven-menu raven-settings-menu; do
+    # Resolve compositor binary dependencies
+    log_info "  Resolving compositor binary dependencies..."
+    for bin in raven-compositor raven-shell raven-settings; do
         if [[ -f "${LIVE_ROOT}/bin/${bin}" ]]; then
             timeout 2 ldd "${LIVE_ROOT}/bin/${bin}" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
                 [[ -z "$lib" || ! -f "$lib" ]] && continue
@@ -1046,7 +885,7 @@ SETTINGS_EOF
         log_info "  Created default Raven settings"
     fi
 
-    log_success "Raven desktop components built and installed"
+    log_success "Raven desktop configuration installed"
 }
 
 # =============================================================================

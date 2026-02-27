@@ -1,20 +1,18 @@
 #!/bin/bash
-# test-nested.sh - Test Raven desktop components
+# test-nested.sh - Test Raven compositor in nested mode
 # Usage: ./test-nested.sh [--nested]
-#   Default: Run components on current Wayland session
-#   --nested: Launch nested raven-compositor (winit backend)
+#   Default: Run compositor on current Wayland session (nested winit)
+#   --nested: Same as default (kept for compatibility)
+#
+# Desktop Go apps have been removed. This script now only tests the compositor.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NESTED_MODE=false
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-# Parse args
-for arg in "$@"; do
-    case $arg in
-        --nested) NESTED_MODE=true ;;
-    esac
-done
+# Source repos library
+source "${PROJECT_ROOT}/scripts/lib/repos.sh"
 
 # Colors for output
 RED='\033[0;31m'
@@ -27,6 +25,8 @@ log() { echo -e "${GREEN}[TEST]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+
+COMPOSITOR_DIR="$(get_repo_dir compositor)"
 
 # Check Wayland environment
 check_wayland_env() {
@@ -51,117 +51,29 @@ check_wayland_env() {
 check_deps() {
     log "Checking dependencies..."
 
-    local missing=()
-    command -v go >/dev/null 2>&1 || missing+=("go")
-
-    if $NESTED_MODE; then
-        command -v raven-compositor >/dev/null 2>&1 || missing+=("raven-compositor")
-    fi
-
-    if [ ${#missing[@]} -ne 0 ]; then
-        error "Missing dependencies: ${missing[*]}"
+    local compositor_bin="${COMPOSITOR_DIR}/target/release/raven-compositor"
+    if [[ ! -f "$compositor_bin" ]]; then
+        error "raven-compositor not found at ${compositor_bin}. Build with: ./scripts/build-packages.sh compositor"
     fi
 
     log "All dependencies found"
 }
 
-# Cleanup function
-cleanup() {
-    log "Cleaning up..."
-    pkill -f "go-build.*raven-" 2>/dev/null || true
-}
+echo ""
+echo "=========================================="
+echo "  Raven Compositor - Nested Test"
+echo "=========================================="
+echo ""
 
-# Array to track background PIDs
-PIDS=()
+check_wayland_env
+check_deps
 
-# Run component in background
-run_component() {
-    local name="$1"
-    local dir="$2"
+log "Starting nested raven-compositor (winit backend)..."
+echo ""
+echo "The compositor will open in a window."
+echo "Use Super+Alt+Q to exit the nested session."
+echo ""
 
-    if [ -d "$SCRIPT_DIR/$dir" ]; then
-        log "Starting $name..."
-        (cd "$SCRIPT_DIR/$dir" && go run . 2>&1 | sed "s/^/[$name] /") &
-        PIDS+=($!)
-        sleep 1
-    else
-        warn "Directory not found: $dir"
-    fi
-}
+"${COMPOSITOR_DIR}/target/release/raven-compositor" --backend winit
 
-# Direct test mode - run on current session
-run_direct_test() {
-    echo ""
-    echo "=========================================="
-    echo "  Raven Desktop - Direct Test Mode"
-    echo "=========================================="
-    echo ""
-    echo "Components will run on your CURRENT Wayland session."
-    echo "Press Ctrl+C to stop all components."
-    echo ""
-
-    check_wayland_env
-    check_deps
-
-    mkdir -p ~/.config/raven
-
-    log "Starting Raven components on current session..."
-    echo ""
-
-    run_component "raven-desktop" "raven-desktop"
-    run_component "raven-shell" "raven-shell"
-
-    echo ""
-    info "Core components started (desktop + shell)"
-    echo ""
-    echo "To test other components, open a new terminal and run:"
-    echo "  cd $SCRIPT_DIR/raven-menu && go run ."
-    echo "  cd $SCRIPT_DIR/raven-file-manager && go run ."
-    echo "  cd $SCRIPT_DIR/raven-settings-menu && go run ."
-    echo "  cd $SCRIPT_DIR/raven-power && go run ."
-    echo "  cd $SCRIPT_DIR/raven-keybindings && go run ."
-    echo ""
-    info "Press Enter to stop all components..."
-
-    read -r
-
-    log "Stopping components..."
-    for pid in "${PIDS[@]}"; do
-        kill "$pid" 2>/dev/null || true
-    done
-}
-
-# Nested test mode - launch raven-compositor with winit backend
-run_nested_test() {
-    echo ""
-    echo "=========================================="
-    echo "  Raven Desktop - Nested Test Environment"
-    echo "=========================================="
-    echo ""
-
-    check_wayland_env
-    check_deps
-
-    log "Starting nested raven-compositor (winit backend)..."
-    echo ""
-    echo "The compositor will open in a window."
-    echo "Use Super+Alt+Q to exit the nested session."
-    echo ""
-
-    raven-compositor --backend winit
-
-    log "Nested session ended"
-}
-
-trap cleanup EXIT
-
-# Main
-main() {
-    if $NESTED_MODE; then
-        run_nested_test
-    else
-        run_direct_test
-    fi
-}
-
-main "$@"
+log "Nested session ended"

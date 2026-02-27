@@ -2,7 +2,8 @@
 # =============================================================================
 # RavenLinux Compositor Build Script
 # =============================================================================
-# Builds the raven-compositor Wayland compositor
+# Builds the raven-compositor Wayland compositor from GitHub
+# Produces: raven-compositor, raven-shell, raven-settings
 
 set -euo pipefail
 
@@ -12,17 +13,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${RAVEN_ROOT:-$(dirname "$SCRIPT_DIR")}"
-COMPOSITOR_DIR="${PROJECT_ROOT}/desktop/compositor"
 OUTPUT_DIR="${RAVEN_BUILD:-${PROJECT_ROOT}/build}/packages/bin"
 
 # =============================================================================
-# Logging (use shared library or define fallbacks)
+# Source libraries
 # =============================================================================
 
 if [[ -f "${SCRIPT_DIR}/lib/logging.sh" ]]; then
     source "${SCRIPT_DIR}/lib/logging.sh"
 else
-    # Fallback logging functions
     RED='\033[0;31m'
     GREEN='\033[0;32m'
     BLUE='\033[0;34m'
@@ -31,6 +30,8 @@ else
     log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
     log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 fi
+
+source "${SCRIPT_DIR}/lib/repos.sh"
 
 echo ""
 echo "=========================================="
@@ -46,85 +47,29 @@ fi
 # Check for required system libraries
 log_info "Checking system dependencies..."
 
-required_libs=(libwayland-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libseat-dev libxkbcommon-dev)
-# On Arch, these are different package names - just warn
 log_info "Required: wayland libinput udev libgbm libdrm seatd libxkbcommon"
+
+# Fetch and build compositor from GitHub
+fetch_repo compositor
+COMPOSITOR_DIR="$(get_repo_dir compositor)"
 
 cd "$COMPOSITOR_DIR"
 
 log_info "Building compositor..."
-if CARGO_TARGET_DIR=target-user cargo build --release 2>&1; then
+if cargo build --release 2>&1; then
     mkdir -p "$OUTPUT_DIR"
-    cp target-user/release/raven-compositor "$OUTPUT_DIR/"
-    log_success "Compositor built -> ${OUTPUT_DIR}/raven-compositor"
+    for bin in raven-compositor raven-shell raven-settings; do
+        if [[ -f "target/release/${bin}" ]]; then
+            cp "target/release/${bin}" "$OUTPUT_DIR/"
+            log_success "${bin} built -> ${OUTPUT_DIR}/${bin}"
+        fi
+    done
 else
     log_error "Build failed"
-fi
-
-# Build raven-shell (GTK4 panel/taskbar)
-SHELL_DIR="${PROJECT_ROOT}/desktop/raven-shell"
-if [[ -d "$SHELL_DIR" ]]; then
-    echo ""
-    echo "=========================================="
-    echo "  Building Raven Shell"
-    echo "=========================================="
-    echo ""
-
-    cd "$SHELL_DIR"
-    log_info "Building raven-shell (GTK4 panel)..."
-
-    if CGO_ENABLED=1 go build -o raven-shell . 2>&1; then
-        cp raven-shell "$OUTPUT_DIR/"
-        log_success "Shell built -> ${OUTPUT_DIR}/raven-shell"
-    else
-        log_info "Shell build failed (may need gtk4-layer-shell installed)"
-    fi
-fi
-
-# Build raven-menu (GTK4 start menu)
-MENU_DIR="${PROJECT_ROOT}/desktop/raven-menu"
-if [[ -d "$MENU_DIR" ]]; then
-    echo ""
-    echo "=========================================="
-    echo "  Building Raven Menu"
-    echo "=========================================="
-    echo ""
-
-    cd "$MENU_DIR"
-    log_info "Building raven-menu (GTK4 start menu)..."
-
-    if CGO_ENABLED=1 go build -o raven-menu . 2>&1; then
-        cp raven-menu "$OUTPUT_DIR/"
-        log_success "Menu built -> ${OUTPUT_DIR}/raven-menu"
-    else
-        log_info "Menu build failed (may need gtk4-layer-shell installed)"
-    fi
-fi
-
-# Build raven-desktop (GTK4 desktop with icons)
-DESKTOP_DIR="${PROJECT_ROOT}/desktop/raven-desktop"
-if [[ -d "$DESKTOP_DIR" ]]; then
-    echo ""
-    echo "=========================================="
-    echo "  Building Raven Desktop"
-    echo "=========================================="
-    echo ""
-
-    cd "$DESKTOP_DIR"
-    log_info "Building raven-desktop (GTK4 desktop)..."
-
-    if CGO_ENABLED=1 go build -o raven-desktop . 2>&1; then
-        cp raven-desktop "$OUTPUT_DIR/"
-        log_success "Desktop built -> ${OUTPUT_DIR}/raven-desktop"
-    else
-        log_info "Desktop build failed (may need gtk4-layer-shell installed)"
-    fi
 fi
 
 echo ""
 echo "To run the compositor:"
 echo "  Native:  switch to TTY and run: raven-compositor"
 echo "  Nested:  raven-compositor --nested"
-echo ""
-echo "The raven-shell panel will auto-start with the compositor."
 echo ""

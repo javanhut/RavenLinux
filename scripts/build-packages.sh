@@ -2,20 +2,30 @@
 # =============================================================================
 # RavenLinux Custom Packages Build Script
 # =============================================================================
-# Builds custom Go packages from GitHub for RavenLinux
+# Builds custom packages from GitHub for RavenLinux
 #
 # Usage: ./scripts/build-packages.sh [OPTIONS] [package-name|all]
 #
-# Packages:
-#   vem        Build Vem text editor
-#   carrion    Build Carrion programming language
-#   ivaldi     Build Ivaldi VCS
-#   installer  Build Raven Installer
-#   rvn        Build rvn package manager
-#   dhcp       Build raven-dhcp DHCP client
-#   usb        Build USB creator tool
-#   bootloader Build RavenBoot bootloader
-#   all        Build all packages (default)
+# Packages (from GitHub repos):
+#   compositor    Build RavenCompositor (Rust)
+#   file-manager  Build RavenFileManager (Rust)
+#   terminal      Build RavenTerminal (Go, CGO=1)
+#   shell         Build RavenShell utils (Go, CGO=0)
+#   poxy          Build Poxy (Go, CGO=0)
+#   vem           Build Vem text editor (Go, CGO=1)
+#   carrion       Build Carrion language (Go, CGO=0)
+#   ivaldi        Build Ivaldi VCS (Go, CGO=0)
+#
+# Local tools (embedded in tools/):
+#   installer     Build Raven Installer
+#   rvn           Build rvn package manager
+#   dhcp          Build raven-dhcp DHCP client
+#   usb           Build USB creator tool
+#   bootloader    Build RavenBoot bootloader
+#   wifi          Build WiFi tools
+#   launcher      Build raven-launcher
+#
+#   all           Build all packages (default)
 #
 # Options:
 #   --no-log   Disable file logging
@@ -37,8 +47,9 @@ OUTPUT_DIR="${RAVEN_BUILD}/packages"
 export GOCACHE="${GOCACHE:-${RAVEN_BUILD}/.gocache}"
 mkdir -p "${GOCACHE}" 2>/dev/null || true
 
-# Source shared logging library
+# Source shared libraries
 source "${SCRIPT_DIR}/lib/logging.sh"
+source "${SCRIPT_DIR}/lib/repos.sh"
 
 # =============================================================================
 # Functions
@@ -64,6 +75,70 @@ check_dependencies() {
     log_success "All dependencies found (Go $(go version | awk '{print $3}'))"
 }
 
+# =============================================================================
+# GitHub repo builds (via repos.sh)
+# =============================================================================
+
+build_compositor() {
+    log_section "Building RavenCompositor"
+    if ! command -v cargo &>/dev/null; then
+        log_warn "Rust/Cargo not found, skipping compositor build"
+        return 0
+    fi
+    fetch_repo compositor
+    build_cargo_repo compositor
+}
+
+build_file_manager() {
+    log_section "Building RavenFileManager"
+    if ! command -v cargo &>/dev/null; then
+        log_warn "Rust/Cargo not found, skipping file-manager build"
+        return 0
+    fi
+    fetch_repo file-manager
+    build_cargo_repo file-manager
+}
+
+build_terminal() {
+    log_section "Building RavenTerminal"
+    fetch_repo terminal
+    build_go_repo terminal
+}
+
+build_shell() {
+    log_section "Building RavenShell"
+    fetch_repo shell
+    build_go_repo shell
+}
+
+build_poxy() {
+    log_section "Building Poxy"
+    fetch_repo poxy
+    build_go_repo poxy
+}
+
+build_vem() {
+    log_section "Building Vem Text Editor"
+    fetch_repo vem
+    build_go_repo vem
+}
+
+build_carrion() {
+    log_section "Building Carrion Language"
+    fetch_repo carrion
+    build_go_repo carrion
+}
+
+build_ivaldi() {
+    log_section "Building Ivaldi VCS"
+    fetch_repo ivaldi
+    build_go_repo ivaldi
+}
+
+# =============================================================================
+# Local tool builds (embedded in tools/ or bootloader/)
+# =============================================================================
+
 build_raven_dhcp() {
     log_section "Building raven-dhcp DHCP Client"
 
@@ -87,103 +162,6 @@ build_raven_dhcp() {
     fi
 }
 
-# Build a Go package from GitHub
-build_go_package() {
-    local name="$1"
-    local repo="$2"
-    local binary="$3"
-    local cgo="${4:-0}"
-
-    log_info "Building ${name}..."
-
-    local src_dir="${SOURCES_DIR}/${name}"
-
-    # Clone or update repository
-    if [ -d "$src_dir" ]; then
-        log_info "Updating ${name} from GitHub..."
-        cd "$src_dir"
-        run_logged git fetch origin main
-        run_logged git reset --hard origin/main
-    else
-        log_info "Cloning ${name} from GitHub..."
-        run_logged git clone --depth 1 "https://github.com/${repo}.git" "$src_dir"
-        cd "$src_dir"
-    fi
-
-    # Download Go dependencies
-    log_info "Downloading dependencies for ${name}..."
-    run_logged go mod download
-
-    # Build
-    log_info "Compiling ${name}..."
-    if ! run_logged env CGO_ENABLED="$cgo" go build -o "${binary}" .; then
-        log_error "Failed to build ${name}"
-        return 1
-    fi
-
-    # Copy to output
-    mkdir -p "${OUTPUT_DIR}/bin"
-    cp "${binary}" "${OUTPUT_DIR}/bin/"
-
-    log_success "${name} built successfully -> ${OUTPUT_DIR}/bin/${binary}"
-}
-
-# Build Vem text editor
-build_vem() {
-    log_section "Building Vem Text Editor"
-
-    # Vem requires CGO for Gio UI/Wayland support
-    build_go_package "vem" "javanhut/Vem" "vem" "1"
-}
-
-# Build Carrion programming language
-build_carrion() {
-    log_section "Building Carrion Language"
-
-    local name="carrion"
-    local repo="javanhut/TheCarrionLanguage"
-    local src_dir="${SOURCES_DIR}/${name}"
-
-    log_info "Building ${name}..."
-
-    # Clone or update repository
-    if [ -d "$src_dir" ]; then
-        log_info "Updating ${name} from GitHub..."
-        cd "$src_dir"
-        run_logged git fetch origin main
-        run_logged git reset --hard origin/main
-    else
-        log_info "Cloning ${name} from GitHub..."
-        run_logged git clone --depth 1 "https://github.com/${repo}.git" "$src_dir"
-        cd "$src_dir"
-    fi
-
-    # Download Go dependencies
-    log_info "Downloading dependencies for ${name}..."
-    run_logged go mod download
-
-    # Build - Carrion has main.go in src/ directory
-    log_info "Compiling ${name}..."
-    if ! run_logged env CGO_ENABLED=0 go build -o carrion ./src/main.go; then
-        log_error "Failed to build ${name}"
-        return 1
-    fi
-
-    # Copy to output
-    mkdir -p "${OUTPUT_DIR}/bin"
-    cp carrion "${OUTPUT_DIR}/bin/"
-
-    log_success "${name} built successfully -> ${OUTPUT_DIR}/bin/carrion"
-}
-
-# Build Ivaldi VCS
-build_ivaldi() {
-    log_section "Building Ivaldi VCS"
-
-    build_go_package "ivaldi" "javanhut/IvaldiVCS" "ivaldi" "0"
-}
-
-# Build Raven Installer
 build_installer() {
     log_section "Building Raven Installer"
 
@@ -209,7 +187,6 @@ build_installer() {
     fi
 }
 
-# Build rvn package manager
 build_rvn() {
     log_section "Building rvn Package Manager"
 
@@ -218,7 +195,6 @@ build_rvn() {
     if [ -d "$rvn_dir" ]; then
         cd "$rvn_dir"
 
-        # Check for cargo
         if ! command -v cargo &>/dev/null; then
             log_warn "Rust/Cargo not found, skipping rvn build"
             cd "${PROJECT_ROOT}"
@@ -240,7 +216,6 @@ build_rvn() {
     fi
 }
 
-# Build USB creator tool
 build_usb_creator() {
     log_section "Building Raven USB Creator"
 
@@ -252,7 +227,6 @@ build_usb_creator() {
         run_logged go mod download 2>/dev/null || run_logged go mod tidy
 
         log_info "Compiling USB creator..."
-        # Requires CGO for Gio UI graphics
         if run_logged env CGO_ENABLED=1 go build -o raven-usb .; then
             mkdir -p "${OUTPUT_DIR}/bin"
             cp raven-usb "${OUTPUT_DIR}/bin/"
@@ -267,7 +241,6 @@ build_usb_creator() {
     fi
 }
 
-# Build RavenBoot bootloader
 build_bootloader() {
     log_section "Building RavenBoot Bootloader"
 
@@ -276,14 +249,12 @@ build_bootloader() {
     if [ -d "$bootloader_dir" ]; then
         cd "$bootloader_dir"
 
-        # Check for cargo
         if ! command -v cargo &>/dev/null; then
             log_warn "Rust/Cargo not found, skipping bootloader build"
             cd "${PROJECT_ROOT}"
             return
         fi
 
-        # Check for UEFI target
         if ! rustup target list --installed 2>/dev/null | grep -q "x86_64-unknown-uefi"; then
             log_info "Adding UEFI target..."
             if ! run_logged rustup target add x86_64-unknown-uefi; then
@@ -308,7 +279,6 @@ build_bootloader() {
     fi
 }
 
-# Build WiFi tools
 build_wifi_tools() {
     log_section "Building WiFi Tools"
 
@@ -340,11 +310,9 @@ build_wifi_tools() {
         run_logged go mod download 2>/dev/null || run_logged go mod tidy
 
         log_info "Compiling raven-wifi GUI with Wayland support..."
-        # CGO flags to ensure Wayland backend is linked
         local cgo_cflags=""
         local cgo_ldflags=""
 
-        # Add Wayland and XKB flags if available
         if pkg-config --exists wayland-client wayland-egl xkbcommon 2>/dev/null; then
             cgo_cflags="$(pkg-config --cflags wayland-client wayland-egl xkbcommon 2>/dev/null || true)"
             cgo_ldflags="$(pkg-config --libs wayland-client wayland-egl xkbcommon 2>/dev/null || true)"
@@ -368,46 +336,6 @@ build_wifi_tools() {
     fi
 }
 
-# Build raven-terminal
-build_raven_terminal() {
-    log_section "Building raven-terminal"
-
-    local terminal_dir="${PROJECT_ROOT}/tools/raven-terminal"
-    if [ ! -d "$terminal_dir" ]; then
-        log_warn "raven-terminal source not found at ${terminal_dir}, skipping"
-        return 0
-    fi
-
-    cd "$terminal_dir"
-    log_info "Downloading dependencies for raven-terminal..."
-    run_logged go mod download 2>/dev/null || run_logged go mod tidy
-
-    log_info "Compiling raven-terminal with Wayland support..."
-    # CGO flags to ensure Wayland backend is linked
-    local cgo_cflags=""
-    local cgo_ldflags=""
-
-    # Add Wayland and XKB flags if available
-    if pkg-config --exists wayland-client wayland-egl xkbcommon 2>/dev/null; then
-        cgo_cflags="$(pkg-config --cflags wayland-client wayland-egl xkbcommon 2>/dev/null || true)"
-        cgo_ldflags="$(pkg-config --libs wayland-client wayland-egl xkbcommon 2>/dev/null || true)"
-        log_info "Building with Wayland support: ${cgo_ldflags}"
-    fi
-
-    if run_logged env CGO_ENABLED=1 \
-        CGO_CFLAGS="${cgo_cflags}" \
-        CGO_LDFLAGS="${cgo_ldflags}" \
-        go build -o raven-terminal .; then
-        mkdir -p "${OUTPUT_DIR}/bin"
-        cp raven-terminal "${OUTPUT_DIR}/bin/"
-        log_success "raven-terminal built -> ${OUTPUT_DIR}/bin/raven-terminal"
-    else
-        log_error "Failed to build raven-terminal"
-    fi
-    cd "${PROJECT_ROOT}"
-}
-
-# Build raven-launcher
 build_raven_launcher() {
     log_section "Building raven-launcher"
 
@@ -422,7 +350,6 @@ build_raven_launcher() {
     run_logged go mod download 2>/dev/null || run_logged go mod tidy
 
     log_info "Compiling raven-launcher..."
-    # CGO flags for Wayland support
     local cgo_cflags=""
     local cgo_ldflags=""
 
@@ -446,15 +373,21 @@ build_raven_launcher() {
 
 # Build all packages
 build_all() {
+    # GitHub repos
+    build_compositor
+    build_file_manager
+    build_terminal
+    build_shell
+    build_poxy
     build_vem
     build_carrion
     build_ivaldi
+    # Local tools
     build_installer
     build_rvn
     build_raven_dhcp
     build_usb_creator
     build_wifi_tools
-    build_raven_terminal
     build_raven_launcher
     build_bootloader
 }
@@ -496,13 +429,13 @@ main() {
                 export RAVEN_NO_LOG=1
                 shift
                 ;;
-            vem|carrion|ivaldi|installer|rvn|dhcp|usb|bootloader|all)
+            compositor|file-manager|terminal|shell|poxy|vem|carrion|ivaldi|installer|rvn|dhcp|usb|bootloader|wifi|launcher|all)
                 target="$1"
                 shift
                 ;;
             *)
                 log_error "Unknown package or option: $1"
-                echo "Usage: $0 [--no-log] [vem|carrion|ivaldi|installer|rvn|dhcp|usb|bootloader|all]"
+                echo "Usage: $0 [--no-log] [compositor|file-manager|terminal|shell|poxy|vem|carrion|ivaldi|installer|rvn|dhcp|usb|bootloader|wifi|launcher|all]"
                 exit 1
                 ;;
         esac
@@ -525,33 +458,22 @@ main() {
     check_dependencies
 
     case "$target" in
-        vem)
-            build_vem
-            ;;
-        carrion)
-            build_carrion
-            ;;
-        ivaldi)
-            build_ivaldi
-            ;;
-        installer)
-            build_installer
-            ;;
-        rvn)
-            build_rvn
-            ;;
-        dhcp)
-            build_raven_dhcp
-            ;;
-        usb)
-            build_usb_creator
-            ;;
-        bootloader)
-            build_bootloader
-            ;;
-        all)
-            build_all
-            ;;
+        compositor)     build_compositor ;;
+        file-manager)   build_file_manager ;;
+        terminal)       build_terminal ;;
+        shell)          build_shell ;;
+        poxy)           build_poxy ;;
+        vem)            build_vem ;;
+        carrion)        build_carrion ;;
+        ivaldi)         build_ivaldi ;;
+        installer)      build_installer ;;
+        rvn)            build_rvn ;;
+        dhcp)           build_raven_dhcp ;;
+        usb)            build_usb_creator ;;
+        bootloader)     build_bootloader ;;
+        wifi)           build_wifi_tools ;;
+        launcher)       build_raven_launcher ;;
+        all)            build_all ;;
     esac
 
     print_summary

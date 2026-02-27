@@ -1,23 +1,29 @@
 #!/bin/bash
-# Quick installer for the GBM-enabled raven-compositor
+# Quick installer for raven-compositor from GitHub build
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMPOSITOR_BIN="${SCRIPT_DIR}/desktop/compositor/target/release/raven-compositor"
 INSTALL_DIR="${SCRIPT_DIR}/build/packages/bin"
 
+# Source repos library
+source "${SCRIPT_DIR}/scripts/lib/repos.sh"
+
+COMPOSITOR_DIR="$(get_repo_dir compositor)"
+COMPOSITOR_BIN="${COMPOSITOR_DIR}/target/release/raven-compositor"
+
 echo "========================================"
-echo "  Installing Raven Compositor (GBM)"
+echo "  Installing Raven Compositor"
 echo "========================================"
 echo ""
 
 # Check if compositor is built
 if [[ ! -f "${COMPOSITOR_BIN}" ]]; then
-    echo "ERROR: Compositor not found at: ${COMPOSITOR_BIN}"
-    echo "Please build it first with:"
-    echo "  cd desktop/compositor && cargo build --release"
-    exit 1
+    echo "Compositor not found. Building from GitHub..."
+    fetch_repo compositor
+    cd "$COMPOSITOR_DIR"
+    cargo build --release
+    cd "$SCRIPT_DIR"
 fi
 
 # Show binary info
@@ -28,22 +34,21 @@ echo ""
 # Install
 echo "Installing to: ${INSTALL_DIR}/"
 sudo mkdir -p "${INSTALL_DIR}"
-sudo cp "${COMPOSITOR_BIN}" "${INSTALL_DIR}/raven-compositor"
-sudo chmod +x "${INSTALL_DIR}/raven-compositor"
+for bin in raven-compositor raven-shell raven-settings; do
+    if [[ -f "${COMPOSITOR_DIR}/target/release/${bin}" ]]; then
+        sudo cp "${COMPOSITOR_DIR}/target/release/${bin}" "${INSTALL_DIR}/${bin}"
+        sudo chmod +x "${INSTALL_DIR}/${bin}"
+        echo "  Installed ${bin}"
+    fi
+done
 
 echo ""
-echo "✓ Installation complete!"
+echo "Installation complete!"
 echo ""
-ls -lh "${INSTALL_DIR}/raven-compositor"
+ls -lh "${INSTALL_DIR}"/raven-compositor "${INSTALL_DIR}"/raven-shell "${INSTALL_DIR}"/raven-settings 2>/dev/null
 echo ""
 echo "The compositor is now ready for:"
 echo "  - ISO building (stage4)"
 echo "  - Direct testing in build environment"
 echo "  - Deployment to target system"
-echo ""
-echo "GBM rendering features:"
-echo "  ✓ virtio-gpu-pci support"
-echo "  ✓ Hardware buffer management"  
-echo "  ✓ Visual output enabled"
-echo "  ✓ Enhanced logging"
 echo ""

@@ -1,14 +1,21 @@
 #!/bin/bash
 # Test the compositor with built binaries
 
-cd /home/javanstorm/Development/CustomLinux/RavenLinux
+set -e
 
-# Use the compositor from /tmp
-export PATH="/tmp/raven-compositor-build/release:$PATH"
-export PATH="$PWD/desktop/raven-shell:$PATH"
-export PATH="$PWD/desktop/raven-desktop:$PATH"
-export PATH="$PWD/desktop/raven-menu:$PATH"
-export PATH="$PWD/tools/raven-terminal:$PATH"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+export RAVEN_ROOT="$PROJECT_ROOT"
+export RAVEN_BUILD="${PROJECT_ROOT}/build"
+
+# Source repos library
+source "${SCRIPT_DIR}/lib/repos.sh"
+
+COMPOSITOR_DIR="$(get_repo_dir compositor)"
+
+# Add compositor binaries to PATH
+export PATH="${COMPOSITOR_DIR}/target/release:$PATH"
+export PATH="${RAVEN_BUILD}/packages/bin:$PATH"
 
 # Set up XDG_RUNTIME_DIR if not set
 if [ -z "$XDG_RUNTIME_DIR" ]; then
@@ -18,11 +25,8 @@ fi
 
 echo "=== Raven Desktop Test ==="
 echo "Binaries in PATH:"
-which raven-compositor
-which raven-shell
-which raven-desktop
-which raven-menu
-which raven-terminal
+which raven-compositor || echo "  raven-compositor: not found"
+which raven-terminal || echo "  raven-terminal: not found"
 echo ""
 
 # Check for seatd
@@ -33,13 +37,10 @@ if ! pgrep -x seatd >/dev/null; then
     echo "Please start seatd first:"
     echo "  sudo seatd -g video"
     echo ""
-    echo "Or run this script with seatd startup:"
-    echo "  sudo seatd -g video & sleep 1 && sudo -E ./scripts/test-compositor.sh"
-    echo ""
     exit 1
 fi
 
-echo "✓ seatd is running"
+echo "seatd is running"
 
 # Check for /dev/dri
 if [ ! -d /dev/dri ]; then
@@ -48,7 +49,7 @@ if [ ! -d /dev/dri ]; then
     exit 1
 fi
 
-echo "✓ /dev/dri exists"
+echo "/dev/dri exists"
 ls -la /dev/dri/
 
 echo ""

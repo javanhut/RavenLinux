@@ -8,8 +8,8 @@ maintainers = ["RavenLinux Team"]
 categories = ["desktop", "compositor", "wayland"]
 
 [source]
-type = "local"
-path = "/usr/src/raven/desktop/compositor"
+type = "git"
+url = "https://github.com/javanhut/RavenCompositor.git"
 
 [build]
 system = "cargo"

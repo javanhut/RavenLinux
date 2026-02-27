@@ -13,10 +13,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-BUILD_DIR="${PROJECT_ROOT}/build"
+export RAVEN_ROOT="$PROJECT_ROOT"
+export RAVEN_BUILD="${PROJECT_ROOT}/build"
+BUILD_DIR="${RAVEN_BUILD}"
 SYSROOT="${BUILD_DIR}/sysroot"
 PACKAGES_BIN="${BUILD_DIR}/packages/bin"
 ISO_ROOT="${BUILD_DIR}/iso/iso-root"
+
+# Source repos library
+source "${SCRIPT_DIR}/lib/repos.sh"
 
 # Colors
 RED='\033[0;31m'
@@ -64,6 +69,8 @@ for arg in "$@"; do
     esac
 done
 
+COMPOSITOR_DIR="$(get_repo_dir compositor)"
+
 # =============================================================================
 # Build Functions
 # =============================================================================
@@ -71,73 +78,30 @@ done
 build_desktop_components() {
     log_info "Building desktop components..."
 
-    # Build raven-shell
-    if [[ -d "${PROJECT_ROOT}/desktop/raven-shell" ]]; then
-        log_info "Building raven-shell..."
-        cd "${PROJECT_ROOT}/desktop/raven-shell"
-        if CGO_ENABLED=1 go build -o raven-shell . 2>&1; then
-            log_success "raven-shell built"
-        else
-            log_warn "raven-shell build failed"
-        fi
+    # Fetch and build compositor from GitHub
+    log_info "Fetching and building raven-compositor..."
+    fetch_repo compositor
+    cd "$COMPOSITOR_DIR"
+    if cargo build --release 2>&1; then
+        log_success "raven-compositor built"
+    else
+        log_warn "raven-compositor build failed"
     fi
-
-    # Build raven-menu
-    if [[ -d "${PROJECT_ROOT}/desktop/raven-menu" ]]; then
-        log_info "Building raven-menu..."
-        cd "${PROJECT_ROOT}/desktop/raven-menu"
-        if CGO_ENABLED=1 go build -o raven-menu . 2>&1; then
-            log_success "raven-menu built"
-        else
-            log_warn "raven-menu build failed"
-        fi
-    fi
-
-    # Build raven-desktop
-    if [[ -d "${PROJECT_ROOT}/desktop/raven-desktop" ]]; then
-        log_info "Building raven-desktop..."
-        cd "${PROJECT_ROOT}/desktop/raven-desktop"
-        if CGO_ENABLED=1 go build -o raven-desktop . 2>&1; then
-            log_success "raven-desktop built"
-        else
-            log_warn "raven-desktop build failed"
-        fi
-    fi
-
-    # Build raven-compositor
-    if [[ -d "${PROJECT_ROOT}/desktop/compositor" ]]; then
-        log_info "Building raven-compositor..."
-        cd "${PROJECT_ROOT}/desktop/compositor"
-        if CARGO_TARGET_DIR=/tmp/raven-compositor-build cargo build --release 2>&1; then
-            log_success "raven-compositor built"
-        else
-            log_warn "raven-compositor build failed"
-        fi
-    fi
-
     cd "${PROJECT_ROOT}"
 }
 
 copy_to_sysroot() {
     log_info "Copying binaries to sysroot..."
 
-    # Ensure bin directories exist
     sudo mkdir -p "${SYSROOT}/usr/bin" "${PACKAGES_BIN}"
 
-    # Copy desktop components
-    local components=(
-        "${PROJECT_ROOT}/desktop/raven-shell/raven-shell"
-        "${PROJECT_ROOT}/desktop/raven-menu/raven-menu"
-        "${PROJECT_ROOT}/desktop/raven-desktop/raven-desktop"
-        "/tmp/raven-compositor-build/release/raven-compositor"
-    )
-
-    for bin in "${components[@]}"; do
-        if [[ -f "$bin" ]]; then
-            name=$(basename "$bin")
-            sudo cp "$bin" "${SYSROOT}/usr/bin/"
-            sudo cp "$bin" "${PACKAGES_BIN}/" 2>/dev/null || true
-            log_success "Copied $name"
+    # Copy compositor binaries
+    for bin in raven-compositor raven-shell raven-settings; do
+        local src="${COMPOSITOR_DIR}/target/release/${bin}"
+        if [[ -f "$src" ]]; then
+            sudo cp "$src" "${SYSROOT}/usr/bin/"
+            sudo cp "$src" "${PACKAGES_BIN}/" 2>/dev/null || true
+            log_success "Copied ${bin}"
         fi
     done
 
@@ -162,8 +126,7 @@ run_nested() {
     fi
 
     log_info "Starting Raven Compositor nested..."
-    "${PROJECT_ROOT}/desktop/compositor/target-user/release/raven-compositor" --nested 2>/dev/null || \
-    /tmp/raven-compositor-build/release/raven-compositor --nested
+    "${COMPOSITOR_DIR}/target/release/raven-compositor" --nested
 }
 
 run_qemu() {
@@ -195,7 +158,6 @@ run_qemu() {
                 --grub2-boot-info \
                 --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img \
                 "${ISO_ROOT}" 2>/dev/null || \
-            # Fallback: simple ISO without BIOS boot
             xorriso -as mkisofs -o "$iso_file" -V "RAVENLINUX" -J -R "${ISO_ROOT}" 2>/dev/null || \
             genisoimage -o "$iso_file" -V "RAVENLINUX" -J -R "${ISO_ROOT}" 2>/dev/null
 
@@ -212,7 +174,6 @@ run_qemu() {
     local kernel=""
     local initramfs=""
 
-    # Find kernel
     for k in "${ISO_ROOT}/boot/vmlinuz" "${SYSROOT}/boot/vmlinuz"; do
         if [[ -f "$k" ]]; then
             kernel="$k"
@@ -225,7 +186,6 @@ run_qemu() {
         exit 1
     fi
 
-    # Find initramfs
     for i in "${ISO_ROOT}/boot/initramfs.img" "${SYSROOT}/boot/initramfs.img"; do
         if [[ -f "$i" ]]; then
             initramfs="$i"
@@ -243,7 +203,6 @@ run_qemu() {
     log_info "Compositor: $COMPOSITOR"
     [[ -n "$iso_file" ]] && log_info "ISO: $iso_file"
 
-    # Build kernel command line
     local cmdline="rdinit=/init raven.graphics=wayland raven.wayland=${COMPOSITOR}"
 
     if [[ "$SERIAL" == true ]]; then
@@ -257,7 +216,6 @@ run_qemu() {
     log_info "Starting QEMU... (Ctrl+Alt+G to release mouse, Ctrl+C to quit)"
     echo ""
 
-    # QEMU command
     local qemu_cmd=(
         qemu-system-x86_64
         -enable-kvm
@@ -274,17 +232,14 @@ run_qemu() {
         -append "$cmdline"
     )
 
-    # Add CDROM with ISO if available
     if [[ -n "$iso_file" ]] && [[ -f "$iso_file" ]]; then
         qemu_cmd+=(-cdrom "$iso_file")
     fi
 
-    # Add serial console if requested
     if [[ "$SERIAL" == true ]]; then
         qemu_cmd+=(-serial stdio)
     fi
 
-    # Run QEMU
     "${qemu_cmd[@]}"
 }
 

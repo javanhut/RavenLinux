@@ -50,6 +50,9 @@ else
     log_step() { echo -e "${CYAN}[STEP]${NC} $1"; }
 fi
 
+# Source repos library for fetching external repos
+source "${PROJECT_ROOT}/scripts/lib/repos.sh"
+
 
 # =============================================================================
 # Check dependencies
@@ -597,72 +600,14 @@ copy_kernel_modules() {
 # Build and install Raven desktop components (shell, menu, desktop, settings)
 # =============================================================================
 build_desktop_components() {
-    log_step "Building Raven desktop components..."
-
-    if ! command -v go &>/dev/null; then
-        log_warn "Go not found, skipping desktop component build"
-        return 0
-    fi
+    log_step "Installing Raven desktop configuration..."
 
     local desktop_dir="${PROJECT_ROOT}/desktop"
     mkdir -p "${SYSROOT_DIR}/bin"
     mkdir -p "${SYSROOT_DIR}/root/.config/raven/scripts"
 
-    # Build raven-shell (panel/taskbar)
-    if [[ -d "${desktop_dir}/raven-shell" ]]; then
-        log_info "  Building raven-shell..."
-        cd "${desktop_dir}/raven-shell"
-        if CGO_ENABLED=1 go build -o raven-shell . 2>&1; then
-            cp raven-shell "${SYSROOT_DIR}/bin/"
-            chmod +x "${SYSROOT_DIR}/bin/raven-shell"
-            log_info "  Installed raven-shell"
-        else
-            log_warn "  Failed to build raven-shell"
-        fi
-        cd "${PROJECT_ROOT}"
-    fi
-
-    # Build raven-desktop (background/icons)
-    if [[ -d "${desktop_dir}/raven-desktop" ]]; then
-        log_info "  Building raven-desktop..."
-        cd "${desktop_dir}/raven-desktop"
-        if CGO_ENABLED=1 go build -o raven-desktop . 2>&1; then
-            cp raven-desktop "${SYSROOT_DIR}/bin/"
-            chmod +x "${SYSROOT_DIR}/bin/raven-desktop"
-            log_info "  Installed raven-desktop"
-        else
-            log_warn "  Failed to build raven-desktop"
-        fi
-        cd "${PROJECT_ROOT}"
-    fi
-
-    # Build raven-menu (application launcher)
-    if [[ -d "${desktop_dir}/raven-menu" ]]; then
-        log_info "  Building raven-menu..."
-        cd "${desktop_dir}/raven-menu"
-        if CGO_ENABLED=1 go build -o raven-menu . 2>&1; then
-            cp raven-menu "${SYSROOT_DIR}/bin/"
-            chmod +x "${SYSROOT_DIR}/bin/raven-menu"
-            log_info "  Installed raven-menu"
-        else
-            log_warn "  Failed to build raven-menu"
-        fi
-        cd "${PROJECT_ROOT}"
-    fi
-
-    # Build raven-settings-menu (settings application)
-    if [[ -d "${desktop_dir}/raven-settings-menu" ]]; then
-        log_info "  Building raven-settings-menu..."
-        cd "${desktop_dir}/raven-settings-menu"
-        if CGO_ENABLED=1 go build -o raven-settings-menu . 2>&1; then
-            cp raven-settings-menu "${SYSROOT_DIR}/bin/"
-            chmod +x "${SYSROOT_DIR}/bin/raven-settings-menu"
-            log_info "  Installed raven-settings-menu"
-        else
-            log_warn "  Failed to build raven-settings-menu"
-        fi
-        cd "${PROJECT_ROOT}"
-    fi
+    # Desktop Go apps have been removed; compositor builds raven-shell and
+    # raven-settings as Rust binaries. They are copied in copy_wayland_compositor().
 
     # Install Raven scripts
     if [[ -d "${desktop_dir}/config/raven/scripts" ]]; then
@@ -717,21 +662,18 @@ EOF
 copy_wayland_compositor() {
     log_step "Copying Wayland compositor from host..."
 
-    # Copy raven-compositor and raven-shell (Rust) from build
-    local compositor_bin="${PROJECT_ROOT}/../RavenCompositor/target/release/raven-compositor"
-    local shell_bin="${PROJECT_ROOT}/../RavenCompositor/target/release/raven-shell"
-    if [[ -f "${compositor_bin}" ]]; then
-        cp "${compositor_bin}" "${SYSROOT_DIR}/bin/"
-        chmod +x "${SYSROOT_DIR}/bin/raven-compositor"
-        log_info "  Copied raven-compositor"
-    else
-        log_warn "raven-compositor not found - build with: cd RavenCompositor && cargo build --release"
-    fi
-    if [[ -f "${shell_bin}" ]]; then
-        cp "${shell_bin}" "${SYSROOT_DIR}/bin/"
-        chmod +x "${SYSROOT_DIR}/bin/raven-shell"
-        log_info "  Copied raven-shell (Rust)"
-    fi
+    # Copy raven-compositor and raven-shell (Rust) from fetched repo build
+    local compositor_release
+    compositor_release="$(get_repo_dir compositor)/target/release"
+    for bin in raven-compositor raven-shell raven-settings; do
+        if [[ -f "${compositor_release}/${bin}" ]]; then
+            cp "${compositor_release}/${bin}" "${SYSROOT_DIR}/bin/"
+            chmod +x "${SYSROOT_DIR}/bin/${bin}"
+            log_info "  Copied ${bin}"
+        else
+            log_warn "${bin} not found - run: ./scripts/build-packages.sh compositor"
+        fi
+    done
 
     # Copy wayland-protocols
     if [[ -d /usr/share/wayland-protocols ]]; then

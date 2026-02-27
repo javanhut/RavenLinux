@@ -17,7 +17,7 @@ RavenDE is a modern, developer-focused desktop environment built from scratch fo
 │                    (Session Manager / Login)                         │
 ├─────────────────────────────────────────────────────────────────────┤
 │                      raven-compositor                                │
-│              (Wayland Compositor - wlroots based)                    │
+│              (Wayland Compositor - Smithay based)                    │
 │  ┌─────────────┬──────────────┬─────────────┬──────────────────┐    │
 │  │   Windows   │  Workspaces  │  Tiling/    │  Animations/     │    │
 │  │  Management │  Management  │  Floating   │  Effects         │    │
@@ -43,7 +43,7 @@ RavenDE is a modern, developer-focused desktop environment built from scratch fo
 
 ### 1. raven-compositor
 
-The Wayland compositor is the core of the desktop. Built on wlroots for compatibility.
+The Wayland compositor is the core of the desktop. Built on Smithay.
 
 **Features:**
 - Hybrid tiling/floating window management
@@ -168,17 +168,16 @@ System settings application.
 ## Technology Stack
 
 ### Core Libraries
-- **wlroots** - Wayland compositor library
-- **GTK4** or **Qt6** - UI toolkit (decision needed)
+- **Smithay** - Wayland compositor library (Rust)
 - **Vulkan/OpenGL** - Graphics rendering
 - **D-Bus** - IPC
 - **libinput** - Input handling
 - **PipeWire** - Audio/screen capture
 
 ### Languages
-- **Rust** - Primary language (compositor, terminal, core services)
-- **C** - wlroots integration
-- **Python/JavaScript** - Plugin scripting
+- **Rust** - Primary language (compositor, panel, settings, core services)
+- **Go** - CLI tools, terminal, file manager
+- **Python/JavaScript** - Plugin scripting (future)
 
 ### Configuration
 - TOML for all configuration files
@@ -294,27 +293,29 @@ gap = 8
 
 ## Building
 
+All external repos are fetched from GitHub at build time:
+
 ```bash
-# Build all RavenDE components
-cd desktop
-meson setup build
-ninja -C build
+# Build compositor (fetches from GitHub)
+./scripts/build-packages.sh compositor
+
+# Build all packages
+./scripts/build-packages.sh all
 
 # Run in nested Wayland session (for testing)
-./build/raven-compositor --nested
+raven-compositor --nested
 ```
 
 ## Dependencies
 
 Build dependencies:
-- meson, ninja
 - rustc, cargo
+- go 1.23+
 - wayland-protocols
-- wlroots (>= 0.17)
-- gtk4 or qt6
 - libinput
 - pixman
 - libdrm
+- libseat
 
 Runtime dependencies:
 - wayland

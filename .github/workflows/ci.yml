@@ -68,10 +68,16 @@ jobs:
         run: cargo check --release --target x86_64-unknown-uefi
         working-directory: bootloader
 
-      # Check compositor
+      # Check compositor (fetched from GitHub)
+      - name: Checkout compositor
+        uses: actions/checkout@v4
+        with:
+          repository: javanhut/RavenCompositor
+          path: build/sources/compositor
+
       - name: Check compositor
         run: cargo check --release
-        working-directory: desktop/compositor
+        working-directory: build/sources/compositor
         continue-on-error: true  # May have missing dependencies
 
   # ===========================================================================

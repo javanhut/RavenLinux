@@ -4,7 +4,14 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR/.."
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+export RAVEN_ROOT="$PROJECT_ROOT"
+export RAVEN_BUILD="${PROJECT_ROOT}/build"
+
+# Source repos library
+source "${SCRIPT_DIR}/lib/repos.sh"
+
+COMPOSITOR_DIR="$(get_repo_dir compositor)"
 
 echo "=== Raven Desktop Environment Startup ==="
 echo ""
@@ -29,21 +36,21 @@ echo ""
 
 # Start seatd if not running
 if pgrep -x seatd >/dev/null; then
-    echo "✓ seatd is already running"
+    echo "seatd is already running"
 else
     echo "Starting seatd..."
     seatd -g video >/tmp/seatd.log 2>&1 &
     SEATD_PID=$!
-    
+
     # Wait for seatd socket
     for i in {1..50}; do
         if [ -S /run/seatd.sock ]; then
-            echo "✓ seatd started (PID: $SEATD_PID)"
+            echo "seatd started (PID: $SEATD_PID)"
             break
         fi
         sleep 0.1
     done
-    
+
     if [ ! -S /run/seatd.sock ]; then
         echo "ERROR: seatd failed to start"
         cat /tmp/seatd.log
@@ -60,11 +67,8 @@ chmod 700 "$XDG_RUNTIME_DIR"
 
 export HOME="$ACTUAL_HOME"
 export USER="$ACTUAL_USER"
-export PATH="/tmp/raven-compositor-build/release:$PATH"
-export PATH="$PWD/desktop/raven-shell:$PATH"
-export PATH="$PWD/desktop/raven-desktop:$PATH"
-export PATH="$PWD/desktop/raven-menu:$PATH"
-export PATH="$PWD/tools/raven-terminal:$PATH"
+export PATH="${COMPOSITOR_DIR}/target/release:$PATH"
+export PATH="${RAVEN_BUILD}/packages/bin:$PATH"
 
 echo "Environment:"
 echo "  XDG_RUNTIME_DIR: $XDG_RUNTIME_DIR"

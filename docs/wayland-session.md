@@ -55,7 +55,7 @@ UEFI Boot Menu
 | `bootloader/src/config.rs` | UEFI bootloader hardcoded entries | 176-183 |
 | `init/src/main.rs` | RavenInit - processes cmdline, starts services | 134-242 |
 | `configs/raven-wayland-session` | Session startup script | All (347 lines) |
-| `desktop/compositor/src/` | Raven compositor source (Rust/Smithay) | - |
+| `github.com/javanhut/RavenCompositor` | Raven compositor source (Rust/Smithay) | Fetched at build time |
 
 ---
 

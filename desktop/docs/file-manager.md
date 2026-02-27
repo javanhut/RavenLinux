@@ -1,6 +1,9 @@
 # Raven File Manager
 
-A modern GTK4-based file manager for Raven Linux with visual search and system-wide fuzzy finder capabilities.
+A file manager for Raven Linux with visual search and system-wide fuzzy finder capabilities.
+
+> **Note:** The file manager is now in its own repo ([RavenFileManager](https://github.com/javanhut/RavenFileManager))
+> and is fetched from GitHub at build time. Build with: `./scripts/build-packages.sh file-manager`
 
 ## Features
 
@@ -110,27 +113,10 @@ Settings are stored in `~/.config/raven/file-manager/settings.json`:
 
 ## Architecture
 
-### Source Files
-
-| File | Description |
-|------|-------------|
-| `main.go` | Application entry point, keyboard shortcuts |
-| `ui.go` | Main UI layout, window creation |
-| `fileview.go` | File entry struct, directory reading, file operations |
-| `search.go` | Fuzzy finder, content search engine |
-| `preview.go` | Preview pane for different file types |
-| `syntax.go` | Syntax highlighting for code files |
-| `filter.go` | File type, size, date filters |
-| `navigation.go` | History (back/forward), bookmarks |
-| `clipboard.go` | Cut/copy/paste operations |
-| `dialogs.go` | Rename, delete, new folder dialogs |
-| `config.go` | Settings management |
-| `css.go` | Dark theme CSS styles |
-
 ### Technology Stack
 
-- **Language**: Go 1.23
-- **UI Framework**: GTK4 via gotk4/pkg v0.3.1
+- **Language**: Rust
+- **Repo**: [github.com/javanhut/RavenFileManager](https://github.com/javanhut/RavenFileManager)
 - **Design**: Dark theme matching Raven Linux desktop
   - Background: #0f1720
   - Accent: #009688 (teal)
@@ -139,19 +125,8 @@ Settings are stored in `~/.config/raven/file-manager/settings.json`:
 ## Building
 
 ```bash
-cd raven-file-manager
-go build -o raven-file-manager
-```
-
-### Dependencies
-
-The following system packages are required:
-- gtk4
-- gobject-introspection
-
-Install on Arch Linux:
-```bash
-sudo pacman -S gtk4 gobject-introspection
+# Via the build system (fetches from GitHub):
+./scripts/build-packages.sh file-manager
 ```
 
 ## Usage

@@ -46,6 +46,9 @@ else
     log_step() { echo -e "${CYAN}[STEP]${NC} $1"; }
 fi
 
+# Source repos library for fetching external repos
+source "${PROJECT_ROOT}/scripts/lib/repos.sh"
+
 # =============================================================================
 # Build Go packages (Vem, Carrion, Ivaldi)
 # =============================================================================
@@ -103,10 +106,10 @@ build_rvn() {
 }
 
 # =============================================================================
-# RavenCompositor (built from RavenCompositor/ with cargo)
+# RavenCompositor (fetched from GitHub and built with cargo)
 # =============================================================================
-# raven-compositor is built from the RavenCompositor/ workspace.
-# See scripts/build-live-iso.sh copy_wayland_tools() function.
+# raven-compositor is fetched via repos.sh and built by build-packages.sh.
+# See scripts/build-packages.sh compositor target.
 
 # =============================================================================
 # Build raven-installer (Go with Gio UI)
