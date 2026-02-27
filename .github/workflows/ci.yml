@@ -68,17 +68,16 @@ jobs:
         run: cargo check --release --target x86_64-unknown-uefi
         working-directory: bootloader
 
-      # Check compositor (fetched from GitHub)
-      - name: Checkout compositor
-        uses: actions/checkout@v4
-        with:
-          repository: javanhut/RavenCompositor
-          path: build/sources/compositor
+      # Check compositor (external repo - optional, has its own CI)
+      - name: Clone compositor
+        run: git clone --depth 1 https://github.com/javanhut/RavenCompositor.git build/sources/compositor
+        continue-on-error: true
 
       - name: Check compositor
+        if: hashFiles('build/sources/compositor/Cargo.toml') != ''
         run: cargo check --release
         working-directory: build/sources/compositor
-        continue-on-error: true  # May have missing dependencies
+        continue-on-error: true
 
   # ===========================================================================
   # Build Test
