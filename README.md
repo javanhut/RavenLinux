@@ -25,12 +25,12 @@ RavenLinux is an independent Linux distribution designed for developers and appl
 
 Download the latest release from [GitHub Releases](../../releases):
 
-| File | Description |
-|------|-------------|
-| `ravenlinux-vX.X.X.iso` | Bootable ISO image |
-| `raven-usb-vX.X.X-linux-x86_64` | USB flasher tool |
-| `ravenlinux-vX.X.X-source.tar.gz` | Complete source code |
-| `ravenlinux-tools-vX.X.X-linux-x86_64.tar.gz` | All tools bundled |
+| File                                          | Description          |
+| --------------------------------------------- | -------------------- |
+| `ravenlinux-vX.X.X.iso`                       | Bootable ISO image   |
+| `raven-usb-vX.X.X-linux-x86_64`               | USB flasher tool     |
+| `ravenlinux-vX.X.X-source.tar.gz`             | Complete source code |
+| `ravenlinux-tools-vX.X.X-linux-x86_64.tar.gz` | All tools bundled    |
 
 ### Quick Install
 
@@ -44,51 +44,69 @@ sudo ./raven-usb-*-linux-x86_64 ravenlinux-*.iso /dev/sdX
 
 ## Technology Stack
 
-| Component | Language | Description |
-|-----------|----------|-------------|
-| Kernel | C | Linux kernel with EFI stub |
-| Bootloader | Rust | UEFI multi-boot loader (RavenBoot) |
-| Init System | Rust | Custom init and service manager |
-| Package Manager | Rust | System package management (rvn) |
-| Text Editor | Go | Vem - Modal editor with syntax highlighting |
-| Version Control | Go | Ivaldi - Distributed VCS |
-| Programming Language | Go | Carrion - Custom programming language |
-| WiFi Manager | Go | TUI/GUI tools to connect to WiFi networks |
-| Installer | Go | GUI system installer |
-| USB Flasher | Go | Tool to create bootable USB drives |
+| Component            | Language | Description                                 |
+| -------------------- | -------- | ------------------------------------------- |
+| Kernel               | C        | Linux kernel with EFI stub                  |
+| Bootloader           | Rust     | UEFI multi-boot loader (RavenBoot)          |
+| Init System          | Rust     | Custom init and service manager             |
+| Package Manager      | Rust     | System package management (rvn)             |
+| Text Editor          | Go       | Vem - Modal editor with syntax highlighting |
+| Version Control      | Go       | Ivaldi - Distributed VCS                    |
+| Programming Language | Go       | Carrion - Custom programming language       |
+| WiFi Manager         | Go       | TUI/GUI tools to connect to WiFi networks   |
+| Installer            | Go       | GUI system installer                        |
+| USB Flasher          | Go       | Tool to create bootable USB drives          |
 
 ## Native Tools
 
 RavenLinux includes these custom development tools:
 
 ### Vem (Text Editor)
+
 Modal text editor with syntax highlighting and modern editing features.
+
 ```bash
 vem myfile.txt
 ```
 
 ### Carrion (Programming Language)
+
 Custom programming language designed for system scripting and application development.
+
 ```bash
-carrion run script.crn
+carrion run script.crl
 ```
 
-### Ivaldi (Version Control)
-Distributed version control system with a focus on simplicity.
+### OxigenLang (Programming Language)
+
+TBD - Still in Alpha
+
 ```bash
-ivaldi init
-ivaldi commit -m "Initial commit"
+oxigen example.oxi
+```
+
+### Ivaldi (Version Control) Currently GO \*will transition to Rust Version
+
+Distributed version control system with a focus on simplicity.
+
+```bash
+ivaldi forge
+ivaldi seal "Example message"
+ivaldi upload
 ```
 
 ## Networking
 
 ### WiFi Setup
+
 Connecting to WiFi is simple. Just run:
+
 ```bash
 sudo wifi
 ```
 
 This opens an interactive terminal interface where you can:
+
 - See all available networks with signal strength
 - Use arrow keys to select a network
 - Enter password when prompted
@@ -99,13 +117,17 @@ That's it! No complicated commands to remember.
 Note: RavenLinux ships `rtw89` firmware and sets `options rtw89_pci disable_aspm=1` by default to ensure RTL8852BE cards reliably create a `wlan*` interface at boot.
 
 ### Alternative: GUI WiFi Manager
+
 If you prefer a graphical interface:
+
 ```bash
 raven-wifi
 ```
 
 ### Advanced: Manual WiFi (CLI)
+
 For power users who prefer raw commands:
+
 ```bash
 # Using iwd
 iwctl station wlan0 scan
@@ -298,11 +320,13 @@ type = linux-efi
 ## System Requirements
 
 ### Target System
+
 - x86_64 CPU with UEFI firmware
 - 2GB RAM minimum (4GB recommended)
 - 20GB disk space
 
 ### Build Host
+
 - Linux system
 - 20GB+ disk space
 - 8GB+ RAM recommended
