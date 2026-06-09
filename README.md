@@ -146,6 +146,45 @@ cd RavenLinux
 ./scripts/build.sh stage4    # Generate ISO
 ```
 
+### Building with Docker / Podman (macOS, Windows, or Linux)
+
+RavenLinux is a Linux-From-Scratch style distro — the build uses chroot,
+overlayfs mounts and a musl cross-toolchain, so it cannot run natively on macOS
+or Windows. The included `Dockerfile` provides a ready-to-use Linux build host
+that works with both Docker and Podman.
+
+```bash
+# Build everything inside a container; the ISO lands in ./build/
+./scripts/docker-build.sh all
+
+# Or target a single stage
+./scripts/docker-build.sh stage0          # cross toolchain only
+./scripts/docker-build.sh -j 8 stage1     # stage1 with 8 jobs
+./scripts/docker-build.sh --clean all     # clean rebuild
+
+# Drop into an interactive shell in the build environment
+./scripts/docker-build.sh shell
+```
+
+The helper auto-detects Docker or Podman, builds the image (cached after the
+first run), and runs the container `--privileged` with the repo bind-mounted at
+`/raven` so all artifacts appear in `./build/` on your host.
+
+See [docs/docker-build.md](docs/docker-build.md) for the full guide (options,
+environment variables, Apple Silicon notes, and troubleshooting).
+
+> **macOS note:** the resulting ISO is `x86_64`. On Apple Silicon, Docker/Podman
+> emulate x86_64, so the build works but is slower than on a native x86_64 host.
+> To boot/test the ISO afterwards, use QEMU (`brew install qemu`).
+
+Prefer to run the engine directly:
+
+```bash
+docker build -t ravenlinux-build .
+docker run --rm -it --privileged -v "$PWD:/raven" -w /raven \
+    ravenlinux-build ./scripts/build.sh all
+```
+
 ### Development Environment
 
 ```bash

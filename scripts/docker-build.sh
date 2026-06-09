@@ -1,0 +1,97 @@
+#!/bin/bash
+# =============================================================================
+# RavenLinux Containerized Build Helper
+# =============================================================================
+# Builds RavenLinux inside a Linux container so it can be produced from macOS,
+# Windows, or any Linux host. Works with both Docker and Podman.
+#
+# Usage:
+#   ./scripts/docker-build.sh [BUILD_ARGS...]
+#
+# Examples:
+#   ./scripts/docker-build.sh                 # build everything (build.sh all)
+#   ./scripts/docker-build.sh stage0          # only the cross toolchain
+#   ./scripts/docker-build.sh -j 8 stage1     # stage1 with 8 jobs
+#   ./scripts/docker-build.sh --clean all     # clean rebuild
+#   ./scripts/docker-build.sh shell           # drop into an interactive shell
+#
+# Environment:
+#   RAVEN_ENGINE   Force the container engine: "docker" or "podman"
+#   RAVEN_IMAGE    Image tag to build/use (default: ravenlinux-build)
+#   RAVEN_NO_BUILD Set to 1 to skip the image build (assume it exists)
+#
+# Notes:
+#   - The container runs --privileged because the build uses chroot, overlayfs
+#     mounts and loop devices.
+#   - The repository is bind-mounted at /raven, so the resulting ISO and all
+#     artifacts land in ./build/ on the host.
+# =============================================================================
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RAVEN_ROOT="$(dirname "$SCRIPT_DIR")"
+IMAGE="${RAVEN_IMAGE:-ravenlinux-build}"
+
+# -----------------------------------------------------------------------------
+# Pick a container engine
+# -----------------------------------------------------------------------------
+ENGINE="${RAVEN_ENGINE:-}"
+if [[ -z "$ENGINE" ]]; then
+    if command -v docker &>/dev/null; then
+        ENGINE="docker"
+    elif command -v podman &>/dev/null; then
+        ENGINE="podman"
+    else
+        echo "ERROR: neither 'docker' nor 'podman' found in PATH." >&2
+        echo "Install Docker Desktop or Podman, then re-run." >&2
+        exit 1
+    fi
+fi
+echo ">> Using container engine: ${ENGINE}"
+
+# -----------------------------------------------------------------------------
+# Build the image (cached after first run)
+# -----------------------------------------------------------------------------
+if [[ "${RAVEN_NO_BUILD:-0}" != "1" ]]; then
+    echo ">> Building image '${IMAGE}' (cached after first run)..."
+    "$ENGINE" build -t "$IMAGE" -f "${RAVEN_ROOT}/Dockerfile" "${RAVEN_ROOT}"
+fi
+
+# -----------------------------------------------------------------------------
+# Assemble the build command to run inside the container
+# -----------------------------------------------------------------------------
+if [[ "${1:-}" == "shell" ]]; then
+    CMD=(/bin/bash)
+    shift || true
+else
+    CMD=(./scripts/build.sh "$@")
+    # Default to a full build when no stage/args were given.
+    if [[ $# -eq 0 ]]; then
+        CMD=(./scripts/build.sh all)
+    fi
+fi
+
+# Podman maps the host user into the container by default, which breaks the
+# build's root-owned chroot steps; --userns=keep-id or running rootful is
+# needed. Using --privileged + default root user works for both engines.
+RUN_FLAGS=(
+    --rm -it
+    --privileged
+    -v "${RAVEN_ROOT}:/raven"
+    -w /raven
+)
+
+# Podman needs SELinux relabeling on some hosts; :z is harmless on Docker-less
+# Linux but unsupported on macOS bind mounts, so only add it for Podman/Linux.
+if [[ "$ENGINE" == "podman" && "$(uname -s)" == "Linux" ]]; then
+    RUN_FLAGS=(
+        --rm -it
+        --privileged
+        -v "${RAVEN_ROOT}:/raven:z"
+        -w /raven
+    )
+fi
+
+echo ">> Running: ${CMD[*]}"
+exec "$ENGINE" run "${RUN_FLAGS[@]}" "$IMAGE" "${CMD[@]}"
