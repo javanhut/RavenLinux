@@ -124,6 +124,7 @@ The helper script honours these:
 | `RAVEN_ENGINE` | auto-detected | Force the container engine: `docker` or `podman`. |
 | `RAVEN_IMAGE` | `ravenlinux-build` | Image tag to build and run. |
 | `RAVEN_NO_BUILD` | `0` | Set to `1` to skip the image build and reuse an existing image. |
+| `RAVEN_PLATFORM` | `linux/amd64` | Container platform for `run`. RavenLinux is x86_64-only; on arm64 hosts it runs under emulation. Set empty to let the engine choose. |
 
 Example:
 
@@ -133,8 +134,10 @@ RAVEN_ENGINE=podman RAVEN_NO_BUILD=1 ./scripts/docker-build.sh stage4
 
 ## Notes for Apple Silicon (M1/M2/M3/M4)
 
-The RavenLinux ISO targets **`x86_64`**. On Apple Silicon, Docker and Podman run
-x86_64 containers under emulation:
+The RavenLinux ISO targets **`x86_64`**. The Arch base image is x86_64-only, so
+the `Dockerfile` pins `--platform=linux/amd64` and the helper runs the container
+as `linux/amd64`. On Apple Silicon, Docker and Podman run it under emulation
+automatically — no extra flags needed:
 
 - The build **works**, but is **noticeably slower** than on a native x86_64 host.
   A full from-scratch build can take a long time — build individual stages while
@@ -160,6 +163,7 @@ x86_64 containers under emulation:
 | Symptom | Cause / Fix |
 |---------|-------------|
 | `neither 'docker' nor 'podman' found` | Install Docker Desktop or Podman, or set `RAVEN_ENGINE`. |
+| `no image found in image index for architecture "arm64"` | The Arch base image is x86_64-only. The `Dockerfile` pins `--platform=linux/amd64`, so use the current Dockerfile / `make` / helper. If building by hand, add `--platform linux/amd64` to your `docker build`. |
 | `mount: permission denied` / `chroot: ... Operation not permitted` | The container is not privileged. Use the helper script, or add `--privileged` to your `docker run`. |
 | `no space left on device` | The Docker/Podman VM ran out of disk. Increase the VM disk size (Docker Desktop → Settings → Resources) or prune images. |
 | Build artifacts owned by `root` on the host | Expected: the privileged container runs as root. Re-run a build (the build script fixes ownership), or `sudo chown -R "$USER" build`. |

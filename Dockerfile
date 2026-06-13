@@ -20,7 +20,10 @@
 # and check-deps.sh maps the most complete package set to pacman.
 # =============================================================================
 
-FROM archlinux:latest
+# RavenLinux only targets x86_64, and Arch Linux only publishes an x86_64 image
+# (there is no arm64 variant). Pin the platform so the build works everywhere,
+# including Apple Silicon (arm64) hosts, where it runs under emulation.
+FROM --platform=linux/amd64 archlinux:latest
 
 # Avoid interactive prompts; keep pacman caches out of the image layers.
 ENV LANG=C.UTF-8

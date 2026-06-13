@@ -34,6 +34,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RAVEN_ROOT="$(dirname "$SCRIPT_DIR")"
 IMAGE="${RAVEN_IMAGE:-ravenlinux-build}"
 
+# RavenLinux only targets x86_64 (the Arch base image is x86_64-only). On an
+# arm64 host (e.g. Apple Silicon) the image runs under emulation; make the
+# platform explicit so `run` matches the amd64 image. Override with
+# RAVEN_PLATFORM= (empty) to let the engine choose.
+PLATFORM="${RAVEN_PLATFORM-linux/amd64}"
+PLATFORM_FLAGS=()
+[[ -n "$PLATFORM" ]] && PLATFORM_FLAGS=(--platform "$PLATFORM")
+
 # -----------------------------------------------------------------------------
 # Pick a container engine
 # -----------------------------------------------------------------------------
@@ -107,4 +115,4 @@ if [[ "$ENGINE" == "podman" && "$(uname -s)" == "Linux" ]]; then
 fi
 
 echo ">> Running: ${CMD[*]}"
-exec "$ENGINE" run "${RUN_FLAGS[@]}" "$IMAGE" "${CMD[@]}"
+exec "$ENGINE" run "${PLATFORM_FLAGS[@]}" "${RUN_FLAGS[@]}" "$IMAGE" "${CMD[@]}"
