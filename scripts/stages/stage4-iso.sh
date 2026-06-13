@@ -1235,8 +1235,14 @@ main() {
     create_live_init
     copy_boot_files
     copy_kernel_modules
-    build_desktop_components
-    copy_wayland_compositor
+    # GUI integration: the desktop apps and Wayland compositor. Skipped for a
+    # minimal/headless ISO, which boots to an autologin root shell on tty1.
+    if [[ "${RAVEN_MINIMAL:-0}" == "1" ]]; then
+        log_info "Minimal build: skipping desktop components and Wayland compositor"
+    else
+        build_desktop_components
+        copy_wayland_compositor
+    fi
     create_squashfs
     setup_ravenboot || true  # Continue even if RavenBoot not available
     setup_grub  # GRUB as fallback for BIOS

@@ -153,7 +153,24 @@ install_linux_headers() {
 
         cd "${SOURCES_DIR}/linux-${LINUX_VERSION}"
         make mrproper
-        make ARCH="${RAVEN_ARCH}" headers
+
+        # `make headers` runs many short-lived helper processes (sed, shell).
+        # Under CPU emulation (qemu / Apple Rosetta when building the amd64 image
+        # on an arm64 host) one of these occasionally segfaults mid-run — a
+        # transient translation crash, not a real error (it succeeds on retry).
+        # Retry a few times, cleaning between attempts, before giving up.
+        local _attempt
+        for _attempt in 1 2 3 4 5; do
+            if make ARCH="${RAVEN_ARCH}" headers; then
+                break
+            elif [[ "$_attempt" -eq 5 ]]; then
+                log_error "make headers failed after 5 attempts"
+                exit 1
+            else
+                log_warn "make headers crashed (attempt ${_attempt}/5) — likely a transient emulation segfault; cleaning and retrying..."
+                make mrproper >/dev/null 2>&1 || true
+            fi
+        done
 
         # Clean non-header files
         find usr/include -type f ! -name '*.h' -delete

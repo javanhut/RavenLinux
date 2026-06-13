@@ -1,0 +1,71 @@
+# =============================================================================
+# RavenLinux Minimal Build Environment (headless / no GUI)
+# =============================================================================
+# A slimmer toolchain image for building a headless RavenLinux: base system +
+# kernel + a CLI ISO, with NONE of the graphical stack. Use it with the
+# `minimal` build stage:
+#
+#   docker build -t ravenlinux-build-minimal -f Dockerfile.minimal .
+#   docker run --rm -it --privileged -v "$PWD:/raven" -w /raven \
+#       ravenlinux-build-minimal ./scripts/build.sh minimal
+#
+# or simply:  make minimal-image  &&  make minimal
+#
+# Compared to Dockerfile, this drops the GUI build deps (mesa, wayland, gtk4,
+# libadwaita, vulkan, X11, pango/cairo, seatd, ...), which the headless build
+# never touches — making the image considerably smaller and faster to build.
+# Keep this in sync with Dockerfile for the shared (non-GUI) packages.
+# =============================================================================
+
+FROM --platform=linux/amd64 archlinux:latest
+
+ENV LANG=C.UTF-8
+
+# pacman 7's download sandbox uses seccomp(), which fails under qemu-user
+# emulation (amd64 image on an arm64 host). Disabling it is a no-op on native
+# x86_64. See Dockerfile for the full explanation.
+RUN sed -i 's/^#DisableSandboxSyscalls/DisableSandboxSyscalls/' /etc/pacman.conf
+
+# -----------------------------------------------------------------------------
+# System + build dependencies (headless subset of check-deps.sh)
+# -----------------------------------------------------------------------------
+RUN pacman -Syu --noconfirm --needed \
+        # Core build toolchain
+        base-devel make gcc binutils \
+        # Archive / compression
+        tar gzip xz bzip2 cpio zstd unzip \
+        # Download + VCS
+        curl wget git \
+        # File / text utilities
+        findutils file patch coreutils rsync sed gawk grep diffutils which less \
+        # Disk / filesystem / ISO tooling
+        squashfs-tools xorriso util-linux e2fsprogs dosfstools mtools \
+        # Build systems
+        meson ninja cmake pkgconf autoconf automake libtool m4 gettext gperf \
+        # Kernel build
+        bc flex bison perl python python-jinja openssl \
+        linux-headers libelf pahole \
+        # Go toolchain (1.23+)
+        go \
+        # Core libraries / dev headers used by the base system
+        ncurses zlib libffi \
+        # uutils-coreutils builds onig_sys with RUSTONIG_SYSTEM_LIBONIG=1
+        oniguruma \
+        # Misc runtime utilities used by the build/test scripts
+        kexec-tools inetutils \
+    && pacman -Scc --noconfirm
+
+# -----------------------------------------------------------------------------
+# Rust via rustup (cargo + rust-src for the musl cross target)
+# -----------------------------------------------------------------------------
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN pacman -Syu --noconfirm --needed rustup \
+    && rustup default stable \
+    && rustup component add rust-src \
+    && pacman -Scc --noconfirm
+
+WORKDIR /raven
+
+CMD ["/bin/bash"]

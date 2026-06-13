@@ -24,8 +24,12 @@
 # Notes:
 #   - The container runs --privileged because the build uses chroot, overlayfs
 #     mounts and loop devices.
-#   - The repository is bind-mounted at /raven, so the resulting ISO and all
-#     artifacts land in ./build/ on the host.
+#   - The repository is bind-mounted at /raven, so the resulting ISO
+#     (raven-<ver>-<arch>.iso) lands in the repo root on the host.
+#   - On macOS the build's working tree (build/) is kept on a native engine
+#     volume instead of the virtiofs bind mount — virtiofs mishandles the
+#     symlinks an LFS build unpacks. See the volume note below. On Linux the
+#     bind mount is native, so build/ stays directly on the host as before.
 # =============================================================================
 
 set -euo pipefail
@@ -33,6 +37,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RAVEN_ROOT="$(dirname "$SCRIPT_DIR")"
 IMAGE="${RAVEN_IMAGE:-ravenlinux-build}"
+# Dockerfile to build the toolchain image from. Override with RAVEN_DOCKERFILE
+# (e.g. Dockerfile.minimal for the slim headless image).
+DOCKERFILE="${RAVEN_DOCKERFILE:-Dockerfile}"
 
 # RavenLinux only targets x86_64 (the Arch base image is x86_64-only). On an
 # arm64 host (e.g. Apple Silicon) the image runs under emulation; make the
@@ -66,7 +73,7 @@ echo ">> Using container engine: ${ENGINE}"
 # a build or dropping into a shell.
 if [[ "${1:-}" == "image" ]]; then
     echo ">> Building image '${IMAGE}' (toolchain only)..."
-    "$ENGINE" build -t "$IMAGE" -f "${RAVEN_ROOT}/Dockerfile" "${RAVEN_ROOT}"
+    "$ENGINE" build -t "$IMAGE" -f "${RAVEN_ROOT}/${DOCKERFILE}" "${RAVEN_ROOT}"
     echo ">> Image '${IMAGE}' is ready. Run a build with: ./scripts/docker-build.sh all"
     exit 0
 fi
@@ -76,7 +83,7 @@ fi
 # -----------------------------------------------------------------------------
 if [[ "${RAVEN_NO_BUILD:-0}" != "1" ]]; then
     echo ">> Building image '${IMAGE}' (cached after first run)..."
-    "$ENGINE" build -t "$IMAGE" -f "${RAVEN_ROOT}/Dockerfile" "${RAVEN_ROOT}"
+    "$ENGINE" build -t "$IMAGE" -f "${RAVEN_ROOT}/${DOCKERFILE}" "${RAVEN_ROOT}"
 fi
 
 # -----------------------------------------------------------------------------
@@ -112,6 +119,30 @@ if [[ "$ENGINE" == "podman" && "$(uname -s)" == "Linux" ]]; then
         -v "${RAVEN_ROOT}:/raven:z"
         -w /raven
     )
+fi
+
+# -----------------------------------------------------------------------------
+# Keep the build's working tree (build/) off the macOS bind mount.
+# -----------------------------------------------------------------------------
+# On macOS the repo bind mount reaches the Linux VM over virtiofs/sshfs, which
+# mishandles the symlinks an LFS build unpacks: GNU tar (and bsdtar) abort with
+# "Cannot open: Permission denied" / "Could not stat" the instant they extract a
+# symlink (e.g. musl's ld-musl-x86_64.so.1 in the stage0 toolchain). A native
+# engine volume avoids that entirely (and is far faster for the build's millions
+# of small files). It also persists between runs, so the toolchain download and
+# completed stages are cached. The final ISO is written to the repo root
+# (/raven, the bind mount), so it still lands on the host. On Linux hosts the
+# bind mount is native, so build/ stays directly visible on the host as before.
+#
+# Override the volume name with RAVEN_BUILD_VOLUME; set it empty to force the
+# plain bind mount (build/ on the host) even on macOS.
+if [[ "$(uname -s)" == "Darwin" && "${1:-}" != "image" ]]; then
+    BUILD_VOLUME="${RAVEN_BUILD_VOLUME-raven-build}"
+    if [[ -n "$BUILD_VOLUME" ]]; then
+        RUN_FLAGS+=(-v "${BUILD_VOLUME}:/raven/build")
+        echo ">> Using '${ENGINE}' volume '${BUILD_VOLUME}' for /raven/build (macOS:"
+        echo "   avoids virtiofs symlink failures; the ISO still lands in the repo root)."
+    fi
 fi
 
 echo ">> Running: ${CMD[*]}"

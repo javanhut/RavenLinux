@@ -409,9 +409,17 @@ build_elogind() {
     mkdir -p build
     cd build
 
+    # elogind enables -Werror, and modern GCC (16+) flags its generated
+    # errno-to-name.h table as [-Werror=override-init] because several errno
+    # values intentionally share a number (e.g. EAGAIN/EWOULDBLOCK), aborting
+    # the build. Disable the project-wide -Werror and, as belt-and-suspenders,
+    # demote override-init via c_args (meson places user c_args last on the
+    # compile line, so it overrides any earlier -Werror).
     meson setup .. \
         --prefix=/usr \
         --buildtype=release \
+        -D werror=false \
+        -D c_args=-Wno-error=override-init \
         -D man=false \
         -D docdir=/usr/share/doc/elogind-${ELOGIND_VERSION} \
         -D cgroup-controller=elogind \
@@ -674,9 +682,21 @@ build_accountsservice() {
     export LIBRARY_PATH="${SYSROOT_DIR}/usr/lib:${LIBRARY_PATH:-}"
     export LD_LIBRARY_PATH="${SYSROOT_DIR}/usr/lib:${LD_LIBRARY_PATH:-}"
     export PYTHONPATH="${SYSROOT_DIR}/usr/share/glib-2.0:${PYTHONPATH:-}"
+    # accountsservice translates its polkit .policy file with `msgfmt --xml`,
+    # which needs polkit's ITS rules (polkit.its). polkit installed those into
+    # the sysroot, so point gettext at the sysroot gettext data dir or msgfmt
+    # fails with "cannot locate ITS rules".
+    export GETTEXTDATADIRS="${SYSROOT_DIR}/usr/share/gettext:${GETTEXTDATADIRS:-}"
 
     # Build link arguments for meson - pass library path to linker
     local link_args="-L${SYSROOT_DIR}/usr/lib -Wl,-rpath-link,${SYSROOT_DIR}/usr/lib"
+
+    # polkit, elogind and duktape are installed into the sysroot, but their
+    # pkg-config files report host prefixes (/usr/include/...), so the compiler
+    # looks for e.g. <polkit/polkit.h> on the host and fails. Add the sysroot
+    # include dirs explicitly so those headers resolve. Meson appends c_args
+    # last, so host headers (glib, etc.) still take precedence.
+    local sysroot_includes="-I${SYSROOT_DIR}/usr/include -I${SYSROOT_DIR}/usr/include/polkit-1"
 
     meson setup .. \
         --prefix=/usr \
@@ -688,6 +708,7 @@ build_accountsservice() {
         -D introspection=false \
         -D vapi=false \
         -D docbook=false \
+        -D c_args="${sysroot_includes}" \
         -D c_link_args="${link_args}" \
         -D cpp_link_args="${link_args}" \
         2>&1 | tee "${log_file}"

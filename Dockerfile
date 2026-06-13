@@ -85,6 +85,30 @@ RUN pacman -Syu --noconfirm --needed rustup \
     && rustup component add rust-src \
     && pacman -Scc --noconfirm
 
+# -----------------------------------------------------------------------------
+# Extra libraries for components the build compiles from source
+# -----------------------------------------------------------------------------
+# Not pulled in transitively by the system-deps layer above:
+#   - libxcursor/libxi/libxinerama/libxfixes: GLFW's X11 backend, linked via cgo
+#     by raven-terminal (go-gl/glfw).
+#   - oniguruma: uutils-coreutils builds onig_sys with RUSTONIG_SYSTEM_LIBONIG=1
+#     (the crate's bundled oniguruma fails to compile with modern GCC), so it
+#     needs the system library plus oniguruma.pc.
+#   - gtk4 / libadwaita: RavenFileManager's gtk4-rs and libadwaita-rs bindings
+#     (gdk4-sys needs gtk4.pc, libadwaita-sys needs libadwaita-1.pc); these pull
+#     in graphene etc. transitively.
+#   - vulkan-headers / vulkan-icd-loader: Vem's Gio (gioui.org) cgo backend
+#     includes <vulkan/vulkan.h> and may link -lvulkan.
+# Kept as its own layer (using the package DB already synced above, so no -Sy)
+# so editing it doesn't invalidate the large system-deps and rustup layers.
+# Mirrored in check-deps.sh EXTRA_PACKAGES.
+RUN pacman -S --noconfirm --needed \
+        libxcursor libxi libxinerama libxfixes \
+        oniguruma \
+        gtk4 libadwaita \
+        vulkan-headers vulkan-icd-loader \
+    && pacman -Scc --noconfirm
+
 # The build's permission-fix step expects to be able to chown; running as root
 # inside the privileged container keeps chroot/mount working. The script handles
 # resulting root-owned build artifacts.

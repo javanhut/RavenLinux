@@ -32,15 +32,23 @@ _REPOS_OUTPUT_DIR="${RAVEN_BUILD}/packages"
 # =============================================================================
 # Format: name -> "github_repo|build_type|binary_names|extra_args"
 #   build_type: cargo, go-cgo0, go-cgo1
-#   binary_names: comma-separated list of binaries produced
-#   extra_args: optional build arguments (e.g., ./src/main.go for carrion)
+#   binary_names: comma-separated list of binaries produced. For cargo repos an
+#                 entry may be "srcname:dstname" to install the built binary
+#                 (srcname in target/release) under a different name (dstname).
+#   extra_args: optional build target/args (e.g., ./src/main.go for carrion,
+#               ./src for terminal, ./cmd/poxy for poxy). Defaults to '.' (repo
+#               root) for go builds when empty.
 
 declare -A REPO_REGISTRY=(
     [compositor]="javanhut/RavenCompositor|cargo|raven-compositor,raven-shell,raven-settings|"
-    [file-manager]="javanhut/RavenFileManager|cargo|raven-file-manager|"
-    [terminal]="javanhut/RavenTerminal|go-cgo1|raven-terminal|"
+    # Cargo [[bin]] is 'ravenfilemanager'; install it as 'raven-file-manager'
+    # (the name the desktop keybind in hyprland-config.sh execs) via src:dst.
+    [file-manager]="javanhut/RavenFileManager|cargo|ravenfilemanager:raven-file-manager|"
+    # package main lives in ./src, not the repo root.
+    [terminal]="javanhut/RavenTerminal|go-cgo1|raven-terminal|./src"
     [shell]="javanhut/RavenShell|go-cgo0|raven-shell-utils|"
-    [poxy]="javanhut/Poxy|go-cgo0|poxy|"
+    # package main lives in ./cmd/poxy, not the repo root.
+    [poxy]="javanhut/Poxy|go-cgo0|poxy|./cmd/poxy"
     [vem]="javanhut/Vem|go-cgo1|vem|"
     [carrion]="javanhut/TheCarrionLanguage|go-cgo0|carrion|./src/main.go"
     [ivaldi]="javanhut/IvaldiVCS|go-cgo0|ivaldi|"
@@ -123,11 +131,14 @@ build_cargo_repo() {
     mkdir -p "${_REPOS_OUTPUT_DIR}/bin"
     IFS=',' read -ra bins <<< "$binaries"
     for bin in "${bins[@]}"; do
-        if [[ -f "target/release/${bin}" ]]; then
-            cp "target/release/${bin}" "${_REPOS_OUTPUT_DIR}/bin/"
-            echo "[repos]   -> ${_REPOS_OUTPUT_DIR}/bin/${bin}"
+        # Optional "srcname:dstname" — build produces srcname, install as dstname.
+        local src="${bin%%:*}"
+        local dst="${bin##*:}"
+        if [[ -f "target/release/${src}" ]]; then
+            cp "target/release/${src}" "${_REPOS_OUTPUT_DIR}/bin/${dst}"
+            echo "[repos]   -> ${_REPOS_OUTPUT_DIR}/bin/${dst}"
         else
-            echo "[repos]   WARNING: binary '${bin}' not found in target/release/" >&2
+            echo "[repos]   WARNING: binary '${src}' not found in target/release/" >&2
         fi
     done
 

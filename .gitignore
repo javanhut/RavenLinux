@@ -131,6 +131,9 @@ desktop.ini
 /build/qemu/*.sock
 /build/qemu/*.monitor
 
+# Core dumps from crashes (e.g. amd64 rustc segfaulting under qemu-user on arm64)
+*.core
+
 # -----------------------------------------------------------------------------
 # Cache directories
 # -----------------------------------------------------------------------------

@@ -93,6 +93,62 @@ check_build_dependencies() {
     fi
 }
 
+# Verify the Rust toolchain can actually execute before starting a long build.
+#
+# RavenLinux is x86_64-only, so on an arm64 host (e.g. Apple Silicon) the amd64
+# build image runs under qemu-user emulation. amd64 rustc/LLVM segfaults under
+# qemu-user, so every Rust compile in the build (sudo-rs, raven-compositor,
+# raven-shell) would crash the same way — but only minutes into the build,
+# deep inside a stage, with a cryptic "qemu: uncaught target signal 11" and
+# leftover core dumps. Detect it here and fail fast with actionable guidance.
+check_rust_toolchain() {
+    if [[ "${RAVEN_SKIP_RUST_CHECK:-false}" == "true" ]]; then
+        return 0
+    fi
+
+    # If rustc is absent the dependency check already covers it; nothing to probe.
+    command -v rustc &>/dev/null || return 0
+
+    # A trivial invocation is enough: under qemu-user rustc crashes at startup
+    # (SIGSEGV -> exit 139), long before it does any real work. Run it in a
+    # subshell with core dumps disabled so the probe itself never litters a
+    # *.core file into the working directory when it crashes.
+    local rc=0
+    ( ulimit -c 0 2>/dev/null; rustc --version &>/dev/null ) || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        return 0
+    fi
+
+    log_error "The Rust compiler (rustc) cannot execute in this environment."
+    echo ""
+    echo "  'rustc --version' exited with status ${rc} (137/139 means it crashed)."
+    echo ""
+    echo "  This almost always means the amd64 build image is running under"
+    echo "  qemu-user emulation on an arm64 host (e.g. Apple Silicon). amd64"
+    echo "  rustc/LLVM segfaults under qemu-user, so every Rust compile in the"
+    echo "  build (sudo-rs, raven-compositor, raven-shell) would fail the same way."
+    echo ""
+    echo "  RavenLinux is x86_64-only, so run the build where amd64 code executes"
+    echo "  natively or via a complete translator:"
+    echo ""
+    echo "    - Build on a real x86_64 host (Linux PC, Intel Mac, or an x86_64"
+    echo "      cloud/CI runner). Most reliable."
+    echo "    - On Apple Silicon, use Docker Desktop or colima with Rosetta, which"
+    echo "      translates amd64 Linux far more completely than qemu-user:"
+    echo "        Docker Desktop: enable Settings > General >"
+    echo "          'Use Rosetta for x86/amd64 emulation', then run:"
+    echo "            RAVEN_ENGINE=docker make build"
+    echo "        colima: colima start --arch x86_64 --vm-type vz --vz-rosetta"
+    echo "                RAVEN_ENGINE=docker make build"
+    echo ""
+    echo "  podman + libkrun only offers qemu-user for amd64 on arm64 and cannot"
+    echo "  run rustc; there is no in-container workaround for that engine."
+    echo ""
+    echo "  To skip this check anyway, set RAVEN_SKIP_RUST_CHECK=1."
+    echo ""
+    exit 1
+}
+
 # Check and fix build directory permissions if owned by root
 fix_build_permissions() {
     local current_user
@@ -286,7 +342,13 @@ build_stage1() {
 
     if [[ -f "${RAVEN_ROOT}/scripts/stages/stage1-base.sh" ]]; then
         build_sudo_rs
-        build_raven_terminal
+        # raven-terminal is a GUI (GLFW/X11) app; skip it for minimal/headless
+        # builds, which don't ship a graphical environment.
+        if [[ "${RAVEN_MINIMAL:-0}" == "1" ]]; then
+            log_info "Minimal build: skipping GUI raven-terminal"
+        else
+            build_raven_terminal
+        fi
         run_logged source "${RAVEN_ROOT}/scripts/stages/stage1-base.sh"
     else
         log_warn "Stage 1 script not found, skipping"
@@ -356,6 +418,8 @@ Usage: $(basename "$0") [OPTIONS] [STAGE]
 
 Stages:
     all         Build everything (default)
+    minimal     Headless build: toolchain + base system + kernel + CLI ISO,
+                no GUI (skips stage3 packages, security and desktop)
     stage0      Build cross-compilation toolchain
     stage1      Build base system with cross toolchain
     stage2      Native rebuild of entire system
@@ -433,7 +497,7 @@ main() {
                 SKIP_DEP_CHECK=true
                 shift
                 ;;
-            all|stage0|stage1|stage2|stage3|security|desktop|stage4)
+            all|stage0|stage1|stage2|stage3|security|desktop|stage4|minimal)
                 stage="$1"
                 shift
                 ;;
@@ -445,8 +509,24 @@ main() {
         esac
     done
 
+    # Minimal/headless build: base system + kernel + CLI ISO, no GUI. Export so
+    # stage scripts (stage1 terminal, stage4 compositor) can skip GUI pieces.
+    if [[ "$stage" == "minimal" ]]; then
+        export RAVEN_MINIMAL=1
+    fi
+
     # Check for required dependencies first
     check_build_dependencies
+
+    # Fail fast if rustc can't run (qemu-user emulation on arm64). Skip for the
+    # pure-C cross toolchain (stage0) and ISO assembly (stage4), which build no
+    # Rust; every other path compiles Rust and would crash without this.
+    # 'minimal' still builds Rust (sudo-rs, uutils) in stage1/2, so check it too.
+    case "$stage" in
+        all|stage1|stage2|stage3|security|desktop|minimal)
+            check_rust_toolchain
+            ;;
+    esac
 
     # Fix build directory permissions before anything else
     fix_build_permissions
@@ -479,6 +559,15 @@ main() {
             build_stage3
             build_security
             build_desktop
+            build_stage4
+            ;;
+        minimal)
+            # Headless base system: toolchain -> base/kernel -> native rebuild
+            # -> CLI ISO. Skips stage3 packages, security and the desktop, so it
+            # needs none of the GUI build dependencies.
+            build_stage0
+            build_stage1
+            build_stage2
             build_stage4
             ;;
         stage0)

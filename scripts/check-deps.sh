@@ -93,7 +93,10 @@ DEPENDENCIES=(
     "mmd:mtools:-:-:-:-:-:Create directories in FAT images"
     
     # Wayland compositor and display server
-    "raven-compositor:raven-compositor:raven-compositor:raven-compositor:raven-compositor:raven-compositor:raven-compositor:Raven Wayland compositor (built from source)"
+    # NOTE: raven-compositor is intentionally NOT checked here. It is not a host
+    # package — it is fetched from GitHub and built with cargo during the build
+    # (see scripts/build-compositor.sh and stages 3/4). Listing it as an
+    # installable package made pacman abort with "target not found".
     "Xwayland:xorg-xwayland:xwayland:xorg-x11-server-Xwayland:xwayland:xorg-server-xwayland:xwayland:XWayland X11 compatibility"
     "seatd:seatd:seatd:seatd:seatd:seatd:seatd:Seat management daemon"
     "swaybg:swaybg:swaybg:swaybg:swaybg:swaybg:swaybg:Wallpaper utility for Wayland"
@@ -149,12 +152,21 @@ DEPENDENCIES=(
 
 # Additional package groups (not command-based)
 # Format: "distro:packages"
-EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja wayland-protocols libxkbcommon pixman libdrm mesa libinput seatd pango cairo gdk-pixbuf2"
-EXTRA_PACKAGES_DEBIAN="build-essential linux-headers-generic libelf-dev python3-jinja2 libwayland-dev wayland-protocols libxkbcommon-dev libpixman-1-dev libdrm-dev libmesa-dev libinput-dev libseat-dev libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev"
-EXTRA_PACKAGES_FEDORA="kernel-devel elfutils-libelf-devel python3-jinja2 wayland-devel wayland-protocols-devel libxkbcommon-devel pixman-devel libdrm-devel mesa-libGL-devel libinput-devel libseat-devel pango-devel cairo-devel gdk-pixbuf2-devel"
-EXTRA_PACKAGES_SUSE="kernel-devel libelf-devel python3-Jinja2 wayland-devel wayland-protocols-devel libxkbcommon-devel pixman-devel libdrm-devel Mesa-libGL-devel libinput-devel libseat-devel pango-devel cairo-devel gdk-pixbuf-devel"
-EXTRA_PACKAGES_VOID="base-devel linux-headers elfutils-devel python3-Jinja2 wayland-devel wayland-protocols libxkbcommon-devel pixman-devel libdrm-devel mesa-devel libinput-devel seatd-devel pango-devel cairo-devel gdk-pixbuf-devel"
-EXTRA_PACKAGES_ALPINE="build-base linux-headers elfutils-dev py3-jinja2 wayland-dev wayland-protocols libxkbcommon-dev pixman-dev libdrm-dev mesa-dev libinput-dev seatd-dev pango-dev cairo-dev gdk-pixbuf-dev"
+# Trailing extras on each list are for components the build compiles from source:
+#   - libx{cursor,i,inerama,fixes}: raven-terminal's go-gl/glfw cgo build
+#     (GLFW X11 backend).
+#   - oniguruma: uutils-coreutils onig_sys with RUSTONIG_SYSTEM_LIBONIG=1.
+#   - gtk4 / libadwaita: RavenFileManager's gtk4-rs and libadwaita-rs bindings
+#     (gdk4-sys needs gtk4.pc, libadwaita-sys needs libadwaita-1.pc).
+#   - vulkan-headers / vulkan loader: Vem's Gio (gioui.org) cgo backend needs
+#     <vulkan/vulkan.h> and may link -lvulkan.
+# Mirrored in the Dockerfile.
+EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja wayland-protocols libxkbcommon pixman libdrm mesa libinput seatd pango cairo gdk-pixbuf2 libxcursor libxi libxinerama libxfixes oniguruma gtk4 libadwaita vulkan-headers vulkan-icd-loader"
+EXTRA_PACKAGES_DEBIAN="build-essential linux-headers-generic libelf-dev python3-jinja2 libwayland-dev wayland-protocols libxkbcommon-dev libpixman-1-dev libdrm-dev libmesa-dev libinput-dev libseat-dev libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev libxcursor-dev libxi-dev libxinerama-dev libxfixes-dev libonig-dev libgtk-4-dev libadwaita-1-dev libvulkan-dev"
+EXTRA_PACKAGES_FEDORA="kernel-devel elfutils-libelf-devel python3-jinja2 wayland-devel wayland-protocols-devel libxkbcommon-devel pixman-devel libdrm-devel mesa-libGL-devel libinput-devel libseat-devel pango-devel cairo-devel gdk-pixbuf2-devel libXcursor-devel libXi-devel libXinerama-devel libXfixes-devel oniguruma-devel gtk4-devel libadwaita-devel vulkan-headers vulkan-loader-devel"
+EXTRA_PACKAGES_SUSE="kernel-devel libelf-devel python3-Jinja2 wayland-devel wayland-protocols-devel libxkbcommon-devel pixman-devel libdrm-devel Mesa-libGL-devel libinput-devel libseat-devel pango-devel cairo-devel gdk-pixbuf-devel libXcursor-devel libXi-devel libXinerama-devel libXfixes-devel oniguruma-devel gtk4-devel libadwaita-devel vulkan-headers vulkan-loader-devel"
+EXTRA_PACKAGES_VOID="base-devel linux-headers elfutils-devel python3-Jinja2 wayland-devel wayland-protocols libxkbcommon-devel pixman-devel libdrm-devel mesa-devel libinput-devel seatd-devel pango-devel cairo-devel gdk-pixbuf-devel libXcursor-devel libXi-devel libXinerama-devel libXfixes-devel oniguruma-devel gtk4-devel libadwaita-devel Vulkan-Headers vulkan-loader-devel"
+EXTRA_PACKAGES_ALPINE="build-base linux-headers elfutils-dev py3-jinja2 wayland-dev wayland-protocols libxkbcommon-dev pixman-dev libdrm-dev mesa-dev libinput-dev seatd-dev pango-dev cairo-dev gdk-pixbuf-dev libxcursor-dev libxi-dev libxinerama-dev libxfixes-dev oniguruma-dev gtk4.0-dev libadwaita-dev vulkan-headers vulkan-loader-dev"
 
 # =============================================================================
 # Functions
@@ -339,13 +351,31 @@ check_command() {
         
         # Rust source (needed for UEFI cross-compilation)
         rust-src)
-            # Check common locations for rust-src
+            # Prefer rustup's component list. It is authoritative for the
+            # rustup-managed toolchain this build uses, and unlike
+            # `rustc --print sysroot` it does not crash under qemu-user
+            # emulation (running the amd64 image on an arm64 host segfaults
+            # rustc, which previously made this check report a false MISSING).
+            if command -v rustup &>/dev/null; then
+                if rustup component list --installed 2>/dev/null | grep -q '^rust-src'; then
+                    return 0
+                fi
+            fi
+            # Fall back to known on-disk locations. RUSTUP_HOME may be a custom
+            # path (the build image uses /usr/local/rustup), so search its
+            # toolchains too rather than assuming ~/.rustup.
             local rust_sysroot
-            rust_sysroot="$(rustc --print sysroot 2>/dev/null)" || return 1
-            [[ -d "${rust_sysroot}/lib/rustlib/src/rust/library" ]] || \
-            [[ -d "/usr/lib/rustlib/src/rust/library" ]] || \
-            [[ -d "${HOME}/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library" ]]
-            return $?
+            rust_sysroot="$(rustc --print sysroot 2>/dev/null || true)"
+            if [[ -n "$rust_sysroot" && -d "${rust_sysroot}/lib/rustlib/src/rust/library" ]]; then
+                return 0
+            fi
+            if [[ -d "/usr/lib/rustlib/src/rust/library" ]]; then
+                return 0
+            fi
+            if compgen -G "${RUSTUP_HOME:-$HOME/.rustup}/toolchains/*/lib/rustlib/src/rust/library" >/dev/null 2>&1; then
+                return 0
+            fi
+            return 1
             ;;
         
         # Standard command check

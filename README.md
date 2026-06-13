@@ -180,8 +180,10 @@ the containerized build for you, on any host OS:
 
 ```bash
 make image      # build just the Docker/Podman toolchain image
-make build      # build everything and produce the ISO (-> ./build/)
+make build      # build everything and produce the ISO (-> repo root)
 make iso        # generate the ISO from existing build output
+make minimal    # headless build: base system + CLI ISO, no GUI
+make rootfs     # package the built rootfs as a runnable image (ravenlinux:latest)
 make shell      # interactive shell inside the build environment
 make help       # list every target
 
@@ -216,9 +218,19 @@ first run), and runs the container `--privileged` with the repo bind-mounted at
 See [docs/docker-build.md](docs/docker-build.md) for the full guide (options,
 environment variables, Apple Silicon notes, and troubleshooting).
 
-> **macOS note:** the resulting ISO is `x86_64`. On Apple Silicon, Docker/Podman
-> emulate x86_64, so the build works but is slower than on a native x86_64 host.
-> To boot/test the ISO afterwards, use QEMU (`brew install qemu`).
+> **macOS / Apple Silicon note:** the build is `x86_64`, so on Apple Silicon it
+> runs under emulation. Use **Docker or colima with Rosetta** — Rosetta
+> translates the amd64 toolchain reliably, whereas Podman's default qemu-user
+> emulation crashes the Rust compiler. With colima:
+> ```bash
+> colima start --vm-type vz --vz-rosetta --memory 12 --cpu 8
+> RAVEN_ENGINE=docker make build
+> ```
+> Give the VM several GB of RAM — the kernel link is memory-hungry and a small
+> VM gets OOM-killed. The build's working tree is kept on a Docker volume on
+> macOS (the bind mount's virtiofs mishandles the symlinks an LFS build unpacks);
+> the ISO still lands in the repo root. To boot/test the ISO, use QEMU
+> (`brew install qemu`).
 
 Prefer to run the engine directly:
 
@@ -227,6 +239,56 @@ docker build -t ravenlinux-build .
 docker run --rm -it --privileged -v "$PWD:/raven" -w /raven \
     ravenlinux-build ./scripts/build.sh all
 ```
+
+### Headless / minimal build (no GUI)
+
+For a lean, command-line-only RavenLinux — base system, kernel and a CLI ISO
+with **none** of the graphical stack — use the `minimal` build. It skips the
+compositor, file manager, desktop and GUI apps, so it needs none of the GUI
+build dependencies and builds from a much smaller toolchain image
+(`Dockerfile.minimal`):
+
+```bash
+make minimal-image   # slim headless toolchain image (one-time)
+make minimal         # base system + kernel + CLI ISO (-> repo root)
+```
+
+The resulting ISO boots straight to an autologin root shell on `tty1` (and the
+serial console). The minimal build uses its own image tag and a separate build
+volume, so it never touches the full build's output.
+
+### Running RavenLinux in a container (test your tools)
+
+The build produces an ISO for booting on hardware or in a VM. To **run
+RavenLinux itself and test terminal tools quickly**, package the built root
+filesystem (`build/sysroot`) as a container image. This is RavenLinux — not the
+Arch builder:
+
+```bash
+make build           # (or `make minimal`) build RavenLinux into the sysroot
+make rootfs          # package build/sysroot as image `ravenlinux:latest`
+
+# Run it — a Raven Linux shell with your tools (rvn, carrion, ivaldi, poxy, ...)
+docker run --rm -it --platform linux/amd64 ravenlinux:latest
+```
+
+`make minimal-rootfs` does the same from the headless build. Under the hood,
+`scripts/export-rootfs.sh` tars the sysroot and `docker import`s it as a flat
+image (drop `--platform linux/amd64` on a native x86_64 host).
+
+To iterate on a tool **without rebuilding**, mount the binary into the running
+image:
+
+```bash
+docker run --rm -it --platform linux/amd64 \
+    -v "$PWD/mytool/target/release/mytool:/usr/local/bin/mytool" \
+    ravenlinux:latest
+# now run `mytool` inside real RavenLinux
+```
+
+To bake a tool in permanently, add it to `scripts/lib/repos.sh` `REPO_REGISTRY`
+(or copy the binary into `build/sysroot/bin/`) and re-run `make rootfs`. Build Go
+tools with `CGO_ENABLED=0` for a static binary that runs regardless of libc.
 
 ### Development Environment
 
