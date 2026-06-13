@@ -29,6 +29,18 @@ FROM --platform=linux/amd64 archlinux:latest
 ENV LANG=C.UTF-8
 
 # -----------------------------------------------------------------------------
+# Disable pacman's seccomp download sandbox
+# -----------------------------------------------------------------------------
+# pacman 7's download sandbox installs a seccomp syscall filter. Under qemu-user
+# emulation (building this amd64 image on an arm64 host, e.g. Apple Silicon)
+# seccomp() returns EINVAL, so pacman aborts with:
+#   error: error restricting syscalls via seccomp: 22
+#   error: switching to sandbox user 'alpm' failed!
+# Uncommenting DisableSandboxSyscalls turns off only that syscall filter; the
+# build still runs in a throwaway container. No-op on native x86_64 hosts.
+RUN sed -i 's/^#DisableSandboxSyscalls/DisableSandboxSyscalls/' /etc/pacman.conf
+
+# -----------------------------------------------------------------------------
 # System + build dependencies
 # -----------------------------------------------------------------------------
 # Mirrors scripts/check-deps.sh (command deps + EXTRA_PACKAGES_ARCH). Grouped to

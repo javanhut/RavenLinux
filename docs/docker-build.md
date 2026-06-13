@@ -164,6 +164,7 @@ automatically — no extra flags needed:
 |---------|-------------|
 | `neither 'docker' nor 'podman' found` | Install Docker Desktop or Podman, or set `RAVEN_ENGINE`. |
 | `no image found in image index for architecture "arm64"` | The Arch base image is x86_64-only. The `Dockerfile` pins `--platform=linux/amd64`, so use the current Dockerfile / `make` / helper. If building by hand, add `--platform linux/amd64` to your `docker build`. |
+| `error restricting syscalls via seccomp: 22` / `switching to sandbox user 'alpm' failed` | pacman's download sandbox can't apply its seccomp filter under qemu emulation (arm64 host building the amd64 image). The `Dockerfile` disables it via `DisableSandboxSyscalls`; make sure you're on the current Dockerfile and re-run `make image`. |
 | `mount: permission denied` / `chroot: ... Operation not permitted` | The container is not privileged. Use the helper script, or add `--privileged` to your `docker run`. |
 | `no space left on device` | The Docker/Podman VM ran out of disk. Increase the VM disk size (Docker Desktop → Settings → Resources) or prune images. |
 | Build artifacts owned by `root` on the host | Expected: the privileged container runs as root. Re-run a build (the build script fixes ownership), or `sudo chown -R "$USER" build`. |
