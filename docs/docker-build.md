@@ -11,6 +11,24 @@ any host that runs Docker or Podman.
 
 ## Quick Start
 
+The simplest entry point is the `Makefile` at the repo root, which works the
+same on macOS, Windows, and Linux:
+
+```bash
+make image      # build just the toolchain image
+make build      # build everything; the ISO lands in ./build/ on your host
+make iso        # (re)generate the ISO from existing build output
+make shell      # interactive shell in the build environment
+make help       # list every target
+```
+
+Overrides: `make build JOBS=8`, `make build ARCH=x86_64`,
+`make build ENGINE=podman`, `make image IMAGE=raven:dev`, `make rebuild`
+(clean rebuild), `make clean` / `make distclean`.
+
+The Makefile is a thin wrapper around `scripts/docker-build.sh`, which you can
+call directly for the same result:
+
 ```bash
 # Build everything; the ISO lands in ./build/ on your host
 ./scripts/docker-build.sh all
@@ -62,6 +80,7 @@ arguments it runs a full build (`build.sh all`).
 | Command | Description |
 |---------|-------------|
 | `./scripts/docker-build.sh` | Full build (equivalent to `all`) |
+| `./scripts/docker-build.sh image` | Build the toolchain image only, then exit |
 | `./scripts/docker-build.sh all` | Build everything and generate the ISO |
 | `./scripts/docker-build.sh stage0` | Build only the cross-compilation toolchain |
 | `./scripts/docker-build.sh stage1` | Build the base system |

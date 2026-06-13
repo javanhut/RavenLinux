@@ -10,6 +10,7 @@
 #
 # Examples:
 #   ./scripts/docker-build.sh                 # build everything (build.sh all)
+#   ./scripts/docker-build.sh image           # build the toolchain image only
 #   ./scripts/docker-build.sh stage0          # only the cross toolchain
 #   ./scripts/docker-build.sh -j 8 stage1     # stage1 with 8 jobs
 #   ./scripts/docker-build.sh --clean all     # clean rebuild
@@ -49,6 +50,18 @@ if [[ -z "$ENGINE" ]]; then
     fi
 fi
 echo ">> Using container engine: ${ENGINE}"
+
+# -----------------------------------------------------------------------------
+# `image` subcommand: build the toolchain image only, then exit.
+# -----------------------------------------------------------------------------
+# Lets callers (and the Makefile) pre-build the Linux build host without running
+# a build or dropping into a shell.
+if [[ "${1:-}" == "image" ]]; then
+    echo ">> Building image '${IMAGE}' (toolchain only)..."
+    "$ENGINE" build -t "$IMAGE" -f "${RAVEN_ROOT}/Dockerfile" "${RAVEN_ROOT}"
+    echo ">> Image '${IMAGE}' is ready. Run a build with: ./scripts/docker-build.sh all"
+    exit 0
+fi
 
 # -----------------------------------------------------------------------------
 # Build the image (cached after first run)

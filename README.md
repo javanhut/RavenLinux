@@ -175,11 +175,32 @@ overlayfs mounts and a musl cross-toolchain, so it cannot run natively on macOS
 or Windows. The included `Dockerfile` provides a ready-to-use Linux build host
 that works with both Docker and Podman.
 
+**The easiest way is the `Makefile`** — it builds the toolchain image and runs
+the containerized build for you, on any host OS:
+
+```bash
+make image      # build just the Docker/Podman toolchain image
+make build      # build everything and produce the ISO (-> ./build/)
+make iso        # generate the ISO from existing build output
+make shell      # interactive shell inside the build environment
+make help       # list every target
+
+# Overrides
+make build JOBS=8            # parallel compile jobs
+make build ARCH=x86_64       # target architecture
+make build ENGINE=podman     # force Podman instead of Docker
+make rebuild                 # clean rebuild from scratch
+```
+
+Under the hood the Makefile calls `scripts/docker-build.sh`, which you can also
+use directly:
+
 ```bash
 # Build everything inside a container; the ISO lands in ./build/
 ./scripts/docker-build.sh all
 
 # Or target a single stage
+./scripts/docker-build.sh image           # build the toolchain image only
 ./scripts/docker-build.sh stage0          # cross toolchain only
 ./scripts/docker-build.sh -j 8 stage1     # stage1 with 8 jobs
 ./scripts/docker-build.sh --clean all     # clean rebuild
