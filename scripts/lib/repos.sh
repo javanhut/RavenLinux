@@ -51,7 +51,11 @@ declare -A REPO_REGISTRY=(
     [poxy]="javanhut/Poxy|go-cgo0|poxy|./cmd/poxy"
     [vem]="javanhut/Vem|go-cgo1|vem|"
     [carrion]="javanhut/TheCarrionLanguage|go-cgo0|carrion|./src/main.go"
-    [ivaldi]="javanhut/IvaldiVCS|go-cgo0|ivaldi|"
+    # Ivaldi is now a Rust workspace (single 'ivaldi' binary); the old IvaldiVCS
+    # repo was Go.
+    [ivaldi]="javanhut/Ivaldi|cargo|ivaldi|"
+    # OxigenLang: cargo workspace; the oxigen-cli crate produces the 'oxigen' bin.
+    [oxigen]="javanhut/OxigenLang|cargo|oxigen|"
 )
 
 # =============================================================================

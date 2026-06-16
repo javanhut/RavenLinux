@@ -99,6 +99,8 @@ RUN pacman -Syu --noconfirm --needed rustup \
 #     in graphene etc. transitively.
 #   - vulkan-headers / vulkan-icd-loader: Vem's Gio (gioui.org) cgo backend
 #     includes <vulkan/vulkan.h> and may link -lvulkan.
+#   - neovim / ripgrep: the Neovim editor is shipped in the rootfs (copied in by
+#     build_neovim); ripgrep is used by the NvCrow config.
 # Kept as its own layer (using the package DB already synced above, so no -Sy)
 # so editing it doesn't invalidate the large system-deps and rustup layers.
 # Mirrored in check-deps.sh EXTRA_PACKAGES.
@@ -107,6 +109,7 @@ RUN pacman -S --noconfirm --needed \
         oniguruma \
         gtk4 libadwaita \
         vulkan-headers vulkan-icd-loader \
+        neovim ripgrep \
     && pacman -Scc --noconfirm
 
 # The build's permission-fix step expects to be able to chown; running as root

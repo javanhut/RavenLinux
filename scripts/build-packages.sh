@@ -42,6 +42,7 @@ export RAVEN_ROOT="$PROJECT_ROOT"
 export RAVEN_BUILD="${PROJECT_ROOT}/build"
 SOURCES_DIR="${RAVEN_BUILD}/sources"
 OUTPUT_DIR="${RAVEN_BUILD}/packages"
+SYSROOT_DIR="${RAVEN_BUILD}/sysroot"
 
 # Avoid relying on ~/.cache in restricted environments
 export GOCACHE="${GOCACHE:-${RAVEN_BUILD}/.gocache}"
@@ -132,7 +133,88 @@ build_carrion() {
 build_ivaldi() {
     log_section "Building Ivaldi VCS"
     fetch_repo ivaldi
-    build_go_repo ivaldi
+    build_cargo_repo ivaldi
+}
+
+build_oxigen() {
+    log_section "Building OxigenLang"
+    fetch_repo oxigen
+    build_cargo_repo oxigen
+}
+
+# -----------------------------------------------------------------------------
+# Copy a host binary plus the shared libraries ldd reports into the sysroot.
+# RavenLinux assembles much of its userland this way (see stage2's bash/sudo
+# handling), so terminal tools that ship as host packages — like Neovim — land
+# in the image complete with their dependencies.
+# -----------------------------------------------------------------------------
+_copy_with_libs() {
+    local src="$1" dest_rel="$2"
+    if [[ ! -x "$src" ]]; then
+        log_warn "  $src not found, skipping"
+        return 1
+    fi
+    mkdir -p "$(dirname "${SYSROOT_DIR}${dest_rel}")"
+    cp -L "$src" "${SYSROOT_DIR}${dest_rel}"
+    chmod 755 "${SYSROOT_DIR}${dest_rel}"
+    local lib dest
+    for lib in $(ldd "$src" 2>/dev/null | grep -oE '/[^ ]+' | sort -u); do
+        [[ -f "$lib" ]] || continue
+        dest="${SYSROOT_DIR}${lib}"
+        [[ -e "$dest" ]] && continue
+        mkdir -p "$(dirname "$dest")"
+        cp -L "$lib" "$dest" 2>/dev/null || true
+    done
+}
+
+# Neovim — terminal editor. Not built from our repos; copied from the build
+# image (binary + runtime + bundled tree-sitter parsers + libs). The image
+# installs `neovim` and `ripgrep` for this.
+build_neovim() {
+    log_section "Installing Neovim"
+    local nvim_bin
+    nvim_bin="$(command -v nvim 2>/dev/null || true)"
+    if [[ -z "$nvim_bin" ]]; then
+        log_warn "nvim not in the build image; skipping (add 'neovim' to the Dockerfile)"
+        return 0
+    fi
+    _copy_with_libs "$nvim_bin" /usr/bin/nvim
+    [[ -d /usr/share/nvim ]] && { mkdir -p "${SYSROOT_DIR}/usr/share"; cp -a /usr/share/nvim "${SYSROOT_DIR}/usr/share/"; }
+    [[ -d /usr/lib/nvim ]]   && { mkdir -p "${SYSROOT_DIR}/usr/lib";   cp -a /usr/lib/nvim   "${SYSROOT_DIR}/usr/lib/"; }
+    ln -sf nvim "${SYSROOT_DIR}/usr/bin/vi" 2>/dev/null || true
+    # ripgrep — used by the NvCrow config (telescope/live-grep).
+    local rg_bin; rg_bin="$(command -v rg 2>/dev/null || true)"
+    [[ -n "$rg_bin" ]] && _copy_with_libs "$rg_bin" /usr/bin/rg
+    log_success "Neovim installed into sysroot"
+}
+
+# NvCrow — Neovim Lua config (lazy.nvim). Installed as the config for root and
+# /etc/skel so every account gets it; plugins bootstrap on first `nvim` launch
+# (needs network on the booted system).
+build_nvcrow() {
+    log_section "Installing NvCrow (Neovim config)"
+    local src_dir="${SOURCES_DIR}/nvcrow"
+    if [[ -d "${src_dir}/.git" ]]; then
+        (cd "${src_dir}" && git pull --quiet 2>/dev/null || true)
+    else
+        rm -rf "${src_dir}"
+        git clone --depth 1 https://github.com/javanhut/NvCrow.git "${src_dir}" || {
+            log_warn "Failed to clone NvCrow; skipping"
+            return 0
+        }
+    fi
+    local cfg
+    for cfg in "${SYSROOT_DIR}/root/.config/nvim" \
+               "${SYSROOT_DIR}/etc/skel/.config/nvim" \
+               "${SYSROOT_DIR}/home/raven/.config/nvim"; do
+        if [[ "$cfg" == *"/home/raven/"* && ! -d "${SYSROOT_DIR}/home/raven" ]]; then
+            continue
+        fi
+        mkdir -p "$cfg"
+        cp -a "${src_dir}/." "$cfg/"
+        rm -rf "$cfg/.git"
+    done
+    log_success "NvCrow installed (plugins bootstrap on first nvim launch)"
 }
 
 # =============================================================================
@@ -371,17 +453,31 @@ build_raven_launcher() {
     cd "${PROJECT_ROOT}"
 }
 
-# Build all packages
-build_all() {
-    # GitHub repos
+# Core / terminal tools — built for BOTH the minimal (headless) and full images.
+build_core_tools() {
+    build_shell
+    build_poxy
+    build_ivaldi
+    build_carrion
+    build_oxigen
+    build_neovim
+    build_nvcrow
+}
+
+# GUI / desktop-only tools — only useful with the graphical environment, so they
+# are built only for the full/desktop image.
+build_gui_tools() {
     build_compositor
     build_file_manager
     build_terminal
-    build_shell
-    build_poxy
     build_vem
-    build_carrion
-    build_ivaldi
+}
+
+# Build all packages (full/desktop image): core CLI tools + GUI tools + the
+# local system tools.
+build_all() {
+    build_core_tools
+    build_gui_tools
     # Local tools
     build_installer
     build_rvn
@@ -429,13 +525,13 @@ main() {
                 export RAVEN_NO_LOG=1
                 shift
                 ;;
-            compositor|file-manager|terminal|shell|poxy|vem|carrion|ivaldi|installer|rvn|dhcp|usb|bootloader|wifi|launcher|all)
+            compositor|file-manager|terminal|shell|poxy|vem|carrion|ivaldi|oxigen|neovim|nvim|nvcrow|installer|rvn|dhcp|usb|bootloader|wifi|launcher|core|all)
                 target="$1"
                 shift
                 ;;
             *)
                 log_error "Unknown package or option: $1"
-                echo "Usage: $0 [--no-log] [compositor|file-manager|terminal|shell|poxy|vem|carrion|ivaldi|installer|rvn|dhcp|usb|bootloader|wifi|launcher|all]"
+                echo "Usage: $0 [--no-log] [core|all|compositor|file-manager|terminal|shell|poxy|vem|carrion|ivaldi|oxigen|neovim|nvcrow|installer|rvn|dhcp|usb|bootloader|wifi|launcher]"
                 exit 1
                 ;;
         esac
@@ -466,6 +562,10 @@ main() {
         vem)            build_vem ;;
         carrion)        build_carrion ;;
         ivaldi)         build_ivaldi ;;
+        oxigen)         build_oxigen ;;
+        neovim|nvim)    build_neovim ;;
+        nvcrow)         build_nvcrow ;;
+        core)           build_core_tools ;;
         installer)      build_installer ;;
         rvn)            build_rvn ;;
         dhcp)           build_raven_dhcp ;;

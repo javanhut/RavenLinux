@@ -160,8 +160,10 @@ DEPENDENCIES=(
 #     (gdk4-sys needs gtk4.pc, libadwaita-sys needs libadwaita-1.pc).
 #   - vulkan-headers / vulkan loader: Vem's Gio (gioui.org) cgo backend needs
 #     <vulkan/vulkan.h> and may link -lvulkan.
+#   - neovim / ripgrep: shipped in the rootfs (copied in by build_neovim);
+#     ripgrep is used by the NvCrow config.
 # Mirrored in the Dockerfile.
-EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja wayland-protocols libxkbcommon pixman libdrm mesa libinput seatd pango cairo gdk-pixbuf2 libxcursor libxi libxinerama libxfixes oniguruma gtk4 libadwaita vulkan-headers vulkan-icd-loader"
+EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja wayland-protocols libxkbcommon pixman libdrm mesa libinput seatd pango cairo gdk-pixbuf2 libxcursor libxi libxinerama libxfixes oniguruma gtk4 libadwaita vulkan-headers vulkan-icd-loader neovim ripgrep"
 EXTRA_PACKAGES_DEBIAN="build-essential linux-headers-generic libelf-dev python3-jinja2 libwayland-dev wayland-protocols libxkbcommon-dev libpixman-1-dev libdrm-dev libmesa-dev libinput-dev libseat-dev libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev libxcursor-dev libxi-dev libxinerama-dev libxfixes-dev libonig-dev libgtk-4-dev libadwaita-1-dev libvulkan-dev"
 EXTRA_PACKAGES_FEDORA="kernel-devel elfutils-libelf-devel python3-jinja2 wayland-devel wayland-protocols-devel libxkbcommon-devel pixman-devel libdrm-devel mesa-libGL-devel libinput-devel libseat-devel pango-devel cairo-devel gdk-pixbuf2-devel libXcursor-devel libXi-devel libXinerama-devel libXfixes-devel oniguruma-devel gtk4-devel libadwaita-devel vulkan-headers vulkan-loader-devel"
 EXTRA_PACKAGES_SUSE="kernel-devel libelf-devel python3-Jinja2 wayland-devel wayland-protocols-devel libxkbcommon-devel pixman-devel libdrm-devel Mesa-libGL-devel libinput-devel libseat-devel pango-devel cairo-devel gdk-pixbuf-devel libXcursor-devel libXi-devel libXinerama-devel libXfixes-devel oniguruma-devel gtk4-devel libadwaita-devel vulkan-headers vulkan-loader-devel"

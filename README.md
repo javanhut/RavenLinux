@@ -250,12 +250,13 @@ build dependencies and builds from a much smaller toolchain image
 
 ```bash
 make minimal-image   # slim headless toolchain image (one-time)
-make minimal         # base system + kernel + CLI ISO (-> repo root)
+make minimal         # base system + kernel + CLI ISO -> raven-*-minimal.iso
 ```
 
-The resulting ISO boots straight to an autologin root shell on `tty1` (and the
-serial console). The minimal build uses its own image tag and a separate build
-volume, so it never touches the full build's output.
+The resulting ISO (`raven-<ver>-<arch>-minimal.iso` in the repo root) boots
+straight to an autologin root shell on `tty1` (and the serial console). The
+minimal build uses its own image tag, build volume and ISO name, so it never
+touches the full build's output.
 
 ### Running RavenLinux in a container (test your tools)
 

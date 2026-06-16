@@ -27,7 +27,12 @@ LOGS_DIR="${LOGS_DIR:-${BUILD_DIR}/logs}"
 RAVEN_VERSION="${RAVEN_VERSION:-2025.12}"
 RAVEN_ARCH="${RAVEN_ARCH:-x86_64}"
 ISO_LABEL="RAVEN_LIVE"
-ISO_OUTPUT="${PROJECT_ROOT}/raven-${RAVEN_VERSION}-${RAVEN_ARCH}.iso"
+# Headless builds get a distinct filename so they don't clobber the full ISO.
+if [[ "${RAVEN_MINIMAL:-0}" == "1" ]]; then
+    ISO_OUTPUT="${PROJECT_ROOT}/raven-${RAVEN_VERSION}-${RAVEN_ARCH}-minimal.iso"
+else
+    ISO_OUTPUT="${PROJECT_ROOT}/raven-${RAVEN_VERSION}-${RAVEN_ARCH}.iso"
+fi
 
 # =============================================================================
 # Logging (use shared library or define fallbacks)

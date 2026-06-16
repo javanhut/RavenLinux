@@ -51,6 +51,9 @@ RUN pacman -Syu --noconfirm --needed \
         ncurses zlib libffi \
         # uutils-coreutils builds onig_sys with RUSTONIG_SYSTEM_LIBONIG=1
         oniguruma \
+        # Terminal editor shipped in the rootfs (copied in by build_neovim);
+        # ripgrep is used by the NvCrow config.
+        neovim ripgrep \
         # Misc runtime utilities used by the build/test scripts
         kexec-tools inetutils \
     && pacman -Scc --noconfirm

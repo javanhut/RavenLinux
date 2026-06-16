@@ -410,6 +410,20 @@ build_stage4() {
     fi
 }
 
+# Core CLI tools (shell, poxy, ivaldi, carrion, oxigen, neovim+NvCrow). Built for
+# the minimal/headless image; the full build gets these plus the GUI tools as
+# part of stage3 (build-packages.sh all). Output lands in build/packages/bin and
+# is installed into the sysroot by stage4.
+build_core_packages() {
+    log_section "Building Core CLI Tools"
+
+    if [[ -x "${RAVEN_ROOT}/scripts/build-packages.sh" ]]; then
+        run_logged "${RAVEN_ROOT}/scripts/build-packages.sh" core
+    else
+        log_warn "build-packages.sh not found, skipping core tools"
+    fi
+}
+
 show_help() {
     cat << EOF
 RavenLinux Build System v${RAVEN_VERSION}
@@ -562,12 +576,14 @@ main() {
             build_stage4
             ;;
         minimal)
-            # Headless base system: toolchain -> base/kernel -> native rebuild
-            # -> CLI ISO. Skips stage3 packages, security and the desktop, so it
-            # needs none of the GUI build dependencies.
+            # Headless build: toolchain -> base/kernel -> native rebuild -> core
+            # CLI tools -> CLI ISO. Builds the terminal tools (shell, poxy,
+            # ivaldi, carrion, oxigen, neovim+NvCrow) but skips the GUI tools,
+            # security stack and desktop.
             build_stage0
             build_stage1
             build_stage2
+            build_core_packages
             build_stage4
             ;;
         stage0)
