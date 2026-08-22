@@ -1,9 +1,9 @@
 # =============================================================================
 # RavenLinux Makefile
 # =============================================================================
-# Builds a Docker/Podman image containing the full RavenLinux build toolchain,
-# and runs the build inside it -- so you can produce a RavenLinux ISO from ANY
-# host (macOS, Windows, or Linux) without the host itself being Linux.
+# Builds a Docker/Podman image containing the RavenLinux build toolchain, and
+# runs the build inside it -- so you can produce a RavenLinux ISO from ANY host
+# (macOS, Windows, or Linux) without the host itself being Linux.
 #
 # RavenLinux is a Linux-From-Scratch style distro: the build performs chroot,
 # overlayfs mounts, loop-device setup and runs a musl cross-toolchain. None of
@@ -67,45 +67,22 @@ image: ## Build the Docker/Podman toolchain image only
 build all: ## Build everything and generate the ISO (-> ./build/)
 	$(RUN) $(BUILD_FLAGS) all
 
-# ----------------------------------------------------------------------------
-# Minimal / headless build (no GUI)
-# ----------------------------------------------------------------------------
-# Base system + kernel + CLI ISO, with none of the graphical stack. Uses a
-# slim toolchain image (Dockerfile.minimal), its own image tag and a separate
-# build volume, so it never pulls in the GUI deps and keeps its sysroot apart
-# from the full build. The ISO still lands in the repo root.
-MINIMAL_IMAGE ?= ravenlinux-build-minimal
-MINIMAL_ENV := RAVEN_IMAGE='$(MINIMAL_IMAGE)' RAVEN_DOCKERFILE='Dockerfile.minimal' RAVEN_BUILD_VOLUME='raven-build-minimal' $(if $(strip $(ENGINE)),RAVEN_ENGINE='$(ENGINE)',)
-
-.PHONY: minimal-image
-minimal-image: ## Build the slim headless toolchain image only
-	$(MINIMAL_ENV) $(DOCKER_BUILD) image
-
-.PHONY: minimal
-minimal: ## Headless build: base system + kernel + CLI ISO (no GUI)
-	$(MINIMAL_ENV) $(DOCKER_BUILD) $(BUILD_FLAGS) minimal
+.PHONY: rebuild
+rebuild: ## Clean rebuild from scratch (wipes build dir, then builds all)
+	$(RUN) $(BUILD_FLAGS) --clean all
 
 # ----------------------------------------------------------------------------
-# RavenLinux container image (the OS itself — for running and testing tools)
+# RavenLinux container image (the OS itself — for running and testing)
 # ----------------------------------------------------------------------------
 # Packages the built rootfs (build/sysroot) as a runnable image. This is
 # RavenLinux, not the Arch builder. Run a build first, then:
-#   make rootfs           # from the full build  -> includes your tools
-#   make minimal-rootfs   # from the minimal build (bare base)
+#   make rootfs
 #   docker run --rm -it --platform linux/amd64 ravenlinux
 ROOTFS_IMAGE ?= ravenlinux:latest
 
 .PHONY: rootfs
-rootfs: ## Package the full RavenLinux rootfs as image '$(ROOTFS_IMAGE)'
+rootfs: ## Package the RavenLinux rootfs as image '$(ROOTFS_IMAGE)'
 	$(ENV) RAVEN_ROOTFS_IMAGE='$(ROOTFS_IMAGE)' ./scripts/export-rootfs.sh
-
-.PHONY: minimal-rootfs
-minimal-rootfs: ## Package the minimal RavenLinux rootfs as image '$(ROOTFS_IMAGE)'
-	$(MINIMAL_ENV) RAVEN_ROOTFS_IMAGE='$(ROOTFS_IMAGE)' ./scripts/export-rootfs.sh
-
-.PHONY: rebuild
-rebuild: ## Clean rebuild from scratch (wipes build dir, then builds all)
-	$(RUN) $(BUILD_FLAGS) --clean all
 
 # ----------------------------------------------------------------------------
 # Individual stages (see scripts/build.sh for details)
@@ -123,16 +100,8 @@ stage2: ## Native rebuild of the entire system
 	$(RUN) $(BUILD_FLAGS) stage2
 
 .PHONY: stage3
-stage3: ## Build additional packages
+stage3: ## Build base packages (core libraries, shells, OpenSSH)
 	$(RUN) $(BUILD_FLAGS) stage3
-
-.PHONY: security
-security: ## Build the security tooling
-	$(RUN) $(BUILD_FLAGS) security
-
-.PHONY: desktop
-desktop: ## Build the desktop / compositor
-	$(RUN) $(BUILD_FLAGS) desktop
 
 .PHONY: stage4 iso
 stage4 iso: ## Generate the bootable ISO from existing build output

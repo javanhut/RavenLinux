@@ -38,7 +38,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RAVEN_ROOT="$(dirname "$SCRIPT_DIR")"
 IMAGE="${RAVEN_IMAGE:-ravenlinux-build}"
 # Dockerfile to build the toolchain image from. Override with RAVEN_DOCKERFILE
-# (e.g. Dockerfile.minimal for the slim headless image).
+# to use a variant image.
 DOCKERFILE="${RAVEN_DOCKERFILE:-Dockerfile}"
 
 # RavenLinux only targets x86_64 (the Arch base image is x86_64-only). On an

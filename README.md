@@ -1,6 +1,6 @@
 # RavenLinux
 
-A developer-focused Linux distribution built from scratch with custom tooling.
+A minimal Linux distribution built from scratch, meant to be rebuilt on.
 
 ```
   _____                         _      _
@@ -13,413 +13,152 @@ A developer-focused Linux distribution built from scratch with custom tooling.
 
 ## Overview
 
-RavenLinux is an independent Linux distribution designed for developers and application development. It features:
+RavenLinux is an independent, Linux-From-Scratch style distribution. This is the
+base system and nothing more: a musl userland, a custom init, a shell, and a
+bootable ISO. It is deliberately small so that everything above it can be
+designed and built to taste.
 
-- **Custom Package Manager** (`rvn`) - Fast, Rust-based package management with developer workspaces
-- **Custom Bootloader** (RavenBoot) - Multi-boot UEFI bootloader with Linux EFI stub support
-- **Native Tools Integration** - First-class support for Vem editor, Carrion language, and Ivaldi VCS
-- **Minimal Base** - Built with musl libc for a clean, lightweight system
-- **Rolling Release** - Always up-to-date packages
+What's here:
 
-## Downloads
+- **musl libc** base, cross-built from source with a purpose-built toolchain
+- **Custom init** (`raven-init`) and service manager (`raven-rc`), written in Rust
+- **Custom bootloader** (RavenBoot), a UEFI loader written in Rust, with GRUB as
+  the BIOS fallback
+- **uutils coreutils** (Rust) for the core userland
+- **bash** and **fish** shells, **OpenSSH** client and server
+- **A five-stage build** that runs in a container, so it works from any host
 
-Download the latest release from [GitHub Releases](../../releases):
+What's deliberately absent: a desktop environment, a package manager, a text
+editor, language toolchains, an installer. Those are the things to build back.
 
-| File                                          | Description          |
-| --------------------------------------------- | -------------------- |
-| `ravenlinux-vX.X.X.iso`                       | Bootable ISO image   |
-| `raven-usb-vX.X.X-linux-x86_64`               | USB flasher tool     |
-| `ravenlinux-vX.X.X-source.tar.gz`             | Complete source code |
-| `ravenlinux-tools-vX.X.X-linux-x86_64.tar.gz` | All tools bundled    |
+## Building
 
-### Quick Install
-
-```bash
-# Download the ISO and raven-usb tool, then flash to USB
-chmod +x raven-usb-*-linux-x86_64
-sudo ./raven-usb-*-linux-x86_64 ravenlinux-*.iso /dev/sdX
-
-# Boot from USB and follow the installer
-```
-
-## Technology Stack
-
-| Component            | Language | Description                                 |
-| -------------------- | -------- | ------------------------------------------- |
-| Kernel               | C        | Linux kernel with EFI stub                  |
-| Bootloader           | Rust     | UEFI multi-boot loader (RavenBoot)          |
-| Init System          | Rust     | Custom init and service manager             |
-| Package Manager      | Rust     | System package management (rvn)             |
-| Text Editor          | Go       | Vem - Modal editor with syntax highlighting |
-| Version Control      | Go       | Ivaldi - Distributed VCS                    |
-| Programming Language | Go       | Carrion - Custom programming language       |
-| WiFi Manager         | Go       | TUI/GUI tools to connect to WiFi networks   |
-| Installer            | Go       | GUI system installer                        |
-| USB Flasher          | Go       | Tool to create bootable USB drives          |
-
-## Native Tools
-
-RavenLinux includes these custom development tools:
-
-### Vem (Text Editor)
-
-Modal text editor with syntax highlighting and modern editing features.
+The build runs inside a container so it works from macOS, Windows, or Linux. It
+needs Docker or Podman, and the container runs `--privileged` because the build
+uses chroot, overlayfs mounts, and loop devices.
 
 ```bash
-vem myfile.txt
-```
-
-### Carrion (Programming Language)
-
-Custom programming language designed for system scripting and application development.
-
-```bash
-carrion run script.crl
-```
-
-### OxigenLang (Programming Language)
-
-TBD - Still in Alpha
-
-```bash
-oxigen example.oxi
-```
-
-### Ivaldi (Version Control) Currently GO \*will transition to Rust Version
-
-Distributed version control system with a focus on simplicity.
-
-```bash
-ivaldi forge
-ivaldi seal "Example message"
-ivaldi upload
-```
-
-## Networking
-
-### WiFi Setup
-
-Connecting to WiFi is simple. Just run:
-
-```bash
-sudo wifi
-```
-
-This opens an interactive terminal interface where you can:
-
-- See all available networks with signal strength
-- Use arrow keys to select a network
-- Enter password when prompted
-- Connection is automatically saved for next time
-
-That's it! No complicated commands to remember.
-
-Note: RavenLinux ships `rtw89` firmware and sets `options rtw89_pci disable_aspm=1` by default to ensure RTL8852BE cards reliably create a `wlan*` interface at boot.
-
-### Alternative: GUI WiFi Manager
-
-If you prefer a graphical interface:
-
-```bash
-raven-wifi
-```
-
-### Advanced: Manual WiFi (CLI)
-
-For power users who prefer raw commands:
-
-```bash
-# Using iwd
-iwctl station wlan0 scan
-iwctl station wlan0 get-networks
-iwctl station wlan0 connect "NetworkName"
-
-# Using wpa_supplicant (fallback)
-wpa_passphrase "NetworkName" "password" > /etc/wpa_supplicant.conf
-wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant.conf
-dhcpcd wlan0
-```
-
-## Building from Source
-
-### Requirements
-
-- Linux system (tested on Arch Linux)
-- 20GB+ disk space
-- 8GB+ RAM recommended
-- Rust toolchain
-- Go toolchain (1.23+)
-- Build tools: gcc, make, cmake, meson
-
-### Build Steps
-
-```bash
-# Clone the repository
-git clone https://github.com/javanhut/RavenLinux.git
-cd RavenLinux
-
-# Build everything and generate ISO
-./scripts/build.sh all
-
-# Or build individual stages:
-./scripts/build.sh stage1    # Download toolchain and build base
-./scripts/build.sh stage2    # Build native sysroot
-./scripts/build.sh stage3    # Build packages
-./scripts/build.sh stage4    # Generate ISO
-```
-
-### Building with Docker / Podman (macOS, Windows, or Linux)
-
-RavenLinux is a Linux-From-Scratch style distro — the build uses chroot,
-overlayfs mounts and a musl cross-toolchain, so it cannot run natively on macOS
-or Windows. The included `Dockerfile` provides a ready-to-use Linux build host
-that works with both Docker and Podman.
-
-**The easiest way is the `Makefile`** — it builds the toolchain image and runs
-the containerized build for you, on any host OS:
-
-```bash
-make image      # build just the Docker/Podman toolchain image
-make build      # build everything and produce the ISO (-> repo root)
-make iso        # generate the ISO from existing build output
-make minimal    # headless build: base system + CLI ISO, no GUI
-make rootfs     # package the built rootfs as a runnable image (ravenlinux:latest)
-make shell      # interactive shell inside the build environment
+make image      # build the toolchain image (cached after the first run)
+make build      # build everything -> ./build/ and raven-<ver>-x86_64.iso
+make shell      # drop into the build environment interactively
 make help       # list every target
-
-# Overrides
-make build JOBS=8            # parallel compile jobs
-make build ARCH=x86_64       # target architecture
-make build ENGINE=podman     # force Podman instead of Docker
-make rebuild                 # clean rebuild from scratch
 ```
 
-Under the hood the Makefile calls `scripts/docker-build.sh`, which you can also
-use directly:
+Common overrides:
 
 ```bash
-# Build everything inside a container; the ISO lands in ./build/
-./scripts/docker-build.sh all
-
-# Or target a single stage
-./scripts/docker-build.sh image           # build the toolchain image only
-./scripts/docker-build.sh stage0          # cross toolchain only
-./scripts/docker-build.sh -j 8 stage1     # stage1 with 8 jobs
-./scripts/docker-build.sh --clean all     # clean rebuild
-
-# Drop into an interactive shell in the build environment
-./scripts/docker-build.sh shell
+make build JOBS=8          # 8 parallel compile jobs
+make build ENGINE=podman   # force Podman instead of Docker
+make iso ARCH=x86_64       # target architecture
 ```
 
-The helper auto-detects Docker or Podman, builds the image (cached after the
-first run), and runs the container `--privileged` with the repo bind-mounted at
-`/raven` so all artifacts appear in `./build/` on your host.
-
-See [docs/docker-build.md](docs/docker-build.md) for the full guide (options,
-environment variables, Apple Silicon notes, and troubleshooting).
-
-> **macOS / Apple Silicon note:** the build is `x86_64`, so on Apple Silicon it
-> runs under emulation. Use **Docker or colima with Rosetta** — Rosetta
-> translates the amd64 toolchain reliably, whereas Podman's default qemu-user
-> emulation crashes the Rust compiler. With colima:
-> ```bash
-> colima start --vm-type vz --vz-rosetta --memory 12 --cpu 8
-> RAVEN_ENGINE=docker make build
-> ```
-> Give the VM several GB of RAM — the kernel link is memory-hungry and a small
-> VM gets OOM-killed. The build's working tree is kept on a Docker volume on
-> macOS (the bind mount's virtiofs mishandles the symlinks an LFS build unpacks);
-> the ISO still lands in the repo root. To boot/test the ISO, use QEMU
-> (`brew install qemu`).
-
-Prefer to run the engine directly:
+To build on a Linux host directly, without the container:
 
 ```bash
-docker build -t ravenlinux-build .
-docker run --rm -it --privileged -v "$PWD:/raven" -w /raven \
-    ravenlinux-build ./scripts/build.sh all
+./scripts/check-deps.sh    # check and install host build dependencies
+./scripts/build.sh all
 ```
 
-### Headless / minimal build (no GUI)
+Note that RavenLinux targets x86_64 only. On an arm64 host (e.g. Apple Silicon)
+the amd64 build image runs under emulation, and `rustc` crashes under
+qemu-user — use Docker Desktop or colima with Rosetta, or build on x86_64.
 
-For a lean, command-line-only RavenLinux — base system, kernel and a CLI ISO
-with **none** of the graphical stack — use the `minimal` build. It skips the
-compositor, file manager, desktop and GUI apps, so it needs none of the GUI
-build dependencies and builds from a much smaller toolchain image
-(`Dockerfile.minimal`):
+## Build Stages
+
+| Stage | Script | What it does |
+|-------|--------|--------------|
+| `stage0` | `scripts/stages/stage0-toolchain.sh` | musl cross-compilation toolchain (binutils, gcc, musl) |
+| `stage1` | `scripts/stages/stage1-base.sh` | Base system cross-built with that toolchain; kernel and initramfs |
+| `stage2` | `scripts/stages/stage2-native.sh` | Native rebuild of the sysroot: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
+| `stage3` | `scripts/stages/stage3-packages.sh` | Base packages: core libraries (zlib, ncurses, readline, attr, acl), shells, OpenSSH, RavenBoot |
+| `stage4` | `scripts/stages/stage4-iso.sh` | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
+
+Run one stage at a time with `make stage2` or `./scripts/build.sh stage2`.
+
+Artifacts land in `./build/`:
+
+```
+build/
+├── toolchain/   # stage0 cross toolchain
+├── sysroot/     # the RavenLinux root filesystem
+├── packages/    # built binaries staged for the sysroot
+├── sources/     # downloaded and cloned sources
+├── iso/         # ISO workspace
+└── logs/        # per-stage build logs
+```
+
+## Testing the ISO
 
 ```bash
-make minimal-image   # slim headless toolchain image (one-time)
-make minimal         # base system + kernel + CLI ISO -> raven-*-minimal.iso
+# UEFI
+qemu-system-x86_64 -cdrom raven-*.iso -m 2G \
+  -nographic -serial mon:stdio \
+  -bios /usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd -enable-kvm
+
+# BIOS
+qemu-system-x86_64 -cdrom raven-*.iso -m 2G -enable-kvm
+
+# Write to USB
+sudo dd if=raven-*.iso of=/dev/sdX bs=4M status=progress
 ```
 
-The resulting ISO (`raven-<ver>-<arch>-minimal.iso` in the repo root) boots
-straight to an autologin root shell on `tty1` (and the serial console). The
-minimal build uses its own image tag, build volume and ISO name, so it never
-touches the full build's output.
+The ISO boots to a root shell on tty1. Under UEFI it boots via RavenBoot; under
+BIOS (or if RavenBoot didn't build) GRUB takes over, offering a serial-console
+entry for headless VMs and a recovery entry.
 
-### Running RavenLinux in a container (test your tools)
-
-The build produces an ISO for booting on hardware or in a VM. To **run
-RavenLinux itself and test terminal tools quickly**, package the built root
-filesystem (`build/sysroot`) as a container image. This is RavenLinux — not the
-Arch builder:
+You can also run the built rootfs as a container image, which is much faster
+than booting a VM when you only want to poke at the userland:
 
 ```bash
-make build           # (or `make minimal`) build RavenLinux into the sysroot
-make rootfs          # package build/sysroot as image `ravenlinux:latest`
-
-# Run it — a Raven Linux shell with your tools (rvn, carrion, ivaldi, poxy, ...)
-docker run --rm -it --platform linux/amd64 ravenlinux:latest
+make rootfs
+docker run --rm -it --platform linux/amd64 ravenlinux
 ```
 
-`make minimal-rootfs` does the same from the headless build. Under the hood,
-`scripts/export-rootfs.sh` tars the sysroot and `docker import`s it as a flat
-image (drop `--platform linux/amd64` on a native x86_64 host).
-
-To iterate on a tool **without rebuilding**, mount the binary into the running
-image:
-
-```bash
-docker run --rm -it --platform linux/amd64 \
-    -v "$PWD/mytool/target/release/mytool:/usr/local/bin/mytool" \
-    ravenlinux:latest
-# now run `mytool` inside real RavenLinux
-```
-
-To bake a tool in permanently, add it to `scripts/lib/repos.sh` `REPO_REGISTRY`
-(or copy the binary into `build/sysroot/bin/`) and re-run `make rootfs`. Build Go
-tools with `CGO_ENABLED=0` for a static binary that runs regardless of libc.
-
-### Development Environment
-
-```bash
-# Set up development environment
-./scripts/dev-env.sh setup
-
-# Mount overlay filesystem for editing
-./scripts/dev-env.sh mount
-
-# Enter chroot to test
-./scripts/dev-env.sh chroot
-
-# Boot in QEMU with graphics
-./scripts/dev-env.sh qemu -g
-
-# Boot in QEMU headless (no new window, serial console in this terminal)
-# Tip: In the RavenBoot menu select "Raven Linux (Serial Console)" for best logs/debugging.
-./scripts/dev-env.sh qemu
-
-# Console access:
-# - tty1: starts `/bin/raven-shell` via `agetty --skip-login` (PAM-free rescue shell)
-# - tty2: starts a normal `login` prompt (use this to test PAM/password logins)
-
-# Check status
-./scripts/dev-env.sh status
-```
-
-## Project Structure
+## Repository Layout
 
 ```
-RavenLinux/
-├── bootloader/          # RavenBoot UEFI bootloader (Rust)
-├── init/                # Init system and service manager (Rust)
-├── tools/
-│   ├── rvn/             # Package manager (Rust)
-│   ├── raven-installer/ # GUI system installer (Go)
-│   └── raven-usb/       # USB flasher tool (Go)
-├── configs/             # System configurations
-│   └── kernel/          # Kernel configs
-├── scripts/             # Build and utility scripts
-│   ├── build.sh         # Main build script
-│   ├── dev-env.sh       # Development environment
-│   ├── build-initramfs.sh
-│   └── stages/          # Build stage scripts
-├── etc/                 # Base system configuration
-└── .github/workflows/   # CI/CD pipelines
+.
+├── Makefile                  # containerized build entry point
+├── Dockerfile                # the Linux build host image
+├── scripts/
+│   ├── build.sh              # build orchestration
+│   ├── check-deps.sh         # host dependency check/install
+│   ├── docker-build.sh       # container engine wrapper
+│   ├── build-kernel.sh       # kernel build
+│   ├── build-initramfs.sh    # initramfs build
+│   ├── build-uutils.sh       # uutils coreutils build
+│   ├── export-rootfs.sh      # package the sysroot as a container image
+│   ├── lib/logging.sh        # shared logging
+│   └── stages/               # the five build stages
+├── init/                     # raven-init and raven-rc (Rust)
+├── bootloader/               # RavenBoot, the UEFI bootloader (Rust)
+├── packages/
+│   ├── core/                 # musl, linux, openssl, openssh, sudo-rs, uutils
+│   └── base/                 # bash, fish
+├── configs/                  # shell, SSH, kernel, fontconfig configuration
+├── etc/                      # files installed into the rootfs /etc
+├── fonts/                    # console font (JetBrains Mono Nerd Font)
+└── docs/                     # build and kernel notes
 ```
 
-## Package Manager (rvn)
+## Adding Things Back
 
-```bash
-# Install packages
-rvn install rust nodejs python
+The build is set up so that growing the distribution means adding, not
+rewiring:
 
-# Search packages
-rvn search editor
-
-# Sync repository metadata (required for fast/offline search)
-rvn sync
-
-# Generate an index.json for a repo directory (expects ./packages/*.rvn)
-rvn repo index /path/to/raven_linux_v0.1.0
-
-# Developer tools
-rvn dev rust           # Set up Rust toolchain
-rvn dev node 20        # Set up Node.js 20
-
-# Workspaces (isolated dev environments)
-rvn workspace create myproject --lang rust,python
-rvn workspace enter myproject
-
-# System management
-rvn system snapshot    # Create system snapshot
-rvn system rollback    # Rollback to snapshot
-rvn system health      # Check system health
-```
-
-## Bootloader (RavenBoot)
-
-The custom UEFI bootloader supports:
-
-- Linux EFI stub booting with initrd support
-- Multi-boot with other operating systems
-- Auto-detection of Windows, other Linux distros
-- Keyboard navigation and configurable timeout
-- Configuration via `/EFI/raven/boot.cfg` (preferred) or `/EFI/raven/boot.conf`
-- Recovery mode boot option
-
-### Boot Configuration
-
-```conf
-# /EFI/raven/boot.cfg
-timeout = 5
-default = 0
-
-[entry]
-name = "Raven Linux"
-kernel = "\EFI\raven\vmlinuz"
-initrd = "\EFI\raven\initramfs.img"
-cmdline = "rdinit=/init quiet"
-type = linux-efi
-
-[entry]
-name = "Raven Linux (Recovery)"
-kernel = "\EFI\raven\vmlinuz"
-initrd = "\EFI\raven\initramfs.img"
-cmdline = "rdinit=/init single"
-type = linux-efi
-```
-
-## System Requirements
-
-### Target System
-
-- x86_64 CPU with UEFI firmware
-- 2GB RAM minimum (4GB recommended)
-- 20GB disk space
-
-### Build Host
-
-- Linux system
-- 20GB+ disk space
-- 8GB+ RAM recommended
-- Internet connection for downloading sources
-
-## Contributing
-
-Contributions welcome! Please open an issue or pull request on GitHub.
+- **A package**: add a `package.toml` under `packages/` and a build function in
+  `scripts/stages/stage3-packages.sh` (the existing `build_openssh` is a good
+  template for an autotools package).
+- **A new class of software** (a desktop, a toolchain, an editor suite): give it
+  its own stage script under `scripts/stages/` and a case in `build.sh`, rather
+  than growing stage 3 indefinitely.
+- **Host build dependencies**: add them to both `scripts/check-deps.sh` and the
+  `Dockerfile` — the two are kept deliberately parallel so they're easy to diff.
+- **Boot behavior**: the live init is a heredoc inside
+  `create_live_init()` in `scripts/stages/stage4-iso.sh`; the GRUB menu is in
+  `setup_grub()` and RavenBoot staging in `setup_ravenboot()` in the same file.
+  RavenBoot's own menu is compiled in — see `bootloader/src/`.
 
 ## License
 
-MIT License - See LICENSE file
+See [LICENSE](LICENSE).

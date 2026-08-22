@@ -23,7 +23,7 @@
 #   stage0   Build cross-compilation toolchain
 #   stage1   Build base system with cross toolchain
 #   stage2   Native rebuild of entire system
-#   stage3   Build additional packages
+#   stage3   Build base packages (core libraries, shells, OpenSSH)
 #   stage4   Generate bootable ISO image
 
 set -euo pipefail
@@ -36,7 +36,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export RAVEN_ROOT="$(dirname "$SCRIPT_DIR")"
 export RAVEN_BUILD="${RAVEN_ROOT}/build"
 RAVEN_PACKAGES="${RAVEN_ROOT}/packages"
-RAVEN_TOOLS="${RAVEN_ROOT}/tools"
 RAVEN_CONFIGS="${RAVEN_ROOT}/configs"
 
 # Build configuration
@@ -44,7 +43,6 @@ export RAVEN_VERSION="2025.12"
 export RAVEN_ARCH="${RAVEN_ARCH:-x86_64}"
 export RAVEN_TARGET="${RAVEN_ARCH}-raven-linux-musl"
 export RAVEN_JOBS="${RAVEN_JOBS:-$(nproc)}"
-# NOTE: RavenCompositor is built from source (RavenCompositor/)
 
 # Directory structure
 TOOLCHAIN_DIR="${RAVEN_BUILD}/toolchain"
@@ -97,8 +95,8 @@ check_build_dependencies() {
 #
 # RavenLinux is x86_64-only, so on an arm64 host (e.g. Apple Silicon) the amd64
 # build image runs under qemu-user emulation. amd64 rustc/LLVM segfaults under
-# qemu-user, so every Rust compile in the build (sudo-rs, raven-compositor,
-# raven-shell) would crash the same way — but only minutes into the build,
+# qemu-user, so every Rust compile in the build (sudo-rs, uutils-coreutils)
+# would crash the same way — but only minutes into the build,
 # deep inside a stage, with a cryptic "qemu: uncaught target signal 11" and
 # leftover core dumps. Detect it here and fail fast with actionable guidance.
 check_rust_toolchain() {
@@ -126,7 +124,7 @@ check_rust_toolchain() {
     echo "  This almost always means the amd64 build image is running under"
     echo "  qemu-user emulation on an arm64 host (e.g. Apple Silicon). amd64"
     echo "  rustc/LLVM segfaults under qemu-user, so every Rust compile in the"
-    echo "  build (sudo-rs, raven-compositor, raven-shell) would fail the same way."
+    echo "  build (sudo-rs, uutils-coreutils) would fail the same way."
     echo ""
     echo "  RavenLinux is x86_64-only, so run the build where amd64 code executes"
     echo "  natively or via a complete translator:"
@@ -290,40 +288,6 @@ build_sudo_rs() {
     done
 }
 
-# Build raven-terminal into build/bin/
-build_raven_terminal() {
-    log_section "Building raven-terminal"
-
-    if [[ -f "${RAVEN_BUILD}/bin/raven-terminal" ]]; then
-        log_info "raven-terminal already built, skipping"
-        return 0
-    fi
-
-    if ! command -v go &>/dev/null; then
-        log_warn "Go not found, skipping raven-terminal build"
-        return 0
-    fi
-
-    local src_dir="${RAVEN_ROOT}/tools/raven-terminal"
-
-    if [[ ! -d "${src_dir}" ]]; then
-        log_warn "raven-terminal source not found at ${src_dir}, skipping"
-        return 0
-    fi
-
-    mkdir -p "${RAVEN_BUILD}/bin"
-
-    log_step "Compiling raven-terminal..."
-    (cd "${src_dir}" && run_logged go build -o "${RAVEN_BUILD}/bin/raven-terminal" .)
-
-    if [[ -f "${RAVEN_BUILD}/bin/raven-terminal" ]]; then
-        chmod +x "${RAVEN_BUILD}/bin/raven-terminal"
-        log_success "Built ${RAVEN_BUILD}/bin/raven-terminal"
-    else
-        log_warn "Failed to build raven-terminal"
-    fi
-}
-
 # Stage 0: Build cross-compilation toolchain
 build_stage0() {
     log_section "Stage 0: Building Cross Toolchain"
@@ -342,13 +306,6 @@ build_stage1() {
 
     if [[ -f "${RAVEN_ROOT}/scripts/stages/stage1-base.sh" ]]; then
         build_sudo_rs
-        # raven-terminal is a GUI (GLFW/X11) app; skip it for minimal/headless
-        # builds, which don't ship a graphical environment.
-        if [[ "${RAVEN_MINIMAL:-0}" == "1" ]]; then
-            log_info "Minimal build: skipping GUI raven-terminal"
-        else
-            build_raven_terminal
-        fi
         run_logged source "${RAVEN_ROOT}/scripts/stages/stage1-base.sh"
     else
         log_warn "Stage 1 script not found, skipping"
@@ -366,36 +323,14 @@ build_stage2() {
     fi
 }
 
-# Stage 3: Build additional packages
+# Stage 3: Build base packages (shells, OpenSSH, core libraries)
 build_stage3() {
-    log_section "Stage 3: Building Packages"
+    log_section "Stage 3: Building Base Packages"
 
     if [[ -f "${RAVEN_ROOT}/scripts/stages/stage3-packages.sh" ]]; then
         run_logged source "${RAVEN_ROOT}/scripts/stages/stage3-packages.sh"
     else
         log_warn "Stage 3 script not found, skipping"
-    fi
-}
-
-# Build security packages (elogind, polkit, accountsservice)
-build_security() {
-    log_section "Building Security Packages"
-
-    if [[ -f "${RAVEN_ROOT}/scripts/build-security.sh" ]]; then
-        run_logged "${RAVEN_ROOT}/scripts/build-security.sh" all
-    else
-        log_warn "build-security.sh not found, skipping"
-    fi
-}
-
-# Build desktop environment (raven-shell, raven-menu, raven-desktop, raven-settings-menu)
-build_desktop() {
-    log_section "Building Desktop Environment"
-
-    if [[ -f "${RAVEN_ROOT}/scripts/build-desktop-local.sh" ]]; then
-        run_logged "${RAVEN_ROOT}/scripts/build-desktop-local.sh"
-    else
-        log_warn "build-desktop-local.sh not found, skipping"
     fi
 }
 
@@ -410,20 +345,6 @@ build_stage4() {
     fi
 }
 
-# Core CLI tools (shell, poxy, ivaldi, carrion, oxigen, neovim+NvCrow). Built for
-# the minimal/headless image; the full build gets these plus the GUI tools as
-# part of stage3 (build-packages.sh all). Output lands in build/packages/bin and
-# is installed into the sysroot by stage4.
-build_core_packages() {
-    log_section "Building Core CLI Tools"
-
-    if [[ -x "${RAVEN_ROOT}/scripts/build-packages.sh" ]]; then
-        run_logged "${RAVEN_ROOT}/scripts/build-packages.sh" core
-    else
-        log_warn "build-packages.sh not found, skipping core tools"
-    fi
-}
-
 show_help() {
     cat << EOF
 RavenLinux Build System v${RAVEN_VERSION}
@@ -432,14 +353,10 @@ Usage: $(basename "$0") [OPTIONS] [STAGE]
 
 Stages:
     all         Build everything (default)
-    minimal     Headless build: toolchain + base system + kernel + CLI ISO,
-                no GUI (skips stage3 packages, security and desktop)
     stage0      Build cross-compilation toolchain
     stage1      Build base system with cross toolchain
     stage2      Native rebuild of entire system
-    stage3      Build additional packages
-    security    Build security packages (elogind, polkit, accountsservice)
-    desktop     Build desktop environment (raven-shell, raven-menu, etc.)
+    stage3      Build base packages (core libraries, shells, OpenSSH)
     stage4      Generate bootable ISO image
 
 Options:
@@ -455,7 +372,6 @@ Environment Variables:
     RAVEN_JOBS      Number of parallel build jobs
     RAVEN_VERSION   Distribution version string
     RAVEN_NO_LOG    Set to "1" to disable logging
-    RAVEN_REQUIRE_COMPOSITOR  Set to "0" to continue if raven-compositor fails to build
 
 Log Files:
     Build logs are saved to: ${RAVEN_BUILD}/logs/
@@ -511,7 +427,7 @@ main() {
                 SKIP_DEP_CHECK=true
                 shift
                 ;;
-            all|stage0|stage1|stage2|stage3|security|desktop|stage4|minimal)
+            all|stage0|stage1|stage2|stage3|stage4)
                 stage="$1"
                 shift
                 ;;
@@ -523,21 +439,15 @@ main() {
         esac
     done
 
-    # Minimal/headless build: base system + kernel + CLI ISO, no GUI. Export so
-    # stage scripts (stage1 terminal, stage4 compositor) can skip GUI pieces.
-    if [[ "$stage" == "minimal" ]]; then
-        export RAVEN_MINIMAL=1
-    fi
-
     # Check for required dependencies first
     check_build_dependencies
 
     # Fail fast if rustc can't run (qemu-user emulation on arm64). Skip for the
     # pure-C cross toolchain (stage0) and ISO assembly (stage4), which build no
-    # Rust; every other path compiles Rust and would crash without this.
-    # 'minimal' still builds Rust (sudo-rs, uutils) in stage1/2, so check it too.
+    # Rust; every other path compiles Rust (sudo-rs, uutils) and would crash
+    # without this.
     case "$stage" in
-        all|stage1|stage2|stage3|security|desktop|minimal)
+        all|stage1|stage2|stage3)
             check_rust_toolchain
             ;;
     esac
@@ -571,19 +481,6 @@ main() {
             build_stage1
             build_stage2
             build_stage3
-            build_security
-            build_desktop
-            build_stage4
-            ;;
-        minimal)
-            # Headless build: toolchain -> base/kernel -> native rebuild -> core
-            # CLI tools -> CLI ISO. Builds the terminal tools (shell, poxy,
-            # ivaldi, carrion, oxigen, neovim+NvCrow) but skips the GUI tools,
-            # security stack and desktop.
-            build_stage0
-            build_stage1
-            build_stage2
-            build_core_packages
             build_stage4
             ;;
         stage0)
@@ -597,12 +494,6 @@ main() {
             ;;
         stage3)
             build_stage3
-            ;;
-        security)
-            build_security
-            ;;
-        desktop)
-            build_desktop
             ;;
         stage4)
             build_stage4

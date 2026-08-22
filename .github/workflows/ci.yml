@@ -2,7 +2,7 @@
 # RavenLinux CI Workflow
 # =============================================================================
 # Quick CI checks for pull requests and commits
-# Does NOT build kernel or ISO (that's in build.yml for releases)
+# Does NOT build the kernel or ISO (that's in build.yml for releases)
 
 name: CI
 
@@ -43,17 +43,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-check-
 
-      # Check package manager
-      - name: Check rvn
-        run: cargo check --release
-        working-directory: tools/rvn
-
-      - name: Clippy rvn
-        run: cargo clippy --release -- -W warnings
-        working-directory: tools/rvn
-        continue-on-error: true
-
-      # Check init system
       - name: Check raven-init
         run: cargo check --release
         working-directory: init
@@ -63,21 +52,9 @@ jobs:
         working-directory: init
         continue-on-error: true
 
-      # Check bootloader
       - name: Check bootloader
         run: cargo check --release --target x86_64-unknown-uefi
         working-directory: bootloader
-
-      # Check compositor (external repo - optional, has its own CI)
-      - name: Clone compositor
-        run: git clone --depth 1 https://github.com/javanhut/RavenCompositor.git build/sources/compositor
-        continue-on-error: true
-
-      - name: Check compositor
-        if: hashFiles('build/sources/compositor/Cargo.toml') != ''
-        run: cargo check --release
-        working-directory: build/sources/compositor
-        continue-on-error: true
 
   # ===========================================================================
   # Build Test
@@ -106,10 +83,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-build-
 
-      - name: Build rvn
-        run: cargo build --release
-        working-directory: tools/rvn
-
       - name: Build raven-init
         run: cargo build --release
         working-directory: init
@@ -124,50 +97,9 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Component | Size |" >> $GITHUB_STEP_SUMMARY
           echo "|-----------|------|" >> $GITHUB_STEP_SUMMARY
-          echo "| rvn | $(du -h tools/rvn/target/release/rvn | cut -f1) |" >> $GITHUB_STEP_SUMMARY
           echo "| raven-init | $(du -h init/target/release/raven-init | cut -f1) |" >> $GITHUB_STEP_SUMMARY
           echo "| raven-rc | $(du -h init/target/release/raven-rc | cut -f1) |" >> $GITHUB_STEP_SUMMARY
           echo "| raven-boot.efi | $(du -h bootloader/target/x86_64-unknown-uefi/release/raven-boot.efi | cut -f1) |" >> $GITHUB_STEP_SUMMARY
-
-  # ===========================================================================
-  # Go Checks
-  # ===========================================================================
-  go-check:
-    name: Go Check
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
-
-      - name: Install GUI dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libgl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev \
-            libxi-dev libxxf86vm-dev libwayland-dev pkg-config \
-            libvulkan-dev libx11-xcb-dev libxcb-icccm4-dev libxcb-image0-dev \
-            libxcb-keysyms1-dev libxcb-randr0-dev libxcb-render-util0-dev \
-            libxcb-xfixes0-dev libxcb-xinerama0-dev libxcb-xkb-dev \
-            libegl1-mesa-dev libwayland-egl1-mesa
-
-      - name: Check raven-installer
-        run: |
-          cd tools/raven-installer
-          go mod tidy
-          CGO_ENABLED=1 go build -o /dev/null .
-
-      - name: Check raven-usb
-        run: |
-          cd tools/raven-usb
-          go mod tidy
-          CGO_ENABLED=1 go build -o /dev/null .
 
   # ===========================================================================
   # Shell Script Checks

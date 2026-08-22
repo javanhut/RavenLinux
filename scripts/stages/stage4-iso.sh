@@ -6,7 +6,7 @@
 # - RavenBoot UEFI bootloader (primary)
 # - GRUB fallback for BIOS systems
 # - Squashfs compressed root filesystem
-# - Live boot support
+# - Live boot into a console shell on tty1
 
 set -euo pipefail
 
@@ -27,12 +27,7 @@ LOGS_DIR="${LOGS_DIR:-${BUILD_DIR}/logs}"
 RAVEN_VERSION="${RAVEN_VERSION:-2025.12}"
 RAVEN_ARCH="${RAVEN_ARCH:-x86_64}"
 ISO_LABEL="RAVEN_LIVE"
-# Headless builds get a distinct filename so they don't clobber the full ISO.
-if [[ "${RAVEN_MINIMAL:-0}" == "1" ]]; then
-    ISO_OUTPUT="${PROJECT_ROOT}/raven-${RAVEN_VERSION}-${RAVEN_ARCH}-minimal.iso"
-else
-    ISO_OUTPUT="${PROJECT_ROOT}/raven-${RAVEN_VERSION}-${RAVEN_ARCH}.iso"
-fi
+ISO_OUTPUT="${PROJECT_ROOT}/raven-${RAVEN_VERSION}-${RAVEN_ARCH}.iso"
 
 # =============================================================================
 # Logging (use shared library or define fallbacks)
@@ -54,10 +49,6 @@ else
     log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
     log_step() { echo -e "${CYAN}[STEP]${NC} $1"; }
 fi
-
-# Source repos library for fetching external repos
-source "${PROJECT_ROOT}/scripts/lib/repos.sh"
-
 
 # =============================================================================
 # Check dependencies
@@ -394,10 +385,7 @@ printf '\033[0m'
 echo ""
 printf '\033[1;37m'
 echo "  ┌────────────────────────────────────────────────────────────────────────────────────────┐"
-echo "  │  BUILT-IN TOOLS:                                                                       │"
-echo "  │    vem        - Text editor              wifi       - WiFi manager                     │"
-echo "  │    carrion    - Programming language     rvn        - Package manager                  │"
-echo "  │    ivaldi     - Version control          raven-install - System installer              │"
+echo "  │  This is the RavenLinux base system: a musl userland, bash, and OpenSSH.                │"
 echo "  └────────────────────────────────────────────────────────────────────────────────────────┘"
 printf '\033[0m'
 echo ""
@@ -459,58 +447,6 @@ start_shell_loop() {
         done
     fi
 }
-
-if echo "$cmdline" | grep -qE '(^| )raven\.graphics=wayland($| )'; then
-    echo ""
-    echo "Starting Wayland graphics..."
-
-    if [ ! -d /dev/dri ]; then
-        echo "No /dev/dri found; DRM/KMS not available. Skipping Wayland."
-        echo "Hint: QEMU needs a KMS-capable GPU (e.g. -device virtio-vga-gl -display gtk,gl=on)."
-        echo "Hint: VirtualBox should use 'VMSVGA' graphics controller."
-        dmesg 2>/dev/null | grep -iE 'drm|kms|gpu|i915|amdgpu|nouveau|virtio|vmwgfx|vbox|qxl|bochs|cirrus|simpledrm|framebuffer' | tail -n 200 || true
-    elif [ -x /bin/raven-wayland-session ]; then
-        if command -v openvt >/dev/null 2>&1; then
-            if openvt -c 1 -s -f -- /bin/raven-wayland-session; then
-                :
-            else
-                echo "Wayland session exited; falling back to shell."
-            fi
-        elif /bin/raven-wayland-session; then
-            :
-        else
-            echo "Wayland session exited; falling back to shell."
-        fi
-    else
-        echo "raven-wayland-session not found; falling back to shell."
-    fi
-fi
-
-if echo "$cmdline" | grep -qE '(^| )raven\.graphics=x11($| )'; then
-    echo ""
-    echo "Starting X11 graphics..."
-
-    if [ ! -d /dev/dri ]; then
-        echo "No /dev/dri found; DRM/KMS not available. Skipping X11."
-        echo "Hint: QEMU needs a KMS-capable GPU (e.g. -device virtio-vga-gl -display gtk,gl=on)."
-        echo "Hint: VirtualBox should use 'VMSVGA' graphics controller."
-        dmesg 2>/dev/null | grep -iE 'drm|kms|gpu|i915|amdgpu|nouveau|virtio|vmwgfx|vbox|qxl|bochs|cirrus|simpledrm|framebuffer' | tail -n 200 || true
-    elif [ -x /bin/raven-x11-session ]; then
-        if command -v openvt >/dev/null 2>&1; then
-            if openvt -c 1 -s -f -- /bin/raven-x11-session; then
-                :
-            else
-                echo "X11 session exited; falling back to shell."
-            fi
-        elif /bin/raven-x11-session; then
-            :
-        else
-            echo "X11 session exited; falling back to shell."
-        fi
-    else
-        echo "raven-x11-session not found; falling back to shell."
-    fi
-fi
 
 start_shell_loop
 INIT
@@ -602,127 +538,6 @@ copy_kernel_modules() {
 }
 
 # =============================================================================
-# Build and install Raven desktop components (shell, menu, desktop, settings)
-# =============================================================================
-build_desktop_components() {
-    log_step "Installing Raven desktop configuration..."
-
-    local desktop_dir="${PROJECT_ROOT}/desktop"
-    mkdir -p "${SYSROOT_DIR}/bin"
-    mkdir -p "${SYSROOT_DIR}/root/.config/raven/scripts"
-
-    # Desktop Go apps have been removed; compositor builds raven-shell and
-    # raven-settings as Rust binaries. They are copied in copy_wayland_compositor().
-
-    # Install Raven scripts
-    if [[ -d "${desktop_dir}/config/raven/scripts" ]]; then
-        cp "${desktop_dir}/config/raven/scripts"/*.sh "${SYSROOT_DIR}/root/.config/raven/scripts/" 2>/dev/null || true
-        chmod +x "${SYSROOT_DIR}/root/.config/raven/scripts"/*.sh 2>/dev/null || true
-        log_info "  Installed Raven scripts"
-    fi
-
-    # Install default Raven settings
-    if [[ ! -f "${SYSROOT_DIR}/root/.config/raven/settings.json" ]]; then
-        cat > "${SYSROOT_DIR}/root/.config/raven/settings.json" << 'EOF'
-{
-  "theme": "dark",
-  "accent_color": "#009688",
-  "font_size": 14,
-  "icon_theme": "Papirus-Dark",
-  "cursor_theme": "Adwaita",
-  "panel_opacity": 0.95,
-  "enable_animations": true,
-  "wallpaper_path": "",
-  "wallpaper_mode": "fill",
-  "show_desktop_icons": false,
-  "panel_position": "top",
-  "panel_height": 38,
-  "show_clock": true,
-  "clock_format": "24h",
-  "show_workspaces": true,
-  "border_width": 2,
-  "gap_size": 8,
-  "focus_follows_mouse": false,
-  "titlebar_buttons": "close,minimize,maximize",
-  "keyboard_layout": "us",
-  "mouse_speed": 0.5,
-  "touchpad_natural_scroll": true,
-  "touchpad_tap_to_click": true,
-  "screen_timeout": 300,
-  "suspend_timeout": 900,
-  "lid_close_action": "suspend",
-  "master_volume": 80,
-  "mute_on_lock": false
-}
-EOF
-        log_info "  Created default Raven settings"
-    fi
-
-    log_success "Raven desktop components built and installed"
-}
-
-# =============================================================================
-# Copy Wayland compositor and dependencies
-# =============================================================================
-copy_wayland_compositor() {
-    log_step "Copying Wayland compositor from host..."
-
-    # Copy raven-compositor and raven-shell (Rust) from fetched repo build
-    local compositor_release
-    compositor_release="$(get_repo_dir compositor)/target/release"
-    for bin in raven-compositor raven-shell raven-settings; do
-        if [[ -f "${compositor_release}/${bin}" ]]; then
-            cp "${compositor_release}/${bin}" "${SYSROOT_DIR}/bin/"
-            chmod +x "${SYSROOT_DIR}/bin/${bin}"
-            log_info "  Copied ${bin}"
-        else
-            log_warn "${bin} not found - run: ./scripts/build-packages.sh compositor"
-        fi
-    done
-
-    # Copy wayland-protocols
-    if [[ -d /usr/share/wayland-protocols ]]; then
-        mkdir -p "${SYSROOT_DIR}/usr/share/wayland-protocols"
-        cp -a /usr/share/wayland-protocols/. "${SYSROOT_DIR}/usr/share/wayland-protocols/" 2>/dev/null || true
-        log_info "  Copied wayland-protocols"
-    fi
-
-    # Copy XKB keyboard layouts
-    if [[ -d /usr/share/X11/xkb ]]; then
-        mkdir -p "${SYSROOT_DIR}/usr/share/X11/xkb"
-        cp -a /usr/share/X11/xkb/. "${SYSROOT_DIR}/usr/share/X11/xkb/" 2>/dev/null || true
-        log_info "  Copied XKB layouts"
-    fi
-
-    log_success "RavenCompositor copied"
-
-    # Copy seatd if available
-    if command -v seatd &>/dev/null; then
-        cp "$(which seatd)" "${SYSROOT_DIR}/bin/" 2>/dev/null || true
-        log_info "  Copied seatd"
-    fi
-
-    # Copy Xwayland if available
-    if command -v Xwayland &>/dev/null; then
-        local xwayland_bin
-        xwayland_bin="$(which Xwayland)"
-        if [[ ! -f "${SYSROOT_DIR}/bin/Xwayland" ]]; then
-            cp "$xwayland_bin" "${SYSROOT_DIR}/bin/"
-            log_info "  Copied Xwayland"
-            # Copy Xwayland libraries
-            ldd "$xwayland_bin" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
-                [[ -z "$lib" || ! -f "$lib" ]] && continue
-                dest="${SYSROOT_DIR}${lib}"
-                if [[ ! -f "$dest" ]]; then
-                    mkdir -p "$(dirname "$dest")"
-                    cp -L "$lib" "$dest" 2>/dev/null || true
-                fi
-            done || true
-        fi
-    fi
-}
-
-# =============================================================================
 # Install packages to sysroot
 # =============================================================================
 install_packages_to_sysroot() {
@@ -742,39 +557,7 @@ install_packages_to_sysroot() {
         done
     fi
 
-    # Create raven-install symlink for the installer
-    if [[ -f "${SYSROOT_DIR}/bin/raven-installer" ]]; then
-        ln -sf raven-installer "${SYSROOT_DIR}/bin/raven-install"
-        log_info "  Created raven-install symlink"
-    fi
-
-    # Copy desktop entries if present
-    if [[ -d "${PROJECT_ROOT}/configs/desktop" ]]; then
-        mkdir -p "${SYSROOT_DIR}/usr/share/applications"
-        cp "${PROJECT_ROOT}/configs/desktop"/*.desktop "${SYSROOT_DIR}/usr/share/applications/" 2>/dev/null || true
-    fi
-
-    # Copy session helper scripts
-    if [[ -f "${PROJECT_ROOT}/configs/raven-wayland-session" ]]; then
-        cp "${PROJECT_ROOT}/configs/raven-wayland-session" "${SYSROOT_DIR}/bin/raven-wayland-session" 2>/dev/null || true
-        chmod +x "${SYSROOT_DIR}/bin/raven-wayland-session" 2>/dev/null || true
-    fi
-    if [[ -f "${PROJECT_ROOT}/configs/raven-x11-session" ]]; then
-        cp "${PROJECT_ROOT}/configs/raven-x11-session" "${SYSROOT_DIR}/bin/raven-x11-session" 2>/dev/null || true
-        chmod +x "${SYSROOT_DIR}/bin/raven-x11-session" 2>/dev/null || true
-    fi
-    if command -v swaybg &>/dev/null; then
-        cp "$(which swaybg)" "${SYSROOT_DIR}/bin/" 2>/dev/null || true
-        log_info "  Copied swaybg"
-    else
-        log_warn "  swaybg not found on host; wallpapers may not render"
-    fi
-    if [[ -d "${PROJECT_ROOT}/desktop/config/raven/backgrounds" ]]; then
-        mkdir -p "${SYSROOT_DIR}/usr/share/backgrounds"
-        cp "${PROJECT_ROOT}/desktop/config/raven/backgrounds"/* "${SYSROOT_DIR}/usr/share/backgrounds/" 2>/dev/null || true
-        log_info "  Copied Raven wallpapers"
-    fi
-    # Fontconfig + fonts (needed for terminal/shell; missing config causes warnings).
+    # Fontconfig + fonts (the console font; a missing config causes warnings).
     if [[ -d "/etc/fonts" ]]; then
         mkdir -p "${SYSROOT_DIR}/etc/fonts"
         cp -a "/etc/fonts/." "${SYSROOT_DIR}/etc/fonts/" 2>/dev/null || true
@@ -803,18 +586,6 @@ install_packages_to_sysroot() {
         log_warn "  No custom fonts directory found at ${font_src}; skipping font copy"
     fi
     mkdir -p "${SYSROOT_DIR}/var/cache/fontconfig" 2>/dev/null || true
-
-    # Cursor themes (needed for proper cursor display in Wayland compositors).
-    if [[ -d "/usr/share/icons" ]]; then
-        mkdir -p "${SYSROOT_DIR}/usr/share/icons"
-        for theme in default breeze_cursors Adwaita hicolor; do
-            if [[ -d "/usr/share/icons/${theme}" ]]; then
-                mkdir -p "${SYSROOT_DIR}/usr/share/icons/${theme}"
-                cp -a "/usr/share/icons/${theme}/." "${SYSROOT_DIR}/usr/share/icons/${theme}/" 2>/dev/null || true
-                log_info "  Copied /usr/share/icons/${theme}"
-            fi
-        done
-    fi
 
     # Ensure shared library dependencies for newly installed binaries are present.
     log_info "Copying runtime libraries for sysroot binaries..."
@@ -934,17 +705,10 @@ setup_ravenboot() {
         mkdir -p "${ISO_ROOT}/EFI/raven"
         cp "${ravenboot}" "${ISO_ROOT}/EFI/raven/raven-boot.efi"
 
-        # RavenBoot now has built-in submenu support with sensible defaults.
-        # The bootloader will use its compiled-in menu structure which includes:
-        # - Raven Linux (terminal)
-        # - Raven Linux (Graphical) > submenu with compositor options
-        # - Raven Linux (Recovery)
-        # - System > submenu with UEFI Shell, Reboot, Shutdown
-        #
-        # No boot.cfg needed - the defaults are baked into the bootloader.
-        # If you want to customize, create boot.cfg with flat entries (submenus not yet
-        # supported in config file parsing).
-        log_info "  Using built-in boot menu with submenu support"
+        # RavenBoot has built-in menu support with sensible defaults, so no
+        # boot.cfg is needed. If you want to customize, create boot.cfg with
+        # flat entries (submenus are not yet supported in config file parsing).
+        log_info "  Using built-in boot menu"
 
         log_success "RavenBoot configured"
         return 0
@@ -974,9 +738,9 @@ set gfxpayload=keep
 set color_normal=cyan/black
 set color_highlight=white/blue
 
-# Default: Graphical mode with Raven Compositor
+# Default: console on tty1
 menuentry "Raven Linux" --class raven {
-    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=tty0
+    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 console=tty0
     initrd /boot/initramfs.img
 }
 
@@ -984,18 +748,6 @@ menuentry "Raven Linux" --class raven {
 menuentry "Raven Linux (Serial)" --class raven {
     linux /boot/vmlinuz rdinit=/init quiet loglevel=3 console=ttyS0,115200 console=tty0
     initrd /boot/initramfs.img
-}
-
-# Graphical options submenu
-submenu "Raven Linux (Graphical) >" --class raven {
-    menuentry "Raven Compositor" --class raven {
-        linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=tty0
-        initrd /boot/initramfs.img
-    }
-
-    menuentry "< Back" --class raven {
-        configfile /boot/grub/grub.cfg
-    }
 }
 
 # System options submenu
@@ -1019,7 +771,7 @@ submenu "System >" --class raven {
 }
 EOF
 
-    # Create EFI bootloader if RavenBoot wasn't available
+    # Create the EFI bootloader only if RavenBoot wasn't available
     if [[ ! -f "${ISO_ROOT}/EFI/BOOT/BOOTX64.EFI" ]]; then
         if command -v grub-mkstandalone &>/dev/null; then
             grub-mkstandalone \
@@ -1029,6 +781,8 @@ EOF
                 --fonts="" \
                 "boot/grub/grub.cfg=${ISO_ROOT}/boot/grub/grub.cfg" 2>/dev/null || \
                 log_warn "Failed to create GRUB EFI"
+        else
+            log_warn "grub-mkstandalone not found and no RavenBoot; the ISO will not boot under UEFI"
         fi
     fi
 
@@ -1203,20 +957,19 @@ print_summary() {
     echo ""
 
     if [[ -f "${PACKAGES_DIR}/boot/raven-boot.efi" ]]; then
-        echo "  Bootloader: RavenBoot (UEFI)"
+        echo "  Bootloader: RavenBoot (UEFI), GRUB (BIOS)"
     else
-        echo "  Bootloader: GRUB (UEFI)"
+        echo "  Bootloader: GRUB (UEFI + BIOS)"
     fi
 
     echo ""
     echo "  Test in QEMU (UEFI):"
-    echo "    qemu-system-x86_64 -cdrom ${ISO_OUTPUT} -m 4G \\"
-    echo "      -device virtio-vga-gl -display gtk,gl=on \\"
-    echo "      -serial stdio \\"
+    echo "    qemu-system-x86_64 -cdrom ${ISO_OUTPUT} -m 2G \\"
+    echo "      -nographic -serial mon:stdio \\"
     echo "      -bios /usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd -enable-kvm"
     echo ""
     echo "  Test in QEMU (BIOS):"
-    echo "    qemu-system-x86_64 -cdrom ${ISO_OUTPUT} -m 4G -enable-kvm"
+    echo "    qemu-system-x86_64 -cdrom ${ISO_OUTPUT} -m 2G -enable-kvm"
     echo ""
     echo "  Write to USB:"
     echo "    sudo dd if=${ISO_OUTPUT} of=/dev/sdX bs=4M status=progress"
@@ -1240,14 +993,6 @@ main() {
     create_live_init
     copy_boot_files
     copy_kernel_modules
-    # GUI integration: the desktop apps and Wayland compositor. Skipped for a
-    # minimal/headless ISO, which boots to an autologin root shell on tty1.
-    if [[ "${RAVEN_MINIMAL:-0}" == "1" ]]; then
-        log_info "Minimal build: skipping desktop components and Wayland compositor"
-    else
-        build_desktop_components
-        copy_wayland_compositor
-    fi
     create_squashfs
     setup_ravenboot || true  # Continue even if RavenBoot not available
     setup_grub  # GRUB as fallback for BIOS

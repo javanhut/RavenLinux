@@ -1,5 +1,5 @@
 # =============================================================================
-# RavenLinux .gitignore
+# RavenLinux ignore rules
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -11,18 +11,23 @@
 Cargo.lock
 
 # Keep Cargo.lock for applications (not libraries)
-!tools/rvn/Cargo.lock
 !init/Cargo.lock
-!installer/Cargo.lock
 !bootloader/Cargo.lock
-!desktop/compositor/Cargo.lock
 
 # -----------------------------------------------------------------------------
 # Build output directories
 # -----------------------------------------------------------------------------
 /build/
 !/build/.gitkeep
+/build-unpriv/
 */release/*
+
+# Compiled binaries must never be committed -- build them, don't check them in.
+# (Go and Rust output lands next to the sources by default.)
+**/*.a
+**/*.so
+**/*.so.*
+**/*.exe
 # Temporary build directories
 /tmp/
 *.tmp/

@@ -1,59 +1,88 @@
 # RavenLinux Architecture
 
 ## Overview
-RavenLinux is an independent, developer-focused Linux distribution built from scratch with a custom desktop environment and package manager.
+
+RavenLinux is an independent Linux distribution built from scratch. This
+document describes the base system — the layer everything else gets built on
+top of.
+
+The base is deliberately narrow. It boots, gives you a shell, talks to the
+network, and can be rebuilt from source in one command. Everything beyond that
+(package management, a desktop, toolchains, an installer) is intentionally left
+out so it can be designed rather than inherited.
 
 ## Design Principles
-1. **Developer Experience First** - Every decision optimized for coding workflows
-2. **Performance** - Fast boot, fast package management, responsive DE
-3. **Simplicity** - Clear, understandable system design
-4. **Reproducibility** - Declarative configuration where possible
+
+1. **Reproducible from source** — every stage is a script, not a state of mind
+2. **Small enough to hold in your head** — no component you can't read in an afternoon
+3. **Composable** — new software is a new stage or a new package, never a rewiring
+4. **Host-independent** — the build runs in a container, so it works anywhere
 
 ## System Components
 
-### 1. Base System (raven-core)
-- **Kernel**: Linux kernel (LTS or latest stable)
-- **C Library**: musl libc (lightweight, secure) or glibc
-- **Init System**: Custom `raven-init` or systemd
-- **Core Utilities**: uutils (Rust coreutils)
-- **Shell**: bash (default), fish, sh available
+### Base System
 
-### 2. Package Manager (rvn)
-- Written in Rust for performance
-- Declarative package definitions (TOML-based)
-- Binary package distribution with source build fallback
-- Atomic upgrades with rollback support
-- Developer workspace management (per-project dependencies)
+- **Kernel**: Linux (LTS or latest stable), built from source with a Raven config
+- **C Library**: musl libc
+- **Bootloader**: RavenBoot (Rust, UEFI), with GRUB as the BIOS fallback
+- **Init System**: `raven-init` (Rust) with `raven-rc` as service manager
+- **Core Utilities**: uutils coreutils (Rust)
+- **Shells**: bash (default), fish
+- **Networking**: OpenSSH client and server
+- **Privilege escalation**: sudo-rs
 
-### 3. Desktop Environment (RavenDE)
-- Built on Wayland (wlroots-based compositor)
-- Custom compositor: `raven-compositor`
-- Panel/dock: `raven-panel`
-- Application launcher: `raven-launcher`
-- File manager: `raven-files`
-- Settings: `raven-settings`
-- Notification daemon: `raven-notify`
-- Built with GTK4 or Qt6
+### Init System (`init/`)
 
-### 4. Developer Tools Integration (raven-sdk)
-- Language version managers (rustup, nvm, pyenv integration)
-- Container runtime (podman/docker)
-- Virtual machine support (QEMU/KVM)
-- Git integration throughout DE
-- Terminal emulator: `raven-term`
-- Code editor integration hooks
+`raven-init` runs as PID 1. It reads `/etc/raven/init.toml`, mounts the virtual
+filesystems, and hands off to `raven-rc` for service supervision.
 
-## Directory Structure
+| File | Role |
+|------|------|
+| `init/src/main.rs` | PID 1 entry point, early boot |
+| `init/src/config.rs` | `init.toml` parsing |
+| `init/src/service.rs` | Service definition and lifecycle |
+| `init/src/rc.rs` | Service manager (`raven-rc`) |
+
+### Bootloader (`bootloader/`)
+
+RavenBoot is a UEFI bootloader written in Rust, built for the
+`x86_64-unknown-uefi` target. It ships as `EFI/BOOT/BOOTX64.EFI` on the ISO and
+carries a compiled-in boot menu, so no config file is required on the ESP. GRUB
+remains on the image as the BIOS path, and takes over UEFI too if RavenBoot
+wasn't built.
+
+### Boot Path
+
+```
+firmware
+    │
+    ├── UEFI ──▶ RavenBoot (EFI/BOOT/BOOTX64.EFI)
+    │              └── falls back to GRUB when absent
+    │
+    └── BIOS ──▶ GRUB ── reads /boot/grub/grub.cfg
+                   │
+                   ▼
+            vmlinuz + initramfs.img
+                   │
+                   ▼
+    /init  ── live init: mounts the squashfs root, then execs a shell on tty1
+                   │
+                   ▼
+            bash (login shell, root)
+```
+
+On an installed system the handoff is to `raven-init` instead of the live init
+script; the live path exists so the ISO is useful without an installer.
+
+## Directory Structure (target rootfs)
 
 ```
 /
 ├── bin/          -> /usr/bin (symlink)
-├── boot/         # Bootloader, kernel, initramfs
+├── boot/         # Kernel, initramfs, bootloader
 ├── dev/          # Device files
 ├── etc/          # System configuration
-│   ├── raven/    # RavenLinux specific configs
-│   ├── rvn/      # Package manager config
-│   └── ...
+│   └── raven/    # RavenLinux-specific configs (init.toml, first-boot-setup)
 ├── home/         # User home directories
 ├── lib/          -> /usr/lib (symlink)
 ├── lib64/        -> /usr/lib (symlink)
@@ -72,30 +101,53 @@ RavenLinux is an independent, developer-focused Linux distribution built from sc
 │   ├── share/    # Architecture-independent data
 │   └── src/      # Source code (optional)
 └── var/          # Variable data
-    ├── cache/    # Package cache
-    ├── lib/rvn/  # Package database
+    ├── cache/
+    ├── lib/
     └── log/      # System logs
 ```
 
-## Build System (raven-build)
+## Build System
 
-### Build Stages
-1. **Stage 0**: Cross-compile minimal toolchain
-2. **Stage 1**: Build base system with Stage 0 toolchain
-3. **Stage 2**: Rebuild everything natively
-4. **Stage 3**: Build additional packages
-5. **Stage 4**: Generate ISO image
+### Stages
 
-### Build Dependencies (Host)
-- GCC/Clang
-- Make, CMake, Meson
-- Rust toolchain
-- Python 3
-- Git
+| Stage | Purpose |
+|-------|---------|
+| **Stage 0** | Cross-compile the musl toolchain (binutils, gcc, musl) |
+| **Stage 1** | Build the base system with the stage 0 toolchain; kernel and initramfs |
+| **Stage 2** | Rebuild the sysroot natively: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
+| **Stage 3** | Base packages: core libraries, shells, OpenSSH, RavenBoot |
+| **Stage 4** | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
+
+Each stage is a standalone script under `scripts/stages/` that can be run on its
+own; `scripts/build.sh` sequences them and owns the shared environment
+(`RAVEN_ROOT`, `RAVEN_BUILD`, `SYSROOT_DIR`, and friends).
+
+### Where State Lives
+
+```
+build/
+├── toolchain/   # stage0 output
+├── sysroot/     # the rootfs under construction (stages 1-3 write here)
+├── packages/    # built binaries staged for install into the sysroot
+├── sources/     # downloaded tarballs and cloned repos
+├── iso/         # stage4 ISO workspace
+└── logs/        # one log per stage run
+```
+
+Stage 2 resets the sysroot before it runs, so stages 2-4 are re-runnable
+without a full rebuild from stage 0.
+
+### Host Dependencies
+
+`scripts/check-deps.sh` is the source of truth: it maps every required command
+to a package name across Arch, Debian/Ubuntu, Fedora/RHEL, openSUSE, Void, and
+Alpine, and can install the missing ones. The `Dockerfile` mirrors that list for
+the Arch-based build image — keep the two in sync when adding a dependency.
 
 ## Package Format
 
-### Package Definition (package.toml)
+Package definitions live under `packages/` as `package.toml`:
+
 ```toml
 [package]
 name = "example"
@@ -119,86 +171,26 @@ url = "https://example.com/example-1.0.0.tar.gz"
 sha256 = "..."
 ```
 
-### Binary Package Format
-- Compressed archive (.rvn)
-- Contains: metadata, file manifest, compressed files
-- Supports: pre/post install scripts, triggers
+The definitions currently document what the base system contains; the build
+functions in `scripts/stages/stage3-packages.sh` are what actually compile
+them. Wiring a package manager to consume these definitions directly is one of
+the natural next things to build.
 
-## Desktop Environment Architecture
+Sets:
 
-### RavenDE Components
+- `packages/core/` — musl, linux, openssl, openssh, libssh, sudo-rs, uutils-coreutils
+- `packages/base/` — bash, fish
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    raven-compositor                      │
-│                  (Wayland Compositor)                    │
-├─────────────────────────────────────────────────────────┤
-│  raven-panel  │  raven-launcher  │  raven-notify        │
-├───────────────┴──────────────────┴──────────────────────┤
-│                    raven-session                         │
-│              (Session/Login Manager)                     │
-├─────────────────────────────────────────────────────────┤
-│  raven-files  │  raven-term  │  raven-settings          │
-│               │              │                           │
-│  (File Mgr)   │  (Terminal)  │  (System Settings)       │
-└─────────────────────────────────────────────────────────┘
-```
+## Extending the System
 
-### Theming
-- Custom icon theme: `raven-icons`
-- GTK/Qt theme: `raven-theme`
-- Cursor theme: `raven-cursors`
-- Color scheme: Dark-first with accent colors
+The base is designed to be grown, not modified:
 
-## Developer Workflow Features
-
-### Project Environments
-```bash
-# Create isolated development environment
-rvn workspace create myproject --lang rust,python
-
-# Activate environment
-rvn workspace enter myproject
-
-# Environment automatically:
-# - Sets up PATH for project-specific tools
-# - Configures language versions
-# - Mounts project-specific packages
-```
-
-### Quick Commands
-```bash
-rvn dev rust      # Install Rust toolchain
-rvn dev node 20   # Install Node.js 20
-rvn dev docker    # Set up container runtime
-rvn template web  # Scaffold web project
-```
-
-## Installer (raven-installer)
-
-### Features
-- Graphical installer (runs in live environment)
-- Disk partitioning (auto + manual)
-- Encryption support (LUKS)
-- User creation
-- Package selection (minimal, standard, full)
-- Post-install configuration
-
-## Versioning
-
-- Rolling release model
-- Stable snapshots monthly
-- Version format: YYYY.MM (e.g., 2025.12)
-
-## Target Specifications
-
-### Minimum Requirements
-- CPU: x86_64 (ARM64 future)
-- RAM: 2GB (4GB recommended)
-- Storage: 20GB (50GB recommended)
-- Graphics: Vulkan-capable GPU for compositor
-
-### Supported Hardware
-- Primary: Modern laptops/desktops
-- Secondary: Virtual machines
-- Future: ARM64 SBCs, servers
+- **A package** → a `package.toml` under `packages/`, plus a build function in
+  stage 3
+- **A new software class** (desktop, toolchain, editor suite) → its own stage
+  script and a case in `build.sh`, rather than an ever-growing stage 3
+- **A host build dependency** → `check-deps.sh` *and* the `Dockerfile`
+- **Boot behavior** → `create_live_init()`, `setup_ravenboot()`, and
+  `setup_grub()` in `scripts/stages/stage4-iso.sh`
+- **The boot menu** → `bootloader/src/` (RavenBoot's menu is compiled in)
+- **Service management** → `init/src/service.rs` and `init/src/rc.rs`

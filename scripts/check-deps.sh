@@ -92,14 +92,8 @@ DEPENDENCIES=(
     "mcopy:mtools:-:-:-:-:-:Copy files to FAT images"
     "mmd:mtools:-:-:-:-:-:Create directories in FAT images"
     
-    # Wayland compositor and display server
-    # NOTE: raven-compositor is intentionally NOT checked here. It is not a host
-    # package — it is fetched from GitHub and built with cargo during the build
-    # (see scripts/build-compositor.sh and stages 3/4). Listing it as an
-    # installable package made pacman abort with "target not found".
-    "Xwayland:xorg-xwayland:xwayland:xorg-x11-server-Xwayland:xwayland:xorg-server-xwayland:xwayland:XWayland X11 compatibility"
-    "seatd:seatd:seatd:seatd:seatd:seatd:seatd:Seat management daemon"
-    "swaybg:swaybg:swaybg:swaybg:swaybg:swaybg:swaybg:Wallpaper utility for Wayland"
+    # Bootloader
+    "grub-mkstandalone:grub:grub-efi-amd64-bin:grub2-efi-x64:grub2:grub:grub-efi:GRUB EFI image builder"
 
     # Build systems
     "cargo:rust:-:rust-cargo:cargo:rust:rust:Rust package manager"
@@ -132,10 +126,7 @@ DEPENDENCIES=(
     "ssl:openssl:libssl-dev:openssl-devel:libopenssl-devel:openssl-devel:openssl-dev:OpenSSL development files"
     "zlib:zlib:zlib1g-dev:zlib-devel:zlib-devel:zlib-devel:zlib-dev:Zlib compression library"
     "libffi:libffi:libffi-dev:libffi-devel:libffi-devel:libffi-devel:libffi-dev:Foreign function interface library"
-    
-    # Graphics/Wayland build dependencies
-    "wayland-scanner:wayland:libwayland-dev:wayland-devel:wayland-devel:wayland-devel:wayland-dev:Wayland scanner tool"
-    
+
     # EFI/bootloader
     "objcopy:binutils:-:-:-:-:-:Object copy utility"
     
@@ -152,23 +143,16 @@ DEPENDENCIES=(
 
 # Additional package groups (not command-based)
 # Format: "distro:packages"
-# Trailing extras on each list are for components the build compiles from source:
-#   - libx{cursor,i,inerama,fixes}: raven-terminal's go-gl/glfw cgo build
-#     (GLFW X11 backend).
-#   - oniguruma: uutils-coreutils onig_sys with RUSTONIG_SYSTEM_LIBONIG=1.
-#   - gtk4 / libadwaita: RavenFileManager's gtk4-rs and libadwaita-rs bindings
-#     (gdk4-sys needs gtk4.pc, libadwaita-sys needs libadwaita-1.pc).
-#   - vulkan-headers / vulkan loader: Vem's Gio (gioui.org) cgo backend needs
-#     <vulkan/vulkan.h> and may link -lvulkan.
-#   - neovim / ripgrep: shipped in the rootfs (copied in by build_neovim);
-#     ripgrep is used by the NvCrow config.
+# oniguruma is needed because uutils-coreutils builds onig_sys with
+# RUSTONIG_SYSTEM_LIBONIG=1 (the crate's bundled copy fails to compile with
+# modern GCC), so it needs the system library plus oniguruma.pc.
 # Mirrored in the Dockerfile.
-EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja wayland-protocols libxkbcommon pixman libdrm mesa libinput seatd pango cairo gdk-pixbuf2 libxcursor libxi libxinerama libxfixes oniguruma gtk4 libadwaita vulkan-headers vulkan-icd-loader neovim ripgrep"
-EXTRA_PACKAGES_DEBIAN="build-essential linux-headers-generic libelf-dev python3-jinja2 libwayland-dev wayland-protocols libxkbcommon-dev libpixman-1-dev libdrm-dev libmesa-dev libinput-dev libseat-dev libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev libxcursor-dev libxi-dev libxinerama-dev libxfixes-dev libonig-dev libgtk-4-dev libadwaita-1-dev libvulkan-dev"
-EXTRA_PACKAGES_FEDORA="kernel-devel elfutils-libelf-devel python3-jinja2 wayland-devel wayland-protocols-devel libxkbcommon-devel pixman-devel libdrm-devel mesa-libGL-devel libinput-devel libseat-devel pango-devel cairo-devel gdk-pixbuf2-devel libXcursor-devel libXi-devel libXinerama-devel libXfixes-devel oniguruma-devel gtk4-devel libadwaita-devel vulkan-headers vulkan-loader-devel"
-EXTRA_PACKAGES_SUSE="kernel-devel libelf-devel python3-Jinja2 wayland-devel wayland-protocols-devel libxkbcommon-devel pixman-devel libdrm-devel Mesa-libGL-devel libinput-devel libseat-devel pango-devel cairo-devel gdk-pixbuf-devel libXcursor-devel libXi-devel libXinerama-devel libXfixes-devel oniguruma-devel gtk4-devel libadwaita-devel vulkan-headers vulkan-loader-devel"
-EXTRA_PACKAGES_VOID="base-devel linux-headers elfutils-devel python3-Jinja2 wayland-devel wayland-protocols libxkbcommon-devel pixman-devel libdrm-devel mesa-devel libinput-devel seatd-devel pango-devel cairo-devel gdk-pixbuf-devel libXcursor-devel libXi-devel libXinerama-devel libXfixes-devel oniguruma-devel gtk4-devel libadwaita-devel Vulkan-Headers vulkan-loader-devel"
-EXTRA_PACKAGES_ALPINE="build-base linux-headers elfutils-dev py3-jinja2 wayland-dev wayland-protocols libxkbcommon-dev pixman-dev libdrm-dev mesa-dev libinput-dev seatd-dev pango-dev cairo-dev gdk-pixbuf-dev libxcursor-dev libxi-dev libxinerama-dev libxfixes-dev oniguruma-dev gtk4.0-dev libadwaita-dev vulkan-headers vulkan-loader-dev"
+EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja oniguruma"
+EXTRA_PACKAGES_DEBIAN="build-essential linux-headers-generic libelf-dev python3-jinja2 libonig-dev"
+EXTRA_PACKAGES_FEDORA="kernel-devel elfutils-libelf-devel python3-jinja2 oniguruma-devel"
+EXTRA_PACKAGES_SUSE="kernel-devel libelf-devel python3-Jinja2 oniguruma-devel"
+EXTRA_PACKAGES_VOID="base-devel linux-headers elfutils-devel python3-Jinja2 oniguruma-devel"
+EXTRA_PACKAGES_ALPINE="build-base linux-headers elfutils-dev py3-jinja2 oniguruma-dev"
 
 # =============================================================================
 # Functions
