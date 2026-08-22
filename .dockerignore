@@ -1,4 +1,0 @@
-# The image does not COPY the repo (it is bind-mounted at run time), so keep the
-# build context tiny — only the Dockerfile is needed to build the image.
-*
-!Dockerfile
