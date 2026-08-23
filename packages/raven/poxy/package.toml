@@ -1,0 +1,35 @@
+[package]
+name = "poxy"
+version = "0.1.0"
+description = "Poxy - universal package manager"
+license = "MIT"
+homepage = "https://github.com/javanhut/Poxy"
+repository = "https://github.com/javanhut/Poxy"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "package-management"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/Poxy.git"
+commit = "5ebc75259ec193d23ff444d8cd0d6c074c295ae8"
+
+[build]
+system = "go"
+# CGO_ENABLED=0 makes this a fully static binary with no libc linkage, so it
+# runs on the musl sysroot without any runtime dependency.
+env = { CGO_ENABLED = "0", GOOS = "linux", GOARCH = "amd64" }
+build_flags = ["-trimpath", "-ldflags", "-s -w"]
+target = "./cmd"
+
+[dependencies]
+runtime = []
+build = ["go"]
+
+[install]
+files = [
+    { src = "poxy", dest = "/usr/bin/poxy", mode = 755 }
+]
+
+symlinks = [
+    { target = "/usr/bin/poxy", link = "/bin/poxy" }
+]

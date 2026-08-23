@@ -73,6 +73,9 @@ RUN pacman -Syu --noconfirm --needed \
         oniguruma \
         # Misc runtime utilities used by the build/test scripts
         kexec-tools inetutils \
+        # Go toolchain -- the Raven stage builds ravenshell, poxy and imlazy
+        # with CGO_ENABLED=0, so no Go cgo headers are needed.
+        go \
     && pacman -Scc --noconfirm
 
 # -----------------------------------------------------------------------------
@@ -83,9 +86,15 @@ RUN pacman -Syu --noconfirm --needed \
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH
+# Two extra targets are pre-installed so the build works offline and does not
+# pay for a target download mid-build:
+#   x86_64-unknown-uefi        RavenBoot (stage3)
+#   x86_64-unknown-linux-musl  the Raven toolchain's static Rust binaries
 RUN pacman -Syu --noconfirm --needed rustup \
     && rustup default stable \
     && rustup component add rust-src \
+    && rustup target add x86_64-unknown-uefi \
+    && rustup target add x86_64-unknown-linux-musl \
     && pacman -Scc --noconfirm
 
 WORKDIR /raven

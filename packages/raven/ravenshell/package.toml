@@ -1,0 +1,38 @@
+# The default login shell. The Raven stage registers it in /etc/shells and
+# points root's passwd entry at it once the binary is actually installed;
+# stage3 leaves bash as the default so the base system stands on its own.
+[package]
+name = "ravenshell"
+version = "0.1.0"
+description = "Raven Shell - interactive command line interpreter and scripting language"
+license = "NOASSERTION"
+homepage = "https://github.com/javanhut/RavenShell"
+repository = "https://github.com/javanhut/RavenShell"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "shell"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/RavenShell.git"
+commit = "db1baaa1b8e966656310179157fbfeecb1d75c40"
+
+[build]
+system = "go"
+# CGO_ENABLED=0 makes this a fully static binary with no libc linkage, so it
+# runs on the musl sysroot without any runtime dependency.
+env = { CGO_ENABLED = "0", GOOS = "linux", GOARCH = "amd64" }
+build_flags = ["-trimpath", "-ldflags", "-s -w"]
+target = "."
+
+[dependencies]
+runtime = []
+build = ["go"]
+
+[install]
+files = [
+    { src = "ravenshell", dest = "/usr/bin/ravenshell", mode = 755 }
+]
+
+symlinks = [
+    { target = "/usr/bin/ravenshell", link = "/bin/ravenshell" }
+]

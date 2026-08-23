@@ -1,0 +1,38 @@
+# A Cargo workspace: the binary lives in crates/oxigen-cli, so the build
+# selects it with -p oxigen rather than building the whole workspace.
+[package]
+name = "oxigen"
+version = "0.1.4"
+description = "OxigenLang - modern interpreted programming language"
+license = "NOASSERTION"
+homepage = "https://github.com/javanhut/OxigenLang"
+repository = "https://github.com/javanhut/OxigenLang"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "language"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/OxigenLang.git"
+commit = "aa6a45285056336b98a22065c995a29de13d51cc"
+
+[build]
+system = "cargo"
+# Built against the musl target so the result is statically linked and carries
+# no runtime dependency on the sysroot's libraries.
+target = "x86_64-unknown-linux-musl"
+build_flags = ["--release"]
+# Workspace package selected with -p.
+package = "oxigen"
+
+[dependencies]
+runtime = []
+build = ["rust", "cargo"]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-musl/release/oxigen", dest = "/usr/bin/oxigen", mode = 755 }
+]
+
+symlinks = [
+    { target = "/usr/bin/oxigen", link = "/bin/oxigen" }
+]

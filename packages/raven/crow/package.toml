@@ -1,0 +1,34 @@
+[package]
+name = "crow"
+version = "0.1.0"
+description = "Crow - text editor"
+license = "NOASSERTION"
+homepage = "https://github.com/javanhut/CrowTextEditor"
+repository = "https://github.com/javanhut/CrowTextEditor"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "editor"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/CrowTextEditor.git"
+commit = "0923050837f34c11728dfc71f6d2f767752e636c"
+
+[build]
+system = "cargo"
+# Built against the musl target so the result is statically linked and carries
+# no runtime dependency on the sysroot's libraries.
+target = "x86_64-unknown-linux-musl"
+build_flags = ["--release", "--locked"]
+
+[dependencies]
+runtime = []
+build = ["rust", "cargo"]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-musl/release/crow", dest = "/usr/bin/crow", mode = 755 }
+]
+
+symlinks = [
+    { target = "/usr/bin/crow", link = "/bin/crow" }
+]

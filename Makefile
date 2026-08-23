@@ -103,6 +103,10 @@ stage2: ## Native rebuild of the entire system
 stage3: ## Build base packages (core libraries, shells, OpenSSH)
 	$(RUN) $(BUILD_FLAGS) stage3
 
+.PHONY: raven
+raven: ## Build the Raven self-hosted toolchain into the sysroot (before iso)
+	$(RUN) $(BUILD_FLAGS) raven
+
 .PHONY: stage4 iso
 stage4 iso: ## Generate the bootable ISO from existing build output
 	$(RUN) $(BUILD_FLAGS) stage4

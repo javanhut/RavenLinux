@@ -1,0 +1,507 @@
+#!/bin/bash
+# =============================================================================
+# RavenLinux Raven Stage: Self-Hosted Toolchain
+# =============================================================================
+# Builds the software RavenLinux provides for itself -- the shell, package
+# managers, version control, editor, task runner and language it ships instead
+# of inheriting from elsewhere. See REPOSFORRAVEN.md for the roadmap this
+# implements.
+#
+# This stage is deliberately *not* numbered. Stages 0-4 build the base system
+# and the ISO; those must exist and work on their own. This layer sits on top
+# of stage3 and must run before stage4, because stage4 squashes the sysroot
+# into the ISO -- anything installed after it would not ship.
+#
+#   stage0 -> stage1 -> stage2 -> stage3 -> raven -> stage4
+#
+# Every component is built as a *static* binary, so nothing here adds a runtime
+# link dependency on the sysroot:
+#
+#   Go   -> CGO_ENABLED=0                       (static by construction)
+#   Rust -> --target x86_64-unknown-linux-musl  (static by construction)
+#
+# The stage is fail-soft by design. A component that will not clone or will not
+# compile is logged and skipped; the rest of the stage, and the ISO build after
+# it, still succeed. A base system without Crow is a base system; a build that
+# aborts halfway through leaves you with nothing.
+#
+# Package definitions live in packages/raven.
+#
+# Environment:
+#   RAVEN_ONLY=crow,ivaldi        build only these components
+#   RAVEN_SKIP=oxigen             skip these components
+#   RAVEN_OFFLINE=1               never touch the network; use existing clones
+#   RAVEN_<KEY>_REF=<git-ref>     pin one component (e.g. RAVEN_IVALDI_REF=v0.1.2)
+#   RAVEN_KEEP_BASH_DEFAULT=1     install ravenshell but leave bash as the
+#                                 default login shell
+# =============================================================================
+
+set -euo pipefail
+
+# =============================================================================
+# Environment Setup (with defaults for standalone execution)
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${RAVEN_ROOT:-$(dirname "$(dirname "$SCRIPT_DIR")")}"
+BUILD_DIR="${RAVEN_BUILD:-${PROJECT_ROOT}/build}"
+SYSROOT_DIR="${SYSROOT_DIR:-${BUILD_DIR}/sysroot}"
+PACKAGES_DIR="${PACKAGES_DIR:-${BUILD_DIR}/packages}"
+SOURCES_DIR="${SOURCES_DIR:-${BUILD_DIR}/sources}"
+LOGS_DIR="${LOGS_DIR:-${BUILD_DIR}/logs}"
+RAVEN_JOBS="${RAVEN_JOBS:-$(nproc)}"
+
+# Where component checkouts live, and where built binaries are staged before
+# they are installed into the sysroot.
+RAVEN_SRC_DIR="${SOURCES_DIR}/raven"
+RAVEN_STAGE_DIR="${PACKAGES_DIR}/raven"
+
+# Static build target for Rust components. Overridable so this stage can be
+# exercised against a host target when the musl std is not installed.
+RUST_MUSL_TARGET="${RUST_MUSL_TARGET:-x86_64-unknown-linux-musl}"
+
+# =============================================================================
+# Logging (use shared library or define fallbacks)
+# =============================================================================
+
+if [[ -f "${PROJECT_ROOT}/scripts/lib/logging.sh" ]]; then
+    source "${PROJECT_ROOT}/scripts/lib/logging.sh"
+else
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    NC='\033[0m'
+    log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+    log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+    log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+    log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+    log_step() { echo -e "${CYAN}[STEP]${NC} $1"; }
+fi
+
+# =============================================================================
+# Component Table
+# =============================================================================
+# key|repo|lang|binary|build_target|description
+#
+#   key          short name; also the RAVEN_<KEY>_REF env suffix and the
+#                packages/raven/<key> directory
+#   repo         github.com/javanhut/<repo>
+#   lang         go | rust
+#   binary       the installed name in /usr/bin
+#   build_target go: the package path to build
+#                rust: the workspace package (-p), or "." for a plain crate
+#
+# RavenTerminal is intentionally absent: it is a GPU-accelerated terminal that
+# needs OpenGL, GLFW and an X11/Wayland display, none of which exist in the
+# console base. It belongs with whatever graphical stack gets built back.
+
+RAVEN_COMPONENTS=(
+    "ravenshell|RavenShell|go|ravenshell|.|Raven Shell - interactive shell and scripting language"
+    "rvn|RavenPackageManager|rust|rvn|.|Raven Package Manager"
+    "poxy|Poxy|go|poxy|./cmd|Poxy - universal package manager"
+    "ivaldi|Ivaldi|rust|ivaldi|.|Ivaldi - version control system"
+    "crow|CrowTextEditor|rust|crow|.|Crow - text editor"
+    "imlazy|ImLazy|go|imlazy|.|ImLazy - task runner"
+    "oxigen|OxigenLang|rust|oxigen|oxigen|OxigenLang - interpreted language"
+)
+
+# Populated by build_component() so print_summary and the default-shell switch
+# can tell what actually landed.
+declare -a RAVEN_BUILT=()
+declare -a RAVEN_FAILED=()
+declare -a RAVEN_SKIPPED=()
+
+# =============================================================================
+# Toolchain checks
+# =============================================================================
+
+# Returns 0 if Go is usable. Go tools are skipped wholesale when it is not.
+have_go() {
+    command -v go &>/dev/null
+}
+
+# Returns 0 if cargo can produce static musl binaries. Adds the musl target
+# via rustup when it is missing; without rustup we can only hope the
+# distribution shipped it.
+have_rust_musl() {
+    command -v cargo &>/dev/null || return 1
+
+    if command -v rustup &>/dev/null; then
+        if ! rustup target list --installed 2>/dev/null | grep -qx "${RUST_MUSL_TARGET}"; then
+            log_info "Adding Rust target ${RUST_MUSL_TARGET}..."
+            rustup target add "${RUST_MUSL_TARGET}" >/dev/null 2>&1 || return 1
+        fi
+        return 0
+    fi
+
+    # No rustup: ask rustc where the target's libdir would be and check that it
+    # actually exists. --print target-libdir only *computes* the path, so it
+    # succeeds for targets that were never installed -- the directory test is
+    # what makes this a real probe.
+    local libdir
+    libdir="$(rustc --print target-libdir --target "${RUST_MUSL_TARGET}" 2>/dev/null)" || return 1
+    [[ -n "${libdir}" && -d "${libdir}" ]]
+}
+
+# =============================================================================
+# Source fetching
+# =============================================================================
+# Clones a component, or updates an existing clone. Honours RAVEN_OFFLINE and
+# the per-component RAVEN_<KEY>_REF pin.
+fetch_component() {
+    local key="$1" repo="$2"
+    local dest="${RAVEN_SRC_DIR}/${repo}"
+    local url="https://github.com/javanhut/${repo}.git"
+
+    # RAVEN_IVALDI_REF, RAVEN_CROW_REF, ...
+    local ref_var="RAVEN_${key^^}_REF"
+    local ref="${!ref_var:-}"
+
+    if [[ "${RAVEN_OFFLINE:-0}" == "1" ]]; then
+        if [[ -d "${dest}/.git" ]]; then
+            log_info "  offline: using existing clone of ${repo}"
+            return 0
+        fi
+        log_warn "  offline: no clone of ${repo} in ${RAVEN_SRC_DIR}"
+        return 1
+    fi
+
+    if ! command -v git &>/dev/null; then
+        log_warn "  git not found, cannot fetch ${repo}"
+        return 1
+    fi
+
+    mkdir -p "${RAVEN_SRC_DIR}"
+
+    if [[ -d "${dest}/.git" ]]; then
+        log_info "  updating ${repo}..."
+        # Unshallow-safe: --depth on fetch keeps shallow clones shallow.
+        if ! (cd "${dest}" && git fetch --tags --depth 1 origin "${ref:-HEAD}" 2>/dev/null \
+              && git reset --hard FETCH_HEAD >/dev/null 2>&1); then
+            log_warn "  could not update ${repo}, using the existing checkout"
+        fi
+    else
+        log_info "  cloning ${repo}..."
+        rm -rf "${dest}"
+        if [[ -n "${ref}" ]]; then
+            git clone --depth 1 --branch "${ref}" -q "${url}" "${dest}" 2>/dev/null \
+                || git clone --depth 1 -q "${url}" "${dest}" || return 1
+        else
+            git clone --depth 1 -q "${url}" "${dest}" || return 1
+        fi
+    fi
+
+    local rev
+    rev="$(cd "${dest}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    log_info "  ${repo} @ ${rev}"
+    return 0
+}
+
+# =============================================================================
+# Builders
+# =============================================================================
+
+# Build a Go component into a fully static binary.
+#   CGO_ENABLED=0  no libc linkage at all
+#   -trimpath      strips local paths out of the binary
+#   -s -w          drops the symbol table and DWARF (these are user tools,
+#                  not something we ship debug info for)
+build_go_component() {
+    local src="$1" binary="$2" target="$3" out="$4"
+
+    (
+        cd "${src}"
+        CGO_ENABLED=0 \
+        GOOS=linux \
+        GOARCH="${RAVEN_GOARCH:-amd64}" \
+        GOFLAGS="${GOFLAGS:-}" \
+        go build -trimpath -ldflags "-s -w" -o "${out}" "${target}"
+    )
+}
+
+# Build a Rust component into a static musl binary.
+# --locked is used only when the component actually ships a Cargo.lock;
+# RavenPackageManager and OxigenLang currently do not.
+build_rust_component() {
+    local src="$1" binary="$2" target="$3" out="$4"
+
+    local -a cargo_args=(build --release --target "${RUST_MUSL_TARGET}")
+
+    [[ -f "${src}/Cargo.lock" ]] && cargo_args+=(--locked)
+    [[ "${target}" != "." ]] && cargo_args+=(-p "${target}")
+
+    (
+        cd "${src}"
+        cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}"
+    ) || return 1
+
+    local built="${src}/target/${RUST_MUSL_TARGET}/release/${binary}"
+    [[ -f "${built}" ]] || return 1
+    cp "${built}" "${out}"
+}
+
+# Fetch, build, stage and install one component. Never fails the stage.
+build_component() {
+    local spec="$1"
+    IFS='|' read -r key repo lang binary target desc <<< "${spec}"
+
+    log_step "${binary} (${desc})"
+
+    if ! fetch_component "${key}" "${repo}"; then
+        log_warn "  ${binary}: source unavailable, skipping"
+        RAVEN_FAILED+=("${binary}")
+        return 0
+    fi
+
+    local src="${RAVEN_SRC_DIR}/${repo}"
+    local out="${RAVEN_STAGE_DIR}/${binary}"
+    mkdir -p "${RAVEN_STAGE_DIR}"
+
+    local ok=0
+    case "${lang}" in
+        go)
+            build_go_component "${src}" "${binary}" "${target}" "${out}" || ok=1
+            ;;
+        rust)
+            build_rust_component "${src}" "${binary}" "${target}" "${out}" || ok=1
+            ;;
+        *)
+            log_error "  ${binary}: unknown language '${lang}'"
+            ok=1
+            ;;
+    esac
+
+    if (( ok != 0 )) || [[ ! -f "${out}" ]]; then
+        log_warn "  ${binary}: build failed, skipping"
+        RAVEN_FAILED+=("${binary}")
+        return 0
+    fi
+
+    install_component_binary "${binary}" "${out}"
+    RAVEN_BUILT+=("${binary}")
+    log_success "  ${binary} installed ($(du -h "${out}" | cut -f1))"
+}
+
+# Install a staged binary into the sysroot, with the /bin compatibility
+# symlink the rest of the base system uses.
+install_component_binary() {
+    local binary="$1" src="$2"
+
+    mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/bin"
+    install -m 0755 "${src}" "${SYSROOT_DIR}/usr/bin/${binary}"
+    ln -sf "../usr/bin/${binary}" "${SYSROOT_DIR}/bin/${binary}"
+}
+
+# =============================================================================
+# Component selection
+# =============================================================================
+# RAVEN_ONLY wins over RAVEN_SKIP. Both take comma-separated component keys.
+component_selected() {
+    local key="$1"
+
+    if [[ -n "${RAVEN_ONLY:-}" ]]; then
+        [[ ",${RAVEN_ONLY}," == *",${key},"* ]] && return 0
+        return 1
+    fi
+
+    if [[ -n "${RAVEN_SKIP:-}" ]]; then
+        [[ ",${RAVEN_SKIP}," == *",${key},"* ]] && return 1
+    fi
+
+    return 0
+}
+
+build_all_components() {
+    local go_ok=1 rust_ok=1
+
+    have_go || go_ok=0
+    have_rust_musl || rust_ok=0
+
+    if (( go_ok == 0 )); then
+        log_warn "Go toolchain not usable -- Go components will be skipped"
+        log_info "  install it with: pacman -S go  (or see scripts/check-deps.sh)"
+    fi
+    if (( rust_ok == 0 )); then
+        log_warn "Rust ${RUST_MUSL_TARGET} target not usable -- Rust components will be skipped"
+        log_info "  install it with: rustup target add ${RUST_MUSL_TARGET}"
+    fi
+
+    for spec in "${RAVEN_COMPONENTS[@]}"; do
+        IFS='|' read -r key repo lang binary target desc <<< "${spec}"
+
+        if ! component_selected "${key}"; then
+            log_info "Skipping ${binary} (deselected)"
+            RAVEN_SKIPPED+=("${binary}")
+            continue
+        fi
+
+        if [[ "${lang}" == "go" ]] && (( go_ok == 0 )); then
+            RAVEN_SKIPPED+=("${binary}")
+            continue
+        fi
+        if [[ "${lang}" == "rust" ]] && (( rust_ok == 0 )); then
+            RAVEN_SKIPPED+=("${binary}")
+            continue
+        fi
+
+        build_component "${spec}"
+    done
+}
+
+# =============================================================================
+# Default shell
+# =============================================================================
+# stage3 sets bash as the default so that the base system stands on its own.
+# Once ravenshell is actually in the sysroot we take that over. If ravenshell
+# did not build, this is a no-op and bash stays the default -- which is the
+# whole point of doing it here rather than in stage3.
+set_ravenshell_default() {
+    local rsh="${SYSROOT_DIR}/usr/bin/ravenshell"
+
+    if [[ ! -f "${rsh}" ]]; then
+        log_info "ravenshell not installed, leaving bash as the default shell"
+        return 0
+    fi
+
+    if [[ "${RAVEN_KEEP_BASH_DEFAULT:-0}" == "1" ]]; then
+        log_info "RAVEN_KEEP_BASH_DEFAULT=1, leaving bash as the default shell"
+        register_shells
+        return 0
+    fi
+
+    log_step "Making ravenshell the default login shell..."
+
+    register_shells
+
+    # root's login shell
+    if [[ -f "${SYSROOT_DIR}/etc/passwd" ]]; then
+        sed -i 's|^root:\(.*\):[^:]*$|root:\1:/usr/bin/ravenshell|' \
+            "${SYSROOT_DIR}/etc/passwd" 2>/dev/null || true
+    else
+        mkdir -p "${SYSROOT_DIR}/etc"
+        echo "root:x:0:0:root:/root:/usr/bin/ravenshell" > "${SYSROOT_DIR}/etc/passwd"
+    fi
+
+    # default for new users
+    mkdir -p "${SYSROOT_DIR}/etc/default"
+    if [[ -f "${SYSROOT_DIR}/etc/default/useradd" ]]; then
+        sed -i 's|^SHELL=.*|SHELL=/usr/bin/ravenshell|' \
+            "${SYSROOT_DIR}/etc/default/useradd" 2>/dev/null || true
+    fi
+
+    log_success "Default shell set to ravenshell (bash remains available)"
+}
+
+# Rewrite /etc/shells with ravenshell first. bash, fish and sh stay listed --
+# they are still installed, and /bin/sh in particular is what the boot and
+# build scripts use.
+register_shells() {
+    mkdir -p "${SYSROOT_DIR}/etc"
+    cat > "${SYSROOT_DIR}/etc/shells" << 'SHELLS'
+# /etc/shells - valid login shells for RavenLinux
+#
+# Default: ravenshell (Raven Shell). bash and fish remain available as
+# alternates; /bin/sh is the POSIX fallback the boot and build scripts use.
+/bin/ravenshell
+/usr/bin/ravenshell
+/bin/bash
+/usr/bin/bash
+/bin/fish
+/usr/bin/fish
+/bin/sh
+/usr/bin/sh
+SHELLS
+    log_info "Registered ravenshell in /etc/shells"
+}
+
+# =============================================================================
+# Skeleton configuration
+# =============================================================================
+# Ship whatever configs/raven-shell/ holds into /etc and the user skeleton, the
+# same way stage3 does for bash and fish.
+install_raven_configs() {
+    local configs_dir="${PROJECT_ROOT}/configs/ravenshell"
+
+    [[ -d "${configs_dir}" ]] || return 0
+
+    log_step "Installing ravenshell configuration..."
+    mkdir -p "${SYSROOT_DIR}/etc/ravenshell" "${SYSROOT_DIR}/etc/skel/.config/ravenshell"
+    cp -r "${configs_dir}/." "${SYSROOT_DIR}/etc/ravenshell/" 2>/dev/null || true
+    cp -r "${configs_dir}/." "${SYSROOT_DIR}/etc/skel/.config/ravenshell/" 2>/dev/null || true
+    log_success "ravenshell configuration installed"
+}
+
+# =============================================================================
+# Summary
+# =============================================================================
+print_summary() {
+    echo ""
+    echo "=========================================="
+    echo "  Raven Stage Summary"
+    echo "=========================================="
+    echo ""
+
+    echo "Components:"
+    for spec in "${RAVEN_COMPONENTS[@]}"; do
+        IFS='|' read -r key repo lang binary target desc <<< "${spec}"
+        local path="${SYSROOT_DIR}/usr/bin/${binary}"
+        if [[ -f "${path}" ]]; then
+            printf "  [OK] %-14s %-6s %s\n" "${binary}" "$(du -h "${path}" | cut -f1)" "${desc}"
+        else
+            printf "  [--] %-14s %-6s %s\n" "${binary}" "" "${desc}"
+        fi
+    done
+
+    echo ""
+    echo "Default shell:"
+    if grep -q "ravenshell" "${SYSROOT_DIR}/etc/passwd" 2>/dev/null; then
+        echo "  [OK] ravenshell"
+    else
+        echo "  [--] ravenshell (bash still default)"
+    fi
+
+    if (( ${#RAVEN_FAILED[@]} > 0 )); then
+        echo ""
+        echo "Not built: ${RAVEN_FAILED[*]}"
+        echo "  (the ISO still builds; rerun this stage after fixing the cause)"
+    fi
+    echo ""
+}
+
+# =============================================================================
+# Main
+# =============================================================================
+main() {
+    echo ""
+    echo "=========================================="
+    echo "  Raven Stage: Self-Hosted Toolchain"
+    echo "=========================================="
+    echo ""
+
+    mkdir -p "${LOGS_DIR}" "${RAVEN_SRC_DIR}" "${RAVEN_STAGE_DIR}"
+
+    if [[ ! -d "${SYSROOT_DIR}" ]]; then
+        log_error "Sysroot not found at ${SYSROOT_DIR}"
+        log_error "Run stage2 and stage3 first."
+        return 1
+    fi
+
+    # RavenShell, rvn, poxy, ivaldi, crow, imlazy, oxigen
+    build_all_components
+
+    # ravenshell config into /etc and /etc/skel, if configs/ravenshell exists
+    install_raven_configs
+
+    # Take over the default shell, but only if ravenshell actually landed
+    set_ravenshell_default
+
+    print_summary
+
+    log_success "Raven stage complete!"
+    echo ""
+}
+
+# Run main (whether executed directly or sourced)
+main "$@"

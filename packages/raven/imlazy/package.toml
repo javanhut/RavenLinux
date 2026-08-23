@@ -1,0 +1,35 @@
+[package]
+name = "imlazy"
+version = "0.3.0"
+description = "ImLazy - task runner driven by lazy.toml"
+license = "NOASSERTION"
+homepage = "https://github.com/javanhut/ImLazy"
+repository = "https://github.com/javanhut/ImLazy"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "build-tools"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/ImLazy.git"
+commit = "98cb1835bf1ca698892030ad48c7708d955dd832"
+
+[build]
+system = "go"
+# CGO_ENABLED=0 makes this a fully static binary with no libc linkage, so it
+# runs on the musl sysroot without any runtime dependency.
+env = { CGO_ENABLED = "0", GOOS = "linux", GOARCH = "amd64" }
+build_flags = ["-trimpath", "-ldflags", "-s -w"]
+target = "."
+
+[dependencies]
+runtime = []
+build = ["go"]
+
+[install]
+files = [
+    { src = "imlazy", dest = "/usr/bin/imlazy", mode = 755 }
+]
+
+symlinks = [
+    { target = "/usr/bin/imlazy", link = "/bin/imlazy" }
+]

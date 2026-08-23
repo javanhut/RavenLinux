@@ -7,9 +7,12 @@ document describes the base system — the layer everything else gets built on
 top of.
 
 The base is deliberately narrow. It boots, gives you a shell, talks to the
-network, and can be rebuilt from source in one command. Everything beyond that
-(package management, a desktop, toolchains, an installer) is intentionally left
-out so it can be designed rather than inherited.
+network, and can be rebuilt from source in one command. On top of it sits the
+Raven layer — the shell, package managers, version control, editor, task runner
+and language RavenLinux provides for itself rather than inheriting.
+
+What is still intentionally left out: a desktop, a graphical terminal, hosted
+Rust/Go toolchains, and an installer.
 
 ## Design Principles
 
@@ -27,9 +30,32 @@ out so it can be designed rather than inherited.
 - **Bootloader**: RavenBoot (Rust, UEFI), with GRUB as the BIOS fallback
 - **Init System**: `raven-init` (Rust) with `raven-rc` as service manager
 - **Core Utilities**: uutils coreutils (Rust)
-- **Shells**: bash (default), fish
+- **Shells**: ravenshell (default), bash, fish
 - **Networking**: OpenSSH client and server
 - **Privilege escalation**: sudo-rs
+
+### The Raven Layer
+
+The software RavenLinux provides for itself, built on top of the base system by
+`scripts/stages/stage-raven.sh`:
+
+| Binary | Source | Language | Role |
+|--------|--------|----------|------|
+| `ravenshell` | RavenShell | Go | Default login shell and scripting language |
+| `rvn` | RavenPackageManager | Rust | Package manager |
+| `poxy` | Poxy | Go | Universal package manager |
+| `ivaldi` | Ivaldi | Rust | Version control |
+| `crow` | CrowTextEditor | Rust | Text editor |
+| `imlazy` | ImLazy | Go | Task runner |
+| `oxigen` | OxigenLang | Rust | Interpreted language |
+
+All are statically linked — Go with `CGO_ENABLED=0`, Rust against
+`x86_64-unknown-linux-musl` — so they add nothing to the sysroot's runtime link
+graph and can be dropped in or left out freely.
+
+RavenTerminal is deliberately not part of this layer. It is a GPU-accelerated
+terminal that needs OpenGL, GLFW and a display server, none of which exist in
+the console base; it belongs with whatever graphical stack gets built back.
 
 ### Init System (`init/`)
 
@@ -68,11 +94,19 @@ firmware
     /init  ── live init: mounts the squashfs root, then execs a shell on tty1
                    │
                    ▼
-            bash (login shell, root)
+    /etc/raven/raven-shell ── ravenshell > bash > /bin/sh
+                   │
+                   ▼
+            login shell (root)
 ```
 
 On an installed system the handoff is to `raven-init` instead of the live init
 script; the live path exists so the ISO is useful without an installer.
+
+The login shell is resolved by `/etc/raven/raven-shell`, which prefers
+`ravenshell`, falls back to `bash`, and finally to `/bin/sh`. stage3 sets bash
+as root's default so a base build without the Raven layer still boots to a
+working shell; the Raven layer takes that over once `ravenshell` is installed.
 
 ## Directory Structure (target rootfs)
 
@@ -116,7 +150,14 @@ script; the live path exists so the ISO is useful without an installer.
 | **Stage 1** | Build the base system with the stage 0 toolchain; kernel and initramfs |
 | **Stage 2** | Rebuild the sysroot natively: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | **Stage 3** | Base packages: core libraries, shells, OpenSSH, RavenBoot |
+| **Raven** | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen |
 | **Stage 4** | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
+
+The Raven layer carries no stage number. Stages 0–4 are the base system and
+must work without it; it slots between stage3 and stage4 because stage4 squashes
+the sysroot into the ISO, so anything installed after it would not ship. It is
+also fail-soft: a component that will not build is skipped with a warning rather
+than failing the run.
 
 Each stage is a standalone script under `scripts/stages/` that can be run on its
 own; `scripts/build.sh` sequences them and owns the shared environment
@@ -180,6 +221,7 @@ Sets:
 
 - `packages/core/` — musl, linux, openssl, openssh, libssh, sudo-rs, uutils-coreutils
 - `packages/base/` — bash, fish
+- `packages/raven/` — ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen
 
 ## Extending the System
 
@@ -187,6 +229,8 @@ The base is designed to be grown, not modified:
 
 - **A package** → a `package.toml` under `packages/`, plus a build function in
   stage 3
+- **A Raven tool** → one row in the `RAVEN_COMPONENTS` table in
+  `scripts/stages/stage-raven.sh`, plus a `package.toml` under `packages/raven/`
 - **A new software class** (desktop, toolchain, editor suite) → its own stage
   script and a case in `build.sh`, rather than an ever-growing stage 3
 - **A host build dependency** → `check-deps.sh` *and* the `Dockerfile`

@@ -28,8 +28,25 @@ What's here:
 - **bash** and **fish** shells, **OpenSSH** client and server
 - **A five-stage build** that runs in a container, so it works from any host
 
-What's deliberately absent: a desktop environment, a package manager, a text
-editor, language toolchains, an installer. Those are the things to build back.
+On top of that base sits the **Raven layer** — the software RavenLinux provides
+for itself rather than inheriting:
+
+| Tool | What it is |
+|------|------------|
+| `ravenshell` | [Raven Shell](https://github.com/javanhut/RavenShell) — the default login shell and scripting language |
+| `rvn` | [Raven Package Manager](https://github.com/javanhut/RavenPackageManager) |
+| `poxy` | [Poxy](https://github.com/javanhut/Poxy), a universal package manager |
+| `ivaldi` | [Ivaldi](https://github.com/javanhut/Ivaldi), the version control system |
+| `crow` | [Crow](https://github.com/javanhut/CrowTextEditor), the text editor |
+| `imlazy` | [ImLazy](https://github.com/javanhut/ImLazy), the task runner |
+| `oxigen` | [OxigenLang](https://github.com/javanhut/OxigenLang), the interpreted language |
+
+Every one of those is built as a **static** binary — Go with `CGO_ENABLED=0`,
+Rust against `x86_64-unknown-linux-musl` — so the Raven layer adds no runtime
+link dependency to the base sysroot.
+
+What's deliberately absent: a desktop environment, a graphical terminal, hosted
+Rust/Go toolchains, an installer. Those are the things still to build back.
 
 ## Building
 
@@ -40,6 +57,7 @@ uses chroot, overlayfs mounts, and loop devices.
 ```bash
 make image      # build the toolchain image (cached after the first run)
 make build      # build everything -> ./build/ and raven-<ver>-x86_64.iso
+make raven      # build just the Raven layer into an existing sysroot
 make shell      # drop into the build environment interactively
 make help       # list every target
 ```
@@ -71,9 +89,27 @@ qemu-user — use Docker Desktop or colima with Rosetta, or build on x86_64.
 | `stage1` | `scripts/stages/stage1-base.sh` | Base system cross-built with that toolchain; kernel and initramfs |
 | `stage2` | `scripts/stages/stage2-native.sh` | Native rebuild of the sysroot: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | `stage3` | `scripts/stages/stage3-packages.sh` | Base packages: core libraries (zlib, ncurses, readline, attr, acl), shells, OpenSSH, RavenBoot |
+| `raven` | `scripts/stages/stage-raven.sh` | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen |
 | `stage4` | `scripts/stages/stage4-iso.sh` | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
 
+The Raven layer is unnumbered on purpose. Stages 0–4 build a base system that
+has to stand on its own; the Raven layer sits on top of stage3 and must run
+before stage4, because stage4 squashes the sysroot into the ISO and anything
+installed afterwards would not ship.
+
 Run one stage at a time with `make stage2` or `./scripts/build.sh stage2`.
+
+The Raven layer is fail-soft: a component that will not clone or compile is
+logged and skipped, and the ISO still builds. Narrow it while iterating:
+
+```bash
+./scripts/build.sh raven                  # all seven components
+RAVEN_ONLY=crow,ivaldi make raven         # just these two
+RAVEN_SKIP=oxigen make raven              # everything but this one
+RAVEN_OFFLINE=1 make raven                # reuse existing clones, no network
+RAVEN_IVALDI_REF=v0.1.2 make raven        # pin one component to a git ref
+RAVEN_KEEP_BASH_DEFAULT=1 make raven      # install ravenshell, keep bash default
+```
 
 Artifacts land in `./build/`:
 
@@ -129,12 +165,13 @@ docker run --rm -it --platform linux/amd64 ravenlinux
 │   ├── build-uutils.sh       # uutils coreutils build
 │   ├── export-rootfs.sh      # package the sysroot as a container image
 │   ├── lib/logging.sh        # shared logging
-│   └── stages/               # the five build stages
+│   └── stages/               # the five build stages, plus stage-raven.sh
 ├── init/                     # raven-init and raven-rc (Rust)
 ├── bootloader/               # RavenBoot, the UEFI bootloader (Rust)
 ├── packages/
 │   ├── core/                 # musl, linux, openssl, openssh, sudo-rs, uutils
-│   └── base/                 # bash, fish
+│   ├── base/                 # bash, fish
+│   └── raven/                # ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen
 ├── configs/                  # shell, SSH, kernel, fontconfig configuration
 ├── etc/                      # files installed into the rootfs /etc
 ├── fonts/                    # console font (JetBrains Mono Nerd Font)
@@ -149,6 +186,10 @@ rewiring:
 - **A package**: add a `package.toml` under `packages/` and a build function in
   `scripts/stages/stage3-packages.sh` (the existing `build_openssh` is a good
   template for an autotools package).
+- **A Raven tool**: add one row to the `RAVEN_COMPONENTS` table at the top of
+  `scripts/stages/stage-raven.sh` and a `package.toml` under `packages/raven/`.
+  The table row carries everything the build needs — repository, language,
+  binary name, and build target — so no new build function is required.
 - **A new class of software** (a desktop, a toolchain, an editor suite): give it
   its own stage script under `scripts/stages/` and a case in `build.sh`, rather
   than growing stage 3 indefinitely.

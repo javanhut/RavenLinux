@@ -1,0 +1,27 @@
+[package]
+name = "raven-boot"
+version = "0.1.0"
+edition = "2021"
+authors = ["RavenLinux Team"]
+description = "RavenLinux Custom UEFI Bootloader"
+license = "MIT"
+
+[dependencies]
+# UEFI support
+uefi = { version = "0.28", features = ["alloc"] }
+uefi-services = "0.25"
+
+# Logging
+log = "0.4"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = "z"  # Optimize for size
+
+# Target configuration for UEFI
+# Build with: cargo build --target x86_64-unknown-uefi

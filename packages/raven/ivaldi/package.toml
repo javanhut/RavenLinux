@@ -1,0 +1,36 @@
+# TLS comes from ureq + rustls + ring -- pure Rust, no OpenSSL. That is why
+# this cross-compiles cleanly to a static musl binary.
+[package]
+name = "ivaldi"
+version = "0.1.2"
+description = "Ivaldi - standalone modern version control system"
+license = "AGPL-3.0"
+homepage = "https://github.com/javanhut/Ivaldi"
+repository = "https://github.com/javanhut/Ivaldi"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "vcs"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/Ivaldi.git"
+commit = "7bc995fe321c52ac49da758224dab3ea67b64d36"
+
+[build]
+system = "cargo"
+# Built against the musl target so the result is statically linked and carries
+# no runtime dependency on the sysroot's libraries.
+target = "x86_64-unknown-linux-musl"
+build_flags = ["--release", "--locked"]
+
+[dependencies]
+runtime = []
+build = ["rust", "cargo"]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-musl/release/ivaldi", dest = "/usr/bin/ivaldi", mode = 755 }
+]
+
+symlinks = [
+    { target = "/usr/bin/ivaldi", link = "/bin/ivaldi" }
+]

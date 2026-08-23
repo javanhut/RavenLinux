@@ -1,0 +1,36 @@
+# Ships no Cargo.lock upstream, so the build omits --locked for this
+# component. The commit pin below is what makes it reproducible.
+[package]
+name = "ravenpackagemanager"
+version = "0.1.0"
+description = "Raven Package Manager - the default package manager for RavenLinux"
+license = "NOASSERTION"
+homepage = "https://github.com/javanhut/RavenPackageManager"
+repository = "https://github.com/javanhut/RavenPackageManager"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "package-management"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/RavenPackageManager.git"
+commit = "006ec8abed4550ac4d0d1a6013513bb60c2b18a7"
+
+[build]
+system = "cargo"
+# Built against the musl target so the result is statically linked and carries
+# no runtime dependency on the sysroot's libraries.
+target = "x86_64-unknown-linux-musl"
+build_flags = ["--release"]
+
+[dependencies]
+runtime = []
+build = ["rust", "cargo"]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-musl/release/rvn", dest = "/usr/bin/rvn", mode = 755 }
+]
+
+symlinks = [
+    { target = "/usr/bin/rvn", link = "/bin/rvn" }
+]

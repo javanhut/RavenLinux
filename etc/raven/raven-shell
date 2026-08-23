@@ -17,8 +17,15 @@ if [ ! -f /etc/.raven-first-boot-done ] && [ -x /etc/raven/first-boot-setup ]; t
     /etc/raven/first-boot-setup
 fi
 
-# Prefer bash
-if [ -x /bin/bash ]; then
+# Prefer RavenShell, then bash, then whatever /bin/sh is.
+# The Raven stage installs ravenshell and makes it root's login shell; this
+# chain is the rescue path for when agetty bypasses login(1) entirely, and it
+# has to keep working even on a base system built without the Raven stage.
+if [ -x /usr/bin/ravenshell ]; then
+    exec /usr/bin/ravenshell -l
+elif [ -x /bin/ravenshell ]; then
+    exec /bin/ravenshell -l
+elif [ -x /bin/bash ]; then
     exec /bin/bash -l -i
 fi
 exec /bin/sh -i
