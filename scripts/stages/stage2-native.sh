@@ -1890,7 +1890,7 @@ copy_firmware() {
     done
 
     if [[ -z "$host_firmware" ]]; then
-        log_warn "No host firmware directory found -- WiFi will not work at all."
+        log_warn "No host firmware directory found -- WiFi and graphics will not work at all."
         log_warn "  Install linux-firmware on the build host and rerun stage2."
         log_warn "  (In the containerized build that host is the image itself; see the Dockerfile.)"
         return 0
@@ -1909,7 +1909,26 @@ copy_firmware() {
         rtw88 rtw89 rtlwifi    # Realtek WiFi
         rtl_nic rtl_bt         # Realtek ethernet + bluetooth
         mrvl                   # Marvell
+        amdgpu                 # AMD graphics, 86MB -- see below
+        i915                   # Intel graphics, 25MB
     )
+
+    # Graphics firmware is not optional on any machine built this decade. Both
+    # amdgpu and i915 refuse to initialise without their blobs, and when they do
+    # CONFIG_DRM_SIMPLEDRM takes the EFI framebuffer instead: the console works,
+    # and the compositor renders into a shadow buffer with no GPU behind it,
+    # which looks like a frozen screen of uninitialised memory rather than like
+    # a missing driver. That is the failure this list existed to prevent for
+    # WiFi and did not cover for graphics.
+    #
+    # nouveau's GSP blobs are 152MB decompressed against amdgpu's 86 and i915's
+    # 25, and they only matter for a discrete NVIDIA card -- whose connectors
+    # huginn does not drive yet, since it takes the primary GPU and no other.
+    # Opt in with RAVEN_FW_NVIDIA=1 when that changes.
+    if [[ "${RAVEN_FW_NVIDIA:-0}" == "1" ]]; then
+        fw_dirs+=(nvidia)
+        log_info "  RAVEN_FW_NVIDIA=1: including nouveau GSP firmware (+152MB)"
+    fi
 
     # Arch ships firmware zstd-compressed, and this kernel is built with
     # CONFIG_FW_LOADER_COMPRESS unset, so a .zst blob is a blob the kernel
@@ -1955,7 +1974,7 @@ copy_firmware() {
     done < <(find "${host_firmware}" -maxdepth 1 \( -name 'iwlwifi-*' -o -name 'regulatory.db*' \) 2>/dev/null)
 
     if (( copied == 0 )); then
-        log_warn "Found ${host_firmware} but copied no WiFi firmware; WiFi will not work"
+        log_warn "Found ${host_firmware} but copied no firmware; WiFi and graphics will not work"
         return 0
     fi
 

@@ -34,6 +34,9 @@
 #   RAVEN_<KEY>_REF=<git-ref>     pin one component (e.g. RAVEN_IVALDI_REF=v0.1.2)
 #   RAVEN_KEEP_BASH_DEFAULT=1     install ravenshell but leave bash as the
 #                                 default login shell
+#   RAVEN_PACMAN_FROM_HOST=1      give rvn the build host's pacman.conf and
+#                                 mirrorlist instead of the canonical ones in
+#                                 configs/rvn
 # =============================================================================
 
 set -euo pipefail
@@ -101,7 +104,7 @@ fi
 #                 rust: the workspace package(s) to pass to -p, or "." for a
 #                       plain crate
 #
-# The graphical components are intentionally absent. RavenGUI (huginn/muninn)
+# The graphical components are intentionally absent. RavenGUI (huginn)
 # links libudev, libdrm, libseat and libinput through smithay, so it cannot be
 # a static musl binary the way everything here is, and its udev/TTY backend is
 # not written yet. RavenTerminal needs the display server RavenGUI is meant to
@@ -609,6 +612,112 @@ install_raven_configs() {
 }
 
 # =============================================================================
+# rvn configuration
+# =============================================================================
+# rvn reads pacman's configuration format -- it parses pacman.conf and the
+# mirrorlists it includes, fetches each repo's $repo.db itself, and verifies
+# package signatures against the keyring in GPGDir. Nothing shells out to
+# pacman, and pacman is not installed.
+#
+# Without these files rvn boots onto a system with no repositories at all: the
+# binary ships, runs, and can do nothing, which reads as a broken package
+# manager rather than an unconfigured one.
+#
+# The canonical files in configs/rvn are the default rather than a copy of the
+# build host's, because a host pacman.conf carries that host's repos and mirror
+# ranking -- and sometimes a file:// path that exists on no other machine. An
+# image that depends on the machine that built it is the thing the containerised
+# build exists to avoid. RAVEN_PACMAN_FROM_HOST=1 takes the host's anyway, which
+# is what you want when the host has a repo the target genuinely needs.
+install_rvn_config() {
+    # Only if rvn actually landed. RAVEN_SKIP=rvn should not leave a package
+    # manager's configuration behind with no package manager to read it.
+    if [[ ! -f "${SYSROOT_DIR}/usr/bin/rvn" ]]; then
+        log_info "rvn not installed, skipping its configuration"
+        return 0
+    fi
+
+    log_step "Installing rvn configuration..."
+
+    # DBPath, CacheDir and the sync tree. rvn creates what it needs at run time,
+    # but a read-only or oddly-permissioned parent turns that into a first-run
+    # failure on the target rather than a build-time one here.
+    mkdir -p "${SYSROOT_DIR}/etc/pacman.d" \
+             "${SYSROOT_DIR}/var/lib/pacman/sync" \
+             "${SYSROOT_DIR}/var/cache/pacman/pkg"
+
+    local from_host="${RAVEN_PACMAN_FROM_HOST:-0}"
+    local installed_conf=0
+
+    if [[ "${from_host}" == "1" ]]; then
+        if [[ -f /etc/pacman.conf ]]; then
+            cp /etc/pacman.conf "${SYSROOT_DIR}/etc/pacman.conf"
+            installed_conf=1
+            log_info "  pacman.conf copied from the build host"
+
+            # The host's conf almost certainly Includes this, and a config whose
+            # include is missing leaves rvn with a repo and no servers.
+            if [[ -f /etc/pacman.d/mirrorlist ]]; then
+                cp /etc/pacman.d/mirrorlist "${SYSROOT_DIR}/etc/pacman.d/mirrorlist"
+                log_info "  mirrorlist copied from the build host ($(grep -c '^Server' /etc/pacman.d/mirrorlist 2>/dev/null || echo 0) servers)"
+            else
+                log_warn "  host has no /etc/pacman.d/mirrorlist; rvn may have no servers"
+            fi
+        else
+            log_warn "  RAVEN_PACMAN_FROM_HOST=1 but the host has no /etc/pacman.conf"
+            log_warn "  falling back to the canonical configuration"
+        fi
+    fi
+
+    if (( installed_conf == 0 )); then
+        if [[ -f "${PROJECT_ROOT}/configs/rvn/pacman.conf" ]]; then
+            cp "${PROJECT_ROOT}/configs/rvn/pacman.conf" "${SYSROOT_DIR}/etc/pacman.conf"
+            log_info "  pacman.conf installed from configs/rvn"
+        else
+            log_warn "  configs/rvn/pacman.conf not found; rvn will have no configuration"
+            return 0
+        fi
+
+        if [[ -f "${PROJECT_ROOT}/configs/rvn/mirrorlist" ]]; then
+            cp "${PROJECT_ROOT}/configs/rvn/mirrorlist" "${SYSROOT_DIR}/etc/pacman.d/mirrorlist"
+            log_info "  mirrorlist installed from configs/rvn"
+        fi
+    fi
+
+    install_rvn_keyring
+    log_success "rvn configuration installed"
+}
+
+# rvn verifies package signatures itself and defaults to SigLevel = Required, so
+# a system without a keyring fails every install -- closed rather than silently
+# unsigned, which is the right way round but still a system that cannot install
+# anything. The host's keyring is the only one available at build time; it is
+# the Arch developer and packager keys, which is exactly what signs the packages
+# the mirrorlist points at.
+install_rvn_keyring() {
+    local host_gpg=/etc/pacman.d/gnupg
+    local dest="${SYSROOT_DIR}/etc/pacman.d/gnupg"
+
+    if [[ ! -f "${host_gpg}/pubring.gpg" ]]; then
+        log_warn "  no keyring at ${host_gpg}/pubring.gpg on the build host"
+        log_warn "  rvn will refuse to install: SigLevel = Required with nothing to verify against"
+        log_warn "  install archlinux-keyring and run pacman-key --init --populate archlinux"
+        return 0
+    fi
+
+    mkdir -p "${dest}"
+    # pubring and trustdb only. The private keyring, the random seed and the
+    # socket files under a live gnupg home are either secret, machine-specific,
+    # or meaningless off the machine that made them.
+    cp "${host_gpg}/pubring.gpg" "${dest}/pubring.gpg" 2>/dev/null || true
+    [[ -f "${host_gpg}/trustdb.gpg" ]] && cp "${host_gpg}/trustdb.gpg" "${dest}/trustdb.gpg" 2>/dev/null || true
+    chmod 0755 "${dest}"
+    chmod 0644 "${dest}/pubring.gpg" 2>/dev/null || true
+
+    log_info "  keyring staged ($(du -h "${dest}/pubring.gpg" 2>/dev/null | cut -f1))"
+}
+
+# =============================================================================
 # Summary
 # =============================================================================
 print_summary() {
@@ -675,6 +784,9 @@ main() {
 
     # ravenshell config into /etc and /etc/skel, if configs/ravenshell exists
     install_raven_configs
+
+    # pacman.conf, mirrorlist and keyring for rvn, if rvn actually landed
+    install_rvn_config
 
     # Take over the default shell, but only if ravenshell actually landed
     set_ravenshell_default

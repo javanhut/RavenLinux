@@ -25,7 +25,7 @@
 #   stage2   Native rebuild of entire system
 #   stage3   Build base packages (core libraries, shells, OpenSSH)
 #   raven    Build the Raven self-hosted toolchain (shell, rvn, ivaldi, ...)
-#   gui      Build the compositor and desktop shell (huginn, muninn)
+#   gui      Build the compositor and lock screen (huginn, muninn-lock)
 #   stage4   Generate bootable ISO image
 
 set -euo pipefail
@@ -412,8 +412,8 @@ Stages:
     stage3      Build base packages (core libraries, shells, OpenSSH)
     raven       Build the Raven self-hosted toolchain (ravenshell, rvn, poxy,
                 ivaldi, crow, imlazy, oxigen) into the sysroot
-    gui         Build the compositor and desktop shell (huginn, muninn,
-                muninn-lock). Runs after raven, before stage4.
+    gui         Build the compositor and lock screen (huginn, muninn-lock).
+                Runs after raven, before stage4.
     stage4      Generate bootable ISO image
     initramfs   Rebuild only the initramfs (stage1 does this too; this is the
                 short path when you have changed its init script)

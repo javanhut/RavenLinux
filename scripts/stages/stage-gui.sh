@@ -2,8 +2,17 @@
 # =============================================================================
 # RavenLinux GUI Stage: Compositor and Desktop Shell
 # =============================================================================
-# Builds RavenGUI -- Huginn, the Wayland compositor, and Muninn, the desktop
-# shell it hosts. See REPOSFORRAVEN.md for what they are.
+# Builds RavenGUI -- Huginn, the Wayland compositor, and muninn-lock, the
+# session lock screen. See REPOSFORRAVEN.md for what they are.
+#
+# THERE IS NO SEPARATE SHELL PROCESS
+#
+# The dock, launcher, overview and notifications are drawn by the compositor
+# itself, inside its render loop, so nothing that must feel instant can miss a
+# frame or die on its own. muninn-lock is the one exception, and it has an
+# independent reason: ext-session-lock-v1 keeps the screen locked when the
+# locking client dies, which is worth nothing if that client shares an address
+# space with the rest of the shell.
 #
 # Like the Raven stage this is unnumbered, and for the same reason: stages 0-4
 # build a console system that has to stand on its own. It runs after raven and
@@ -69,10 +78,19 @@ GUI_TARGET="${GUI_TARGET:-$(rustc -vV 2>/dev/null | awk '/^host:/{print $2}')}"
 
 # key|package|binary|description
 GUI_COMPONENTS=(
-    "huginn-comp|huginn-comp|huginn|Huginn - Wayland compositor"
-    "muninn|muninn|muninn|Muninn - desktop shell: panel, launcher, notifications"
+    "huginn-comp|huginn-comp|huginn|Huginn - Wayland compositor, and the shell it draws"
     "muninn-lock|muninn-lock|muninn-lock|Muninn Lock - session lock screen"
 )
+
+# Every binary this stage ships, derived from the table above rather than
+# written out again: the two lists drifted apart once already, and a hardcoded
+# copy is wrong the moment a component is added or dropped.
+declare -a GUI_ALL_BINARIES=()
+for _spec in "${GUI_COMPONENTS[@]}"; do
+    IFS='|' read -r _ _ _binary _ <<< "${_spec}"
+    GUI_ALL_BINARIES+=("${_binary}")
+done
+unset _spec _binary
 
 declare -a GUI_BUILT=()
 declare -a GUI_FAILED=()
@@ -171,9 +189,9 @@ fetch_gui_source() {
 # =============================================================================
 # Build
 # =============================================================================
-# One cargo invocation for all three binaries: they share a workspace, a
-# dependency graph and a target directory, and the committed Cargo.lock was
-# resolved against the set.
+# One cargo invocation for both binaries: they share a workspace, a dependency
+# graph and a target directory, and the committed Cargo.lock was resolved
+# against the set.
 build_gui_workspace() {
     local src="$1"
 
@@ -266,17 +284,16 @@ stage_gui_data() {
 # =============================================================================
 # raven-init starts this when the kernel cmdline says raven.graphics=wayland;
 # until now it did not exist and init fell through to a /bin/raven-compositor
-# that nothing builds. It starts the compositor, waits for its socket, then
-# starts the shell as an ordinary client -- which is the whole architecture:
-# if muninn dies the session survives, so the launcher restarts it rather than
-# taking the compositor down.
+# that nothing builds. It sets the session environment up and hands over to the
+# compositor -- there is no shell client to start afterwards, and nothing to
+# wait for a socket for, because the compositor draws the shell itself.
 install_session_launcher() {
     local dest="${SYSROOT_DIR}/bin/raven-wayland-session"
 
     mkdir -p "${SYSROOT_DIR}/bin"
     cat > "${dest}" << 'LAUNCHER'
 #!/bin/sh
-# RavenLinux Wayland session: Huginn, then Muninn.
+# RavenLinux Wayland session: Huginn.
 #
 # Started by raven-init when the kernel cmdline carries raven.graphics=wayland.
 # RAVEN_WAYLAND_COMPOSITOR comes from raven.wayland=<name> and names the
@@ -298,54 +315,15 @@ command -v "${COMPOSITOR}" >/dev/null 2>&1 || {
     exit 1
 }
 
+# exec, not background-and-wait: with no second process to supervise there is
+# nothing for this script to do afterwards, and execing puts the compositor
+# directly under init -- so its exit status is the session's, and a signal from
+# init reaches it rather than a shell that would have to forward it.
+#
 # --backend udev: this is a TTY, not a nested session. Huginn autodetects from
 # an inherited WAYLAND_DISPLAY, which is exactly what a login session lacks,
 # but saying so beats depending on the absence of a variable.
-"${COMPOSITOR}" --backend udev &
-COMPOSITOR_PID=$!
-
-# Wait for the compositor's socket rather than sleeping: the shell cannot
-# connect before it exists, and how long that takes depends on the GPU.
-i=0
-while [ $i -lt 100 ]; do
-    for sock in "${XDG_RUNTIME_DIR}"/wayland-* "${XDG_RUNTIME_DIR}"/huginn-*; do
-        if [ -S "${sock}" ]; then
-            WAYLAND_DISPLAY="$(basename "${sock}")"
-            export WAYLAND_DISPLAY
-            break 2
-        fi
-    done
-    kill -0 "${COMPOSITOR_PID}" 2>/dev/null || {
-        echo "raven-wayland-session: ${COMPOSITOR} exited during startup" >&2
-        exit 1
-    }
-    i=$((i + 1))
-    sleep 0.1
-done
-
-if [ -z "${WAYLAND_DISPLAY:-}" ]; then
-    echo "raven-wayland-session: no compositor socket appeared" >&2
-    kill "${COMPOSITOR_PID}" 2>/dev/null || true
-    exit 1
-fi
-
-# The shell is a separate process on purpose: a crash here costs the panel and
-# not the session, so it is restarted in place while the compositor keeps
-# running. Give up after a few tries rather than spinning forever.
-if command -v muninn >/dev/null 2>&1; then
-    (
-        tries=0
-        while [ $tries -lt 5 ]; do
-            muninn || true
-            kill -0 "${COMPOSITOR_PID}" 2>/dev/null || exit 0
-            tries=$((tries + 1))
-            echo "raven-wayland-session: muninn exited, restarting (${tries}/5)" >&2
-            sleep 1
-        done
-    ) &
-fi
-
-wait "${COMPOSITOR_PID}"
+exec "${COMPOSITOR}" --backend udev
 LAUNCHER
 
     chmod 0755 "${dest}"
@@ -436,7 +414,7 @@ main() {
         return 0
     fi
 
-    log_step "RavenGUI (huginn, muninn, muninn-lock)"
+    log_step "RavenGUI (${GUI_ALL_BINARIES[*]})"
 
     if ! fetch_gui_source; then
         log_warn "  source unavailable, skipping the GUI stage"
@@ -448,13 +426,13 @@ main() {
     log_info "  building for ${GUI_TARGET}..."
     if ! build_gui_workspace "${src}"; then
         log_warn "  build failed, skipping the GUI stage"
-        GUI_FAILED=(huginn muninn muninn-lock)
+        GUI_FAILED=("${GUI_ALL_BINARIES[@]}")
         print_gui_summary
         return 0
     fi
 
-    # All or nothing. A compositor with no shell is a blank screen, which is
-    # worse than a console: at least a console tells you what went wrong.
+    # All or nothing. Half a graphical session is worse than none: a console
+    # at least tells you what went wrong.
     local -a built_paths=()
     local spec key package binary desc out
     for spec in "${GUI_COMPONENTS[@]}"; do
@@ -462,7 +440,7 @@ main() {
         out="${src}/target/${GUI_TARGET}/release/${binary}"
         if [[ ! -f "${out}" ]]; then
             log_warn "  ${binary}: not produced by the build"
-            GUI_FAILED=(huginn muninn muninn-lock)
+            GUI_FAILED=("${GUI_ALL_BINARIES[@]}")
             print_gui_summary
             return 0
         fi

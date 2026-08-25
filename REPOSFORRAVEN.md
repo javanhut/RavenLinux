@@ -137,16 +137,18 @@ RavenTerminal would go.
 
 | Status | Binary | Repo |
 |--------|--------|------|
-| **wired** | `huginn`, `muninn`, `muninn-lock` | [javanhut/RavenGUI](https://github.com/javanhut/RavenGUI) |
+| **wired** | `huginn`, `muninn-lock` | [javanhut/RavenGUI](https://github.com/javanhut/RavenGUI) |
 
 Built by `scripts/stages/stage-gui.sh` — **its own stage**, not the Raven
 layer. Build it with `make gui`; it runs between `raven` and `stage4`.
 
-`huginn` is a Wayland compositor on Smithay; `muninn` is the desktop shell —
-panel, launcher, notifications — running as an ordinary Wayland client over a
-private `raven_shell_v1` protocol, so a shell crash costs the panel and not the
-session. `muninn-lock` is separate again, because `ext-session-lock-v1` only
-guarantees a locked screen if a shell bug cannot take the locker down with it.
+`huginn` is a Wayland compositor on Smithay, and it draws the desktop itself —
+dock, launcher, overview, notifications — inside its own render loop rather than
+hosting a shell client. Anything that must feel instant and must never fail does
+not get to be a separate process that can miss a frame or die. `muninn-lock` is
+the one exception, and it has an independent reason: `ext-session-lock-v1` only
+guarantees a locked screen if a bug elsewhere cannot take the locker down with
+it, which requires it not to share an address space with the rest of the shell.
 
 It gets its own stage because it cannot satisfy the Raven layer's one
 invariant. Every component under `packages/raven/` is a static binary that adds
@@ -168,16 +170,17 @@ already made it disable the tty1 getty, ensure `seatd`, create `/run/user/0`
 with `LIBSEAT_BACKEND=seatd`, and exec `/bin/raven-wayland-session` with
 `RAVEN_WAYLAND_COMPOSITOR` taken from `raven.wayland=<name>`. That launcher
 simply did not exist — init fell through to a `/bin/raven-compositor` that
-nothing built. The GUI stage installs it: it starts the compositor, waits for
-its socket to appear rather than sleeping, then starts `muninn` as an ordinary
-client and restarts it in place if it dies, which is the point of the shell
-being a separate process.
+nothing built. The GUI stage installs it: it sets up `XDG_RUNTIME_DIR` and
+`LIBSEAT_BACKEND` and then `exec`s the compositor, so huginn runs directly under
+init — its exit status is the session's, and a signal from init reaches it
+rather than a wrapper that would have to forward it. There is nothing to start
+after it, because the compositor draws the shell.
 
 Still outstanding upstream: privilege gating on `raven_shell_v1` — every client
 can currently read workspace state and switch workspaces — and SIGTERM handling
-in the compositor. Muninn's panel is still software-rendered through `wl_shm`;
-the iced renderer is deliberately deferred, and the protocol plumbing does not
-change when it lands.
+in the compositor. The shell is still software-rendered; the iced renderer is
+deliberately deferred, and the protocol plumbing does not change when it
+lands.
 
 This is the prerequisite for RavenTerminal rather than a peer of it: it is the
 display server RavenTerminal has been waiting for.

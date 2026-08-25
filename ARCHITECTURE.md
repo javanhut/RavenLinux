@@ -60,7 +60,6 @@ line:
 | Binary | Source | Language | Role |
 |--------|--------|----------|------|
 | `huginn` | RavenGUI | Rust | Wayland compositor (Smithay, udev/DRM backend) |
-| `muninn` | RavenGUI | Rust | Desktop shell: panel, launcher, notifications |
 | `muninn-lock` | RavenGUI | Rust | Session lock screen |
 
 These link glibc and seventeen shared libraries — libdrm, libgbm, libinput,
@@ -224,7 +223,7 @@ working shell; the Raven layer takes that over once `ravenshell` is installed.
 | **Stage 2** | Rebuild the sysroot natively: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | **Stage 3** | Base packages: core libraries, shells, OpenSSH, RavenBoot |
 | **Raven** | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw |
-| **GUI** | Compositor and shell: huginn, muninn, muninn-lock, and the shared libraries they link |
+| **GUI** | Compositor and lock screen: huginn, muninn-lock, and the shared libraries they link |
 | **Stage 4** | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
 
 The Raven layer carries no stage number. Stages 0–4 are the base system and
@@ -296,7 +295,7 @@ Sets:
 - `packages/core/` — musl, linux, openssl, openssh, libssh, sudo-rs, uutils-coreutils
 - `packages/base/` — bash, fish
 - `packages/raven/` — ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw
-- `packages/gui/` — ravengui: huginn, muninn, muninn-lock
+- `packages/gui/` — ravengui: huginn, muninn-lock
 
 ## Extending the System
 

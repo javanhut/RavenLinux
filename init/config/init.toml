@@ -29,6 +29,26 @@ log_level = "info"
 # =============================================================================
 
 # tty1: PAM-free rescue shell (avoids /bin/login issues during bring-up)
+# Device manager, before anything that needs a device.
+#
+# The graphics and wireless drivers are modules rather than built into the
+# kernel: a built-in driver asks the firmware loader for its blobs at probe,
+# before any filesystem holding firmware is mounted, and never retries. As
+# modules they load from the mounted root, where /lib/firmware is readable --
+# but only if something coldplugs them, which is what this does. It runs first
+# because everything below it assumes its hardware exists.
+#
+# restart = false: raven-udev daemonises udevd and the coldplug is a one-shot,
+# so nothing is left in the foreground to supervise.
+[[services]]
+name = "udev"
+description = "Device manager: start udevd and coldplug attached hardware"
+exec = "/usr/sbin/raven-udev"
+args = []
+restart = false
+enabled = true
+critical = false
+
 [[services]]
 name = "getty-tty1"
 description = "Getty login on tty1"
@@ -76,6 +96,9 @@ name = "dbus"
 description = "D-Bus system message bus"
 exec = "/usr/bin/dbus-daemon"
 args = ["--system", "--nofork", "--nopidfile"]
+# /run is a fresh tmpfs each boot and dbus-daemon does not mkdir its own
+# socket directory -- without this it dies binding /run/dbus/system_bus_socket.
+runtime_dirs = ["/run/dbus"]
 restart = true
 enabled = true
 critical = false

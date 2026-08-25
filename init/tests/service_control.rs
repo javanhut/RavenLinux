@@ -38,6 +38,7 @@ fn sleeper(name: &str) -> ServiceConfig {
         critical: false,
         environment: HashMap::new(),
         tty: None,
+        runtime_dirs: Vec::new(),
         stop_exec: None,
         stop_args: Vec::new(),
         stop_timeout: 5,
@@ -779,4 +780,56 @@ fn a_crash_looping_service_is_given_up_on_once_not_every_tick() {
     );
 
     services.get_mut("flapper").unwrap().kill();
+}
+
+#[test]
+fn runtime_dirs_are_created_and_output_goes_to_the_log() {
+    // dbus's death spiral: /run is a fresh tmpfs each boot, dbus-daemon does
+    // not mkdir its own socket directory, and its complaints -- like every
+    // other daemon's -- printed over the console. Services now get their
+    // runtime_dirs created and their stdout/stderr sent to a per-service log.
+    let root = std::env::temp_dir().join(format!("raven-svclog-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let logs = root.join("logs");
+    let rundir = root.join("run/dbus-like");
+
+    std::env::set_var("RAVEN_SERVICE_LOG_DIR", &logs);
+
+    let cfg_svc = ServiceConfig {
+        name: "chatty".to_string(),
+        description: "prints and exits".to_string(),
+        exec: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "echo to-stdout; echo to-stderr >&2".to_string(),
+        ],
+        restart: false,
+        enabled: true,
+        critical: false,
+        environment: HashMap::new(),
+        tty: None,
+        runtime_dirs: vec![rundir.display().to_string()],
+        stop_exec: None,
+        stop_args: Vec::new(),
+        stop_timeout: 5,
+    };
+
+    let mut svc = Service::start(&cfg_svc).expect("starts");
+    svc.wait_for_exit(Duration::from_secs(5));
+    std::env::remove_var("RAVEN_SERVICE_LOG_DIR");
+
+    assert!(
+        rundir.is_dir(),
+        "runtime_dirs must exist before the service runs"
+    );
+
+    let log = logs.join("chatty.log");
+    let text = std::fs::read_to_string(&log).expect("log file written");
+    assert!(text.contains("to-stdout"), "{text}");
+    assert!(
+        text.contains("to-stderr"),
+        "stderr must reach the log too: {text}"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
 }

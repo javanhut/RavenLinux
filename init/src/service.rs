@@ -97,7 +97,34 @@ impl Service {
         Ok(service)
     }
 
+    /// Where service output goes. Overridable so tests need no /var/log.
+    fn log_dir() -> std::path::PathBuf {
+        std::env::var_os("RAVEN_SERVICE_LOG_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("/var/log/raven"))
+    }
+
+    /// Open this service's log file, creating the directory on the way.
+    fn open_log(&self) -> Option<std::fs::File> {
+        let dir = Self::log_dir();
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join(format!("{}.log", self.config.name)))
+            .ok()
+    }
+
     fn do_start(&mut self) -> Result<()> {
+        // A daemon that binds a socket under /run cannot mkdir its own parent
+        // there after a boot -- /run is a fresh tmpfs every time. dbus is the
+        // canonical case; see ServiceConfig::runtime_dirs.
+        for dir in &self.config.runtime_dirs {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                log::warn!("{}: cannot create {}: {}", self.config.name, dir, e);
+            }
+        }
+
         // Check if this service needs TTY handling
         if let Some(tty_path) = self.config.tty.clone() {
             return self.do_start_with_tty(&tty_path);
@@ -114,10 +141,28 @@ impl Service {
             cmd.env(key, value);
         }
 
-        // Set up stdio
+        // Set up stdio. Output goes to /var/log/raven/<name>.log, not the
+        // console: inherited stdio meant every daemon's chatter -- dbus's
+        // config warnings, cawd's periodic "no wireless port" -- printed
+        // straight over whatever the person at the keyboard was typing, on a
+        // console that (since the kernel dropped fbcon scrollback in 5.9)
+        // cannot scroll back to recover. Inherit remains the fallback so a
+        // read-only /var/log costs the log, not the service.
         cmd.stdin(Stdio::null());
-        cmd.stdout(Stdio::inherit());
-        cmd.stderr(Stdio::inherit());
+        match self.open_log() {
+            Some(file) => {
+                let clone = file.try_clone().ok();
+                cmd.stdout(Stdio::from(file));
+                match clone {
+                    Some(f) => cmd.stderr(Stdio::from(f)),
+                    None => cmd.stderr(Stdio::inherit()),
+                };
+            }
+            None => {
+                cmd.stdout(Stdio::inherit());
+                cmd.stderr(Stdio::inherit());
+            }
+        }
 
         // Spawn the process
         let child = cmd

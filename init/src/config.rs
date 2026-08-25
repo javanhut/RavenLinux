@@ -55,6 +55,7 @@ impl Default for InitConfig {
                     stop_exec: None,
                     stop_args: Vec::new(),
                     stop_timeout: 5,
+                    runtime_dirs: Vec::new(),
                 },
             ],
             mounts: Vec::new(),
@@ -166,6 +167,17 @@ pub struct ServiceConfig {
     /// If set, the service will be spawned with proper session and job control
     #[serde(default)]
     pub tty: Option<String>,
+
+    /// Directories to create before the service starts.
+    ///
+    /// /run is a tmpfs, so anything under it exists only if something creates
+    /// it each boot. dbus is the motivating case: dbus-daemon binds
+    /// /run/dbus/system_bus_socket but does not create /run/dbus, so on a
+    /// system where nothing else made the directory it exited with "Failed to
+    /// bind socket ... No such file or directory" and burned its whole restart
+    /// budget on a missing mkdir.
+    #[serde(default)]
+    pub runtime_dirs: Vec<String>,
 
     /// Command run to stop this service cleanly, before any signal is sent.
     ///

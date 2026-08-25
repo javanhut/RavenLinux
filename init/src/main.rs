@@ -62,11 +62,117 @@ fn main() {
     }
 }
 
+/// Logs to stderr (the console) and, once it can, to /var/log/raven/init.log.
+///
+/// The console copy is what you watch during boot; the file is what you read
+/// after the console has moved on -- fbcon has had no scrollback since kernel
+/// 5.9, so a message that leaves the screen is otherwise simply gone.
+struct DualLogger {
+    file: std::sync::Mutex<Option<std::fs::File>>,
+}
+
+impl log::Log for DualLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let line = format!("[raven-init] {}: {}\n", record.level(), record.args());
+        eprint!("{}", line);
+        if let Ok(mut guard) = self.file.lock() {
+            // Opened lazily: /var/log may not be writable until the root is
+            // mounted rw, and boot must not wait on it.
+            if guard.is_none() {
+                std::fs::create_dir_all("/var/log/raven").ok();
+                *guard = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/var/log/raven/init.log")
+                    .ok();
+            }
+            if let Some(ref mut f) = *guard {
+                use std::io::Write as _;
+                let _ = f.write_all(line.as_bytes());
+            }
+        }
+    }
+
+    fn flush(&self) {}
+}
+
 fn init_logging() {
-    // Simple stderr logging for early boot
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format(|buf, record| writeln!(buf, "[raven-init] {}: {}", record.level(), record.args()))
-        .init();
+    let logger = Box::new(DualLogger {
+        file: std::sync::Mutex::new(None),
+    });
+    if log::set_boxed_logger(logger).is_ok() {
+        log::set_max_level(log::LevelFilter::Info);
+    }
+}
+
+/// Re-probe PCI devices that have no bound driver.
+///
+/// Writing a device address to /sys/bus/pci/drivers_probe re-runs driver
+/// matching for it. Cheap, harmless for devices that genuinely have no driver,
+/// and it is what turns "probe failed at 0.9s because the firmware was not
+/// mounted yet" into a working card -- with no kernel rebuild and no need to
+/// know which devices are affected.
+fn reprobe_orphan_pci_devices() {
+    let Ok(entries) = fs::read_dir("/sys/bus/pci/devices") else {
+        return;
+    };
+
+    let mut reprobed = 0;
+    for entry in entries.flatten() {
+        // A bound device has a `driver` symlink; an orphan does not.
+        if entry.path().join("driver").exists() {
+            continue;
+        }
+        let Some(addr) = entry.file_name().to_str().map(String::from) else {
+            continue;
+        };
+        if fs::write("/sys/bus/pci/drivers_probe", &addr).is_ok() {
+            reprobed += 1;
+        }
+    }
+
+    if reprobed > 0 {
+        log::info!("Re-probed {} driverless PCI device(s)", reprobed);
+    }
+}
+
+/// Bring the loopback interface up.
+///
+/// SIOCSIFFLAGS directly rather than shelling out to `ip`: lo must come up
+/// even on a system where iproute2 did not ship.
+fn bring_loopback_up() {
+    use std::os::fd::AsRawFd;
+
+    let Ok(sock) = std::net::UdpSocket::bind("127.255.255.255:0").or_else(|_| {
+        // Can't bind while lo is down -- an unbound socket works for ioctl too.
+        std::net::UdpSocket::bind("0.0.0.0:0")
+    }) else {
+        log::warn!("Cannot open a socket to bring lo up");
+        return;
+    };
+
+    // struct ifreq with ifr_name = "lo" and ifr_flags = IFF_UP | IFF_RUNNING.
+    let mut ifreq = [0u8; 40];
+    ifreq[..2].copy_from_slice(b"lo");
+    let flags: libc::c_short = (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
+    ifreq[16..18].copy_from_slice(&flags.to_ne_bytes());
+
+    let rc = unsafe { libc::ioctl(sock.as_raw_fd(), libc::SIOCSIFFLAGS, ifreq.as_ptr()) };
+    if rc == 0 {
+        log::info!("Loopback interface up");
+    } else {
+        log::warn!(
+            "Could not bring lo up: {}",
+            std::io::Error::last_os_error()
+        );
+    }
 }
 
 /// Refuse to run as anything but PID 1, unless explicitly overridden.
@@ -138,6 +244,32 @@ fn run_init() -> Result<()> {
     // Phase 2: Setup basic environment
     log::info!("Phase 2: Setting up environment");
     setup_environment()?;
+
+    // Phase 2b: Hardware that gave up before the root was mounted
+    //
+    // A driver built into the kernel probes at ~1s, when the only filesystem
+    // is the initramfs -- which ships no firmware. The blobs live in the real
+    // root, mounted seconds later. rtw88_8821ce is the observed case: firmware
+    // load ENOENT, probe fails with -22, and the WiFi card sits driverless
+    // forever while its firmware sits on disk. Now that the root (and
+    // /lib/firmware) is here, ask the kernel to try those devices again.
+    log::info!("Phase 2b: Re-probing driverless PCI devices");
+    reprobe_orphan_pci_devices();
+
+    // Loopback is nobody's service, so nothing else brings it up -- and a down
+    // `lo` quietly breaks everything that talks to 127.0.0.1.
+    bring_loopback_up();
+
+    // Let unprivileged ping work. The image's /sbin/ping has neither setuid
+    // nor file capabilities (squashfs is not built with xattrs), so its raw
+    // ICMP socket fails -- and the kernel's unprivileged ICMP datagram
+    // fallback is disabled by default (ping_group_range is "1 0", an empty
+    // range). Opening the range to every group is what systemd-based distros
+    // ship, and the first thing anyone types on a machine with new networking
+    // is ping.
+    if let Err(e) = fs::write("/proc/sys/net/ipv4/ping_group_range", "0 2147483647") {
+        log::warn!("Could not enable unprivileged ping: {}", e);
+    }
 
     // Phase 3: Load configuration
     log::info!("Phase 3: Loading configuration");
@@ -289,6 +421,7 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
             critical: false,
             environment: HashMap::new(),
             tty: None,
+            runtime_dirs: Vec::new(),
             stop_exec: None,
             stop_args: Vec::new(),
             stop_timeout: 5,
@@ -319,6 +452,7 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
                 critical: false,
                 environment: env,
                 tty: None,
+                runtime_dirs: Vec::new(),
                 stop_exec: None,
                 stop_args: Vec::new(),
                 stop_timeout: 5,
@@ -338,6 +472,7 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
                 critical: false,
                 environment: compositor_env,
                 tty: None,
+                runtime_dirs: Vec::new(),
                 stop_exec: None,
                 stop_args: Vec::new(),
                 stop_timeout: 5,
@@ -783,6 +918,7 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
             stop_exec: None,
             stop_args: Vec::new(),
             stop_timeout: 5,
+            runtime_dirs: Vec::new(),
         };
 
         // Try agetty first, fall back to direct shell
@@ -800,6 +936,7 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
                 stop_exec: None,
                 stop_args: Vec::new(),
                 stop_timeout: 5,
+                runtime_dirs: Vec::new(),
             };
             Service::start(&shell_config)
         });

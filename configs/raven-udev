@@ -1,0 +1,75 @@
+#!/bin/sh
+# =============================================================================
+# raven-udev -- start the device manager and coldplug what is already attached
+# =============================================================================
+#
+# Ships at /usr/sbin/raven-udev. Run as the first service raven-init starts,
+# and from the live init before anything touches a device.
+#
+# WHY THIS EXISTS
+#
+# The graphics and wireless drivers are modules rather than built in. A driver
+# compiled into the kernel probes at device_initcall and asks the firmware
+# loader for its blobs there and then -- before any filesystem holding firmware
+# has been mounted -- and it does not retry. CONFIG_FW_LOADER_USER_HELPER is
+# unset, so there is no userspace fallback either. Every firmware-bearing
+# driver therefore came up dead: amdgpu and i915 failed and CONFIG_DRM_SIMPLEDRM
+# took the EFI framebuffer, and no wireless device appeared at all.
+#
+# As modules they load from the mounted root, where /lib/firmware is readable.
+# Nothing loads them on its own, though, which is what this is for.
+#
+# WHY ONE SCRIPT AND NOT TWO SERVICES
+#
+# raven-init starts services in declaration order but does not wait for one to
+# be ready before starting the next, and a uevent emitted before udevd is
+# listening on its netlink socket is not queued anywhere -- it is lost. Starting
+# the daemon and triggering the coldplug from the same process is what makes the
+# ordering hold.
+#
+# Nothing here is on the path to the root filesystem: storage, USB and the
+# filesystems stay built into the kernel precisely so that early boot does not
+# depend on any of this working.
+# =============================================================================
+
+set -u
+
+UDEVD="$(command -v udevd 2>/dev/null || true)"
+UDEVADM="$(command -v udevadm 2>/dev/null || true)"
+
+if [ -z "${UDEVD}" ] || [ -z "${UDEVADM}" ]; then
+    echo "raven-udev: udevd/udevadm not installed; devices stay on devtmpfs alone" >&2
+    exit 0
+fi
+
+# modules.dep is what modprobe resolves against, and udev's autoloading is
+# modprobe. A sysroot assembled without a depmod pass has the modules and no
+# index, which fails silently -- every uevent finds no driver and the hardware
+# stays dark. Cheap to rebuild, so rebuild it when it is missing.
+KVER="$(uname -r 2>/dev/null || echo unknown)"
+if [ -d "/lib/modules/${KVER}" ] && [ ! -f "/lib/modules/${KVER}/modules.dep.bin" ]; then
+    if command -v depmod >/dev/null 2>&1; then
+        depmod -a "${KVER}" 2>/dev/null || true
+    fi
+fi
+
+# A second udevd would fight the first for the control socket. The live init and
+# a raven-init service both call this, and on the live path both run.
+if [ ! -S /run/udev/control ]; then
+    mkdir -p /run/udev 2>/dev/null || true
+    "${UDEVD}" --daemon 2>/dev/null || "${UDEVD}" -d 2>/dev/null || {
+        echo "raven-udev: udevd would not start; hardware stays unbound" >&2
+        exit 0
+    }
+fi
+
+# Subsystems before devices: a device's module frequently needs its bus bound
+# first, and triggering in the other order makes that a race.
+"${UDEVADM}" trigger --type=subsystems --action=add 2>/dev/null || true
+"${UDEVADM}" trigger --type=devices --action=add 2>/dev/null || true
+
+# Bounded, because a getty behind an unbounded settle is a machine that looks
+# hung. Anything still arriving after this lands as an ordinary hotplug.
+"${UDEVADM}" settle --timeout=30 2>/dev/null || true
+
+exit 0

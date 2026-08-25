@@ -50,9 +50,8 @@ And a graphical layer, built separately because it cannot be static:
 
 | Tool | What it is |
 |------|------------|
-| `huginn` | [RavenGUI](https://github.com/javanhut/RavenGUI)'s Wayland compositor, on Smithay |
-| `muninn` | the desktop shell — panel, launcher, notifications — as an ordinary Wayland client |
-| `muninn-lock` | the session lock screen, a third process so a shell bug cannot unlock the screen |
+| `huginn` | [RavenGUI](https://github.com/javanhut/RavenGUI)'s Wayland compositor, which also draws the desktop — dock, launcher, notifications |
+| `muninn-lock` | the session lock screen, a separate process so a compositor bug cannot unlock the screen |
 
 Boot the `Raven Desktop (Huginn)` entry, or add `raven.graphics=wayland` to the
 kernel cmdline, and raven-init starts the session instead of a getty.
@@ -124,7 +123,7 @@ qemu-user — use Docker Desktop or colima with Rosetta, or build on x86_64.
 | `stage2` | `scripts/stages/stage2-native.sh` | Native rebuild of the sysroot: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | `stage3` | `scripts/stages/stage3-packages.sh` | Base packages: core libraries (zlib, ncurses, readline, attr, acl), shells, OpenSSH, RavenBoot |
 | `raven` | `scripts/stages/stage-raven.sh` | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw |
-| `gui` | `scripts/stages/stage-gui.sh` | Compositor and desktop shell: huginn, muninn, muninn-lock, plus the shared libraries they need |
+| `gui` | `scripts/stages/stage-gui.sh` | Compositor and lock screen: huginn, muninn-lock, plus the shared libraries they need |
 | `stage4` | `scripts/stages/stage4-iso.sh` | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
 
 The Raven layer is unnumbered on purpose. Stages 0–4 build a base system that
@@ -149,6 +148,7 @@ RAVEN_SKIP=oxigen make raven              # everything but this one
 RAVEN_OFFLINE=1 make raven                # reuse existing clones, no network
 RAVEN_IVALDI_REF=v0.1.2 make raven        # pin one component to a git ref
 RAVEN_KEEP_BASH_DEFAULT=1 make raven      # install ravenshell, keep bash default
+RAVEN_PACMAN_FROM_HOST=1 make raven       # give rvn the host's pacman.conf
 ```
 
 The GUI stage is fail-soft the same way, and skips itself when the build host

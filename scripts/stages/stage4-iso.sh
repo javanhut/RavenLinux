@@ -122,6 +122,15 @@ enable_network = true
 log_level = "info"
 
 [[services]]
+name = "udev"
+description = "Device manager: start udevd and coldplug attached hardware"
+exec = "/usr/sbin/raven-udev"
+args = []
+restart = false
+enabled = true
+critical = false
+
+[[services]]
 name = "console-font"
 description = "Load the JetBrains Mono Nerd Font console font"
 exec = "/usr/sbin/raven-console-font"
@@ -153,6 +162,7 @@ name = "dbus"
 description = "D-Bus system message bus"
 exec = "/usr/bin/dbus-daemon"
 args = ["--system", "--nofork", "--nopidfile"]
+runtime_dirs = ["/run/dbus"]
 restart = true
 enabled = true
 critical = false
@@ -362,6 +372,29 @@ else
     echo "warning: no udevd found; input devices will not be enumerated."
 fi
 
+# Drivers built into the kernel probed at ~1s, when only the initramfs --
+# which ships no firmware -- existed. A WiFi chip whose firmware load got
+# ENOENT then failed its probe permanently (rtw88_8821ce, error -22, on real
+# hardware) even though the blob is right here in the squashfs. Now that
+# /lib/firmware is mounted, re-run driver matching for anything driverless.
+if [ -w /sys/bus/pci/drivers_probe ]; then
+    reprobed=0
+    for dev in /sys/bus/pci/devices/*; do
+        [ -e "$dev/driver" ] && continue
+        if printf '%s' "$(basename "$dev")" > /sys/bus/pci/drivers_probe 2>/dev/null; then
+            reprobed=$((reprobed + 1))
+        fi
+    done
+    [ "$reprobed" -gt 0 ] && echo "Re-probed $reprobed driverless PCI device(s)"
+fi
+
+# Loopback: nothing else brings it up, and a down lo breaks 127.0.0.1.
+ip link set lo up 2>/dev/null || ifconfig lo up 2>/dev/null || true
+
+# Unprivileged ping. /sbin/ping ships with neither setuid nor capabilities, and
+# the kernel's ICMP datagram fallback is off by default (empty group range).
+echo "0 2147483647" > /proc/sys/net/ipv4/ping_group_range 2>/dev/null || true
+
 # Devices that already exist when udevd starts generate no uevents of their
 # own, so without this trigger the database stays empty for exactly the
 # hardware that was present at boot -- the keyboard and touchpad included.
@@ -398,7 +431,15 @@ elif command -v udhcpc >/dev/null 2>&1; then
     udhcpc -q -f >/dev/null 2>&1 || true
 fi
 
-# Try to load common GPU drivers (helps VMs where the driver is modular).
+# Start the device manager and coldplug what is attached. The graphics and
+# wireless drivers are modules, so until this runs the machine has no GPU and no
+# wireless device -- only whatever the kernel bound without firmware.
+if [ -x /usr/sbin/raven-udev ]; then
+    /usr/sbin/raven-udev 2>/dev/null || true
+fi
+
+# Belt and braces for the VM case, where the driver is modular and the device
+# may not generate a uevent the coldplug above matches.
 if command -v modprobe >/dev/null 2>&1; then
     modprobe -a virtio_gpu vmwgfx vboxvideo qxl bochs cirrus_qemu i915 amdgpu nouveau simpledrm 2>/dev/null || true
 fi
@@ -813,6 +854,7 @@ install_packages_to_sysroot() {
     mkdir -p "${SYSROOT_DIR}/var/cache/fontconfig" 2>/dev/null || true
 
     install_console_font
+    install_udev_helper
 
     # Ensure shared library dependencies for newly installed binaries are present.
     log_info "Copying runtime libraries for sysroot binaries..."
@@ -1011,7 +1053,8 @@ EOF
 
 # Wayland session: raven-init reads raven.graphics= and raven.wayland= from the
 # cmdline, disables the tty1 getty, starts seatd, and execs
-# /bin/raven-wayland-session, which runs huginn and then muninn as its client.
+# /bin/raven-wayland-session, which execs huginn. There is no shell client
+# after it: the compositor draws the dock, launcher and notifications itself.
 menuentry "Raven Desktop (Huginn)" --class raven {
     linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=huginn console=tty0
     initrd /boot/initramfs.img
@@ -1363,6 +1406,28 @@ install_console_font() {
     log_success "Console font built (${built} sizes)"
 }
 
+# raven-udev starts the device manager and coldplugs attached hardware. It has
+# to ship in the sysroot rather than only in the live init, because the whole
+# point of it is the installed system: the graphics and wireless drivers are
+# modules now, and nothing binds them without a coldplug.
+install_udev_helper() {
+    if [[ ! -f "${PROJECT_ROOT}/configs/raven-udev" ]]; then
+        log_warn "  configs/raven-udev not found; hardware will not be coldplugged"
+        return 0
+    fi
+
+    mkdir -p "${SYSROOT_DIR}/usr/sbin" "${SYSROOT_DIR}/sbin"
+    cp "${PROJECT_ROOT}/configs/raven-udev" "${SYSROOT_DIR}/usr/sbin/raven-udev"
+    chmod 0755 "${SYSROOT_DIR}/usr/sbin/raven-udev"
+    ln -sf ../usr/sbin/raven-udev "${SYSROOT_DIR}/sbin/raven-udev" 2>/dev/null || true
+    log_info "  Installed raven-udev"
+
+    if [[ ! -x "${SYSROOT_DIR}/sbin/udevd" && ! -x "${SYSROOT_DIR}/usr/sbin/udevd" ]]; then
+        log_warn "  udevd is not in the sysroot; modules will not autoload"
+        log_warn "  It comes from eudev; stage2 copies it when the build host has it"
+    fi
+}
+
 # =============================================================================
 # Install raven-install into the sysroot
 # =============================================================================
@@ -1411,7 +1476,7 @@ check_sysroot_layers() {
             || raven_missing+=("${b}")
     done
 
-    for b in huginn muninn raven-wayland-session; do
+    for b in huginn muninn-lock raven-wayland-session; do
         find "${SYSROOT_DIR}" -name "${b}" -type f -print -quit 2>/dev/null | grep -q . \
             || gui_missing+=("${b}")
     done
