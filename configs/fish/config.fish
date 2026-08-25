@@ -2,8 +2,16 @@
 
 # Environment
 set -gx RAVEN_LINUX 1
-set -gx LANG en_US.UTF-8
-set -gx LC_ALL en_US.UTF-8
+# Locale comes from /etc/locale.conf -- see the note in configs/bash/bashrc.
+# LC_ALL is deliberately not set.
+if not set -q LANG
+    if test -r /etc/locale.conf
+        for line in (string match -r '^LANG=.*' < /etc/locale.conf)
+            set -gx LANG (string replace 'LANG=' '' -- $line | string trim -c '"')
+        end
+    end
+end
+set -q LANG; or set -gx LANG C.UTF-8
 
 # XDG directories
 set -q XDG_CONFIG_HOME; or set -gx XDG_CONFIG_HOME $HOME/.config

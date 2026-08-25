@@ -1,0 +1,1341 @@
+#!/bin/bash
+# =============================================================================
+# raven-install -- install RavenLinux from the live image onto a disk
+# =============================================================================
+#
+# Ships in the sysroot at /usr/sbin/raven-install, so it is present both on the
+# live ISO and on an installed system.
+#
+# What it does, in order:
+#
+#   1. preflight   -- root, UEFI, required tools, a usable source tree
+#   2. wizard      -- disk, hostname, users, passwords, timezone, locale, swap
+#   3. confirm     -- prints the plan, requires a typed YES
+#   4. partition   -- GPT: ESP + optional swap + root, via sfdisk
+#   5. copy        -- the squashfs (preferred) or the running root, onto the disk
+#   6. configure   -- fstab, users, hostname, timezone, locale, init handoff
+#   7. bootloader  -- RavenBoot on the ESP, at both \EFI\raven and the fallback
+#
+# The bootloader is installed to \EFI\BOOT\BOOTX64.EFI as well as
+# \EFI\raven\raven-boot.efi. The fallback path is what makes this boot on
+# firmware that will not take an NVRAM entry from us -- which is most laptop
+# firmware, ASUS included. --efi-nvram additionally registers a named entry.
+#
+# Secure Boot must be off: RavenBoot is unsigned.
+#
+# This is deliberately a shell script rather than a compiled binary. It shells
+# out to sfdisk/mkfs/blkid for everything that matters anyway, and being a
+# script means it can be read and patched on the live system, over SSH, on the
+# machine that is refusing to install -- which is exactly when you need to.
+
+set -uo pipefail
+
+# =============================================================================
+# Constants
+# =============================================================================
+
+RAVEN_INSTALL_VERSION="1.0"
+
+ESP_SIZE_DEFAULT="512M"
+ESP_LABEL="RAVEN_ESP"      # FAT labels are capped at 11 characters
+ROOT_LABEL="RAVEN_ROOT"
+SWAP_LABEL="RAVEN_SWAP"
+
+# Where we do our work. Under /run so it is a tmpfs and never lands on disk.
+WORK="/run/raven-install"
+TARGET="${WORK}/target"
+SRCMNT="${WORK}/source"
+
+# =============================================================================
+# Output
+# =============================================================================
+
+if [[ -t 1 ]]; then
+    RED=$'\033[1;31m'; GREEN=$'\033[1;32m'; YELLOW=$'\033[1;33m'
+    BLUE=$'\033[1;34m'; WHITE=$'\033[1;37m'; CYAN=$'\033[1;36m'; NC=$'\033[0m'
+else
+    RED=""; GREEN=""; YELLOW=""; BLUE=""; WHITE=""; CYAN=""; NC=""
+fi
+
+ok()   { echo "  [  ${GREEN}OK${NC}  ] $*"; }
+warn() { echo "  [${YELLOW}WARN${NC} ] $*"; }
+fail() { echo "  [${RED}FAIL${NC} ] $*"; }
+info() { echo "  [ ${BLUE}**${NC}  ] $*"; }
+step() { echo; echo "${WHITE}>>>${NC} $*"; }
+
+# Print the reason and leave. The EXIT trap owns the "aborted" banner and the
+# unmounting, so this must not do either -- doing them here printed the banner
+# twice, once with the disk state and once without.
+die() {
+    echo
+    fail "$*"
+    exit 1
+}
+
+banner() {
+    cat <<BANNER
+${CYAN}
+   ██████╗  █████╗ ██╗   ██╗███████╗███╗   ██╗
+   ██╔══██╗██╔══██╗██║   ██║██╔════╝████╗  ██║
+   ██████╔╝███████║██║   ██║█████╗  ██╔██╗ ██║
+   ██╔══██╗██╔══██║╚██╗ ██╔╝██╔══╝  ██║╚██╗██║
+   ██║  ██║██║  ██║ ╚████╔╝ ███████╗██║ ╚████║
+   ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝${NC}
+   ${WHITE}Installer${NC} v${RAVEN_INSTALL_VERSION}
+
+BANNER
+}
+
+# =============================================================================
+# Options
+# =============================================================================
+
+OPT_DISK=""
+OPT_FS="ext4"
+OPT_SWAP=""          # "", "none", or a size like 8G
+OPT_ESP_SIZE="${ESP_SIZE_DEFAULT}"
+OPT_NVRAM=0
+OPT_DRY_RUN=0
+OPT_YES=0
+
+usage() {
+    cat <<USAGE
+Usage: raven-install [options]
+
+Installs RavenLinux onto a disk. Interactive by default; the options below
+pre-answer individual questions rather than replacing the wizard.
+
+Options:
+  --disk DEVICE      Target disk (e.g. /dev/nvme0n1). Prompted for if omitted.
+  --fs TYPE          Root filesystem: ext4 (default) or xfs or btrfs, if the
+                     matching mkfs is present.
+  --swap SIZE        Swap partition size (e.g. 8G), or "none" for no swap.
+  --esp-size SIZE    EFI System Partition size. Default ${ESP_SIZE_DEFAULT}.
+  --efi-nvram        Also register a "RavenLinux" UEFI NVRAM boot entry with
+                     efibootmgr. Off by default: the fallback bootloader path
+                     boots without it, and writing NVRAM can reorder the
+                     firmware's existing entries.
+  --dry-run          Run every check and print the plan, then stop before the
+                     first write. Nothing is partitioned, formatted, or copied.
+  -y, --yes          Skip the final typed confirmation. THIS DESTROYS THE DISK
+                     WITH NO FURTHER PROMPT.
+  -h, --help         This message.
+
+The target disk is erased completely. Dual-boot installation is not supported
+yet -- if this machine has another OS you want to keep, stop here.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --disk)      OPT_DISK="${2:-}"; shift 2 ;;
+        --fs)        OPT_FS="${2:-}"; shift 2 ;;
+        --swap)      OPT_SWAP="${2:-}"; shift 2 ;;
+        --esp-size)  OPT_ESP_SIZE="${2:-}"; shift 2 ;;
+        --efi-nvram) OPT_NVRAM=1; shift ;;
+        --dry-run)   OPT_DRY_RUN=1; shift ;;
+        -y|--yes)    OPT_YES=1; shift ;;
+        -h|--help)   usage; exit 0 ;;
+        *)           echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+# =============================================================================
+# Cleanup
+# =============================================================================
+
+# Set once the installer has started writing to the disk, so a failure after
+# that point can say so rather than implying the disk is untouched.
+DISK_DIRTY=0
+
+# "1" when the firmware reports Secure Boot on, "" when off or unreadable.
+SECUREBOOT_STATE=""
+
+cleanup() {
+    # Unmount in reverse depth order so nested mounts come off first.
+    for m in "${TARGET}/boot/efi" "${TARGET}/dev" "${TARGET}/proc" "${TARGET}/sys" \
+             "${TARGET}" "${SRCMNT}"; do
+        mountpoint -q "$m" 2>/dev/null && umount -R "$m" 2>/dev/null
+    done
+    return 0
+}
+
+on_error() {
+    local rc=$?
+    [[ $rc -eq 0 ]] && return 0
+    echo
+    fail "Installation aborted."
+    if [[ $DISK_DIRTY -eq 1 ]]; then
+        echo "  ${YELLOW}The target disk has already been modified and is not bootable.${NC}"
+        echo "  Re-run raven-install to start over."
+    else
+        echo "  No changes were made to any disk."
+    fi
+    cleanup
+    exit $rc
+}
+trap on_error EXIT
+trap 'die "Interrupted."' INT TERM
+
+# =============================================================================
+# Preflight
+# =============================================================================
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+preflight() {
+    step "Preflight checks"
+
+    [[ "$(id -u)" == "0" ]] || die "raven-install must run as root."
+    ok "Running as root"
+
+    if [[ -d /sys/firmware/efi ]]; then
+        ok "Firmware: UEFI"
+    else
+        fail "Firmware: BIOS/CSM"
+        echo
+        echo "  RavenBoot is a UEFI bootloader, and raven-install can only install it"
+        echo "  on a machine booted in UEFI mode. Two things to check:"
+        echo
+        echo "    - You may have booted the live USB through the firmware's legacy/CSM"
+        echo "      entry. Reboot and pick the UEFI entry for the same stick."
+        echo "    - The machine may be UEFI-capable with CSM forced on. Turn CSM off."
+        echo
+        echo "  Installing to a genuinely BIOS-only machine is not supported yet;"
+        echo "  it needs GRUB in the sysroot, which the build does not ship."
+        die "UEFI firmware required."
+    fi
+
+    # Secure Boot rejects RavenBoot before it gets a chance to run, and the
+    # failure lands at the next boot rather than here -- so say it now.
+    if [[ -d /sys/firmware/efi/efivars ]] && have od; then
+        local sbvar
+        sbvar=$(ls /sys/firmware/efi/efivars/SecureBoot-* 2>/dev/null | head -1)
+        if [[ -n "$sbvar" ]]; then
+            # The variable is a 4-byte attribute prefix followed by one byte:
+            # 01 = Secure Boot enabled.
+            SECUREBOOT_STATE=$(od -An -tu1 -j4 -N1 "$sbvar" 2>/dev/null | tr -d ' ')
+        fi
+    fi
+    if [[ "$SECUREBOOT_STATE" == "1" ]]; then
+        warn "Secure Boot is ENABLED"
+        echo "        RavenBoot is unsigned, so the installed system will not boot"
+        echo "        until you disable Secure Boot in the firmware setup."
+        echo "        On ASUS ROG: F2 at power-on, Advanced Mode (F7),"
+        echo "        Security > Secure Boot > Secure Boot Control > Disabled."
+    else
+        ok "Secure Boot is off (or not reported)"
+    fi
+
+    local missing=()
+    local t
+    for t in sfdisk blkid lsblk findmnt mount umount mountpoint mkfs.vfat wipefs; do
+        have "$t" || missing+=("$t")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        fail "Missing required tools: ${missing[*]}"
+        echo
+        echo "  These come from util-linux and dosfstools and are copied into the"
+        echo "  sysroot by stage2. If you are on an ISO built before they were added"
+        echo "  to that list, rebuild with 'make stage2 && make iso'."
+        die "Cannot continue without the tools above."
+    fi
+    ok "Disk tools present"
+
+    case "${OPT_FS}" in
+        ext4|xfs|btrfs) ;;
+        *) die "Unsupported root filesystem: ${OPT_FS} (ext4, xfs, btrfs)" ;;
+    esac
+    have "mkfs.${OPT_FS}" || die "mkfs.${OPT_FS} is not installed; use --fs ext4."
+    ok "Root filesystem: ${OPT_FS}"
+
+    if [[ -n "${OPT_SWAP}" && "${OPT_SWAP}" != "none" ]]; then
+        have mkswap || die "mkswap is not installed; use --swap none."
+    fi
+
+    have chpasswd || warn "chpasswd not found; passwords will have to be set on first boot"
+
+    mkdir -p "${TARGET}" "${SRCMNT}" || die "Cannot create ${WORK}"
+}
+
+# =============================================================================
+# Locate the source tree and the boot payload
+# =============================================================================
+
+SRC_ROOT=""          # directory whose contents become the installed system
+SRC_KIND=""          # "squashfs" or "live-root"
+SRC_KERNEL=""
+SRC_INITRD=""
+SRC_EFI=""
+
+# The live media, wherever the initramfs left it. /run/raven-media is the
+# loop-mounted-ISO case (Ventoy and "just copy the .iso onto a stick");
+# /mnt/cdrom is the ordinary bind mount of the boot device.
+media_dirs() {
+    local d
+    for d in /run/raven-media /mnt/cdrom /run/archiso/bootmnt; do
+        [[ -d "$d" ]] && echo "$d"
+    done
+}
+
+find_first() {
+    local f
+    for f in "$@"; do
+        [[ -f "$f" ]] && { echo "$f"; return 0; }
+    done
+    return 1
+}
+
+locate_source() {
+    step "Locating the system to install"
+
+    # The squashfs is the better source: it is the pristine sysroot, with none
+    # of the tmpfs scribbling the live overlay has accumulated since boot, and
+    # it is a single filesystem so the copy needs no exclusion list.
+    local media squash=""
+    for media in $(media_dirs); do
+        squash=$(find_first \
+            "${media}/raven/filesystem.squashfs" \
+            "${media}/live/filesystem.squashfs" \
+            "${media}/squashfs.img") && break
+        squash=""
+    done
+
+    if [[ -n "$squash" ]]; then
+        if mount -t squashfs -o ro,loop "$squash" "${SRCMNT}" 2>/dev/null; then
+            SRC_ROOT="${SRCMNT}"
+            SRC_KIND="squashfs"
+            ok "Source: ${squash}"
+        else
+            warn "Found ${squash} but could not mount it; falling back to the running root"
+        fi
+    fi
+
+    if [[ -z "$SRC_ROOT" ]]; then
+        # Installing from the running system. Works on the live image and on an
+        # already-installed one (cloning this machine onto another disk).
+        SRC_ROOT="/"
+        SRC_KIND="live-root"
+        ok "Source: the running system (/)"
+    fi
+
+    # The boot payload. On the live image it is on the media; on an installed
+    # system it is in /boot; stage4 also stages a copy inside the squashfs so
+    # neither of those has to exist.
+    local search_dirs=()
+    for media in $(media_dirs); do
+        search_dirs+=("${media}/boot" "${media}/EFI/raven")
+    done
+    search_dirs+=("${SRC_ROOT%/}/boot" "${SRC_ROOT%/}/usr/share/raven/boot" "/boot" "/usr/share/raven/boot")
+
+    local d
+    for d in "${search_dirs[@]}"; do
+        [[ -d "$d" ]] || continue
+        [[ -z "$SRC_KERNEL" ]] && SRC_KERNEL=$(find_first "$d/vmlinuz" "$d/vmlinuz-raven" "$d"/vmlinuz-*) || true
+        [[ -z "$SRC_INITRD" ]] && SRC_INITRD=$(find_first "$d/initramfs.img" "$d/initrd.img" "$d/initramfs-raven.img") || true
+        [[ -z "$SRC_EFI" ]] && SRC_EFI=$(find_first "$d/raven-boot.efi" "$d/BOOTX64.EFI") || true
+    done
+
+    # Last resort for the bootloader: the fallback path on the live media's ESP.
+    if [[ -z "$SRC_EFI" ]]; then
+        for media in $(media_dirs); do
+            SRC_EFI=$(find_first "${media}/EFI/BOOT/BOOTX64.EFI") && break
+        done
+    fi
+
+    [[ -n "$SRC_KERNEL" ]] || die "No kernel found. Looked in: ${search_dirs[*]}"
+    [[ -n "$SRC_INITRD" ]] || die "No initramfs found. Looked in: ${search_dirs[*]}"
+    ok "Kernel:    ${SRC_KERNEL}"
+    ok "Initramfs: ${SRC_INITRD}"
+
+    if [[ -n "$SRC_EFI" ]]; then
+        ok "Bootloader: ${SRC_EFI}"
+    else
+        die "No RavenBoot EFI binary found. stage3 builds it to
+       build/packages/boot/raven-boot.efi -- if that file is missing on the
+       build host, the ISO shipped without it and there is nothing to install."
+    fi
+
+    # An initramfs that predates root= support will mount the squashfs and
+    # ignore the disk entirely, which looks like the installer failed when it
+    # did not. Cheap to detect: the string only exists in the newer script.
+    if have zcat && ! zcat -f "$SRC_INITRD" 2>/dev/null | grep -aq 'raven_root_from_cmdline'; then
+        warn "This initramfs may not support booting from a disk"
+        echo "        It was built before root= handling was added, and will look for"
+        echo "        the live squashfs instead of your new root partition."
+        echo "        Rebuild with 'make initramfs && make iso' if the install does"
+        echo "        not boot."
+    fi
+}
+
+# =============================================================================
+# Disk selection
+# =============================================================================
+
+list_disks() {
+    lsblk -dn -o NAME,SIZE,TYPE,MODEL 2>/dev/null | awk '$3 == "disk" { print }'
+}
+
+# nvme0n1 -> nvme0n1p1, sda -> sda1, mmcblk0 -> mmcblk0p1
+partdev() {
+    local disk="$1" n="$2"
+    if [[ "$disk" =~ [0-9]$ ]]; then
+        echo "${disk}p${n}"
+    else
+        echo "${disk}${n}"
+    fi
+}
+
+choose_disk() {
+    step "Choosing the target disk"
+
+    if [[ -n "${OPT_DISK}" ]]; then
+        DISK="${OPT_DISK}"
+    else
+        echo
+        echo "  Disks on this machine:"
+        echo
+        local n=0 names=() line
+        while read -r line; do
+            [[ -z "$line" ]] && continue
+            n=$((n + 1))
+            names+=("/dev/$(echo "$line" | awk '{print $1}')")
+            printf '    %d) /dev/%s\n' "$n" "$line"
+        done < <(list_disks)
+        echo
+
+        [[ $n -gt 0 ]] || die "No disks found. If this machine uses RAID or Intel RST,
+       switch the SATA/NVMe controller to AHCI mode in the firmware."
+
+        local choice
+        while true; do
+            read -r -p "  Install to which disk? [1-${n}] " choice
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [[ $choice -ge 1 && $choice -le $n ]]; then
+                DISK="${names[$((choice - 1))]}"
+                break
+            fi
+            warn "Enter a number between 1 and ${n}."
+        done
+    fi
+
+    [[ -b "$DISK" ]] || die "${DISK} is not a block device."
+
+    # Refuse to install onto the stick we booted from. It is mounted, the copy
+    # would read from a device it is simultaneously erasing, and the failure is
+    # ugly and halfway through.
+    local media
+    for media in $(media_dirs); do
+        local src_dev
+        src_dev=$(findmnt -no SOURCE --target "$media" 2>/dev/null | sed 's/\[.*//')
+        if [[ -n "$src_dev" && "$src_dev" == "$DISK"* ]]; then
+            die "${DISK} is the live boot media. Pick the machine's internal disk."
+        fi
+    done
+
+    DISK_SIZE=$(lsblk -dn -o SIZE "$DISK" 2>/dev/null | tr -d ' ')
+    DISK_MODEL=$(lsblk -dn -o MODEL "$DISK" 2>/dev/null | sed 's/ *$//')
+    ok "Target: ${DISK} (${DISK_SIZE}${DISK_MODEL:+, ${DISK_MODEL}})"
+
+    # Show what is about to be destroyed. Vague warnings get clicked through;
+    # a list of the user's actual partitions does not.
+    local existing
+    existing=$(lsblk -n -o NAME,SIZE,FSTYPE,LABEL "$DISK" 2>/dev/null | tail -n +2)
+    if [[ -n "$existing" ]]; then
+        echo
+        echo "  ${YELLOW}This disk currently holds:${NC}"
+        echo "$existing" | sed 's/^/      /'
+        if echo "$existing" | grep -qiE 'ntfs|Microsoft|Windows|Basic data'; then
+            echo
+            echo "  ${RED}This looks like a Windows installation.${NC} raven-install erases the"
+            echo "  whole disk -- it cannot install alongside another OS yet."
+        fi
+    fi
+}
+
+# =============================================================================
+# Wizard
+# =============================================================================
+
+ask() {
+    # ask VAR "prompt" "default"
+    local __var="$1" __prompt="$2" __default="${3:-}" __reply=""
+    if [[ -n "$__default" ]]; then
+        read -r -p "  ${__prompt} [${__default}]: " __reply
+        [[ -z "$__reply" ]] && __reply="$__default"
+    else
+        while [[ -z "$__reply" ]]; do
+            read -r -p "  ${__prompt}: " __reply
+        done
+    fi
+    printf -v "$__var" '%s' "$__reply"
+}
+
+ask_yn() {
+    # ask_yn "prompt" "Y|N"  -> returns 0 for yes
+    local prompt="$1" default="${2:-Y}" reply=""
+    local hint="[Y/n]"
+    [[ "$default" == "N" ]] && hint="[y/N]"
+    while true; do
+        read -r -p "  ${prompt} ${hint} " reply
+        [[ -z "$reply" ]] && reply="$default"
+        case "$reply" in
+            [Yy]*) return 0 ;;
+            [Nn]*) return 1 ;;
+        esac
+    done
+}
+
+ask_password() {
+    # ask_password VAR "label"  -- reads twice, no echo, allows empty to skip
+    local __var="$1" __label="$2" p1 p2
+    while true; do
+        read -r -s -p "  ${__label} password (leave empty to skip): " p1; echo
+        if [[ -z "$p1" ]]; then
+            warn "No ${__label} password set."
+            printf -v "$__var" '%s' ""
+            return 0
+        fi
+        read -r -s -p "  Repeat ${__label} password: " p2; echo
+        if [[ "$p1" == "$p2" ]]; then
+            printf -v "$__var" '%s' "$p1"
+            return 0
+        fi
+        warn "Passwords do not match, try again."
+    done
+}
+
+valid_username() {
+    [[ "$1" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]
+}
+
+valid_hostname() {
+    [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]]
+}
+
+# Where the zoneinfo database lives in the source tree, not on the live system:
+# they are the same on the ISO but not when cloning an installed machine.
+zoneinfo_dir() {
+    local d="${SRC_ROOT%/}/usr/share/zoneinfo"
+    [[ -d "$d" ]] && { echo "$d"; return 0; }
+    [[ -d /usr/share/zoneinfo ]] && { echo /usr/share/zoneinfo; return 0; }
+    return 1
+}
+
+run_wizard() {
+    step "System configuration"
+    echo
+
+    while true; do
+        ask HOSTNAME "Hostname" "raven"
+        valid_hostname "$HOSTNAME" && break
+        warn "Hostnames are letters, digits and hyphens, and cannot start or end with a hyphen."
+    done
+
+    echo
+    while true; do
+        ask USERNAME "Username for the primary account" "raven"
+        if ! valid_username "$USERNAME"; then
+            warn "Usernames are lowercase letters, digits, underscore and hyphen, starting with a letter or underscore."
+            continue
+        fi
+        if [[ "$USERNAME" == "root" ]]; then
+            warn "Pick a name other than root; the root account is configured separately."
+            continue
+        fi
+        break
+    done
+
+    ask FULLNAME "Full name for ${USERNAME} (optional)" "${USERNAME}"
+    ask_password USER_PASSWORD "${USERNAME}'s"
+
+    if ask_yn "Give ${USERNAME} administrator access via sudo?" "Y"; then
+        USER_SUDO=1
+    else
+        USER_SUDO=0
+    fi
+
+    echo
+    ask_password ROOT_PASSWORD "root"
+    if [[ -z "$ROOT_PASSWORD" && -z "$USER_PASSWORD" ]]; then
+        warn "Neither account has a password. Anyone with the machine can log in."
+    fi
+
+    echo
+    local tzdir
+    if tzdir=$(zoneinfo_dir); then
+        while true; do
+            ask TIMEZONE "Timezone (Region/City, or ? to list regions)" "UTC"
+            if [[ "$TIMEZONE" == "?" ]]; then
+                find "$tzdir" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null \
+                    | sort | column -c 70 2>/dev/null || \
+                find "$tzdir" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort
+                echo "  Then: <Region>/<City>, e.g. America/New_York. Type ?<Region> to list a region."
+                continue
+            fi
+            if [[ "$TIMEZONE" == \?* ]]; then
+                local region="${TIMEZONE#\?}"
+                if [[ -d "${tzdir}/${region}" ]]; then
+                    find "${tzdir}/${region}" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort | column -c 70 2>/dev/null || true
+                else
+                    warn "No such region: ${region}"
+                fi
+                continue
+            fi
+            if [[ -f "${tzdir}/${TIMEZONE}" ]]; then
+                break
+            fi
+            warn "No timezone '${TIMEZONE}' in the database."
+        done
+    else
+        warn "No timezone database in the source tree; the clock will run on UTC."
+        TIMEZONE="UTC"
+    fi
+
+    ask LOCALE "Locale" "en_US.UTF-8"
+    ask KEYMAP "Console keymap" "us"
+
+    echo
+    if [[ -z "${OPT_SWAP}" ]]; then
+        local memkb memgb
+        memkb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+        memgb=$(( (memkb + 1048575) / 1048576 ))
+        [[ $memgb -lt 1 ]] && memgb=2
+        if ask_yn "Create a ${memgb}G swap partition? (enables hibernate)" "Y"; then
+            SWAP_SIZE="${memgb}G"
+        else
+            SWAP_SIZE=""
+        fi
+    elif [[ "${OPT_SWAP}" == "none" ]]; then
+        SWAP_SIZE=""
+    else
+        SWAP_SIZE="${OPT_SWAP}"
+    fi
+}
+
+# =============================================================================
+# Confirmation
+# =============================================================================
+
+ESP_DEV=""
+SWAP_DEV=""
+ROOT_DEV=""
+
+plan_partitions() {
+    local n=1
+    ESP_DEV="$(partdev "$DISK" $n)"; n=$((n + 1))
+    if [[ -n "$SWAP_SIZE" ]]; then
+        SWAP_DEV="$(partdev "$DISK" $n)"; n=$((n + 1))
+    fi
+    ROOT_DEV="$(partdev "$DISK" $n)"
+}
+
+confirm() {
+    plan_partitions
+
+    step "Installation plan"
+    cat <<PLAN
+
+    Disk           ${DISK} (${DISK_SIZE}${DISK_MODEL:+, ${DISK_MODEL}})
+    Partitioning   GPT, erasing everything on the disk
+
+      ${ESP_DEV}   ${OPT_ESP_SIZE}  EFI System Partition (FAT32) -> /boot/efi
+PLAN
+    # %-4s keeps the size column lined up with the 512M and "rest" above.
+    [[ -n "$SWAP_DEV" ]] && printf '      %s   %-4s  swap\n' "$SWAP_DEV" "$SWAP_SIZE"
+    cat <<PLAN
+      ${ROOT_DEV}   rest  ${OPT_FS} -> /
+
+    Hostname       ${HOSTNAME}
+    User           ${USERNAME}${FULLNAME:+ (${FULLNAME})}$([[ $USER_SUDO -eq 1 ]] && echo ", sudo via wheel")
+    root password  $([[ -n "$ROOT_PASSWORD" ]] && echo "set" || echo "${YELLOW}not set${NC}")
+    Timezone       ${TIMEZONE}
+    Locale         ${LOCALE}
+    Keymap         ${KEYMAP}
+    Bootloader     RavenBoot at \\EFI\\raven and \\EFI\\BOOT\\BOOTX64.EFI$([[ $OPT_NVRAM -eq 1 ]] && echo ", plus an NVRAM entry")
+
+PLAN
+
+    if [[ $OPT_DRY_RUN -eq 1 ]]; then
+        echo "  ${CYAN}--dry-run: stopping here. Nothing has been written.${NC}"
+        echo
+        cleanup
+        trap - EXIT
+        exit 0
+    fi
+
+    if [[ $OPT_YES -eq 1 ]]; then
+        warn "--yes given; proceeding without confirmation."
+        return 0
+    fi
+
+    echo "  ${RED}Everything on ${DISK} will be destroyed.${NC}"
+    echo
+    local reply=""
+    read -r -p "  Type YES to install, anything else to abort: " reply
+    [[ "$reply" == "YES" ]] || die "Aborted at confirmation. Nothing was written."
+}
+
+# =============================================================================
+# Partition and format
+# =============================================================================
+
+partition_disk() {
+    step "Partitioning ${DISK}"
+
+    DISK_DIRTY=1
+
+    # Anything still holding the old partitions open makes the kernel keep the
+    # stale table, and the mkfs below then writes to the wrong offsets.
+    local p
+    for p in "${DISK}"*; do
+        [[ -b "$p" ]] || continue
+        swapoff "$p" 2>/dev/null
+        umount "$p" 2>/dev/null
+    done
+
+    wipefs -a "$DISK" >/dev/null 2>&1 || warn "wipefs reported an error; continuing"
+
+    {
+        echo 'label: gpt'
+        echo "size=${OPT_ESP_SIZE}, type=uefi, name=\"${ESP_LABEL}\""
+        [[ -n "$SWAP_SIZE" ]] && echo "size=${SWAP_SIZE}, type=swap, name=\"${SWAP_LABEL}\""
+        echo "type=linux, name=\"${ROOT_LABEL}\""
+    } | sfdisk --wipe always --wipe-partitions always "$DISK" >/dev/null \
+        || die "sfdisk failed to partition ${DISK}"
+
+    ok "GPT written"
+
+    sync
+    partx -u "$DISK" >/dev/null 2>&1 || blockdev --rereadpt "$DISK" >/dev/null 2>&1 || true
+    have udevadm && udevadm settle --timeout=10 >/dev/null 2>&1
+
+    # The kernel can take a moment to publish the new nodes, and on NVMe it
+    # regularly outlasts a single settle.
+    local waited=0
+    while [[ ! -b "$ROOT_DEV" || ! -b "$ESP_DEV" ]]; do
+        sleep 1
+        waited=$((waited + 1))
+        [[ $waited -ge 15 ]] && die "Partition nodes did not appear (${ESP_DEV}, ${ROOT_DEV})"
+    done
+    ok "Partition devices ready"
+}
+
+format_partitions() {
+    step "Creating filesystems"
+
+    mkfs.vfat -F 32 -n "${ESP_LABEL}" "$ESP_DEV" >/dev/null 2>&1 \
+        || die "mkfs.vfat failed on ${ESP_DEV}"
+    ok "${ESP_DEV}: FAT32 (${ESP_LABEL})"
+
+    case "${OPT_FS}" in
+        ext4)  mkfs.ext4 -F -L "${ROOT_LABEL}" "$ROOT_DEV" >/dev/null 2>&1 ;;
+        xfs)   mkfs.xfs -f -L "${ROOT_LABEL}" "$ROOT_DEV" >/dev/null 2>&1 ;;
+        btrfs) mkfs.btrfs -f -L "${ROOT_LABEL}" "$ROOT_DEV" >/dev/null 2>&1 ;;
+    esac || die "mkfs.${OPT_FS} failed on ${ROOT_DEV}"
+    ok "${ROOT_DEV}: ${OPT_FS} (${ROOT_LABEL})"
+
+    if [[ -n "$SWAP_DEV" ]]; then
+        mkswap -L "${SWAP_LABEL}" "$SWAP_DEV" >/dev/null 2>&1 \
+            || die "mkswap failed on ${SWAP_DEV}"
+        ok "${SWAP_DEV}: swap (${SWAP_LABEL})"
+    fi
+
+    mount "$ROOT_DEV" "$TARGET" || die "Cannot mount ${ROOT_DEV} on ${TARGET}"
+    mkdir -p "${TARGET}/boot/efi"
+    mount "$ESP_DEV" "${TARGET}/boot/efi" || die "Cannot mount ${ESP_DEV}"
+    ok "Target mounted"
+}
+
+# =============================================================================
+# Copy
+# =============================================================================
+
+# Poll the target filesystem's used space rather than walking the tree: du on a
+# 1.4G tree every couple of seconds costs more than the copy it is reporting on.
+# Without df, or without a size to measure against, fall back to a spinner --
+# a copy this long with no output at all reads as a hang.
+copy_progress() {
+    local pid="$1" total_mb="$2" used_mb pct last=-1
+    local spin='-\|/' i=0
+
+    if ! have df || [[ $total_mb -le 0 ]]; then
+        while kill -0 "$pid" 2>/dev/null; do
+            printf '\r  [ %s**%s  ] Copying system files... %s' \
+                "$BLUE" "$NC" "${spin:i++%4:1}"
+            sleep 1
+        done
+        printf '\r%*s\r' 70 ''
+        return 0
+    fi
+
+    while kill -0 "$pid" 2>/dev/null; do
+        # -m is not universal across df implementations; -k is.
+        used_mb=$(df -k "$TARGET" 2>/dev/null | awk 'NR==2 {print int($3/1024)}')
+        [[ -z "$used_mb" ]] && used_mb=0
+        pct=$((used_mb * 100 / total_mb))
+        [[ $pct -gt 99 ]] && pct=99
+        if [[ $pct -ne $last ]]; then
+            printf '\r  [ %s**%s  ] Copying system files... %d%% (%d/%d MB)' \
+                "$BLUE" "$NC" "$pct" "$used_mb" "$total_mb"
+            last=$pct
+        fi
+        sleep 2
+    done
+    printf '\r%*s\r' 70 ''
+}
+
+copy_system() {
+    step "Copying the system to ${ROOT_DEV}"
+
+    local total_mb=0
+    if have du; then
+        total_mb=$(du -sm --one-file-system "$SRC_ROOT" 2>/dev/null | awk '{print $1}')
+    fi
+    [[ "$total_mb" =~ ^[0-9]+$ ]] || total_mb=0
+    [[ $total_mb -gt 0 ]] && info "About ${total_mb} MB to copy"
+
+    local rc=0
+    if [[ "$SRC_KIND" == "squashfs" ]]; then
+        # A read-only single-filesystem source: a plain recursive copy is exact.
+        cp -a "${SRC_ROOT}/." "${TARGET}/" &
+    else
+        # The running root. --one-file-system is what keeps /proc, /sys, /dev,
+        # /run and /tmp out: every one of them is a separate mount, so tar stops
+        # at the boundary without needing a list of paths to skip.
+        ( tar -C / --one-file-system -cf - . 2>/dev/null \
+          | tar -C "$TARGET" -xpf - 2>/dev/null ) &
+    fi
+    local copy_pid=$!
+    copy_progress "$copy_pid" "$total_mb"
+    wait "$copy_pid" || rc=$?
+
+    [[ $rc -eq 0 ]] || die "Copying the system failed (exit ${rc}). The disk is not usable."
+
+    # Directories the copy cannot carry: they are mount points on the source,
+    # so they arrive empty or not at all.
+    local d
+    for d in proc sys dev run tmp mnt media var/log var/tmp home boot/efi; do
+        mkdir -p "${TARGET}/${d}"
+    done
+    chmod 1777 "${TARGET}/tmp" "${TARGET}/var/tmp" 2>/dev/null
+
+    sync
+    ok "System copied"
+}
+
+# =============================================================================
+# Configure the installed system
+# =============================================================================
+
+uuid_of() { blkid -o value -s UUID "$1" 2>/dev/null; }
+
+write_fstab() {
+    local root_uuid esp_uuid swap_uuid
+    root_uuid=$(uuid_of "$ROOT_DEV")
+    esp_uuid=$(uuid_of "$ESP_DEV")
+
+    [[ -n "$root_uuid" ]] || die "Could not read the UUID of ${ROOT_DEV}"
+
+    # printf rather than echo: a FAT volume id is 9 characters and an ext4 UUID
+    # is 36, so hand-spaced columns line up for one of them and not the other.
+    local fmt='%-41s %-10s %-6s %-33s %s %s\n'
+
+    {
+        echo "# /etc/fstab -- written by raven-install"
+        echo "#"
+        # The header's first column is two narrower to pay for the "# " prefix.
+        printf '# %-39s %-10s %-6s %-33s %s %s\n' \
+            "<device>" "<mount>" "<type>" "<options>" "<dump>" "<pass>"
+        printf "$fmt" "UUID=${root_uuid}" "/" "${OPT_FS}" "rw,relatime" 0 1
+        if [[ -n "$esp_uuid" ]]; then
+            printf "$fmt" "UUID=${esp_uuid}" "/boot/efi" "vfat" \
+                "rw,noatime,fmask=0077,dmask=0077" 0 2
+        fi
+        if [[ -n "$SWAP_DEV" ]]; then
+            swap_uuid=$(uuid_of "$SWAP_DEV")
+            [[ -n "$swap_uuid" ]] && printf "$fmt" "UUID=${swap_uuid}" "none" "swap" "sw" 0 0
+        fi
+        # Redundant while raven-init mounts /tmp itself, and kept as the template
+        # for anyone adding a mount by hand.
+        printf "$fmt" "tmpfs" "/tmp" "tmpfs" "rw,nosuid,nodev,mode=1777" 0 0
+    } > "${TARGET}/etc/fstab"
+
+    ROOT_UUID="$root_uuid"
+    ok "/etc/fstab written"
+}
+
+set_hostname() {
+    echo "${HOSTNAME}" > "${TARGET}/etc/hostname"
+
+    {
+        echo "127.0.0.1   localhost"
+        echo "::1         localhost ip6-localhost ip6-loopback"
+        echo "127.0.1.1   ${HOSTNAME}.localdomain ${HOSTNAME}"
+    } > "${TARGET}/etc/hosts"
+
+    # raven-init reads /etc/hostname first, but init.toml carries a hostname of
+    # its own and leaving it saying "raven-linux" is confusing later.
+    if [[ -f "${TARGET}/etc/raven/init.toml" ]]; then
+        sed -i "s|^hostname *= *\".*\"|hostname = \"${HOSTNAME}\"|" \
+            "${TARGET}/etc/raven/init.toml" 2>/dev/null || true
+    fi
+
+    ok "Hostname: ${HOSTNAME}"
+}
+
+# Add $2 to group $1's member list in the target's /etc/group, if not already
+# there. Editing the file directly rather than calling gpasswd keeps this
+# working on an image whose shadow tools cannot chroot.
+add_group_member() {
+    local grp="$1" user="$2" group="${TARGET}/etc/group"
+    grep -q "^${grp}:" "$group" 2>/dev/null || return 1
+
+    awk -F: -v g="$grp" -v u="$user" 'BEGIN{OFS=":"}
+        $1==g {
+            n = split($4, m, ",")
+            for (i = 1; i <= n; i++) if (m[i] == u) { print; next }
+            $4 = ($4 == "" ? u : $4 "," u)
+        }
+        {print}' "$group" > "${group}.new" && mv "${group}.new" "$group"
+}
+
+# Drop $1 from every group's member list. Called when the placeholder account
+# the image ships is removed -- otherwise it stays named in wheel, audio and
+# the rest, referring to a user that no longer exists.
+remove_group_member() {
+    local user="$1" group="${TARGET}/etc/group"
+    [[ -f "$group" ]] || return 0
+
+    awk -F: -v u="$user" 'BEGIN{OFS=":"}
+        {
+            n = split($4, m, ",")
+            out = ""
+            for (i = 1; i <= n; i++) {
+                if (m[i] == u || m[i] == "") continue
+                out = (out == "" ? m[i] : out "," m[i])
+            }
+            $4 = out
+            print
+        }' "$group" > "${group}.new" && mv "${group}.new" "$group"
+}
+
+next_free_uid() {
+    local uid=1000
+    while grep -q ":x:${uid}:" "${TARGET}/etc/passwd" 2>/dev/null; do
+        uid=$((uid + 1))
+    done
+    echo "$uid"
+}
+
+create_user() {
+    local passwd="${TARGET}/etc/passwd"
+    local group="${TARGET}/etc/group"
+    local shadow="${TARGET}/etc/shadow"
+
+    touch "$passwd" "$group" "$shadow"
+
+    # The sysroot ships a placeholder "raven" account so the live image has a
+    # non-root user. If the installer is creating an account under a different
+    # name, that placeholder is dead weight and a login nobody set a password
+    # on -- so it goes.
+    if [[ "$USERNAME" != "raven" ]]; then
+        sed -i '/^raven:/d' "$passwd" "$shadow" 2>/dev/null || true
+        sed -i '/^raven:x:1000:/d' "$group" 2>/dev/null || true
+        remove_group_member raven
+        rm -rf "${TARGET}/home/raven" 2>/dev/null || true
+    fi
+
+    local shell="/bin/bash"
+    for s in /usr/bin/ravenshell /bin/ravenshell /bin/bash /bin/sh; do
+        [[ -x "${TARGET}${s}" ]] && { shell="$s"; break; }
+    done
+
+    if grep -q "^${USERNAME}:" "$passwd"; then
+        info "Account ${USERNAME} already exists in the image; updating it"
+        sed -i "s|^${USERNAME}:.*|${USERNAME}:x:$(awk -F: -v u="$USERNAME" '$1==u{print $3":"$4}' "$passwd"):${FULLNAME}:/home/${USERNAME}:${shell}|" "$passwd"
+        USER_UID=$(awk -F: -v u="$USERNAME" '$1==u{print $3}' "$passwd")
+        USER_GID=$(awk -F: -v u="$USERNAME" '$1==u{print $4}' "$passwd")
+    else
+        USER_UID=$(next_free_uid)
+        USER_GID="$USER_UID"
+        echo "${USERNAME}:x:${USER_UID}:${USER_GID}:${FULLNAME}:/home/${USERNAME}:${shell}" >> "$passwd"
+        grep -q "^${USERNAME}:x:${USER_GID}:" "$group" || \
+            echo "${USERNAME}:x:${USER_GID}:" >> "$group"
+        echo "${USERNAME}:!:0:0:99999:7:::" >> "$shadow"
+    fi
+
+    mkdir -p "${TARGET}/home/${USERNAME}"
+    # Seed the home directory from /etc/skel when the image has one.
+    if [[ -d "${TARGET}/etc/skel" ]]; then
+        cp -a "${TARGET}/etc/skel/." "${TARGET}/home/${USERNAME}/" 2>/dev/null || true
+    fi
+    chown -R "${USER_UID}:${USER_GID}" "${TARGET}/home/${USERNAME}" 2>/dev/null || true
+    chmod 0755 "${TARGET}/home/${USERNAME}"
+
+    ok "Created ${USERNAME} (uid ${USER_UID}, shell ${shell})"
+
+    if [[ $USER_SUDO -eq 1 ]]; then
+        grant_sudo
+    fi
+}
+
+# Membership in wheel, plus a sudoers rule that actually honours wheel. Several
+# builds ship a sudoers with that line commented out, which turns "you have
+# sudo" into "sudo: user is not in the sudoers file" on first use.
+grant_sudo() {
+    local group="${TARGET}/etc/group"
+
+    add_group_member wheel "$USERNAME" || echo "wheel:x:10:${USERNAME}" >> "$group"
+
+    local sudoers="${TARGET}/etc/sudoers"
+    if [[ -f "$sudoers" ]] && grep -qE '^[[:space:]]*%wheel[[:space:]]+ALL=' "$sudoers"; then
+        : # already enabled
+    elif [[ -d "${TARGET}/etc/sudoers.d" ]] || mkdir -p "${TARGET}/etc/sudoers.d" 2>/dev/null; then
+        echo '%wheel ALL=(ALL:ALL) ALL' > "${TARGET}/etc/sudoers.d/10-wheel"
+        chmod 0440 "${TARGET}/etc/sudoers.d/10-wheel"
+        # sudoers.d is only read if sudoers includes it.
+        if [[ -f "$sudoers" ]] && ! grep -qE '^[[:space:]]*@?include(dir)?[[:space:]]+/etc/sudoers\.d' "$sudoers"; then
+            echo '@includedir /etc/sudoers.d' >> "$sudoers"
+        fi
+    fi
+
+    # Groups a desktop session needs to reach hardware directly.
+    local g
+    for g in audio video input render seat; do
+        add_group_member "$g" "$USERNAME" || true
+    done
+
+    ok "${USERNAME} added to wheel (sudo) and the hardware groups"
+}
+
+set_passwords() {
+    if ! have chpasswd; then
+        warn "chpasswd is missing; no passwords were set"
+        NEEDS_PASSWORD_ON_FIRST_BOOT=1
+        return 0
+    fi
+
+    local failed=0
+    if [[ -n "$ROOT_PASSWORD" ]]; then
+        if printf 'root:%s\n' "$ROOT_PASSWORD" | chpasswd -R "$TARGET" 2>/dev/null; then
+            ok "root password set"
+        else
+            failed=1
+        fi
+    else
+        # An empty password field means "no password required", which is worse
+        # than a locked account on a machine that now has a real user on it.
+        sed -i 's|^root::|root:!:|' "${TARGET}/etc/shadow" 2>/dev/null || true
+        warn "root has no password and is locked; use sudo from ${USERNAME}"
+    fi
+
+    if [[ -n "$USER_PASSWORD" ]]; then
+        if printf '%s:%s\n' "$USERNAME" "$USER_PASSWORD" | chpasswd -R "$TARGET" 2>/dev/null; then
+            ok "${USERNAME} password set"
+        else
+            failed=1
+        fi
+    fi
+
+    if [[ $failed -eq 1 ]]; then
+        warn "chpasswd could not set one or more passwords"
+        echo "        Boot the rescue entry and run 'passwd' to set them."
+        NEEDS_PASSWORD_ON_FIRST_BOOT=1
+    fi
+
+    chmod 0600 "${TARGET}/etc/shadow" 2>/dev/null || true
+    chown 0:0 "${TARGET}/etc/shadow" 2>/dev/null || true
+}
+
+set_locale_and_time() {
+    local tzdir="${TARGET}/usr/share/zoneinfo"
+    if [[ -f "${tzdir}/${TIMEZONE}" ]]; then
+        ln -sf "/usr/share/zoneinfo/${TIMEZONE}" "${TARGET}/etc/localtime"
+        echo "${TIMEZONE}" > "${TARGET}/etc/timezone"
+        ok "Timezone: ${TIMEZONE}"
+    else
+        warn "No zoneinfo for ${TIMEZONE} in the installed tree; leaving the clock on UTC"
+    fi
+
+    {
+        echo "LANG=${LOCALE}"
+        echo "LC_COLLATE=C"
+    } > "${TARGET}/etc/locale.conf"
+    ok "Locale: ${LOCALE}"
+
+    # Recorded for the console setup to pick up. Nothing applies it today --
+    # the sysroot ships no loadkeys -- so say that rather than let a setting
+    # that does nothing look like one that works.
+    echo "KEYMAP=${KEYMAP}" > "${TARGET}/etc/vconsole.conf"
+    if [[ "$KEYMAP" != "us" ]]; then
+        warn "Keymap '${KEYMAP}' recorded in /etc/vconsole.conf but not applied"
+        echo "        RavenLinux does not ship loadkeys yet, so the console stays on us."
+    fi
+
+    # A stable machine-id, generated per install rather than baked into the ISO.
+    local mid=""
+    if have od; then
+        mid=$(od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d ' \n')
+    fi
+    if [[ ${#mid} -ne 32 ]]; then
+        # No od in this image. bash's own RNG is not cryptographic, but a
+        # machine-id only has to be unique, not unguessable.
+        mid=""
+        local i
+        for ((i = 0; i < 8; i++)); do
+            mid+=$(printf '%04x' $((RANDOM % 65536)))
+        done
+    fi
+    printf '%s\n' "$mid" > "${TARGET}/etc/machine-id"
+}
+
+# The live image boots a shell script at /init, and /sbin/init is a symlink to
+# it. That is right for the ISO and wrong for a disk: an installed system wants
+# raven-init as PID 1, with services, shutdown and the whole runlevel machinery.
+# The initramfs execs /sbin/init, so repointing that symlink is the handoff.
+switch_to_raven_init() {
+    if [[ -x "${TARGET}/sbin/raven-init" ]]; then
+        rm -f "${TARGET}/sbin/init"
+        ln -sf raven-init "${TARGET}/sbin/init"
+        rm -f "${TARGET}/init"
+        ok "PID 1 on the installed system: raven-init"
+    else
+        warn "raven-init not found in the image; leaving the live init in place"
+        echo "        The installed system will boot to a root shell without services."
+    fi
+
+    # The live image autologins root on tty1 with no password, which is correct
+    # for a live shell and unacceptable once the machine has real accounts.
+    local toml="${TARGET}/etc/raven/init.toml"
+    if [[ -f "$toml" ]] && [[ -x "${TARGET}/bin/login" || -x "${TARGET}/sbin/login" ]]; then
+        # Replace the getty-tty1 argument list with a real login prompt. Only
+        # the first match: later services have their own args.
+        awk '
+            /^name = "getty-tty1"/ { intty = 1 }
+            intty && /^args = / {
+                print "args = [\"--noclear\", \"tty1\", \"linux\"]"
+                intty = 0
+                next
+            }
+            { print }
+        ' "$toml" > "${toml}.new" && mv "${toml}.new" "$toml"
+        ok "tty1 asks for a login"
+    else
+        warn "Leaving the tty1 autologin in place: no /bin/login in the image"
+    fi
+
+    # The first-boot script exists to catch systems that were never through an
+    # installer. This one has been.
+    touch "${TARGET}/etc/.raven-first-boot-done"
+}
+
+configure_system() {
+    step "Configuring the installed system"
+
+    NEEDS_PASSWORD_ON_FIRST_BOOT=0
+
+    write_fstab
+    set_hostname
+    create_user
+    set_passwords
+    set_locale_and_time
+    switch_to_raven_init
+
+    sync
+}
+
+# =============================================================================
+# Bootloader
+# =============================================================================
+
+install_bootloader() {
+    step "Installing RavenBoot to the ESP"
+
+    local esp="${TARGET}/boot/efi"
+    mkdir -p "${esp}/EFI/BOOT" "${esp}/EFI/raven"
+
+    cp "$SRC_EFI" "${esp}/EFI/raven/raven-boot.efi" || die "Cannot write RavenBoot to the ESP"
+    # The fallback path. Firmware booting a disk with no matching NVRAM entry
+    # looks here, which is what makes this work without touching NVRAM at all.
+    cp "$SRC_EFI" "${esp}/EFI/BOOT/BOOTX64.EFI" || die "Cannot write the fallback bootloader"
+    ok "RavenBoot at \\EFI\\raven and \\EFI\\BOOT\\BOOTX64.EFI"
+
+    cp "$SRC_KERNEL" "${esp}/EFI/raven/vmlinuz" || die "Cannot copy the kernel to the ESP"
+    # 8.3-safe name: some firmware is unhappy with long names in the boot path.
+    cp "$SRC_INITRD" "${esp}/EFI/raven/initrd.img" || die "Cannot copy the initramfs to the ESP"
+    ok "Kernel and initramfs on the ESP"
+
+    # Keep a copy in /boot on the root filesystem too, so a later
+    # 'raven-install --help'-free reinstall of the bootloader has a source and
+    # the installed system is not dependent on the ESP for its own kernel.
+    mkdir -p "${TARGET}/boot"
+    cp "$SRC_KERNEL" "${TARGET}/boot/vmlinuz" 2>/dev/null || true
+    cp "$SRC_INITRD" "${TARGET}/boot/initramfs.img" 2>/dev/null || true
+
+    local base_cmdline="root=UUID=${ROOT_UUID} rw"
+
+    {
+        echo "# RavenBoot configuration -- written by raven-install"
+        echo "# Paths are relative to the EFI System Partition."
+        echo
+        echo "timeout = 5"
+        echo "default = 0"
+        echo
+        echo "[entry]"
+        echo "name = \"RavenLinux\""
+        echo "kernel = \"\\EFI\\raven\\vmlinuz\""
+        echo "initrd = \"\\EFI\\raven\\initrd.img\""
+        echo "cmdline = \"${base_cmdline} quiet loglevel=3 console=tty0\""
+        echo "type = linux-efi"
+        echo
+
+        if [[ -x "${TARGET}/usr/bin/huginn" || -x "${TARGET}/bin/huginn" ]]; then
+            echo "[entry]"
+            echo "name = \"RavenLinux (Desktop)\""
+            echo "kernel = \"\\EFI\\raven\\vmlinuz\""
+            echo "initrd = \"\\EFI\\raven\\initrd.img\""
+            echo "cmdline = \"${base_cmdline} quiet loglevel=3 raven.graphics=wayland raven.wayland=huginn console=tty0\""
+            echo "type = linux-efi"
+            echo
+        fi
+
+        echo "[entry]"
+        echo "name = \"RavenLinux (verbose)\""
+        echo "kernel = \"\\EFI\\raven\\vmlinuz\""
+        echo "initrd = \"\\EFI\\raven\\initrd.img\""
+        echo "cmdline = \"${base_cmdline} loglevel=7 console=tty0 console=ttyS0,115200\""
+        echo "type = linux-efi"
+        echo
+
+        # The escape hatch. If login, init or a service is broken, this still
+        # gets a root shell on the installed root with nothing else running.
+        echo "[entry]"
+        echo "name = \"RavenLinux (rescue shell)\""
+        echo "kernel = \"\\EFI\\raven\\vmlinuz\""
+        echo "initrd = \"\\EFI\\raven\\initrd.img\""
+        echo "cmdline = \"${base_cmdline} init=/bin/bash console=tty0\""
+        echo "type = linux-efi"
+        echo
+
+        # RavenBoot's parser drops any entry whose kernel is empty, so these two
+        # carry a placeholder path. It is never read: handle_entry_selection
+        # dispatches on the type and returns before anything is loaded.
+        echo "# The kernel lines below are placeholders that RavenBoot's parser"
+        echo "# requires. The type field is what decides what these entries do."
+        echo "[entry]"
+        echo "name = \"Reboot\""
+        echo "kernel = \"reboot\""
+        echo "type = reboot"
+        echo
+
+        echo "[entry]"
+        echo "name = \"Shutdown\""
+        echo "kernel = \"shutdown\""
+        echo "type = shutdown"
+    } > "${esp}/EFI/raven/boot.cfg"
+
+    ok "boot.cfg written (root=UUID=${ROOT_UUID})"
+
+    if [[ $OPT_NVRAM -eq 1 ]]; then
+        register_nvram_entry
+    else
+        info "No NVRAM entry written; booting via the fallback path"
+    fi
+
+    sync
+}
+
+register_nvram_entry() {
+    if ! have efibootmgr; then
+        warn "efibootmgr is not installed; skipping the NVRAM entry"
+        echo "        The fallback path still boots, so this is not fatal."
+        return 0
+    fi
+
+    # efibootmgr wants the disk and the ESP's partition number separately.
+    local partnum="${ESP_DEV##*[!0-9]}"
+
+    # Drop any entry we wrote on a previous run, so reinstalling does not leave
+    # a row of identical "RavenLinux" entries behind.
+    local old
+    for old in $(efibootmgr 2>/dev/null | awk '/[[:space:]]RavenLinux$/ {print substr($1,5,4)}'); do
+        efibootmgr -B -b "$old" >/dev/null 2>&1 || true
+    done
+
+    if efibootmgr -c -d "$DISK" -p "$partnum" \
+        -L "RavenLinux" -l '\EFI\raven\raven-boot.efi' >/dev/null 2>&1; then
+        ok "UEFI NVRAM entry 'RavenLinux' registered"
+    else
+        warn "efibootmgr could not write the NVRAM entry"
+        echo "        The fallback path still boots, so this is not fatal."
+    fi
+}
+
+# =============================================================================
+# Finish
+# =============================================================================
+
+finish() {
+    step "Finishing up"
+
+    sync
+    umount "${TARGET}/boot/efi" 2>/dev/null
+    umount -R "$TARGET" 2>/dev/null
+    # mount(8) attached the loop device for the squashfs; umount detaches it.
+    mountpoint -q "$SRCMNT" && umount "$SRCMNT" 2>/dev/null
+    ok "Filesystems unmounted"
+
+    echo
+    echo "${GREEN}==========================================${NC}"
+    echo "${GREEN}  RavenLinux is installed on ${DISK}${NC}"
+    echo "${GREEN}==========================================${NC}"
+    echo
+    echo "  Log in as ${WHITE}${USERNAME}${NC} on tty1."
+    if [[ ${NEEDS_PASSWORD_ON_FIRST_BOOT:-0} -eq 1 ]]; then
+        echo "  ${YELLOW}No password was set. Boot 'RavenLinux (rescue shell)' and run passwd.${NC}"
+    fi
+    echo
+    echo "  Before rebooting:"
+    echo "    - Remove the installation media."
+    if [[ "$SECUREBOOT_STATE" == "1" ]]; then
+        echo "    - ${YELLOW}Disable Secure Boot${NC} -- RavenBoot is unsigned and will not load."
+    fi
+    if [[ $OPT_NVRAM -eq 0 ]]; then
+        echo "    - The firmware boots this disk through the removable-media path."
+        echo "      If it does not appear, choose the disk directly from the boot menu"
+        echo "      (F8 on ASUS), or reinstall with --efi-nvram."
+    fi
+    echo
+    echo "  If it does not boot, pick ${WHITE}RavenLinux (rescue shell)${NC} from the"
+    echo "  RavenBoot menu -- it drops straight to a root shell on the installed root."
+    echo
+}
+
+# =============================================================================
+# Main
+# =============================================================================
+
+main() {
+    banner
+    preflight
+    locate_source
+    choose_disk
+    run_wizard
+    confirm
+    partition_disk
+    format_partitions
+    copy_system
+    configure_system
+    install_bootloader
+    finish
+
+    trap - EXIT
+    echo
+    if ask_yn "Reboot now?" "N"; then
+        echo "  Rebooting..."
+        sync
+        reboot
+    fi
+}
+
+main "$@"

@@ -717,6 +717,156 @@ else
 fi
 
 # -----------------------------------------------------------------------------
+# Root Device From the Kernel Command Line
+# -----------------------------------------------------------------------------
+# The live path below hunts for a squashfs on removable media. An installed
+# system has no squashfs and no removable media: it passes root=UUID=... and
+# expects that partition mounted directly. Both paths end at the same
+# switch_root, so everything after the branch is shared.
+#
+# raven-install greps this initramfs for the name of the function below to tell
+# whether the image it is about to copy can boot from a disk at all. Renaming it
+# is fine; renaming it without updating the installer is not.
+
+RAVEN_ROOT_MODE="live"
+RAVEN_ROOT_SPEC=""
+RAVEN_ROOT_FSTYPE=""
+RAVEN_ROOT_FLAGS=""
+RAVEN_ROOT_RW="rw"
+RAVEN_ROOT_WAIT=30
+RAVEN_INIT_OVERRIDE=""
+# Declared out here because the switch_root preparation reads it on both paths.
+RAVEN_MEDIA_MNT=""
+
+raven_root_from_cmdline() {
+    for arg in $(cat /proc/cmdline 2>/dev/null); do
+        case "$arg" in
+            root=*)       RAVEN_ROOT_SPEC="${arg#root=}" ;;
+            rootfstype=*) RAVEN_ROOT_FSTYPE="${arg#rootfstype=}" ;;
+            rootflags=*)  RAVEN_ROOT_FLAGS="${arg#rootflags=}" ;;
+            rootwait)     RAVEN_ROOT_WAIT=60 ;;
+            rootdelay=*)  RAVEN_ROOT_WAIT="${arg#rootdelay=}" ;;
+            init=*)       RAVEN_INIT_OVERRIDE="${arg#init=}" ;;
+            ro)           RAVEN_ROOT_RW="ro" ;;
+            rw)           RAVEN_ROOT_RW="rw" ;;
+            # Escape hatch: boot the live image even from a disk that has a
+            # root= on its command line.
+            raven.live)   RAVEN_ROOT_SPEC="" ; return 0 ;;
+        esac
+    done
+
+    [ -n "$RAVEN_ROOT_SPEC" ] && RAVEN_ROOT_MODE="disk"
+    return 0
+}
+
+# Turn a root= value into a block device path. Supports the four forms a
+# bootloader can reasonably hand us plus a bare device name.
+raven_resolve_root() {
+    spec="$1"
+    dev=""
+
+    case "$spec" in
+        UUID=*)
+            dev=$(blkid -U "${spec#UUID=}" 2>/dev/null)
+            ;;
+        PARTUUID=*)
+            dev=$(blkid -t "PARTUUID=${spec#PARTUUID=}" -o device 2>/dev/null | head -1)
+            ;;
+        LABEL=*)
+            dev=$(blkid -L "${spec#LABEL=}" 2>/dev/null)
+            ;;
+        PARTLABEL=*)
+            dev=$(blkid -t "PARTLABEL=${spec#PARTLABEL=}" -o device 2>/dev/null | head -1)
+            ;;
+        /dev/*)
+            dev="$spec"
+            ;;
+        *)
+            dev="/dev/$spec"
+            ;;
+    esac
+
+    [ -n "$dev" ] && [ -b "$dev" ] || return 1
+    echo "$dev"
+    return 0
+}
+
+raven_mount_disk_root() {
+    info "Root requested on the command line: $RAVEN_ROOT_SPEC"
+
+    # NVMe in particular regularly needs longer than the settle above. Poll
+    # rather than sleeping a fixed amount, so a fast disk costs nothing.
+    root_dev=""
+    waited=0
+    while [ "$waited" -lt "$RAVEN_ROOT_WAIT" ]; do
+        root_dev=$(raven_resolve_root "$RAVEN_ROOT_SPEC") && break
+        root_dev=""
+        [ "$waited" -eq 0 ] && info "Waiting for $RAVEN_ROOT_SPEC to appear..."
+        sleep 1
+        waited=$((waited + 1))
+        command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout=1 >/dev/null 2>&1
+    done
+
+    if [ -z "$root_dev" ]; then
+        fail "Root device not found: $RAVEN_ROOT_SPEC"
+        info "Block devices the kernel can see:"
+        blkid 2>/dev/null || ls -la /dev/nvme* /dev/sd* /dev/vd* 2>/dev/null || true
+        echo ""
+        info "If the disk is missing entirely, check the firmware's storage mode:"
+        info "RAID or Intel RST hides NVMe from Linux. AHCI is the one that works."
+        rescue_shell "Cannot find $RAVEN_ROOT_SPEC"
+    fi
+
+    ok "Root device: $root_dev ($RAVEN_ROOT_SPEC)"
+
+    mount_opts="$RAVEN_ROOT_RW"
+    [ -n "$RAVEN_ROOT_FLAGS" ] && mount_opts="${mount_opts},${RAVEN_ROOT_FLAGS}"
+
+    if [ -n "$RAVEN_ROOT_FSTYPE" ]; then
+        mount -t "$RAVEN_ROOT_FSTYPE" -o "$mount_opts" "$root_dev" /mnt/root 2>/dev/null
+    else
+        mount -o "$mount_opts" "$root_dev" /mnt/root 2>/dev/null
+    fi
+
+    if [ $? -ne 0 ]; then
+        # Second chance read-only: a filesystem with a dirty journal the kernel
+        # will not replay still mounts ro, and a rescue shell on the real root
+        # beats one on an empty initramfs.
+        warn "Mounting $root_dev ${RAVEN_ROOT_RW} failed; retrying read-only"
+        if ! mount -o ro "$root_dev" /mnt/root 2>/dev/null; then
+            fail "Cannot mount $root_dev"
+            rescue_shell "Root filesystem would not mount"
+        fi
+        warn "Root mounted READ-ONLY. Repair it, then remount rw."
+    fi
+
+    ok "Mounted root filesystem (${mount_opts})"
+
+    # A root with no init on it is almost always the wrong partition -- the ESP,
+    # or a data disk -- and saying so beats "switch_root failed" three steps on.
+    if [ ! -x /mnt/root/sbin/init ] && [ ! -x /mnt/root/init ] && [ ! -x /mnt/root/bin/init ]; then
+        fail "$root_dev has no init; this does not look like a RavenLinux root"
+        info "Contents:"
+        ls /mnt/root 2>/dev/null | head -20
+        rescue_shell "No init on $root_dev"
+    fi
+
+    return 0
+}
+
+step "Determining root filesystem"
+raven_root_from_cmdline
+
+if [ "$RAVEN_ROOT_MODE" = "disk" ]; then
+    raven_mount_disk_root
+else
+    ok "No root= on the command line; booting the live image"
+
+# The live path runs to the end of the overlay setup, where the branch closes.
+# It is left unindented on purpose: it predates the branch, and reindenting it
+# would bury a two-line change in a two-hundred-line diff.
+
+# -----------------------------------------------------------------------------
 # Find Boot Device
 # -----------------------------------------------------------------------------
 step "Searching for boot device"
@@ -838,7 +988,8 @@ done
 # RAVEN_MEDIA_MNT records the partition the ISO lives on. It must stay mounted
 # for as long as the loop device is backed by a file inside it, so switch_root
 # moves it into the new root rather than leaving it behind in the initramfs.
-RAVEN_MEDIA_MNT=""
+# Declared before the live/disk branch above, because switch_root reads it on
+# both paths.
 
 attach_iso_from_partitions() {
     command -v losetup &>/dev/null || return 1
@@ -939,12 +1090,15 @@ else
     fi
 fi
 
+fi
+
 # -----------------------------------------------------------------------------
 # Prepare Switch Root
 # -----------------------------------------------------------------------------
 step "Preparing to switch root"
 
-mkdir -p /mnt/root/proc /mnt/root/sys /mnt/root/dev /mnt/root/mnt/cdrom
+mkdir -p /mnt/root/proc /mnt/root/sys /mnt/root/dev
+[ "$RAVEN_ROOT_MODE" = "live" ] && mkdir -p /mnt/root/mnt/cdrom
 ok "Created mount points in new root"
 
 if mount --move /proc /mnt/root/proc 2>/dev/null; then
@@ -968,10 +1122,12 @@ else
     rescue_shell "Cannot prepare new root"
 fi
 
-if mount --bind /mnt/cdrom /mnt/root/mnt/cdrom 2>/dev/null; then
-    ok "Bind mounted /mnt/cdrom"
-else
-    warn "Could not bind mount /mnt/cdrom (non-critical)"
+if [ "$RAVEN_ROOT_MODE" = "live" ]; then
+    if mount --bind /mnt/cdrom /mnt/root/mnt/cdrom 2>/dev/null; then
+        ok "Bind mounted /mnt/cdrom"
+    else
+        warn "Could not bind mount /mnt/cdrom (non-critical)"
+    fi
 fi
 
 # When the ISO is a file on a data partition, the loop device backing / is
@@ -988,14 +1144,37 @@ if [ -n "$RAVEN_MEDIA_MNT" ]; then
     fi
 fi
 
-# Find init in the new root
+# Find init in the new root.
+#
+# The order differs by mode on purpose. On the live image /init is the boot
+# script stage4 generates and is the right answer. On a disk it is not: an
+# installed root wants raven-init, which raven-install leaves behind
+# /sbin/init. Searching /init first there would run the live script against a
+# real root -- it would mostly work, and quietly start no services at all.
 NEW_INIT=""
-for init in /init /sbin/init /bin/init; do
-    if [ -x "/mnt/root$init" ]; then
-        NEW_INIT="$init"
-        break
+if [ -n "$RAVEN_INIT_OVERRIDE" ]; then
+    if [ -x "/mnt/root$RAVEN_INIT_OVERRIDE" ]; then
+        NEW_INIT="$RAVEN_INIT_OVERRIDE"
+        ok "Using init= from the command line: $NEW_INIT"
+    else
+        warn "init=$RAVEN_INIT_OVERRIDE is not executable in the new root; ignoring it"
     fi
-done
+fi
+
+if [ -z "$NEW_INIT" ]; then
+    if [ "$RAVEN_ROOT_MODE" = "disk" ]; then
+        INIT_SEARCH="/sbin/init /bin/init /init"
+    else
+        INIT_SEARCH="/init /sbin/init /bin/init"
+    fi
+
+    for init in $INIT_SEARCH; do
+        if [ -x "/mnt/root$init" ]; then
+            NEW_INIT="$init"
+            break
+        fi
+    done
+fi
 
 if [ -z "$NEW_INIT" ]; then
     NEW_INIT="/bin/bash"

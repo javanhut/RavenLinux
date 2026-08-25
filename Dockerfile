@@ -60,6 +60,12 @@ RUN pacman -Syu --noconfirm --needed \
         findutils file patch coreutils rsync sed gawk grep diffutils which less \
         # Disk / filesystem / ISO tooling
         squashfs-tools xorriso util-linux e2fsprogs dosfstools mtools grub \
+        # Partitioning and UEFI tooling for raven-install. util-linux above
+        # already carries sfdisk/wipefs/partx/blockdev/losetup/findmnt/mkswap;
+        # these three are the ones it does not, and stage2 copies each of them
+        # into the sysroot, so a host without them ships an ISO that cannot
+        # install itself.
+        parted gptfdisk efibootmgr \
         # Build systems
         meson ninja cmake pkgconf autoconf automake libtool m4 gettext gperf \
         # Kernel build

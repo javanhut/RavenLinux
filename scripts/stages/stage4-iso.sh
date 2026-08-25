@@ -257,8 +257,15 @@ EOF
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export HOME=/root
 export TERM=linux
-export LANG=en_US.UTF-8
 export PS1='[\u@raven-linux]# '
+
+# Take the locale from what the build actually compiled, rather than naming one
+# here. Hardcoding en_US.UTF-8 in four places while the build shipped none is
+# what had every shell opening with "cannot change locale".
+if [ -r /etc/locale.conf ]; then
+    . /etc/locale.conf
+fi
+export LANG="${LANG:-C.UTF-8}"
 
 # Mount essential filesystems if not already mounted
 mountpoint -q /proc || mount -t proc proc /proc
@@ -323,16 +330,36 @@ else
     echo raven-linux > /proc/sys/kernel/hostname 2>/dev/null || true
 fi
 
-# Start udevd if available (helps libinput/Xorg enumerate devices)
-if [ -x /sbin/udevd ]; then
-    /sbin/udevd --daemon 2>/dev/null || true
-elif [ -x /usr/lib/systemd/systemd-udevd ]; then
-    /usr/lib/systemd/systemd-udevd --daemon 2>/dev/null || true
+# Start udevd. Not optional for a graphical session: libinput enumerates
+# input devices through libudev, so an empty udev database means a compositor
+# with no keyboard and no touchpad -- and the failure is completely silent from
+# the compositor's side.
+#
+# Errors are shown rather than sent to /dev/null. Hiding them is why that class
+# of failure had no evidence to work from.
+udevd_bin=""
+for candidate in /sbin/udevd /usr/lib/systemd/systemd-udevd /usr/bin/udevd; do
+    [ -x "$candidate" ] && { udevd_bin="$candidate"; break; }
+done
+
+if [ -n "$udevd_bin" ]; then
+    if "$udevd_bin" --daemon; then
+        echo "udevd started ($udevd_bin)"
+    else
+        echo "warning: $udevd_bin failed to start; input devices will not be"
+        echo "         enumerated and a graphical session will have no input."
+    fi
+else
+    echo "warning: no udevd found; input devices will not be enumerated."
 fi
 
+# Devices that already exist when udevd starts generate no uevents of their
+# own, so without this trigger the database stays empty for exactly the
+# hardware that was present at boot -- the keyboard and touchpad included.
 if command -v udevadm >/dev/null 2>&1; then
     udevadm trigger --action=add 2>/dev/null || udevadm trigger 2>/dev/null || true
-    udevadm settle 2>/dev/null || true
+    udevadm settle --timeout=10 2>/dev/null || true
+    echo "udev: $(udevadm info --export-db 2>/dev/null | grep -c '^P: /devices') devices enumerated"
 fi
 
 # Start D-Bus system bus (needed by iwd/iwctl and many GUI apps)
@@ -400,6 +427,9 @@ echo "  │  This is the RavenLinux base system: a musl userland, bash, and Open
 echo "  └────────────────────────────────────────────────────────────────────────────────────────┘"
 printf '\033[0m'
 echo ""
+printf '\033[1;36m'
+echo "  Run 'raven-install' to install RavenLinux onto this machine's disk."
+printf '\033[0m'
 printf '\033[0;32m'
 echo "  Type 'poweroff' to shutdown, 'reboot' to restart"
 printf '\033[0m'
@@ -635,7 +665,42 @@ copy_boot_files() {
         log_warn "Initramfs not found, ISO may not boot correctly"
     fi
 
+    stage_boot_payload_in_sysroot "${kernel}"
+
     log_success "Boot files copied"
+}
+
+# The kernel, initramfs and bootloader, placed inside the sysroot so they end up
+# in the squashfs and therefore on every installed system.
+#
+# It costs about 40MB of ISO, and buys two things. raven-install has a source
+# for the boot payload even when the live media is not reachable -- installing
+# from an already-installed machine, say. And the installed system owns a copy
+# of its own kernel at /boot, rather than only on the ESP, so reinstalling the
+# bootloader later does not require the ISO that produced it.
+stage_boot_payload_in_sysroot() {
+    local kernel="$1"
+
+    mkdir -p "${SYSROOT_DIR}/boot" "${SYSROOT_DIR}/usr/share/raven/boot"
+
+    if [[ -n "${kernel}" && -f "${kernel}" ]]; then
+        cp "${kernel}" "${SYSROOT_DIR}/boot/vmlinuz"
+        log_info "  Staged kernel in the sysroot at /boot/vmlinuz"
+    fi
+
+    if [[ -f "${BUILD_DIR}/initramfs-raven.img" ]]; then
+        cp "${BUILD_DIR}/initramfs-raven.img" "${SYSROOT_DIR}/boot/initramfs.img"
+        log_info "  Staged initramfs in the sysroot at /boot/initramfs.img"
+    fi
+
+    # RavenBoot is 47KB, so this one is free. Not under /boot: that directory
+    # is the kernel's, and on an installed system /boot/efi is a mount point.
+    if [[ -f "${PACKAGES_DIR}/boot/raven-boot.efi" ]]; then
+        cp "${PACKAGES_DIR}/boot/raven-boot.efi" "${SYSROOT_DIR}/usr/share/raven/boot/raven-boot.efi"
+        log_info "  Staged RavenBoot at /usr/share/raven/boot/raven-boot.efi"
+    else
+        log_warn "  No RavenBoot binary to stage; raven-install will have to find one on the media"
+    fi
 }
 
 # =============================================================================
@@ -1192,6 +1257,34 @@ EOF
 }
 
 # =============================================================================
+# Install raven-install into the sysroot
+# =============================================================================
+# It goes into the squashfs rather than onto the ISO alongside it, so the same
+# copy is on the live image and on every system installed from it. Installing
+# from an already-installed machine onto a second disk is then the same code
+# path, not a second one.
+install_installer() {
+    log_step "Installing raven-install..."
+
+    local src="${PROJECT_ROOT}/scripts/installer/raven-install"
+
+    if [[ ! -f "${src}" ]]; then
+        log_warn "scripts/installer/raven-install not found; the ISO will not be able to install itself"
+        return 0
+    fi
+
+    mkdir -p "${SYSROOT_DIR}/usr/sbin" "${SYSROOT_DIR}/sbin"
+    cp "${src}" "${SYSROOT_DIR}/usr/sbin/raven-install"
+    chmod 0755 "${SYSROOT_DIR}/usr/sbin/raven-install"
+
+    # /sbin is where the rest of the system administration commands live in this
+    # sysroot, and it is on root's PATH; /usr/sbin is not always.
+    ln -sf ../usr/sbin/raven-install "${SYSROOT_DIR}/sbin/raven-install" 2>/dev/null || true
+
+    log_success "raven-install installed to /usr/sbin/raven-install"
+}
+
+# =============================================================================
 # Generate ISO
 # =============================================================================
 generate_iso() {
@@ -1310,6 +1403,7 @@ main() {
     setup_iso_structure
     create_live_init
     install_shutdown_commands
+    install_installer
     copy_boot_files
     copy_kernel_modules
     create_squashfs

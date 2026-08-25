@@ -110,6 +110,18 @@ copy_system_utils() {
         strace ltrace lsof ldd
         # Disk utilities
         mount umount mountpoint fdisk parted mkfs.ext4 mkfs.vfat fsck blkid lsblk
+        # Partitioning and installation. raven-install needs every one of these:
+        # sfdisk writes the GPT, wipefs clears the old signatures, partx/blockdev
+        # make the kernel reread the table, findmnt identifies the boot media,
+        # and losetup mounts the squashfs it copies from.
+        sfdisk sgdisk wipefs partx partprobe blockdev losetup findmnt
+        mkswap swapon swapoff
+        # Filesystem creation beyond the ext4/vfat pair above, when the host has
+        # them. raven-install offers whichever ones are present.
+        mkfs.xfs mkfs.btrfs mkfs.ext2 mkfs.ext3 mkfs.fat fatlabel e2label tune2fs
+        resize2fs dumpe2fs
+        # Coreutils the installer uses that the uutils set does not always cover.
+        df du dd sync stat truncate od install chroot column split
         # System info
         dmesg lspci lsusb free uptime uname hostname
         dmidecode lscpu
@@ -689,6 +701,18 @@ ensure_dbus() {
                 mkdir -p "${SYSROOT_DIR}/etc/dbus-1"
                 cp -r /etc/dbus-1/* "${SYSROOT_DIR}/etc/dbus-1/" 2>/dev/null || true
             fi
+
+            # dbus-daemon --system reads <user>dbus</user> out of system.conf and
+            # drops privileges to it. With no such account getpwnam fails and the
+            # daemon exits immediately, every time -- which is what had raven-init
+            # restarting it in a loop. The account is created in /etc/passwd; this
+            # is the rest of what it needs.
+            #
+            # machine-id: dbus looks in /var/lib/dbus/machine-id as well as
+            # /etc/machine-id. The live init generates the latter at boot, so
+            # point one at the other rather than generating two.
+            mkdir -p "${SYSROOT_DIR}/var/lib/dbus"
+            ln -sf /etc/machine-id "${SYSROOT_DIR}/var/lib/dbus/machine-id" 2>/dev/null || true
 
             return 0
         fi
@@ -2309,6 +2333,36 @@ copy_terminfo() {
 }
 
 # =============================================================================
+# Make every locale declaration agree with what was actually generated
+# =============================================================================
+# /etc/profile and /etc/environment are written by create_configs, which runs
+# after copy_locale_data, and both hardcode en_US.UTF-8. If generation fell
+# back to C.UTF-8 they would contradict it and the "cannot change locale"
+# warning would come straight back through pam_env and /etc/profile.
+#
+# Rewritten with sed rather than by interpolating into those heredocs: they are
+# quoted on purpose, because they are full of $PATH and $HOME that must reach
+# the shipped file unexpanded.
+align_locale_declarations() {
+    local lang="${RAVEN_SYSTEM_LANG:-C.UTF-8}"
+
+    if [[ -f "${SYSROOT_DIR}/etc/profile" ]]; then
+        sed -i \
+            -e "s|^export LANG=.*|export LANG=${lang}|" \
+            -e "s|^export LANGUAGE=.*|export LANGUAGE=${lang}|" \
+            -e "s|^export LC_ALL=.*|# LC_ALL deliberately unset: it outranks every LC_* category|" \
+            "${SYSROOT_DIR}/etc/profile"
+    fi
+
+    if [[ -f "${SYSROOT_DIR}/etc/environment" ]]; then
+        sed -i -e "s|^LANG=.*|LANG=\"${lang}\"|" -e "/^LC_ALL=/d" \
+            "${SYSROOT_DIR}/etc/environment"
+    fi
+
+    log_info "  System locale: ${lang}"
+}
+
+# =============================================================================
 # Copy locale data and X11 compose files
 # =============================================================================
 copy_locale_data() {
@@ -2337,17 +2391,72 @@ copy_locale_data() {
         cp /usr/share/i18n/charmaps/UTF-8 "${SYSROOT_DIR}/usr/share/i18n/charmaps/" 2>/dev/null || true
     fi
 
-    # Copy compiled locale archive if available
+    # Copy whatever the host happens to have already compiled. This is a
+    # bonus, not the mechanism -- see the generation step below.
     if [[ -f /usr/lib/locale/locale-archive ]]; then
         cp /usr/lib/locale/locale-archive "${SYSROOT_DIR}/usr/lib/locale/" 2>/dev/null || true
     fi
 
-    # Copy individual compiled locales
     for locale_dir in /usr/lib/locale/en_US* /usr/lib/locale/C.* /usr/lib/locale/POSIX; do
         if [[ -d "$locale_dir" ]]; then
             cp -r "$locale_dir" "${SYSROOT_DIR}/usr/lib/locale/" 2>/dev/null || true
         fi
     done
+
+    # ==========================================================================
+    # Compile the locales, rather than hoping the build host has them
+    # ==========================================================================
+    # Copying alone was the whole mechanism, and it never fired: locales are
+    # produced by locale-gen, which nobody runs in a container image, so an
+    # Arch build host has no compiled en_US.UTF-8 to copy. The sysroot ended up
+    # with i18n *source* data, no compiled locale, and an /etc/locale.conf
+    # promising en_US.UTF-8 -- so every shell opened with
+    #
+    #   bash: warning: setlocale: LC_ALL: cannot change locale (en_US.UTF-8):
+    #                  No such file or directory
+    #
+    # localedef --prefix compiles straight into the sysroot, reading the source
+    # data from the build host.
+    local generated=()
+    if command -v localedef &>/dev/null; then
+        local spec src charmap name
+        for spec in "en_US:UTF-8:en_US.UTF-8" "C:UTF-8:C.UTF-8"; do
+            src="${spec%%:*}"
+            charmap="$(echo "${spec}" | cut -d: -f2)"
+            name="${spec##*:}"
+
+            if localedef -i "${src}" -f "${charmap}" \
+                    --prefix="${SYSROOT_DIR}" "${name}" 2>/dev/null; then
+                generated+=("${name}")
+                log_info "  Generated ${name}"
+            else
+                log_warn "  Could not generate ${name}"
+            fi
+        done
+    else
+        log_warn "  localedef not on the build host; no locales will be compiled"
+    fi
+
+    # Configure the locale the system actually has. Advertising one that was
+    # never built is what produced the warning in the first place, so if
+    # generation failed, say C.UTF-8 -- glibc carries that one built in.
+    # Ask what the sysroot actually holds. localedef --prefix writes a
+    # locale-archive rather than an en_US.utf8 directory, so a directory test
+    # alone reports "missing" for a locale that is present -- which is the same
+    # class of mistake as the bug being fixed here.
+    local system_lang="C.UTF-8"
+    if [[ " ${generated[*]-} " == *" en_US.UTF-8 "* ]] \
+       || [[ -d "${SYSROOT_DIR}/usr/lib/locale/en_US.utf8" ]] \
+       || localedef --list-archive --prefix="${SYSROOT_DIR}" 2>/dev/null \
+            | grep -qx 'en_US.utf8'; then
+        system_lang="en_US.UTF-8"
+    else
+        log_warn "  en_US.UTF-8 unavailable; configuring ${system_lang} instead"
+    fi
+
+    # Published for align_locale_declarations(), which runs after
+    # create_configs and makes every other file agree with this decision.
+    RAVEN_SYSTEM_LANG="${system_lang}"
 
     # X11 Compose files (needed for Fyne and other GUI toolkits)
     mkdir -p "${SYSROOT_DIR}/usr/share/X11/locale"
@@ -2373,16 +2482,21 @@ en_GB.UTF-8 UTF-8
 C.UTF-8 UTF-8
 EOF
 
-    # Create locale.conf
-    cat > "${SYSROOT_DIR}/etc/locale.conf" << 'EOF'
-LANG=en_US.UTF-8
-LC_ALL=en_US.UTF-8
+    # Create locale.conf.
+    #
+    # LANG only. LC_ALL is an override that outranks every LC_* category and is
+    # meant for "just this command" -- setting it system-wide means a user
+    # cannot pick their own LC_TIME or LC_COLLATE at all. It is also why the
+    # missing locale surfaced as a warning on every single shell: bash reports
+    # a failed LC_ALL loudly.
+    cat > "${SYSROOT_DIR}/etc/locale.conf" << EOF
+LANG=${system_lang}
 EOF
 
     # Create a minimal /etc/default/locale
     mkdir -p "${SYSROOT_DIR}/etc/default"
-    cat > "${SYSROOT_DIR}/etc/default/locale" << 'EOF'
-LANG=en_US.UTF-8
+    cat > "${SYSROOT_DIR}/etc/default/locale" << EOF
+LANG=${system_lang}
 EOF
 
     log_success "Locale data configured"
@@ -2631,6 +2745,7 @@ EOF
     cat > "${SYSROOT_DIR}/etc/passwd" << EOF
 root:x:0:0:root:/root:${default_shell}
 raven:x:1000:1000:Raven User:/home/raven:${default_shell}
+dbus:x:81:81:System Message Bus:/:/bin/false
 nobody:x:65534:65534:Nobody:/:/bin/false
 EOF
 
@@ -2654,6 +2769,7 @@ kmem:x:9:
 users:x:100:raven
 raven:x:1000:
 caw:x:970:raven
+dbus:x:81:
 nobody:x:65534:
 nogroup:x:65533:
 EOF
@@ -2681,6 +2797,7 @@ EOF
     cat > "${SYSROOT_DIR}/etc/shadow" << EOF
 root:${default_pass_hash}:${days_since_epoch}:0:99999:7:::
 raven:${default_pass_hash}:${days_since_epoch}:0:99999:7:::
+dbus:!:${days_since_epoch}:0:99999:7:::
 nobody:!:${days_since_epoch}:0:99999:7:::
 EOF
     chmod 0600 "${SYSROOT_DIR}/etc/shadow"
@@ -3428,6 +3545,7 @@ main() {
     copy_timezone_data
     create_system_directories
     create_configs
+    align_locale_declarations
 
     echo ""
     log_success "Stage 2 complete!"

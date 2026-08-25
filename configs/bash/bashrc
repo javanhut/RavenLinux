@@ -46,8 +46,17 @@ alias raven-update='rvn upgrade'
 
 # Environment
 export RAVEN_LINUX=1
-export LANG="${LANG:-en_US.UTF-8}"
-export LC_ALL="${LC_ALL:-en_US.UTF-8}"
+# The locale comes from /etc/locale.conf, which the build sets to whatever it
+# actually compiled. Hardcoding it here would reintroduce the mismatch that had
+# every shell warning about a locale the system did not have.
+#
+# LC_ALL is deliberately not set: it outranks every LC_* category, so setting
+# it system-wide stops anyone choosing their own LC_TIME or LC_COLLATE.
+if [ -z "${LANG:-}" ] && [ -r /etc/locale.conf ]; then
+    . /etc/locale.conf
+    export LANG
+fi
+export LANG="${LANG:-C.UTF-8}"
 
 # XDG directories
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"

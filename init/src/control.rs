@@ -360,7 +360,7 @@ fn start_service(
             return format!("{} is already running\n", name);
         }
         return match svc.start_by_request() {
-            Ok(()) => format!("Started {}\n", name),
+            Ok(()) => confirm_started(name, svc),
             Err(e) => format!("error: failed to start {}: {}\n", name, e),
         };
     }
@@ -373,12 +373,42 @@ fn start_service(
     };
 
     match Service::start(cfg) {
-        Ok(svc) => {
+        Ok(mut svc) => {
+            let reply = confirm_started(name, &mut svc);
             services.insert(name.to_string(), svc);
-            format!("Started {}\n", name)
+            reply
         }
         Err(e) => format!("error: failed to start {}: {}\n", name, e),
     }
+}
+
+/// How long to watch a just-started service before calling it started.
+///
+/// spawn() succeeding only means fork/exec worked; a daemon that finds its
+/// socket already held exits milliseconds later. Reporting "Started cawd" and
+/// then watching the supervisor restart-loop it into the ground is the worst
+/// of both -- the operator is told it worked and the log says otherwise.
+const START_GRACE: Duration = Duration::from_millis(200);
+
+fn confirm_started(name: &str, svc: &mut Service) -> String {
+    let deadline = std::time::Instant::now() + START_GRACE;
+    while std::time::Instant::now() < deadline {
+        svc.poll_exit();
+        if !svc.is_running() {
+            let how = match svc.exit_status() {
+                Some(code) => format!("exited with status {}", code),
+                None => "was killed".to_string(),
+            };
+            return format!(
+                "error: {} started but {} immediately.\n\
+                 Its own output above says why; `raven-rc status {}` has the rest.\n",
+                name, how, name
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    format!("Started {}\n", name)
 }
 
 fn stop_service(name: &str, services: &mut HashMap<String, Service>) -> String {

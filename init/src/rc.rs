@@ -18,7 +18,7 @@
 
 use std::env;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process;
@@ -106,12 +106,34 @@ fn main() {
 /// Send one request to init and return its reply.
 fn ask(request: &str) -> Result<String, String> {
     let mut stream = UnixStream::connect(SOCKET_PATH).map_err(|e| {
-        format!(
-            "cannot reach raven-init on {}: {}\n\
-             (is raven-init PID 1? on the live ISO it is not -- \
-             see /proc/1/comm)",
-            SOCKET_PATH, e
-        )
+        // These two failures look alike and mean opposite things, so name
+        // them. ECONNREFUSED in particular says the socket file is still
+        // there while nothing is listening -- a raven-init that died without
+        // cleaning up -- which reads like a broken service manager rather
+        // than an absent one.
+        let diagnosis = match e.kind() {
+            ErrorKind::NotFound => format!(
+                "there is no socket at {}, so raven-init is not running.\n\
+                 PID 1 is '{}'. On the live ISO that is the live-init script,\n\
+                 not raven-init, and service commands are not available.",
+                SOCKET_PATH,
+                pid1_name()
+            ),
+            ErrorKind::ConnectionRefused => format!(
+                "the socket at {} exists but nothing is listening: raven-init\n\
+                 exited without cleaning up. PID 1 is '{}'.\n\
+                 Remove the stale socket, or reboot.",
+                SOCKET_PATH,
+                pid1_name()
+            ),
+            ErrorKind::PermissionDenied => format!(
+                "permission denied on {}. The control socket is root-only;\n\
+                 try again with sudo.",
+                SOCKET_PATH
+            ),
+            _ => format!("cannot reach raven-init on {}: {}", SOCKET_PATH, e),
+        };
+        format!("raven-rc: {}", diagnosis)
     })?;
 
     stream.set_read_timeout(Some(TIMEOUT)).ok();
@@ -208,6 +230,13 @@ fn send_command(cmd: &str) {
     }
 
     println!("Command sent to init.");
+}
+
+/// What PID 1 actually is, for diagnostics.
+fn pid1_name() -> String {
+    fs::read_to_string("/proc/1/comm")
+        .map(|c| c.trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
 }
 
 /// True when raven-init is PID 1.

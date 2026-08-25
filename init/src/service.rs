@@ -17,6 +17,13 @@ use crate::config::ServiceConfig;
 // TIOCSCTTY ioctl to set controlling terminal
 nix::ioctl_write_int_bad!(tiocsctty, libc::TIOCSCTTY);
 
+/// Restarts allowed inside [`RESTART_WINDOW`] before a service is declared
+/// crash-looping rather than recovering.
+const MAX_RESTARTS: u32 = 5;
+
+/// How long a service must survive for its restart budget to be refilled.
+const RESTART_WINDOW: Duration = Duration::from_secs(60);
+
 /// Service state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceState {
@@ -50,6 +57,16 @@ pub struct Service {
     restart_count: u32,
     /// Last restart time
     last_restart: Option<Instant>,
+    /// Set once the restart budget is spent, so the give-up decision is made
+    /// and logged exactly once.
+    ///
+    /// The supervisor asks `should_restart` on every 100ms tick. Without
+    /// somewhere to record the answer, a crash-looping service re-derived it
+    /// each time and logged from inside the query -- ten "disabling restart"
+    /// warnings a second, none of which disabled anything.
+    restart_disabled: bool,
+    /// When the current restart budget window opened.
+    window_start: Option<Instant>,
     /// Set when an operator stopped this service through raven-rc.
     ///
     /// Without this, `stop` is a no-op with extra steps: the supervisor sees an
@@ -71,6 +88,8 @@ impl Service {
             exit_signal: None,
             restart_count: 0,
             last_restart: None,
+            restart_disabled: false,
+            window_start: None,
             manually_stopped: false,
         };
 
@@ -249,7 +268,16 @@ impl Service {
     }
 
     /// Check if service should be restarted
-    pub fn should_restart(&self) -> bool {
+    /// Decide whether the supervisor should restart this service.
+    ///
+    /// Takes `&mut` because the give-up decision is *latched*. The previous
+    /// version was a pure query that logged, and it was wrong in three ways
+    /// at once: it warned on every tick rather than once, it never recorded
+    /// the decision, and five seconds later the same service was restarted
+    /// again -- so "disabling restart" flooded the console at ~10 lines a
+    /// second forever while disabling nothing. The flood also made the
+    /// console unusable, which is how it was found.
+    pub fn should_restart(&mut self) -> bool {
         if self.manually_stopped {
             return false;
         }
@@ -258,23 +286,32 @@ impl Service {
             return false;
         }
 
-        // Rate limit restarts
-        if let Some(last_restart) = self.last_restart {
-            if last_restart.elapsed() < Duration::from_secs(5) {
-                // Don't restart more than once every 5 seconds
-                if self.restart_count > 5 {
-                    log::warn!(
-                        "Service {} is restarting too frequently, disabling restart",
-                        self.config.name
-                    );
-                    return false;
-                }
-            } else {
-                // Reset count after 30 seconds of stability
-                if last_restart.elapsed() > Duration::from_secs(30) {
-                    return true;
-                }
+        // Already given up. Silent: it was logged when the decision was made.
+        if self.restart_disabled {
+            return false;
+        }
+
+        // A service that stayed up for a whole window is recovering, not
+        // looping, so it gets its budget back.
+        if let Some(started) = self.window_start {
+            if started.elapsed() > RESTART_WINDOW {
+                self.window_start = None;
+                self.restart_count = 0;
             }
+        }
+
+        if self.restart_count >= MAX_RESTARTS {
+            self.restart_disabled = true;
+            self.state = ServiceState::Failed;
+            log::error!(
+                "Service {} failed {} times in under {}s; giving up. \
+                 Fix the cause and run `raven-rc start {}`.",
+                self.config.name,
+                self.restart_count,
+                RESTART_WINDOW.as_secs(),
+                self.config.name
+            );
+            return false;
         }
 
         true
@@ -305,6 +342,7 @@ impl Service {
         self.manually_stopped = false;
         self.restart_count += 1;
         self.last_restart = Some(Instant::now());
+        self.window_start.get_or_insert_with(Instant::now);
 
         log::info!(
             "Restarting service {} (attempt {})",
@@ -505,6 +543,9 @@ impl Service {
         self.manually_stopped = false;
         self.restart_count = 0;
         self.last_restart = None;
+        // An explicit start is the operator saying the cause is dealt with.
+        self.restart_disabled = false;
+        self.window_start = None;
         self.state = ServiceState::Stopped;
 
         self.do_start()

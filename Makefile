@@ -115,6 +115,13 @@ gui: ## Build the compositor and desktop shell (huginn, muninn) into the sysroot
 stage4 iso: ## Generate the bootable ISO from existing build output
 	$(RUN) $(BUILD_FLAGS) stage4
 
+# stage1 builds the initramfs alongside the kernel, but its init script -- which
+# is what decides between the live squashfs and root= on a disk -- gets changed
+# far more often than the kernel does. This rebuilds just that.
+.PHONY: initramfs
+initramfs: ## Rebuild only the initramfs (then run 'make iso')
+	$(RUN) $(BUILD_FLAGS) initramfs
+
 # ----------------------------------------------------------------------------
 # Testing
 # ----------------------------------------------------------------------------
@@ -122,8 +129,9 @@ stage4 iso: ## Generate the bootable ISO from existing build output
 # display and no /dev/kvm, and these check the built artifacts rather than
 # building anything.
 .PHONY: test
-test: ## Run the host-side Rust tests (init config schema)
+test: ## Run the host-side tests (init config schema, raven-install)
 	cargo test --manifest-path init/Cargo.toml
+	./scripts/installer/test-raven-install.sh
 
 .PHONY: qemu
 qemu: ## Boot the built ISO in QEMU on the serial console

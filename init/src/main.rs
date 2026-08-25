@@ -35,12 +35,18 @@ static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 static REBOOT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
-    // Check if we're actually PID 1
-    let pid = std::process::id();
-    if pid != 1 {
-        eprintln!("raven-init: Warning: Not running as PID 1 (pid={})", pid);
-        eprintln!("raven-init: This is intended to run as the init process");
-        // Continue anyway for testing purposes
+    // Refuse to be a second supervisor before doing anything at all -- not
+    // even logging setup. This used to be a warning followed by "continue
+    // anyway for testing purposes", which is how a raven-init started from a
+    // shell on a running system ended up fighting the live init for cawd's
+    // socket.
+    //
+    // Exits rather than dropping to the emergency shell: that shell exists for
+    // "PID 1 could not boot the system", and stranding someone in it because
+    // they typed a command on a working machine is not an improvement.
+    if let Err(e) = ensure_supervisor_role() {
+        eprintln!("raven-init: {}", e);
+        std::process::exit(1);
     }
 
     // Initialize logging
@@ -63,10 +69,71 @@ fn init_logging() {
         .init();
 }
 
+/// Refuse to run as anything but PID 1, unless explicitly overridden.
+///
+/// raven-init is a supervisor: it mounts filesystems, claims
+/// /run/raven-init.sock and starts every enabled service in init.toml. Run a
+/// second copy alongside a system that is already up and the two fight over
+/// all three. The visible symptom is a service that cannot get its own
+/// resources back --
+///
+///     cawd: error: another cawd is listening on /run/caw/caw.sock
+///
+/// -- followed by a restart loop against a socket the *first* cawd still
+/// legitimately holds. That is not a cawd bug, and no amount of restarting
+/// fixes it.
+///
+/// On the live ISO PID 1 is the live-init shell script, so raven-init started
+/// from a shell there is always the second supervisor.
+///
+/// RAVEN_INIT_ALLOW_NONPID1=1 overrides this, for testing in a container where
+/// the harness knows nothing else is running.
+fn ensure_supervisor_role() -> Result<()> {
+    if std::process::id() == 1 {
+        return Ok(());
+    }
+
+    if std::env::var_os("RAVEN_INIT_ALLOW_NONPID1").is_some() {
+        log::warn!(
+            "Running as PID {} rather than PID 1 (RAVEN_INIT_ALLOW_NONPID1 is set).",
+            std::process::id()
+        );
+        log::warn!("  Expect conflicts if another supervisor is already running.");
+        return Ok(());
+    }
+
+    let pid1 = fs::read_to_string("/proc/1/comm")
+        .map(|c| c.trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    anyhow::bail!(
+        "raven-init must be PID 1, but PID 1 is '{}' and this is PID {}.\n\
+         \n\
+         Starting a second supervisor makes it fight the first for the control\n\
+         socket and for every service in init.toml -- a daemon whose socket the\n\
+         running copy still holds will fail to start and be restarted until the\n\
+         restart budget is spent.\n\
+         \n\
+         To manage the running system, use raven-rc.\n\
+         To test raven-init anyway, set RAVEN_INIT_ALLOW_NONPID1=1.",
+        pid1,
+        std::process::id()
+    );
+}
+
 fn run_init() -> Result<()> {
     // Phase 1: Early boot - mount essential filesystems
     log::info!("Phase 1: Mounting essential filesystems");
     mount_essential_filesystems()?;
+
+    // Phase 1b: Everything else /etc/fstab asks for
+    //
+    // The initramfs mounts the root filesystem and nothing else, so on an
+    // installed system this is what brings up /boot/efi, swap, and any extra
+    // partition the user put in fstab. The live image has no fstab, and this
+    // is a no-op there.
+    log::info!("Phase 1b: Mounting /etc/fstab");
+    mount_fstab();
 
     // Phase 2: Setup basic environment
     log::info!("Phase 2: Setting up environment");
@@ -96,6 +163,11 @@ fn run_init() -> Result<()> {
     // Phase 7: Shutdown
     log::info!("Phase 7: Shutting down");
     shutdown_services(&mut services)?;
+
+    // Leave no socket behind. A stale one makes the next raven-rc fail with
+    // ECONNREFUSED rather than "not running", which reads like a broken
+    // service manager instead of an absent one.
+    fs::remove_file(control::SOCKET_PATH).ok();
 
     // Determine shutdown mode
     if REBOOT_REQUESTED.load(Ordering::SeqCst) {
@@ -310,6 +382,210 @@ fn mount_fs(source: &str, target: &str, fstype: &str, flags: MsFlags, data: &str
 
     log::debug!("Mounted {} on {}", fstype, target);
     Ok(())
+}
+
+/// Mount every auto entry in /etc/fstab, and enable every swap entry.
+///
+/// Deliberately forgiving: a bad fstab line should cost you that one mount, not
+/// the boot. Everything here logs and carries on.
+fn mount_fstab() {
+    let content = match fs::read_to_string("/etc/fstab") {
+        Ok(c) => c,
+        Err(_) => {
+            log::debug!("No /etc/fstab; nothing to mount");
+            return;
+        }
+    };
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 3 {
+            log::warn!("Ignoring malformed fstab line: {}", line);
+            continue;
+        }
+
+        let (spec, target, fstype) = (fields[0], fields[1], fields[2]);
+        let options = fields.get(3).copied().unwrap_or("defaults");
+
+        if options.split(',').any(|o| o == "noauto") {
+            continue;
+        }
+
+        if fstype == "swap" {
+            enable_swap(spec);
+            continue;
+        }
+
+        // The initramfs already mounted the root filesystem. Remounting it here
+        // would at best be a no-op and at worst change its flags underneath a
+        // running system.
+        if target == "/" || target == "none" || target == "swap" {
+            continue;
+        }
+
+        if is_mounted(target) {
+            log::debug!("{} already mounted", target);
+            continue;
+        }
+
+        mount_fstab_entry(spec, target, fstype, options);
+    }
+}
+
+fn mount_fstab_entry(spec: &str, target: &str, fstype: &str, options: &str) {
+    fs::create_dir_all(target).ok();
+
+    let (flags, data) = parse_mount_options(options);
+
+    if let Some(device) = resolve_fstab_spec(spec) {
+        let data_opt = if data.is_empty() {
+            None
+        } else {
+            Some(data.as_str())
+        };
+        let fstype_opt = if fstype == "auto" { None } else { Some(fstype) };
+
+        match mount(Some(device.as_str()), target, fstype_opt, flags, data_opt) {
+            Ok(()) => {
+                log::info!("Mounted {} on {} ({})", device, target, fstype);
+                return;
+            }
+            Err(e) => {
+                log::warn!("Mounting {} on {} failed: {}", device, target, e);
+            }
+        }
+    }
+
+    // Fall back to mount(8). It links libblkid, so it resolves UUID= and LABEL=
+    // by scanning the devices itself -- no /dev/disk/by-uuid, and therefore no
+    // dependency on udev having started yet. Given a mount point alone it reads
+    // the rest of the entry back out of fstab.
+    match Command::new("/bin/mount")
+        .arg(target)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => {
+            log::info!("Mounted {} on {} (via mount(8))", spec, target);
+        }
+        Ok(status) => {
+            log::warn!("mount {} failed with {}", target, status);
+        }
+        Err(e) => {
+            log::warn!(
+                "Could not mount {}: {} (and /bin/mount: {})",
+                spec,
+                target,
+                e
+            );
+        }
+    }
+}
+
+fn enable_swap(spec: &str) {
+    let device = match resolve_fstab_spec(spec) {
+        Some(d) => d,
+        None => {
+            // swapon(8) resolves UUID= the same way mount(8) does.
+            match Command::new("/sbin/swapon")
+                .arg(spec)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+            {
+                Ok(status) if status.success() => log::info!("Enabled swap on {}", spec),
+                _ => log::warn!("Could not enable swap on {}", spec),
+            }
+            return;
+        }
+    };
+
+    let path = match std::ffi::CString::new(device.clone()) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    // SAFETY: path is a valid NUL-terminated C string that outlives the call.
+    let rc = unsafe { libc::swapon(path.as_ptr(), 0) };
+    if rc == 0 {
+        log::info!("Enabled swap on {}", device);
+    } else {
+        log::warn!(
+            "swapon({}) failed: {}",
+            device,
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+/// Turn an fstab first field into a device path, or None when it needs a
+/// blkid-style scan that only mount(8) and swapon(8) can do here.
+fn resolve_fstab_spec(spec: &str) -> Option<String> {
+    if spec.starts_with('/') {
+        return Some(spec.to_string());
+    }
+
+    // These symlink trees only exist once udev has populated them, which at this
+    // point in the boot it may not have. Returning None sends the caller to the
+    // mount(8) fallback, which does not need them.
+    let (dir, value) = if let Some(v) = spec.strip_prefix("UUID=") {
+        ("/dev/disk/by-uuid", v)
+    } else if let Some(v) = spec.strip_prefix("PARTUUID=") {
+        ("/dev/disk/by-partuuid", v)
+    } else if let Some(v) = spec.strip_prefix("LABEL=") {
+        ("/dev/disk/by-label", v)
+    } else if let Some(v) = spec.strip_prefix("PARTLABEL=") {
+        ("/dev/disk/by-partlabel", v)
+    } else {
+        return None;
+    };
+
+    let link = format!("{}/{}", dir, value);
+    if Path::new(&link).exists() {
+        // Canonicalize so the log names the real device, not the symlink.
+        return Some(
+            fs::canonicalize(&link)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or(link),
+        );
+    }
+
+    None
+}
+
+/// Split a comma-separated fstab option list into mount(2) flags and the
+/// filesystem-specific data string that carries whatever is left.
+fn parse_mount_options(options: &str) -> (MsFlags, String) {
+    let mut flags = MsFlags::empty();
+    let mut data: Vec<&str> = Vec::new();
+
+    for opt in options.split(',') {
+        match opt.trim() {
+            "" | "defaults" | "rw" | "auto" | "exec" | "suid" | "dev" | "async" | "atime"
+            | "diratime" | "nofail" => {}
+            "ro" => flags |= MsFlags::MS_RDONLY,
+            "noexec" => flags |= MsFlags::MS_NOEXEC,
+            "nosuid" => flags |= MsFlags::MS_NOSUID,
+            "nodev" => flags |= MsFlags::MS_NODEV,
+            "noatime" => flags |= MsFlags::MS_NOATIME,
+            "nodiratime" => flags |= MsFlags::MS_NODIRATIME,
+            "relatime" => flags |= MsFlags::MS_RELATIME,
+            "strictatime" => flags |= MsFlags::MS_STRICTATIME,
+            "sync" => flags |= MsFlags::MS_SYNCHRONOUS,
+            "dirsync" => flags |= MsFlags::MS_DIRSYNC,
+            "remount" => flags |= MsFlags::MS_REMOUNT,
+            "bind" => flags |= MsFlags::MS_BIND,
+            other => data.push(other),
+        }
+    }
+
+    (flags, data.join(","))
 }
 
 fn is_mounted(path: &str) -> bool {
@@ -808,5 +1084,59 @@ fn emergency_shell() -> ! {
         } else {
             std::thread::sleep(Duration::from_secs(1));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // /etc/fstab options are a mix of two different things: flags that go to
+    // mount(2) as bits, and filesystem-specific options that go through as a
+    // string. Getting the split wrong means either a silently ignored option or
+    // an EINVAL from the kernel, and neither says which one it was.
+    #[test]
+    fn mount_options_split_into_flags_and_data() {
+        let (flags, data) = parse_mount_options("rw,relatime");
+        assert_eq!(flags, MsFlags::MS_RELATIME);
+        assert_eq!(data, "");
+
+        // The ESP line raven-install writes. fmask/dmask are vfat's, not the
+        // kernel's, and have to survive as data.
+        let (flags, data) = parse_mount_options("rw,noatime,fmask=0077,dmask=0077");
+        assert_eq!(flags, MsFlags::MS_NOATIME);
+        assert_eq!(data, "fmask=0077,dmask=0077");
+
+        let (flags, data) = parse_mount_options("rw,nosuid,nodev,mode=1777");
+        assert_eq!(flags, MsFlags::MS_NOSUID | MsFlags::MS_NODEV);
+        assert_eq!(data, "mode=1777");
+
+        // "defaults" is not an option, it is the absence of any.
+        let (flags, data) = parse_mount_options("defaults");
+        assert_eq!(flags, MsFlags::empty());
+        assert_eq!(data, "");
+
+        let (flags, _) = parse_mount_options("ro");
+        assert_eq!(flags, MsFlags::MS_RDONLY);
+    }
+
+    // Anything that is not an absolute path needs a blkid-style scan, which at
+    // this point in the boot only mount(8) can do. Returning None is what sends
+    // the caller down that fallback, so a wrong Some() here is a failed mount.
+    #[test]
+    fn only_absolute_paths_resolve_without_a_scan() {
+        assert_eq!(
+            resolve_fstab_spec("/dev/nvme0n1p3"),
+            Some("/dev/nvme0n1p3".to_string())
+        );
+
+        // No /dev/disk/by-uuid in a test environment, so these fall through.
+        assert_eq!(resolve_fstab_spec("UUID=1234-5678-90ab"), None);
+        assert_eq!(resolve_fstab_spec("LABEL=RAVEN_ROOT"), None);
+        assert_eq!(resolve_fstab_spec("PARTUUID=deadbeef-01"), None);
+
+        // Not a recognised form at all.
+        assert_eq!(resolve_fstab_spec("tmpfs"), None);
+        assert_eq!(resolve_fstab_spec("proc"), None);
     }
 }

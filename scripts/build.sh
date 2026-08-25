@@ -365,6 +365,29 @@ build_gui() {
 }
 
 # Stage 4: Generate ISO
+# Rebuild only the initramfs. It is normally produced by stage1 alongside the
+# kernel, but the init script inside it is where root= handling and the live
+# boot search live -- both of which get iterated on far more often than the
+# kernel does, and neither of which is worth a stage1 rerun.
+build_initramfs_only() {
+    log_section "Rebuilding initramfs"
+
+    if [[ ! -x "${RAVEN_ROOT}/scripts/build-initramfs.sh" ]]; then
+        log_error "scripts/build-initramfs.sh not found"
+        return 1
+    fi
+
+    # Same escape hatch stage1 uses: a user namespace refuses mknod whatever
+    # the capability set says, which is every rootless podman build.
+    local -a initramfs_args=()
+    if [[ -n "${RAVEN_NO_DEVNODES:-}" && "${RAVEN_NO_DEVNODES}" != "0" ]]; then
+        log_warn "RAVEN_NO_DEVNODES set: initramfs will ship no static /dev nodes"
+        initramfs_args+=(--no-devnodes)
+    fi
+
+    run_logged "${RAVEN_ROOT}/scripts/build-initramfs.sh" "${initramfs_args[@]}"
+}
+
 build_stage4() {
     log_section "Stage 4: Generating ISO"
 
@@ -392,6 +415,8 @@ Stages:
     gui         Build the compositor and desktop shell (huginn, muninn,
                 muninn-lock). Runs after raven, before stage4.
     stage4      Generate bootable ISO image
+    initramfs   Rebuild only the initramfs (stage1 does this too; this is the
+                short path when you have changed its init script)
 
 Options:
     -j, --jobs N    Number of parallel jobs (default: $(nproc))
@@ -464,7 +489,7 @@ main() {
                 SKIP_DEP_CHECK=true
                 shift
                 ;;
-            all|stage0|stage1|stage2|stage3|raven|gui|stage4)
+            all|stage0|stage1|stage2|stage3|raven|gui|stage4|initramfs)
                 stage="$1"
                 shift
                 ;;
@@ -542,6 +567,9 @@ main() {
             ;;
         stage4)
             build_stage4
+            ;;
+        initramfs)
+            build_initramfs_only
             ;;
     esac
 

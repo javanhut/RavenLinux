@@ -59,8 +59,14 @@ run = ["{{run}} {{build_flags}} stage4"]
 [commands.iso]
 run = ["{{run}} {{build_flags}} stage4"]
 
+[commands.initramfs]
+run = ["{{run}} {{build_flags}} initramfs"]
+
 [commands.test]
-run = ["cargo test --manifest-path init/Cargo.toml"]
+run = [
+  "cargo test --manifest-path init/Cargo.toml",
+  "./scripts/installer/test-raven-install.sh",
+]
 
 [commands.qemu]
 run = ["./scripts/test-qemu.sh --console"]

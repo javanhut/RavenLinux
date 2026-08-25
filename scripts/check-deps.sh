@@ -87,6 +87,11 @@ DEPENDENCIES=(
     "blkid:util-linux:-:-:-:-:-:Block device identification"
     "mount:util-linux:-:-:-:-:-:Mount filesystems"
     "fdisk:util-linux:-:-:-:-:-:Partition table manipulator"
+    # raven-install partitions the target disk with sfdisk and clears the old
+    # signatures with wipefs. stage2 copies both into the sysroot, so a build
+    # host without them produces an ISO that cannot install itself.
+    "sfdisk:util-linux:-:-:-:-:-:Script-driven partition table editor"
+    "wipefs:util-linux:-:-:-:-:-:Filesystem signature eraser"
     "mkfs.ext4:e2fsprogs:-:-:-:-:-:Create ext4 filesystem"
     "mkfs.fat:dosfstools:-:-:-:-:-:Create FAT filesystem"
     "mcopy:mtools:-:-:-:-:-:Copy files to FAT images"
@@ -148,6 +153,10 @@ DEPENDENCIES=(
 # Format matches DEPENDENCIES: cmd:arch:debian:fedora:suse:void:alpine:description
 OPTIONAL_DEPENDENCIES=(
     "qemu-system-x86_64:qemu-base:qemu-system-x86:qemu-system-x86:qemu-x86:qemu:qemu-system-x86_64:Boot the built ISO (make qemu)"
+    # Only needed for "raven-install --efi-nvram". The installer's default path
+    # writes the fallback bootloader at \EFI\BOOT\BOOTX64.EFI, which boots
+    # without touching NVRAM at all.
+    "efibootmgr:efibootmgr:-:-:-:-:-:Register a UEFI NVRAM boot entry (raven-install --efi-nvram)"
 )
 
 # Optional package groups with no command of their own to probe. A QEMU built
@@ -172,7 +181,7 @@ OPTIONAL_PACKAGES_ALPINE="qemu-system-x86_64 ovmf"
 # supplies EGL. Missing them is not fatal -- stage-gui.sh checks for them and
 # skips itself, producing a console-only ISO -- so they are listed with the
 # rest rather than treated as a hard requirement.
-EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja oniguruma libdrm libinput mesa libxkbcommon wayland libwacom libevdev mtdev seatd"
+EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja oniguruma libdrm libinput mesa libxkbcommon wayland libwacom libevdev mtdev seatd parted gptfdisk efibootmgr"
 EXTRA_PACKAGES_DEBIAN="build-essential linux-headers-generic libelf-dev python3-jinja2 libonig-dev libdrm-dev libinput-dev libseat-dev libgbm-dev libegl-dev libxkbcommon-dev libwayland-dev libwacom-dev libevdev-dev libmtdev-dev seatd"
 EXTRA_PACKAGES_FEDORA="kernel-devel elfutils-libelf-devel python3-jinja2 oniguruma-devel libdrm-devel libinput-devel libseat-devel mesa-libgbm-devel mesa-libEGL-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd"
 EXTRA_PACKAGES_SUSE="kernel-devel libelf-devel python3-Jinja2 oniguruma-devel libdrm-devel libinput-devel libseat-devel Mesa-libgbm-devel Mesa-libEGL-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd"

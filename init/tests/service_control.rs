@@ -125,7 +125,7 @@ fn stop_keeps_the_service_stopped() {
         "process should exit"
     );
 
-    let svc = services.get(&"stoppable".to_string()).unwrap();
+    let svc = services.get_mut("stoppable").unwrap();
     assert!(
         svc.is_manually_stopped(),
         "stop must record operator intent"
@@ -391,7 +391,7 @@ fn a_silent_client_does_not_wedge_the_server() {
 ///
 /// Duplicated rather than imported because main.rs is a binary root, not a
 /// library; the assertions below are what keep the two honest.
-fn supervisor_would_restart(svc: &Service) -> bool {
+fn supervisor_would_restart(svc: &mut Service) -> bool {
     let died = matches!(
         svc.state(),
         service::ServiceState::Exited | service::ServiceState::Signaled
@@ -715,4 +715,68 @@ fn no_temp_file_is_left_behind() {
     assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
 
     std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn a_crash_looping_service_is_given_up_on_once_not_every_tick() {
+    // Regression: should_restart() was a pure query that logged from inside
+    // itself and recorded nothing. A crash-looping service therefore printed
+    // "restarting too frequently, disabling restart" on every 100ms supervisor
+    // tick -- roughly ten lines a second, forever -- while never actually
+    // disabling anything: five seconds later it restarted and began again.
+    // The flood made the console unusable, which is how it surfaced.
+    let mut cfg_svc = sleeper("flapper");
+    cfg_svc.exec = "/bin/false".to_string(); // exits immediately, every time
+    cfg_svc.args = vec![];
+    let mut cfg = config_with(vec![cfg_svc.clone()]);
+
+    let mut services = HashMap::new();
+    services.insert(
+        "flapper".to_string(),
+        Service::start(&cfg_svc).expect("starts"),
+    );
+
+    let svc = services.get_mut("flapper").unwrap();
+
+    // Drive the supervisor by hand: let it die, decide, restart, repeat.
+    let mut restarts = 0;
+    for _ in 0..40 {
+        svc.wait_for_exit(Duration::from_secs(2));
+        if svc.should_restart() {
+            let _ = svc.restart();
+            restarts += 1;
+        } else {
+            break;
+        }
+    }
+
+    assert!(
+        restarts <= 5,
+        "gave up after {restarts} restarts; the budget is 5"
+    );
+    assert!(!svc.should_restart(), "must stay given up");
+
+    // The decision must be stable and silent from here: a hundred more ticks
+    // must not change it, which is what stops the flood.
+    for _ in 0..100 {
+        assert!(!svc.should_restart());
+    }
+    assert_eq!(svc.state(), service::ServiceState::Failed);
+
+    // An explicit start is the operator saying the cause is fixed. This one
+    // is not -- /bin/false still exits at once -- and the reply must say so
+    // rather than claiming success for a process that is already gone.
+    let (reply, _) = control::dispatch("start flapper", &mut services, &mut cfg);
+    assert!(
+        reply.contains("exited with status 1 immediately"),
+        "start must report an instant death, not claim success: {reply}"
+    );
+    let svc = services.get_mut("flapper").unwrap();
+    svc.wait_for_exit(Duration::from_secs(2));
+    assert!(
+        svc.should_restart(),
+        "an operator start must refill the restart budget"
+    );
+
+    services.get_mut("flapper").unwrap().kill();
 }
