@@ -145,5 +145,15 @@ if [[ "$(uname -s)" == "Darwin" && "${1:-}" != "image" ]]; then
     fi
 fi
 
+# RAVEN_NO_DEVNODES=1 tells the initramfs builder to skip mknod. Rootless
+# podman cannot create device nodes even with --privileged: mknod of a char
+# device is denied inside a user namespace regardless of capabilities. The
+# kernel config sets CONFIG_DEVTMPFS_MOUNT=y, so /dev is populated before init
+# runs and the static nodes are redundant on this kernel.
+if [[ -n "${RAVEN_NO_DEVNODES:-}" ]]; then
+    RUN_FLAGS+=(-e "RAVEN_NO_DEVNODES=${RAVEN_NO_DEVNODES}")
+    echo ">> RAVEN_NO_DEVNODES=${RAVEN_NO_DEVNODES} (initramfs will ship no static /dev nodes)"
+fi
+
 echo ">> Running: ${CMD[*]}"
 exec "$ENGINE" run "${PLATFORM_FLAGS[@]}" "${RUN_FLAGS[@]}" "$IMAGE" "${CMD[@]}"

@@ -2551,6 +2551,11 @@ nobody:x:65534:65534:Nobody:/:/bin/false
 EOF
 
     # /etc/group
+    #
+    # `caw` gates state-changing commands on cawd's socket -- scan and status
+    # are open to everyone, but connect, disconnect and shutdown check the
+    # peer's credentials. Upstream ships this as a sysusers.d fragment, which
+    # nothing here reads, so the group is declared with the rest of them.
     cat > "${SYSROOT_DIR}/etc/group" << 'EOF'
 root:x:0:
 wheel:x:10:raven
@@ -2564,6 +2569,7 @@ lp:x:7:
 kmem:x:9:
 users:x:100:raven
 raven:x:1000:
+caw:x:970:raven
 nobody:x:65534:
 nogroup:x:65533:
 EOF
@@ -2611,6 +2617,7 @@ lp:::
 kmem:::
 users:::raven
 raven:::
+caw:!::raven
 nobody:!::
 nogroup:!::
 EOF

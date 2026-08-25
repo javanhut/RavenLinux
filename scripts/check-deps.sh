@@ -141,18 +141,43 @@ DEPENDENCIES=(
     "kexec:kexec-tools:-:kexec-tools:kexec-tools:kexec-tools:kexec-tools:Kexec reboot utility"
 )
 
+# Optional tools. Not needed to BUILD RavenLinux -- only to boot and test what
+# was built -- so these are reported separately and never counted as missing
+# build dependencies. Putting them in DEPENDENCIES would paint every build host
+# red for tools its build does not use.
+# Format matches DEPENDENCIES: cmd:arch:debian:fedora:suse:void:alpine:description
+OPTIONAL_DEPENDENCIES=(
+    "qemu-system-x86_64:qemu-base:qemu-system-x86:qemu-system-x86:qemu-x86:qemu:qemu-system-x86_64:Boot the built ISO (make qemu)"
+)
+
+# Optional package groups with no command of their own to probe. A QEMU built
+# without a UI backend still provides qemu-system-x86_64, so `make qemu-desktop`
+# -- and therefore any test of the Huginn session -- fails at run time with only
+# a "no graphical display backend" message to go on.
+OPTIONAL_PACKAGES_ARCH="qemu-ui-gtk qemu-ui-opengl edk2-ovmf"
+OPTIONAL_PACKAGES_DEBIAN="qemu-system-gui ovmf"
+OPTIONAL_PACKAGES_FEDORA="qemu-ui-gtk edk2-ovmf"
+OPTIONAL_PACKAGES_SUSE="qemu-ui-gtk qemu-ovmf-x86_64"
+OPTIONAL_PACKAGES_VOID="qemu edk2-ovmf"
+OPTIONAL_PACKAGES_ALPINE="qemu-system-x86_64 ovmf"
+
 # Additional package groups (not command-based)
 # Format: "distro:packages"
 # oniguruma is needed because uutils-coreutils builds onig_sys with
 # RUSTONIG_SYSTEM_LIBONIG=1 (the crate's bundled copy fails to compile with
 # modern GCC), so it needs the system library plus oniguruma.pc.
 # Mirrored in the Dockerfile.
-EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja oniguruma"
-EXTRA_PACKAGES_DEBIAN="build-essential linux-headers-generic libelf-dev python3-jinja2 libonig-dev"
-EXTRA_PACKAGES_FEDORA="kernel-devel elfutils-libelf-devel python3-jinja2 oniguruma-devel"
-EXTRA_PACKAGES_SUSE="kernel-devel libelf-devel python3-Jinja2 oniguruma-devel"
-EXTRA_PACKAGES_VOID="base-devel linux-headers elfutils-devel python3-Jinja2 oniguruma-devel"
-EXTRA_PACKAGES_ALPINE="build-base linux-headers elfutils-dev py3-jinja2 oniguruma-dev"
+# The GUI stage builds huginn, which unlike every Raven-layer component links C
+# libraries: smithay binds libdrm/libgbm/libinput/libseat/libudev and Mesa
+# supplies EGL. Missing them is not fatal -- stage-gui.sh checks for them and
+# skips itself, producing a console-only ISO -- so they are listed with the
+# rest rather than treated as a hard requirement.
+EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja oniguruma libdrm libinput mesa libxkbcommon wayland libwacom libevdev mtdev seatd"
+EXTRA_PACKAGES_DEBIAN="build-essential linux-headers-generic libelf-dev python3-jinja2 libonig-dev libdrm-dev libinput-dev libseat-dev libgbm-dev libegl-dev libxkbcommon-dev libwayland-dev libwacom-dev libevdev-dev libmtdev-dev seatd"
+EXTRA_PACKAGES_FEDORA="kernel-devel elfutils-libelf-devel python3-jinja2 oniguruma-devel libdrm-devel libinput-devel libseat-devel mesa-libgbm-devel mesa-libEGL-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd"
+EXTRA_PACKAGES_SUSE="kernel-devel libelf-devel python3-Jinja2 oniguruma-devel libdrm-devel libinput-devel libseat-devel Mesa-libgbm-devel Mesa-libEGL-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd"
+EXTRA_PACKAGES_VOID="base-devel linux-headers elfutils-devel python3-Jinja2 oniguruma-devel libdrm-devel libinput-devel seatd-devel MesaLib-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd"
+EXTRA_PACKAGES_ALPINE="build-base linux-headers elfutils-dev py3-jinja2 oniguruma-dev libdrm-dev libinput-dev libseat-dev mesa-dev libxkbcommon-dev wayland-dev libwacom-dev libevdev-dev mtdev-dev seatd"
 
 # =============================================================================
 # Functions
@@ -534,6 +559,49 @@ print_summary() {
 # Main
 # =============================================================================
 
+# Reports optional tooling without affecting the exit status.
+check_optional_dependencies() {
+    local distro="$1"
+
+    [[ "$QUIET" == "true" ]] && return 0
+
+    log_section "Optional (testing only -- not needed to build)"
+
+    local dep_entry cmd desc pkg
+    for dep_entry in "${OPTIONAL_DEPENDENCIES[@]}"; do
+        IFS=':' read -r cmd _ _ _ _ _ _ desc <<< "$dep_entry"
+        if check_command "$cmd"; then
+            echo -e "  ${GREEN}[OK]${NC} $cmd - $desc"
+        else
+            pkg=$(get_package_name "$dep_entry" "$distro")
+            echo -e "  ${YELLOW}[--]${NC} $cmd - $desc${pkg:+  (install: $pkg)}"
+        fi
+    done
+
+    # The display backend has no command of its own: a headless QEMU still
+    # ships qemu-system-x86_64, so this is the only place it can be surfaced
+    # before `make qemu-desktop` fails at run time.
+    local optional_pkgs=""
+    case "$distro" in
+        arch)   optional_pkgs="$OPTIONAL_PACKAGES_ARCH" ;;
+        debian) optional_pkgs="$OPTIONAL_PACKAGES_DEBIAN" ;;
+        fedora) optional_pkgs="$OPTIONAL_PACKAGES_FEDORA" ;;
+        suse)   optional_pkgs="$OPTIONAL_PACKAGES_SUSE" ;;
+        void)   optional_pkgs="$OPTIONAL_PACKAGES_VOID" ;;
+        alpine) optional_pkgs="$OPTIONAL_PACKAGES_ALPINE" ;;
+    esac
+
+    if [[ -n "$optional_pkgs" ]]; then
+        echo ""
+        echo -e "  For ${BOLD}make qemu-desktop${NC} (the Huginn Wayland session), QEMU also needs a"
+        echo -e "  display backend and UEFI firmware, which most distributions package apart:"
+        echo -e "      ${CYAN}${optional_pkgs}${NC}"
+    fi
+
+    echo ""
+    return 0
+}
+
 main() {
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -579,8 +647,11 @@ main() {
     
     # Check dependencies
     if check_dependencies "$distro"; then
+        check_optional_dependencies "$distro"
         exit 0
     fi
+
+    check_optional_dependencies "$distro"
     
     # Offer to install missing packages
     if [[ ${#MISSING_PACKAGES[@]} -gt 0 ]]; then

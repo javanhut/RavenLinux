@@ -162,3 +162,12 @@ node_modules/
 coverage/
 *.gcno
 *.gcda
+bootloader/target/CACHEDIR.TAG
+bootloader/target/release
+bootloader/target/x86_64-unknown-uefi
+init/target/CACHEDIR.TAG
+init/target/debug
+init/target/release
+init/target/tmp
+build/
+.lazy/

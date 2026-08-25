@@ -176,6 +176,9 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
             critical: false,
             environment: HashMap::new(),
             tty: None,
+            stop_exec: None,
+            stop_args: Vec::new(),
+            stop_timeout: 5,
         },
     );
 
@@ -203,6 +206,9 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
                 critical: false,
                 environment: env,
                 tty: None,
+                stop_exec: None,
+                stop_args: Vec::new(),
+                stop_timeout: 5,
             },
         );
     } else {
@@ -219,6 +225,9 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
                 critical: false,
                 environment: compositor_env,
                 tty: None,
+                stop_exec: None,
+                stop_args: Vec::new(),
+                stop_timeout: 5,
             },
         );
     }
@@ -451,6 +460,9 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
             critical: false,
             environment: HashMap::new(),
             tty: Some("/dev/tty1".to_string()),
+            stop_exec: None,
+            stop_args: Vec::new(),
+            stop_timeout: 5,
         };
 
         // Try agetty first, fall back to direct shell
@@ -465,6 +477,9 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
                 critical: false,
                 environment: HashMap::new(),
                 tty: Some("/dev/tty1".to_string()),
+                stop_exec: None,
+                stop_args: Vec::new(),
+                stop_timeout: 5,
             };
             Service::start(&shell_config)
         });
@@ -592,6 +607,18 @@ fn check_command_file() -> Result<()> {
 
 fn shutdown_services(services: &mut HashMap<String, Service>) -> Result<()> {
     log::info!("Stopping services...");
+
+    // Give services with a stop command the chance to leave cleanly. This runs
+    // to completion before any signal is sent, because the whole point is to
+    // let a daemon act while it is still alive -- cawd deauthenticating from
+    // its AP is the case this exists for. /etc/raven/shutdown.d cannot serve:
+    // those scripts run after everything here has already been killed.
+    for (name, svc) in services.iter_mut() {
+        if svc.has_stop_exec() {
+            log::info!("Running stop command for: {}", name);
+            svc.run_stop_exec();
+        }
+    }
 
     // Send SIGTERM to all services
     for (name, svc) in services.iter_mut() {

@@ -1,0 +1,49 @@
+[package]
+name = "caw"
+version = "0.1.0"
+description = "CAW (Corvus Access Wifi) - wireless and network utility"
+license = "MIT"
+homepage = "https://github.com/javanhut/CAW"
+repository = "https://github.com/javanhut/CAW"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "network"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/CAW.git"
+commit = "b58a39444e7ada1c077d5733020bfd2578c3d8f8"
+
+[build]
+system = "cargo"
+# Built against the musl target so the result is statically linked and carries
+# no runtime dependency on the sysroot's libraries. CAW is unusually clean
+# here: rustix runs on its linux_raw backend and issues syscalls directly, and
+# all crypto is RustCrypto, so the tree contains no C at all.
+target = "x86_64-unknown-linux-musl"
+build_flags = ["--release", "--locked", "-p", "caw", "-p", "cawd"]
+
+# No --features: the `enterprise` feature (WPA2/3-Enterprise, 802.1X) pulls a
+# C crypto provider in through rustls, which would end the static-musl build.
+# Turn it on only in a build that can carry that dependency.
+
+[dependencies]
+runtime = []
+build = ["rust", "cargo"]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-musl/release/caw",  dest = "/usr/bin/caw",  mode = 755 },
+    { src = "target/x86_64-unknown-linux-musl/release/cawd", dest = "/usr/bin/cawd", mode = 755 }
+]
+
+symlinks = [
+    { target = "/usr/bin/caw",  link = "/bin/caw" },
+    { target = "/usr/bin/cawd", link = "/bin/cawd" }
+]
+
+# cawd creates /run/caw (mode 0755, for the CLI socket) and
+# /var/lib/caw/profiles (mode 0700, saved passphrases) itself on first start,
+# so there is nothing to pre-create here. dist/cawd.service and
+# dist/caw.sysusers from the upstream tree are systemd artifacts and are not
+# installed: RavenLinux runs raven-init, which takes its service definition
+# from /etc/raven/init.toml, and the `caw` group is created in stage2.

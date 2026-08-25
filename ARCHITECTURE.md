@@ -48,10 +48,25 @@ The software RavenLinux provides for itself, built on top of the base system by
 | `crow` | CrowTextEditor | Rust | Text editor |
 | `imlazy` | ImLazy | Go | Task runner |
 | `oxigen` | OxigenLang | Rust | Interpreted language |
+| `caw`, `cawd` | CAW | Rust | Wireless: nl80211, WPA and DHCP in-process |
 
 All are statically linked — Go with `CGO_ENABLED=0`, Rust against
 `x86_64-unknown-linux-musl` — so they add nothing to the sysroot's runtime link
 graph and can be dropped in or left out freely.
+
+`scripts/stages/stage-gui.sh` is separate precisely because it cannot hold that
+line:
+
+| Binary | Source | Language | Role |
+|--------|--------|----------|------|
+| `huginn` | RavenGUI | Rust | Wayland compositor (Smithay, udev/DRM backend) |
+| `muninn` | RavenGUI | Rust | Desktop shell: panel, launcher, notifications |
+| `muninn-lock` | RavenGUI | Rust | Session lock screen |
+
+These link glibc and seventeen shared libraries — libdrm, libgbm, libinput,
+libseat, libudev and the chain behind them — with Mesa's EGL/GLES drivers
+dlopened at run time. The stage resolves that closure with `ldd` against the
+binaries it just built and stages whatever stage2 did not already provide.
 
 RavenTerminal is deliberately not part of this layer. It is a GPU-accelerated
 terminal that needs OpenGL, GLFW and a display server, none of which exist in
@@ -150,7 +165,8 @@ working shell; the Raven layer takes that over once `ravenshell` is installed.
 | **Stage 1** | Build the base system with the stage 0 toolchain; kernel and initramfs |
 | **Stage 2** | Rebuild the sysroot natively: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | **Stage 3** | Base packages: core libraries, shells, OpenSSH, RavenBoot |
-| **Raven** | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen |
+| **Raven** | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw |
+| **GUI** | Compositor and shell: huginn, muninn, muninn-lock, and the shared libraries they link |
 | **Stage 4** | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
 
 The Raven layer carries no stage number. Stages 0–4 are the base system and
@@ -221,7 +237,8 @@ Sets:
 
 - `packages/core/` — musl, linux, openssl, openssh, libssh, sudo-rs, uutils-coreutils
 - `packages/base/` — bash, fish
-- `packages/raven/` — ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen
+- `packages/raven/` — ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw
+- `packages/gui/` — ravengui: huginn, muninn, muninn-lock
 
 ## Extending the System
 

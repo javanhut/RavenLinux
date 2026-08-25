@@ -189,6 +189,7 @@ video:x:12:raven
 input:x:13:raven
 users:x:100:raven
 raven:x:1000:
+caw:x:970:raven
 nobody:x:65534:
 EOF
     fi
@@ -396,6 +397,68 @@ echo ""
 
 cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
 
+# The live image's PID 1 is this script, not raven-init, so the cmdline
+# handling raven-init does on an installed system has to be repeated here.
+# Without this, booting the "Raven Desktop (Huginn)" entry lands on a console
+# with raven.graphics=wayland silently ignored.
+# cawd is enabled in /etc/raven/init.toml, but that file is raven-init's and
+# raven-init is not PID 1 here -- this script is. Starting it by hand is what
+# makes the wireless stack actually usable from the live image: without it,
+# `caw scan` finds no daemon and autoconnect never runs.
+#
+# There is no clean-stop counterpart: raven-init calls `caw shutdown` through
+# its stop_exec hook, and this script has no shutdown path at all, so a live
+# reboot leaves the station on the air until the AP times it out.
+start_caw_daemon() {
+    [ -x /bin/cawd ] || [ -x /usr/bin/cawd ] || return 0
+    pgrep -x cawd >/dev/null 2>&1 && return 0
+
+    echo "Starting the CAW wireless daemon..."
+    cawd >/dev/null 2>&1 &
+
+    # cawd creates /run/caw itself; wait briefly so the first `caw` command
+    # finds a socket rather than racing it.
+    i=0
+    while [ $i -lt 20 ] && [ ! -S /run/caw/caw.sock ]; do
+        i=$((i + 1))
+        sleep 0.1
+    done
+}
+
+start_wayland_session() {
+    echo "$cmdline" | grep -qE '(^| )raven\.graphics=wayland($| )' || return 1
+    [ -x /bin/raven-wayland-session ] || {
+        echo "raven.graphics=wayland requested, but no compositor is installed."
+        return 1
+    }
+
+    # raven.wayland=<name> picks the compositor; the launcher defaults to
+    # huginn and maps the older "raven" onto it.
+    compositor="$(echo "$cmdline" | sed -n 's/.*[[:space:]]raven\.wayland=\([^[:space:]]*\).*/\1/p')"
+    [ -n "$compositor" ] && export RAVEN_WAYLAND_COMPOSITOR="$compositor"
+
+    # seatd owns the seat; libseat talks to it rather than to logind, which
+    # does not exist here. Started in the background because it is a daemon.
+    if [ -x /bin/seatd ] || [ -x /usr/bin/seatd ]; then
+        if ! pgrep -x seatd >/dev/null 2>&1; then
+            seatd -g video >/dev/null 2>&1 &
+            sleep 1
+        fi
+    fi
+
+    export XDG_RUNTIME_DIR=/run/user/0
+    export LIBSEAT_BACKEND=seatd
+    mkdir -p "$XDG_RUNTIME_DIR"
+    chmod 0700 "$XDG_RUNTIME_DIR"
+
+    echo "Starting the Wayland session..."
+    # Not exec: if the compositor dies we fall through to a console rather
+    # than leaving the machine with no PID 1 and nothing on screen.
+    /bin/raven-wayland-session
+    echo "Wayland session exited; falling back to a console."
+    return 1
+}
+
 start_shell_loop() {
     cd /root
 
@@ -448,6 +511,8 @@ start_shell_loop() {
     fi
 }
 
+start_caw_daemon
+start_wayland_session
 start_shell_loop
 INIT
     chmod +x "${SYSROOT_DIR}/init"
@@ -771,6 +836,30 @@ submenu "System >" --class raven {
 }
 EOF
 
+    # The desktop entry exists only if the GUI stage actually installed a
+    # compositor. Offering "Raven Desktop" on an ISO with no huginn would boot
+    # to a black screen with the getty already disabled, which is strictly
+    # worse than not offering it -- so this is appended, not baked into the
+    # heredoc above.
+    #
+    # It is not the default: entry 0 stays the console. A compositor that fails
+    # on unfamiliar hardware should cost you a menu selection, not the machine.
+    if [[ -x "${SYSROOT_DIR}/usr/bin/huginn" ]]; then
+        cat >> "${ISO_ROOT}/boot/grub/grub.cfg" << 'EOF'
+
+# Wayland session: raven-init reads raven.graphics= and raven.wayland= from the
+# cmdline, disables the tty1 getty, starts seatd, and execs
+# /bin/raven-wayland-session, which runs huginn and then muninn as its client.
+menuentry "Raven Desktop (Huginn)" --class raven {
+    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=huginn console=tty0
+    initrd /boot/initramfs.img
+}
+EOF
+        log_info "  Added the Raven Desktop (Huginn) boot entry"
+    else
+        log_info "  No compositor installed; boot menu stays console-only"
+    fi
+
     # Create the EFI bootloader only if RavenBoot wasn't available
     if [[ ! -f "${ISO_ROOT}/EFI/BOOT/BOOTX64.EFI" ]]; then
         if command -v grub-mkstandalone &>/dev/null; then
@@ -890,10 +979,102 @@ EOF
 }
 
 # =============================================================================
+# EFI-only ISO
+# =============================================================================
+# The degraded image: boots on UEFI, not on BIOS. Split out so both the
+# "no BIOS boot image" and "hybrid xorriso failed" paths produce exactly the
+# same thing instead of two near-copies that can drift.
+generate_iso_efi_only() {
+    xorriso -as mkisofs \
+        -iso-level 3 \
+        -R -J -joliet-long \
+        -volid "${ISO_LABEL}" \
+        -output "${ISO_OUTPUT}" \
+        -eltorito-alt-boot \
+        -e boot/efiboot.img \
+        -no-emul-boot \
+        -isohybrid-gpt-basdat \
+        "${ISO_ROOT}" 2>&1 | tee "${LOGS_DIR}/xorriso.log"
+}
+
+# =============================================================================
+# BIOS boot image
+# =============================================================================
+# Builds boot/grub/i386-pc/eltorito.img, which xorriso needs for the BIOS half
+# of a hybrid ISO.
+#
+# The grub package does NOT ship eltorito.img -- it ships the modules and
+# cdboot.img, and the El Torito image has to be linked from them by
+# grub-mkimage. Without this the hybrid xorriso run fails with
+#
+#   FAILURE : Cannot find in ISO image: -boot_image ... bin_path=.../eltorito.img
+#
+# and generate_iso falls back to an EFI-only image. That fallback is quiet
+# enough to miss: the build still reports success and produces an ISO, which
+# then refuses to boot on BIOS with "No bootable device" and looks like a
+# broken image rather than a missing boot record.
+#
+# Returns non-zero if the image cannot be built, and generate_iso degrades to
+# EFI-only deliberately rather than by accident.
+prepare_bios_boot() {
+    local grub_lib="/usr/lib/grub/i386-pc"
+    local dest="${ISO_ROOT}/boot/grub/i386-pc"
+
+    command -v grub-mkimage &>/dev/null || {
+        log_warn "grub-mkimage not found; the ISO will be EFI-only"
+        return 1
+    }
+    [[ -d "${grub_lib}" ]] || {
+        log_warn "${grub_lib} not found (grub's i386-pc target is not installed); the ISO will be EFI-only"
+        return 1
+    }
+
+    log_step "Building the BIOS El Torito boot image..."
+
+    mkdir -p "${dest}"
+    # The modules have to be on the ISO too: eltorito.img is a small core that
+    # loads the rest from ${prefix} at boot.
+    cp -a "${grub_lib}/." "${dest}/" 2>/dev/null || true
+
+    # -p /boot/grub is where the core looks for grub.cfg and its modules.
+    # The module list is the minimum for finding and reading grub.cfg off an
+    # ISO9660 disc and booting a Linux kernel from it.
+    if ! grub-mkimage \
+            -O i386-pc-eltorito \
+            -p /boot/grub \
+            -o "${dest}/eltorito.img" \
+            biosdisk iso9660 part_msdos part_gpt fat ext2 \
+            normal linux linux16 configfile search search_fs_uuid search_label \
+            echo test boot chain minicmd ls cat halt reboot \
+            gfxterm gfxmenu all_video videoinfo font \
+            2>&1 | tee -a "${LOGS_DIR}/grub-mkimage.log"; then
+        log_warn "grub-mkimage failed; the ISO will be EFI-only"
+        return 1
+    fi
+
+    [[ -s "${dest}/eltorito.img" ]] || {
+        log_warn "eltorito.img was not produced; the ISO will be EFI-only"
+        return 1
+    }
+
+    log_success "  eltorito.img built ($(du -h "${dest}/eltorito.img" | cut -f1))"
+    return 0
+}
+
+# =============================================================================
 # Generate ISO
 # =============================================================================
 generate_iso() {
     log_step "Generating ISO image..."
+
+    # Build the BIOS boot image first. Only attempt the hybrid ISO if it
+    # exists -- otherwise xorriso aborts and we take the fallback anyway,
+    # having written a misleading FAILURE into the log.
+    if ! prepare_bios_boot; then
+        log_warn "No BIOS boot image; creating an EFI-only ISO"
+        generate_iso_efi_only
+        return
+    fi
 
     # Try full hybrid ISO first
     if xorriso -as mkisofs \
@@ -911,24 +1092,12 @@ generate_iso() {
         -e boot/efiboot.img \
         -no-emul-boot \
         -isohybrid-gpt-basdat \
-        -graft-points \
         "${ISO_ROOT}" \
-        /boot/grub/i386-pc=/usr/lib/grub/i386-pc \
         2>&1 | tee "${LOGS_DIR}/xorriso.log"; then
-        log_success "Hybrid ISO created"
+        log_success "Hybrid ISO created (BIOS + UEFI)"
     else
-        # Fallback to simpler EFI-only ISO
         log_warn "Hybrid ISO failed, creating EFI-only ISO..."
-        xorriso -as mkisofs \
-            -iso-level 3 \
-            -R -J -joliet-long \
-            -volid "${ISO_LABEL}" \
-            -output "${ISO_OUTPUT}" \
-            -eltorito-alt-boot \
-            -e boot/efiboot.img \
-            -no-emul-boot \
-            -isohybrid-gpt-basdat \
-            "${ISO_ROOT}" 2>&1 | tee "${LOGS_DIR}/xorriso.log"
+        generate_iso_efi_only
     fi
 
     # Generate checksums

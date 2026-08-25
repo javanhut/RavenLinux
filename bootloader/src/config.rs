@@ -178,10 +178,13 @@ impl Default for BootConfig {
         let mut graphical_entries: Vec<BootEntry> = Vec::new();
 
         graphical_entries.push(BootEntry {
-            name: String::from("Raven Desktop (Wayland)"),
+            name: String::from("Raven Desktop (Huginn)"),
             kernel: String::from("\\EFI\\raven\\vmlinuz"),
             initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
-            cmdline: String::from("rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=raven console=ttyS0,115200 console=tty0"),
+            // raven.wayland names the compositor binary. raven-init passes it
+            // to /bin/raven-wayland-session as RAVEN_WAYLAND_COMPOSITOR; the
+            // launcher still accepts the old "raven" and maps it to huginn.
+            cmdline: String::from("rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=huginn console=ttyS0,115200 console=tty0"),
             entry_type: EntryType::LinuxEfi,
             children: Vec::new(),
         });

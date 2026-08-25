@@ -60,18 +60,51 @@ fi
 # Helper Functions
 # =============================================================================
 
+# Downloads are resumable and retried, and a partial transfer never lands under
+# the final name.
+#
+# Both properties matter here: these are hundred-megabyte tarballs from mirrors
+# that reset connections, and the previous version wrote straight to the final
+# path with a bare `[[ -f ]]` guard. A connection dropped mid-transfer left a
+# truncated file that the next run reported as "already downloaded" and handed
+# to tar, so one flaky download turned into a corrupt source tree that looked
+# like a build bug.
 download_file() {
     local name="$1"
     local url="$2"
     local filename
     filename="$(basename "$url")"
 
-    if [[ -f "${SOURCES_DIR}/${filename}" ]]; then
+    local dest="${SOURCES_DIR}/${filename}"
+    local part="${dest}.part"
+
+    if [[ -f "${dest}" ]]; then
         log_info "${name} already downloaded"
-    else
-        log_info "Downloading ${name}..."
-        curl -L -o "${SOURCES_DIR}/${filename}" "$url"
+        return 0
     fi
+
+    log_info "Downloading ${name}..."
+
+    # --continue-at - resumes a previous .part rather than restarting; --retry
+    # covers the transient resets. HTTP/1.1 because kernel.org's HTTP/2 stream
+    # resets (curl error 92) are what broke this in the first place, and the
+    # throughput difference on a single large file is noise.
+    if ! curl -fL \
+            --http1.1 \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
+            --continue-at - \
+            -o "${part}" \
+            "$url"; then
+        log_error "Failed to download ${name} from ${url}"
+        log_info "  the partial transfer is kept at ${part} and will resume"
+        return 1
+    fi
+
+    # Only now does it get the name the rest of the build looks for.
+    mv -f "${part}" "${dest}"
+    return 0
 }
 
 extract_archive() {

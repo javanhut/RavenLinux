@@ -112,7 +112,20 @@ build_initramfs() {
 
     # Always rebuild initramfs to pick up any init script changes
     if [[ -x "${PROJECT_ROOT}/scripts/build-initramfs.sh" ]]; then
-        "${PROJECT_ROOT}/scripts/build-initramfs.sh" 2>&1 | tee "${LOGS_DIR}/initramfs.log"
+        # RAVEN_NO_DEVNODES=1 is the escape hatch for builds that cannot
+        # mknod -- rootless podman, most obviously, where a user namespace
+        # denies char-device creation whatever the capability set says.
+        # Safe on this kernel: CONFIG_DEVTMPFS_MOUNT=y mounts devtmpfs on /dev
+        # before init is exec'd, so the nodes exist by the time anything wants
+        # them. Expect one "unable to open an initial console" line before that
+        # mount happens.
+        local -a initramfs_args=()
+        if [[ -n "${RAVEN_NO_DEVNODES:-}" && "${RAVEN_NO_DEVNODES}" != "0" ]]; then
+            log_warn "RAVEN_NO_DEVNODES set: initramfs will ship no static /dev nodes"
+            initramfs_args+=(--no-devnodes)
+        fi
+
+        "${PROJECT_ROOT}/scripts/build-initramfs.sh" "${initramfs_args[@]}" 2>&1 | tee "${LOGS_DIR}/initramfs.log"
     else
         log_warn "build-initramfs.sh not found, creating minimal initramfs"
 

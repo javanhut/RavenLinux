@@ -107,9 +107,35 @@ stage3: ## Build base packages (core libraries, shells, OpenSSH)
 raven: ## Build the Raven self-hosted toolchain into the sysroot (before iso)
 	$(RUN) $(BUILD_FLAGS) raven
 
+.PHONY: gui
+gui: ## Build the compositor and desktop shell (huginn, muninn) into the sysroot
+	$(RUN) $(BUILD_FLAGS) gui
+
 .PHONY: stage4 iso
 stage4 iso: ## Generate the bootable ISO from existing build output
 	$(RUN) $(BUILD_FLAGS) stage4
+
+# ----------------------------------------------------------------------------
+# Testing
+# ----------------------------------------------------------------------------
+# These run on the host, not in the build container: the container has no
+# display and no /dev/kvm, and these check the built artifacts rather than
+# building anything.
+.PHONY: test
+test: ## Run the host-side Rust tests (init config schema)
+	cargo test --manifest-path init/Cargo.toml
+
+.PHONY: qemu
+qemu: ## Boot the built ISO in QEMU on the serial console
+	./scripts/test-qemu.sh --console
+
+.PHONY: qemu-desktop
+qemu-desktop: ## Boot the built ISO in QEMU with a GPU, for the Wayland session
+	./scripts/test-qemu.sh --desktop
+
+.PHONY: smoke
+smoke: ## Boot the ISO for 180s and exit (unattended check)
+	./scripts/test-qemu.sh --console --timeout 180
 
 # ----------------------------------------------------------------------------
 # Interactive

@@ -76,6 +76,21 @@ RUN pacman -Syu --noconfirm --needed \
         # Go toolchain -- the Raven stage builds ravenshell, poxy and imlazy
         # with CGO_ENABLED=0, so no Go cgo headers are needed.
         go \
+        # Compositor stack -- the GUI stage builds huginn against these. Unlike
+        # every Raven-layer component, huginn links C libraries: smithay binds
+        # libdrm/libgbm/libinput/libseat/libudev, and Mesa provides EGL and the
+        # DRI drivers it dlopens. Without them stage-gui.sh skips itself and
+        # the ISO ships console-only.
+        #
+        # These are also the libraries stage-gui.sh copies into the sysroot, so
+        # this list is what the shipped system ends up carrying.
+        libdrm libinput mesa libxkbcommon wayland \
+        # libinput classifies devices through libwacom, which pulls in lua.
+        # Named explicitly because the closure is not obvious from the above.
+        libwacom libevdev mtdev \
+        # seatd, not libseat: on Arch there is no libseat package -- the seatd
+        # package owns both the daemon and /usr/lib/libseat.so.
+        seatd \
     && pacman -Scc --noconfirm
 
 # -----------------------------------------------------------------------------

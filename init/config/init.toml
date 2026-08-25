@@ -80,17 +80,61 @@ restart = true
 enabled = true
 critical = false
 
+# cawd - CAW wireless daemon
+#
+# Owns the wifi interface: netlink to the kernel, WPA in-process, and its own
+# DHCP client. It needs no D-Bus and no supplicant, and it creates /run/caw
+# (the CLI socket) and /var/lib/caw/profiles (saved passphrases, 0700) itself
+# on first start, so there is nothing to pre-create.
+#
+# It autoconnects: on start it scans and rejoins the strongest saved network,
+# so this box comes back on the air after a reboot without anyone at the
+# console. Only networks with a credential are eligible -- an open network
+# authenticates nothing, so a saved one is a name anybody can broadcast.
+# First join is still manual: `caw scan`, then `caw connect <ssid>`.
+#
+# Known gap, and it is ours rather than CAW's. `caw shutdown` is the graceful
+# stop -- it deauthenticates, then removes the socket -- and upstream wires it
+# as systemd's ExecStop=. raven-init has no per-service stop command: it sends
+# SIGTERM, then SIGKILL, and /etc/raven/shutdown.d runs only after that, with
+# cawd already dead. So a reboot still leaves the station on the air until the
+# AP times it out. Nothing leaks -- /run is a tmpfs -- but the deauth is lost.
+[[services]]
+name = "cawd"
+description = "CAW wireless daemon"
+exec = "/usr/bin/cawd"
+args = []
+restart = true
+enabled = true
+critical = false
+# The graceful stop. cawd cannot handle SIGTERM -- rustix exposes no safe
+# signalfd and the crate forbids unsafe -- so it is stopped over its own
+# socket, which deauthenticates from the AP before the socket goes away.
+# raven-init runs this to completion, then falls through to SIGTERM either
+# way. Upstream's systemd unit uses the same command as ExecStop=.
+stop_exec = "/usr/bin/caw"
+stop_args = ["shutdown"]
+stop_timeout = 5
+
 # iwd - Modern wireless daemon (requires D-Bus)
+#
+# Disabled: cawd replaces it. Both drive the same wiphy over nl80211 and would
+# fight over the interface, so exactly one of these may be enabled. Flip these
+# two `enabled` flags together to go back to iwd.
 [[services]]
 name = "iwd"
 description = "iNet Wireless Daemon"
 exec = "/usr/libexec/iwd"
 args = []
 restart = true
-enabled = true
+enabled = false
 critical = false
 
 # Network manager (when available)
+#
+# Still handles wired interfaces at boot. cawd runs DHCP itself on the links it
+# brings up, but only after `caw connect`, so the two do not race: by the time
+# cawd touches the wifi interface this has long since finished.
 [[services]]
 name = "network"
 description = "Network management"

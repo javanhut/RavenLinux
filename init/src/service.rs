@@ -302,6 +302,77 @@ impl Service {
         self.do_start()
     }
 
+    /// Whether this service has a stop command configured.
+    pub fn has_stop_exec(&self) -> bool {
+        self.config.stop_exec.is_some()
+    }
+
+    /// Run the service's `stop_exec`, if it has one, and wait for it.
+    ///
+    /// Best-effort by design: a missing binary, a non-zero exit or a hang all
+    /// fall through to the signal path rather than blocking a shutdown. The
+    /// wait is bounded by `stop_timeout` because this runs from PID 1, where
+    /// an unbounded wait is a hung machine.
+    pub fn run_stop_exec(&mut self) {
+        let Some(ref program) = self.config.stop_exec else {
+            return;
+        };
+        if self.pid.is_none() {
+            return;
+        }
+
+        log::info!(
+            "Stopping {} with {} {:?}",
+            self.config.name,
+            program,
+            self.config.stop_args
+        );
+
+        let mut child = match Command::new(program)
+            .args(&self.config.stop_args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(e) => {
+                log::warn!("{}: stop_exec failed to start: {}", self.config.name, e);
+                return;
+            }
+        };
+
+        let deadline =
+            std::time::Instant::now() + Duration::from_secs(self.config.stop_timeout as u64);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        log::warn!("{}: stop_exec exited with {}", self.config.name, status);
+                    }
+                    return;
+                }
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        log::warn!(
+                            "{}: stop_exec did not finish in {}s, killing it",
+                            self.config.name,
+                            self.config.stop_timeout
+                        );
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => {
+                    log::warn!("{}: cannot wait on stop_exec: {}", self.config.name, e);
+                    return;
+                }
+            }
+        }
+    }
+
     /// Stop the service (SIGTERM)
     pub fn stop(&mut self) {
         if let Some(pid) = self.pid {

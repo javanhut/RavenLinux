@@ -42,6 +42,9 @@ impl Default for InitConfig {
                     critical: false,
                     environment: HashMap::new(),
                     tty: Some("/dev/tty1".to_string()),
+                    stop_exec: None,
+                    stop_args: Vec::new(),
+                    stop_timeout: 5,
                 },
             ],
             mounts: Vec::new(),
@@ -152,6 +155,33 @@ pub struct ServiceConfig {
     /// If set, the service will be spawned with proper session and job control
     #[serde(default)]
     pub tty: Option<String>,
+
+    /// Command run to stop this service cleanly, before any signal is sent.
+    ///
+    /// Some daemons cannot be stopped by SIGTERM alone. `cawd` is the case
+    /// this exists for: it holds a wireless association, and the only way it
+    /// can leave the air politely is a request on its own control socket
+    /// (`caw shutdown`), because a signal handler would need `signalfd` and
+    /// the crate forbids unsafe. systemd calls this `ExecStop=`.
+    ///
+    /// Failure is not fatal, and neither is a timeout: SIGTERM follows either
+    /// way. See `stop_timeout`.
+    #[serde(default)]
+    pub stop_exec: Option<String>,
+
+    /// Arguments for [`ServiceConfig::stop_exec`]
+    #[serde(default)]
+    pub stop_args: Vec<String>,
+
+    /// How long to wait for `stop_exec` before moving on to SIGTERM, seconds.
+    #[serde(default = "default_stop_timeout")]
+    pub stop_timeout: u32,
+}
+
+/// Long enough for a deauthentication to reach the AP, short enough that a
+/// wedged stop command does not hold up a reboot.
+fn default_stop_timeout() -> u32 {
+    5
 }
 
 /// Mount point configuration

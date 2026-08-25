@@ -25,6 +25,7 @@
 #   stage2   Native rebuild of entire system
 #   stage3   Build base packages (core libraries, shells, OpenSSH)
 #   raven    Build the Raven self-hosted toolchain (shell, rvn, ivaldi, ...)
+#   gui      Build the compositor and desktop shell (huginn, muninn)
 #   stage4   Generate bootable ISO image
 
 set -euo pipefail
@@ -349,6 +350,20 @@ build_raven() {
     fi
 }
 
+# GUI stage: the compositor and desktop shell (huginn, muninn, muninn-lock).
+# Runs after raven and before stage4. Separate from the Raven stage because
+# huginn links seventeen shared libraries and the Raven layer's defining
+# property is that it links none -- see the header of stage-gui.sh.
+build_gui() {
+    log_section "GUI Stage: Compositor and Shell"
+
+    if [[ -f "${RAVEN_ROOT}/scripts/stages/stage-gui.sh" ]]; then
+        run_logged source "${RAVEN_ROOT}/scripts/stages/stage-gui.sh"
+    else
+        log_warn "GUI stage script not found, skipping"
+    fi
+}
+
 # Stage 4: Generate ISO
 build_stage4() {
     log_section "Stage 4: Generating ISO"
@@ -374,6 +389,8 @@ Stages:
     stage3      Build base packages (core libraries, shells, OpenSSH)
     raven       Build the Raven self-hosted toolchain (ravenshell, rvn, poxy,
                 ivaldi, crow, imlazy, oxigen) into the sysroot
+    gui         Build the compositor and desktop shell (huginn, muninn,
+                muninn-lock). Runs after raven, before stage4.
     stage4      Generate bootable ISO image
 
 Options:
@@ -400,6 +417,7 @@ Examples:
     $(basename "$0") --clean all        # Clean build from scratch
     $(basename "$0") --no-log stage4    # Build ISO without logging
     $(basename "$0") raven              # Build only the Raven toolchain
+    $(basename "$0") gui                # Build only the compositor and shell
     RAVEN_ONLY=crow $(basename "$0") raven   # ... or just one component
 EOF
 }
@@ -446,7 +464,7 @@ main() {
                 SKIP_DEP_CHECK=true
                 shift
                 ;;
-            all|stage0|stage1|stage2|stage3|raven|stage4)
+            all|stage0|stage1|stage2|stage3|raven|gui|stage4)
                 stage="$1"
                 shift
                 ;;
@@ -466,7 +484,7 @@ main() {
     # Rust; every other path compiles Rust (sudo-rs, uutils) and would crash
     # without this.
     case "$stage" in
-        all|stage1|stage2|stage3|raven)
+        all|stage1|stage2|stage3|raven|gui)
             check_rust_toolchain
             ;;
     esac
@@ -501,6 +519,7 @@ main() {
             build_stage2
             build_stage3
             build_raven
+            build_gui
             build_stage4
             ;;
         stage0)
@@ -517,6 +536,9 @@ main() {
             ;;
         raven)
             build_raven
+            ;;
+        gui)
+            build_gui
             ;;
         stage4)
             build_stage4

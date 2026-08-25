@@ -40,13 +40,25 @@ for itself rather than inheriting:
 | `crow` | [Crow](https://github.com/javanhut/CrowTextEditor), the text editor |
 | `imlazy` | [ImLazy](https://github.com/javanhut/ImLazy), the task runner |
 | `oxigen` | [OxigenLang](https://github.com/javanhut/OxigenLang), the interpreted language |
+| `caw`, `cawd` | [CAW](https://github.com/javanhut/CAW), the wireless stack — netlink and WPA in-process, no supplicant |
 
 Every one of those is built as a **static** binary — Go with `CGO_ENABLED=0`,
 Rust against `x86_64-unknown-linux-musl` — so the Raven layer adds no runtime
 link dependency to the base sysroot.
 
-What's deliberately absent: a desktop environment, a graphical terminal, hosted
-Rust/Go toolchains, an installer. Those are the things still to build back.
+And a graphical layer, built separately because it cannot be static:
+
+| Tool | What it is |
+|------|------------|
+| `huginn` | [RavenGUI](https://github.com/javanhut/RavenGUI)'s Wayland compositor, on Smithay |
+| `muninn` | the desktop shell — panel, launcher, notifications — as an ordinary Wayland client |
+| `muninn-lock` | the session lock screen, a third process so a shell bug cannot unlock the screen |
+
+Boot the `Raven Desktop (Huginn)` entry, or add `raven.graphics=wayland` to the
+kernel cmdline, and raven-init starts the session instead of a getty.
+
+What's deliberately absent: a graphical terminal, hosted Rust/Go toolchains, an
+installer. Those are the things still to build back.
 
 ## Building
 
@@ -58,9 +70,31 @@ uses chroot, overlayfs mounts, and loop devices.
 make image      # build the toolchain image (cached after the first run)
 make build      # build everything -> ./build/ and raven-<ver>-x86_64.iso
 make raven      # build just the Raven layer into an existing sysroot
+make gui        # build just the compositor and shell
 make shell      # drop into the build environment interactively
 make help       # list every target
 ```
+
+Every target also exists as an [ImLazy](https://github.com/javanhut/ImLazy)
+command in `lazy.toml`, which is what RavenLinux uses on itself:
+
+```bash
+imlazy list     # every command with a description
+imlazy build    # same as make build
+imlazy -n qemu  # dry run: print what a command would execute
+```
+
+**On a host where Podman runs rootless**, add `RAVEN_NO_DEVNODES=1`. The
+initramfs builder calls `mknod`, which a user namespace refuses whatever the
+capability set says, and stage1 dies with `mknod: Operation not permitted`:
+
+```bash
+RAVEN_NO_DEVNODES=1 imlazy build
+```
+
+That is safe here because the kernel config sets `CONFIG_DEVTMPFS_MOUNT=y`, so
+`/dev` is populated before init runs -- but the resulting ISO is not identical
+to a rootful build, so rule that difference out first if it misbehaves at boot.
 
 Common overrides:
 
@@ -89,7 +123,8 @@ qemu-user — use Docker Desktop or colima with Rosetta, or build on x86_64.
 | `stage1` | `scripts/stages/stage1-base.sh` | Base system cross-built with that toolchain; kernel and initramfs |
 | `stage2` | `scripts/stages/stage2-native.sh` | Native rebuild of the sysroot: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | `stage3` | `scripts/stages/stage3-packages.sh` | Base packages: core libraries (zlib, ncurses, readline, attr, acl), shells, OpenSSH, RavenBoot |
-| `raven` | `scripts/stages/stage-raven.sh` | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen |
+| `raven` | `scripts/stages/stage-raven.sh` | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw |
+| `gui` | `scripts/stages/stage-gui.sh` | Compositor and desktop shell: huginn, muninn, muninn-lock, plus the shared libraries they need |
 | `stage4` | `scripts/stages/stage4-iso.sh` | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
 
 The Raven layer is unnumbered on purpose. Stages 0–4 build a base system that
@@ -103,12 +138,23 @@ The Raven layer is fail-soft: a component that will not clone or compile is
 logged and skipped, and the ISO still builds. Narrow it while iterating:
 
 ```bash
-./scripts/build.sh raven                  # all seven components
+./scripts/build.sh raven                  # all eight components
 RAVEN_ONLY=crow,ivaldi make raven         # just these two
+RAVEN_ONLY=caw make raven                 # caw ships two binaries, caw and cawd
 RAVEN_SKIP=oxigen make raven              # everything but this one
 RAVEN_OFFLINE=1 make raven                # reuse existing clones, no network
 RAVEN_IVALDI_REF=v0.1.2 make raven        # pin one component to a git ref
 RAVEN_KEEP_BASH_DEFAULT=1 make raven      # install ravenshell, keep bash default
+```
+
+The GUI stage is fail-soft the same way, and skips itself when the build host
+lacks the libraries huginn links:
+
+```bash
+./scripts/build.sh gui                    # huginn, muninn, muninn-lock
+GUI_SKIP=1 make build                     # console-only ISO
+GUI_REF=v0.1.0 make gui                   # pin RavenGUI to a git ref
+GUI_OFFLINE=1 make gui                    # reuse the existing clone
 ```
 
 Artifacts land in `./build/`:
@@ -125,22 +171,52 @@ build/
 
 ## Testing the ISO
 
+`scripts/test-qemu.sh` boots the most recent ISO it can find. It picks up KVM
+when `/dev/kvm` is available and falls back to software emulation with a warning
+when it is not -- that fallback boots in minutes rather than seconds, which is
+worth knowing before a slow boot reads as a hang.
+
 ```bash
-# UEFI
-qemu-system-x86_64 -cdrom raven-*.iso -m 2G \
-  -nographic -serial mon:stdio \
-  -bios /usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd -enable-kvm
+imlazy qemu           # serial console (make qemu)
+imlazy qemu-uefi      # boot through OVMF firmware
+imlazy qemu-desktop   # with a virtio GPU, for the Wayland session
+imlazy smoke          # boot for 180s unattended, then exit
+```
 
-# BIOS
-qemu-system-x86_64 -cdrom raven-*.iso -m 2G -enable-kvm
+Quit QEMU with **Ctrl-a x**.
 
-# Write to USB
+Pick **`Raven Linux (Serial)`** in the boot menu to watch the kernel over the
+serial line. The default entry logs to `tty0`, so on `-nographic` the output
+stops after the bootloader banner and looks like a hang.
+
+For the Wayland session, pick **`Raven Desktop (Huginn)`** (under
+`Raven Linux (Graphical) >` on the RavenBoot/UEFI path). `qemu-desktop` passes
+`virtio-vga-gl`, because Huginn's udev backend has to take DRM master on a real
+device and QEMU's default emulated VGA provides none. A display backend is a
+separate package on most distributions:
+
+```bash
+sudo pacman -S qemu-ui-gtk qemu-ui-opengl   # Arch
+sudo apt install qemu-system-gui            # Debian
+```
+
+`./scripts/check-deps.sh` lists these under "Optional (testing only)". Writing
+to a USB stick is unchanged:
+
+```bash
 sudo dd if=raven-*.iso of=/dev/sdX bs=4M status=progress
 ```
 
-The ISO boots to a root shell on tty1. Under UEFI it boots via RavenBoot; under
-BIOS (or if RavenBoot didn't build) GRUB takes over, offering a serial-console
-entry for headless VMs and a recovery entry.
+The ISO boots to a root shell on tty1, and is hybrid: BIOS boots through GRUB,
+UEFI through RavenBoot. `cawd` is started by the live init, so `caw scan` and
+`caw connect <ssid>` work from that shell -- though saved profiles live on a
+tmpfs overlay and do not survive a reboot of a live image.
+
+Host-side tests, which need no ISO and no container:
+
+```bash
+imlazy test     # or: make test
+```
 
 You can also run the built rootfs as a container image, which is much faster
 than booting a VM when you only want to poke at the userland:
@@ -171,7 +247,8 @@ docker run --rm -it --platform linux/amd64 ravenlinux
 ├── packages/
 │   ├── core/                 # musl, linux, openssl, openssh, sudo-rs, uutils
 │   ├── base/                 # bash, fish
-│   └── raven/                # ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen
+│   ├── raven/                # ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw
+│   └── gui/                  # ravengui: huginn, muninn, muninn-lock
 ├── configs/                  # shell, SSH, kernel, fontconfig configuration
 ├── etc/                      # files installed into the rootfs /etc
 ├── fonts/                    # console font (JetBrains Mono Nerd Font)

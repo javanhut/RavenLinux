@@ -3,9 +3,9 @@
 # RavenLinux Raven Stage: Self-Hosted Toolchain
 # =============================================================================
 # Builds the software RavenLinux provides for itself -- the shell, package
-# managers, version control, editor, task runner and language it ships instead
-# of inheriting from elsewhere. See REPOSFORRAVEN.md for the roadmap this
-# implements.
+# managers, version control, editor, task runner, wireless stack and language
+# it ships instead of inheriting from elsewhere. See REPOSFORRAVEN.md for the
+# roadmap this implements.
 #
 # This stage is deliberately *not* numbered. Stages 0-4 build the base system
 # and the ISO; those must exist and work on their own. This layer sits on top
@@ -83,19 +83,25 @@ fi
 # =============================================================================
 # Component Table
 # =============================================================================
-# key|repo|lang|binary|build_target|description
+# key|repo|lang|binaries|build_targets|description
 #
-#   key          short name; also the RAVEN_<KEY>_REF env suffix and the
-#                packages/raven/<key> directory
-#   repo         github.com/javanhut/<repo>
-#   lang         go | rust
-#   binary       the installed name in /usr/bin
-#   build_target go: the package path to build
-#                rust: the workspace package (-p), or "." for a plain crate
+#   key           short name; also the RAVEN_<KEY>_REF env suffix and the
+#                 packages/raven/<key> directory
+#   repo          github.com/javanhut/<repo>
+#   lang          go | rust
+#   binaries      the installed name(s) in /usr/bin. Comma-separated for a
+#                 component that ships more than one -- caw is a CLI plus the
+#                 daemon it drives, and neither is useful without the other.
+#   build_targets go:   the package path(s) to build, positionally paired with
+#                       `binaries`
+#                 rust: the workspace package(s) to pass to -p, or "." for a
+#                       plain crate
 #
-# RavenTerminal is intentionally absent: it is a GPU-accelerated terminal that
-# needs OpenGL, GLFW and an X11/Wayland display, none of which exist in the
-# console base. It belongs with whatever graphical stack gets built back.
+# The graphical components are intentionally absent. RavenGUI (huginn/muninn)
+# links libudev, libdrm, libseat and libinput through smithay, so it cannot be
+# a static musl binary the way everything here is, and its udev/TTY backend is
+# not written yet. RavenTerminal needs the display server RavenGUI is meant to
+# become. Both belong to a graphical stage that does not exist yet.
 
 RAVEN_COMPONENTS=(
     "ravenshell|RavenShell|go|ravenshell|.|Raven Shell - interactive shell and scripting language"
@@ -105,6 +111,7 @@ RAVEN_COMPONENTS=(
     "crow|CrowTextEditor|rust|crow|.|Crow - text editor"
     "imlazy|ImLazy|go|imlazy|.|ImLazy - task runner"
     "oxigen|OxigenLang|rust|oxigen|oxigen|OxigenLang - interpreted language"
+    "caw|CAW|rust|caw,cawd|caw,cawd|CAW - wireless and network utility, with its daemon"
 )
 
 # Populated by build_component() so print_summary and the default-shell switch
@@ -209,79 +216,121 @@ fetch_component() {
 #   -s -w          drops the symbol table and DWARF (these are user tools,
 #                  not something we ship debug info for)
 build_go_component() {
-    local src="$1" binary="$2" target="$3" out="$4"
+    local src="$1" binaries="$2" targets="$3" outdir="$4"
 
-    (
-        cd "${src}"
-        CGO_ENABLED=0 \
-        GOOS=linux \
-        GOARCH="${RAVEN_GOARCH:-amd64}" \
-        GOFLAGS="${GOFLAGS:-}" \
-        go build -trimpath -ldflags "-s -w" -o "${out}" "${target}"
-    )
+    # `binaries` and `targets` are positionally paired: the Nth binary is built
+    # from the Nth package path. A component with one target and several
+    # binaries falls back to that single target for all of them.
+    local -a bins targs
+    IFS=',' read -r -a bins  <<< "${binaries}"
+    IFS=',' read -r -a targs <<< "${targets}"
+
+    local i
+    for i in "${!bins[@]}"; do
+        (
+            cd "${src}"
+            CGO_ENABLED=0 \
+            GOOS=linux \
+            GOARCH="${RAVEN_GOARCH:-amd64}" \
+            GOFLAGS="${GOFLAGS:-}" \
+            go build -trimpath -ldflags "-s -w" \
+                -o "${outdir}/${bins[i]}" "${targs[i]:-${targs[0]}}"
+        ) || return 1
+    done
 }
 
 # Build a Rust component into a static musl binary.
 # --locked is used only when the component actually ships a Cargo.lock;
 # RavenPackageManager and OxigenLang currently do not.
 build_rust_component() {
-    local src="$1" binary="$2" target="$3" out="$4"
+    local src="$1" binaries="$2" targets="$3" outdir="$4"
 
     local -a cargo_args=(build --release --target "${RUST_MUSL_TARGET}")
 
     [[ -f "${src}/Cargo.lock" ]] && cargo_args+=(--locked)
-    [[ "${target}" != "." ]] && cargo_args+=(-p "${target}")
+
+    # Every -p goes into a single cargo invocation. Workspace members share a
+    # dependency graph and a target directory, so building them together is
+    # both faster than one run each and what the committed Cargo.lock was
+    # resolved against.
+    if [[ "${targets}" != "." ]]; then
+        local -a targs
+        IFS=',' read -r -a targs <<< "${targets}"
+        local t
+        for t in "${targs[@]}"; do
+            cargo_args+=(-p "${t}")
+        done
+    fi
 
     (
         cd "${src}"
         cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}"
     ) || return 1
 
-    local built="${src}/target/${RUST_MUSL_TARGET}/release/${binary}"
-    [[ -f "${built}" ]] || return 1
-    cp "${built}" "${out}"
+    local -a bins
+    IFS=',' read -r -a bins <<< "${binaries}"
+    local b built
+    for b in "${bins[@]}"; do
+        built="${src}/target/${RUST_MUSL_TARGET}/release/${b}"
+        [[ -f "${built}" ]] || return 1
+        cp "${built}" "${outdir}/${b}" || return 1
+    done
 }
 
 # Fetch, build, stage and install one component. Never fails the stage.
 build_component() {
     local spec="$1"
-    IFS='|' read -r key repo lang binary target desc <<< "${spec}"
+    IFS='|' read -r key repo lang binaries targets desc <<< "${spec}"
 
-    log_step "${binary} (${desc})"
+    local -a bins
+    IFS=',' read -r -a bins <<< "${binaries}"
+
+    log_step "${bins[*]} (${desc})"
 
     if ! fetch_component "${key}" "${repo}"; then
-        log_warn "  ${binary}: source unavailable, skipping"
-        RAVEN_FAILED+=("${binary}")
+        log_warn "  ${bins[*]}: source unavailable, skipping"
+        RAVEN_FAILED+=("${bins[@]}")
         return 0
     fi
 
     local src="${RAVEN_SRC_DIR}/${repo}"
-    local out="${RAVEN_STAGE_DIR}/${binary}"
     mkdir -p "${RAVEN_STAGE_DIR}"
 
     local ok=0
     case "${lang}" in
         go)
-            build_go_component "${src}" "${binary}" "${target}" "${out}" || ok=1
+            build_go_component "${src}" "${binaries}" "${targets}" "${RAVEN_STAGE_DIR}" || ok=1
             ;;
         rust)
-            build_rust_component "${src}" "${binary}" "${target}" "${out}" || ok=1
+            build_rust_component "${src}" "${binaries}" "${targets}" "${RAVEN_STAGE_DIR}" || ok=1
             ;;
         *)
-            log_error "  ${binary}: unknown language '${lang}'"
+            log_error "  ${bins[*]}: unknown language '${lang}'"
             ok=1
             ;;
     esac
 
-    if (( ok != 0 )) || [[ ! -f "${out}" ]]; then
-        log_warn "  ${binary}: build failed, skipping"
-        RAVEN_FAILED+=("${binary}")
+    # A component is all or nothing. caw without cawd is a CLI with no daemon
+    # to talk to, so a partial build installs nothing rather than something
+    # that looks present and does not work.
+    local b
+    if (( ok == 0 )); then
+        for b in "${bins[@]}"; do
+            [[ -f "${RAVEN_STAGE_DIR}/${b}" ]] || ok=1
+        done
+    fi
+
+    if (( ok != 0 )); then
+        log_warn "  ${bins[*]}: build failed, skipping"
+        RAVEN_FAILED+=("${bins[@]}")
         return 0
     fi
 
-    install_component_binary "${binary}" "${out}"
-    RAVEN_BUILT+=("${binary}")
-    log_success "  ${binary} installed ($(du -h "${out}" | cut -f1))"
+    for b in "${bins[@]}"; do
+        install_component_binary "${b}" "${RAVEN_STAGE_DIR}/${b}"
+        RAVEN_BUILT+=("${b}")
+        log_success "  ${b} installed ($(du -h "${RAVEN_STAGE_DIR}/${b}" | cut -f1))"
+    done
 }
 
 # Install a staged binary into the sysroot, with the /bin compatibility
@@ -329,20 +378,23 @@ build_all_components() {
     fi
 
     for spec in "${RAVEN_COMPONENTS[@]}"; do
-        IFS='|' read -r key repo lang binary target desc <<< "${spec}"
+        IFS='|' read -r key repo lang binaries targets desc <<< "${spec}"
+
+        local -a bins
+        IFS=',' read -r -a bins <<< "${binaries}"
 
         if ! component_selected "${key}"; then
-            log_info "Skipping ${binary} (deselected)"
-            RAVEN_SKIPPED+=("${binary}")
+            log_info "Skipping ${bins[*]} (deselected)"
+            RAVEN_SKIPPED+=("${bins[@]}")
             continue
         fi
 
         if [[ "${lang}" == "go" ]] && (( go_ok == 0 )); then
-            RAVEN_SKIPPED+=("${binary}")
+            RAVEN_SKIPPED+=("${bins[@]}")
             continue
         fi
         if [[ "${lang}" == "rust" ]] && (( rust_ok == 0 )); then
-            RAVEN_SKIPPED+=("${binary}")
+            RAVEN_SKIPPED+=("${bins[@]}")
             continue
         fi
 
@@ -445,13 +497,20 @@ print_summary() {
 
     echo "Components:"
     for spec in "${RAVEN_COMPONENTS[@]}"; do
-        IFS='|' read -r key repo lang binary target desc <<< "${spec}"
-        local path="${SYSROOT_DIR}/usr/bin/${binary}"
-        if [[ -f "${path}" ]]; then
-            printf "  [OK] %-14s %-6s %s\n" "${binary}" "$(du -h "${path}" | cut -f1)" "${desc}"
-        else
-            printf "  [--] %-14s %-6s %s\n" "${binary}" "" "${desc}"
-        fi
+        IFS='|' read -r key repo lang binaries targets desc <<< "${spec}"
+
+        local -a bins
+        IFS=',' read -r -a bins <<< "${binaries}"
+
+        local b path
+        for b in "${bins[@]}"; do
+            path="${SYSROOT_DIR}/usr/bin/${b}"
+            if [[ -f "${path}" ]]; then
+                printf "  [OK] %-14s %-6s %s\n" "${b}" "$(du -h "${path}" | cut -f1)" "${desc}"
+            else
+                printf "  [--] %-14s %-6s %s\n" "${b}" "" "${desc}"
+            fi
+        done
     done
 
     echo ""
