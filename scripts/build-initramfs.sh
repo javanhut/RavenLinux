@@ -708,6 +708,14 @@ step "Searching for boot device"
 BOOT_DEVICE=""
 ISO_LABEL="RAVEN_LIVE"
 
+# Device globs for the fallback scans below. /dev/mapper and /dev/dm-* are
+# here for Ventoy and friends: those boot the ISO as a *file* on a USB stick,
+# exposing it as a device-mapper target rather than a real block device, so
+# none of the conventional patterns would ever match it. Method 1's bare
+# `blkid` enumeration does already catch that case; keeping the globs in step
+# means Ventoy support does not rest on that one method alone.
+SCAN_DEVICES="/dev/sr* /dev/sd* /dev/nvme*n*p* /dev/vd* /dev/mmcblk*p* /dev/loop* /dev/mapper/* /dev/dm-*"
+
 # Method 1: Look for device with our label using blkid
 if command -v blkid &>/dev/null; then
     # Avoid bash process substitution here; it depends on /dev/fd existing.
@@ -723,7 +731,7 @@ fi
 
 # Method 2: Scan common device paths
 if [ -z "$BOOT_DEVICE" ] && command -v blkid &>/dev/null; then
-    for pattern in /dev/sr* /dev/sd* /dev/nvme*n*p* /dev/vd* /dev/mmcblk*p* /dev/loop*; do
+    for pattern in $SCAN_DEVICES; do
         for dev in $pattern; do
             [ -b "$dev" ] 2>/dev/null || continue
             label=$(blkid -o value -s LABEL "$dev" 2>/dev/null)
@@ -738,7 +746,7 @@ fi
 # Method 3: Try to find any ISO9660 filesystem
 if [ -z "$BOOT_DEVICE" ] && command -v blkid &>/dev/null; then
     info "Label not found, searching for ISO9660..."
-    for pattern in /dev/sr* /dev/sd* /dev/nvme*n*p* /dev/vd* /dev/mmcblk*p* /dev/loop*; do
+    for pattern in $SCAN_DEVICES; do
         for dev in $pattern; do
             [ -b "$dev" ] 2>/dev/null || continue
             fstype=$(blkid -o value -s TYPE "$dev" 2>/dev/null)
@@ -763,7 +771,7 @@ fi
 if [ -z "$BOOT_DEVICE" ]; then
     fail "No boot device found"
     info "Available block devices:"
-    ls -la /dev/sd* /dev/sr* /dev/nvme* /dev/vd* /dev/mmcblk* 2>/dev/null || true
+    ls -la $SCAN_DEVICES 2>/dev/null || true
     rescue_shell "Boot device not found"
 fi
 

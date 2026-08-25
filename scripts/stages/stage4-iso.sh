@@ -21,6 +21,16 @@ SYSROOT_DIR="${SYSROOT_DIR:-${BUILD_DIR}/sysroot}"
 PACKAGES_DIR="${PACKAGES_DIR:-${BUILD_DIR}/packages}"
 ISO_DIR="${BUILD_DIR}/iso"
 ISO_ROOT="${ISO_DIR}/iso-root"
+# The EFI System Partition image. Deliberately outside ISO_ROOT: it is attached
+# to the image as an appended GPT partition rather than as a file in the
+# ISO9660 tree, so putting it under ISO_ROOT would ship a second 46MB copy.
+EFI_IMG="${ISO_DIR}/efiboot.img"
+# GPT partition type for an EFI System Partition. Firmware booting removable
+# media looks for a partition of this type and loads /EFI/BOOT/BOOTX64.EFI from
+# it; El Torito is only consulted for optical media. An ISO with no partition
+# table therefore boots fine from a DVD or a VM's virtual CD and not at all
+# from a UEFI USB stick, which is what -append_partition fixes.
+ESP_TYPE_GUID="C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 LOGS_DIR="${LOGS_DIR:-${BUILD_DIR}/logs}"
 
 # Version info
@@ -922,7 +932,8 @@ EOF
 create_efi_image() {
     log_step "Creating EFI boot image..."
 
-    local efi_img="${ISO_ROOT}/boot/efiboot.img"
+    local efi_img="${EFI_IMG}"
+    mkdir -p "$(dirname "${efi_img}")"
 
     # Calculate size needed: kernel + initramfs + bootloader + some headroom
     local kernel_size=0
@@ -1028,10 +1039,11 @@ generate_iso_efi_only() {
         -R -J -joliet-long \
         -volid "${ISO_LABEL}" \
         -output "${ISO_OUTPUT}" \
+        -append_partition 2 "${ESP_TYPE_GUID}" "${EFI_IMG}" \
+        -appended_part_as_gpt \
         -eltorito-alt-boot \
-        -e boot/efiboot.img \
+        -e --interval:appended_partition_2:all:: \
         -no-emul-boot \
-        -isohybrid-gpt-basdat \
         "${ISO_ROOT}" 2>&1 | tee "${LOGS_DIR}/xorriso.log"
 }
 
@@ -1105,6 +1117,15 @@ prepare_bios_boot() {
 generate_iso() {
     log_step "Generating ISO image..."
 
+    # Both paths below attach the ESP with -append_partition, so a missing
+    # image makes xorriso abort in the hybrid run *and* in the fallback. Say so
+    # once, up front, rather than letting it read as two unrelated failures.
+    if [[ ! -f "${EFI_IMG}" ]]; then
+        log_error "No EFI boot image at ${EFI_IMG}"
+        log_error "  create_efi_image() did not run or failed (needs mkfs.vfat and mtools)."
+        return 1
+    fi
+
     # Build the BIOS boot image first. Only attempt the hybrid ISO if it
     # exists -- otherwise xorriso aborts and we take the fallback anyway,
     # having written a misleading FAILURE into the log.
@@ -1114,7 +1135,16 @@ generate_iso() {
         return
     fi
 
-    # Try full hybrid ISO first
+    # Try full hybrid ISO first.
+    #
+    # The ESP rides along as an appended GPT partition, and the UEFI El Torito
+    # entry points into that partition rather than at a file in the ISO9660
+    # tree, so it is stored once instead of twice. This replaces
+    # -isohybrid-gpt-basdat, which silently did nothing here: that option only
+    # takes effect alongside an isolinux -isohybrid-mbr, and --grub2-mbr below
+    # claims the system area instead. The result was an image with no
+    # partition table at all -- bootable from a disc, invisible to UEFI
+    # firmware on a USB stick.
     if xorriso -as mkisofs \
         -iso-level 3 \
         -full-iso9660-filenames \
@@ -1126,10 +1156,11 @@ generate_iso() {
         -boot-info-table \
         --grub2-boot-info \
         --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img \
+        -append_partition 2 "${ESP_TYPE_GUID}" "${EFI_IMG}" \
+        -appended_part_as_gpt \
         -eltorito-alt-boot \
-        -e boot/efiboot.img \
+        -e --interval:appended_partition_2:all:: \
         -no-emul-boot \
-        -isohybrid-gpt-basdat \
         "${ISO_ROOT}" \
         2>&1 | tee "${LOGS_DIR}/xorriso.log"; then
         log_success "Hybrid ISO created (BIOS + UEFI)"
