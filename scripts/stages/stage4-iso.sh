@@ -1112,6 +1112,46 @@ prepare_bios_boot() {
 }
 
 # =============================================================================
+# Shutdown commands
+# =============================================================================
+# The live banner tells you to type 'poweroff' or 'reboot', and until now the
+# sysroot shipped neither -- so the one instruction on screen did nothing. They
+# cannot simply be copied from the build host either: on a systemd distro those
+# are systemd's binaries, and with raven-init as PID 1 they only ever print
+# "System has not been booted with systemd as init system (PID 1)".
+#
+# sysrq is compiled into the kernel (CONFIG_MAGIC_SYSRQ), so ask it directly.
+install_shutdown_commands() {
+    log_step "Installing shutdown commands..."
+
+    local name key
+    for spec in reboot:b poweroff:o halt:o; do
+        name="${spec%%:*}"
+        key="${spec##*:}"
+
+        # Never shadow a real implementation, if one ever gets built.
+        if [[ -e "${SYSROOT_DIR}/bin/${name}" ]]; then
+            log_info "  ${name} already present, leaving it alone"
+            continue
+        fi
+
+        cat > "${SYSROOT_DIR}/bin/${name}" << EOF
+#!/bin/sh
+# Ask the kernel directly: raven-init is PID 1 here, not systemd.
+sync
+[ -w /proc/sys/kernel/sysrq ] && echo 1 > /proc/sys/kernel/sysrq
+echo ${key} > /proc/sysrq-trigger
+EOF
+        chmod 0755 "${SYSROOT_DIR}/bin/${name}"
+        mkdir -p "${SYSROOT_DIR}/usr/bin"
+        ln -sf "../../bin/${name}" "${SYSROOT_DIR}/usr/bin/${name}" 2>/dev/null || true
+        log_info "  Installed ${name}"
+    done
+
+    log_success "Shutdown commands installed"
+}
+
+# =============================================================================
 # Generate ISO
 # =============================================================================
 generate_iso() {
@@ -1229,6 +1269,7 @@ main() {
     check_deps
     setup_iso_structure
     create_live_init
+    install_shutdown_commands
     copy_boot_files
     copy_kernel_modules
     create_squashfs

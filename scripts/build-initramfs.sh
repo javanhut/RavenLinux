@@ -302,12 +302,28 @@ EOF
 
     # These need to come from host (not in uutils or need special handling)
     # Include switch_root for live boot, udevadm for device enumeration
-    local host_bins=(mount umount dmesg clear reset ps kill free grep sed awk find xargs poweroff reboot switch_root losetup blkid udevadm setsid stty)
+    local host_bins=(mount umount dmesg clear reset ps kill free grep sed awk find xargs switch_root losetup blkid udevadm setsid stty)
     for bin in "${host_bins[@]}"; do
         if command -v "$bin" &>/dev/null; then
             cp "$(which "$bin")" "${INITRAMFS_DIR}/bin/" 2>/dev/null || true
         fi
     done
+
+    # reboot/poweroff are deliberately NOT copied from the host. On a systemd
+    # distro those binaries are systemd's, and in an initramfs they fail with
+    #   System has not been booted with systemd as init system (PID 1)
+    # leaving the rescue shell unable to do the two things it tells you to do.
+    # sysrq is compiled into the kernel, so drive it directly instead.
+    for action in reboot:b poweroff:o halt:o; do
+        cat > "${INITRAMFS_DIR}/bin/${action%%:*}" <<EOF
+#!/bin/sh
+sync
+[ -w /proc/sys/kernel/sysrq ] && echo 1 > /proc/sys/kernel/sysrq
+echo ${action##*:} > /proc/sysrq-trigger
+EOF
+        chmod 755 "${INITRAMFS_DIR}/bin/${action%%:*}"
+    done
+    log_info "  Added reboot/poweroff/halt (sysrq-based)"
 
     # Copy bash
     if [[ -f "${RAVEN_BUILD}/sysroot/bin/bash" ]]; then
@@ -716,99 +732,178 @@ ISO_LABEL="RAVEN_LIVE"
 # means Ventoy support does not rest on that one method alone.
 SCAN_DEVICES="/dev/sr* /dev/sd* /dev/nvme*n*p* /dev/vd* /dev/mmcblk*p* /dev/loop* /dev/mapper/* /dev/dm-*"
 
-# Method 1: Look for device with our label using blkid
+# A candidate is only the boot device if it actually *mounts* and actually
+# holds the squashfs. Probing by label or fstype alone is not enough: Ventoy
+# and similar loaders leave other iso9660-looking devices lying around, and
+# committing to the first match meant one decoy earlier in the scan order
+# dead-ended the boot with "Failed to mount boot device" while the real
+# device sat one entry further down the list. So: rank candidates, then try
+# them in turn, and keep going until one proves itself.
+
+# Sets SQUASHFS if /mnt/cdrom holds a recognisable live image.
+find_squashfs() {
+    for candidate in \
+        /mnt/cdrom/raven/filesystem.squashfs \
+        /mnt/cdrom/live/filesystem.squashfs \
+        /mnt/cdrom/squashfs.img; do
+        if [ -f "$candidate" ]; then
+            SQUASHFS="$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Mount $1 and confirm it carries the squashfs. Leaves it mounted on success,
+# unmounted on failure, so the next candidate starts from a clean /mnt/cdrom.
+try_boot_device() {
+    dev="$1"
+    [ -b "$dev" ] 2>/dev/null || return 1
+
+    mount -t iso9660 -o ro "$dev" /mnt/cdrom 2>/dev/null \
+        || mount -o ro "$dev" /mnt/cdrom 2>/dev/null \
+        || return 1
+
+    if find_squashfs; then
+        return 0
+    fi
+
+    info "  $dev mounted but carries no squashfs, continuing search"
+    umount /mnt/cdrom 2>/dev/null || true
+    return 1
+}
+
+# Candidates, best first: exact label match, then any iso9660, then the
+# conventional optical/loop nodes as a last resort. Duplicates are harmless --
+# try_boot_device is cheap and idempotent.
+BOOT_CANDIDATES=""
+add_candidate() {
+    case " $BOOT_CANDIDATES " in
+        *" $1 "*) ;;
+        *) BOOT_CANDIDATES="$BOOT_CANDIDATES $1" ;;
+    esac
+}
+
+# Pass 1: whatever blkid already knows about, matched on our label. This is the
+# pass that catches device-mapper targets, which no glob below would name.
 if command -v blkid &>/dev/null; then
     # Avoid bash process substitution here; it depends on /dev/fd existing.
     for dev in $(blkid 2>/dev/null | awk -F: '{print $1}'); do
         [ -b "$dev" ] 2>/dev/null || continue
         label=$(blkid -o value -s LABEL "$dev" 2>/dev/null)
-        if [ "$label" = "$ISO_LABEL" ]; then
-            BOOT_DEVICE="$dev"
-            break
-        fi
+        [ "$label" = "$ISO_LABEL" ] && add_candidate "$dev"
     done
 fi
 
-# Method 2: Scan common device paths
-if [ -z "$BOOT_DEVICE" ] && command -v blkid &>/dev/null; then
+# Pass 2: the same label match, over the explicit globs, in case blkid's own
+# enumeration came up short.
+if command -v blkid &>/dev/null; then
     for pattern in $SCAN_DEVICES; do
         for dev in $pattern; do
             [ -b "$dev" ] 2>/dev/null || continue
             label=$(blkid -o value -s LABEL "$dev" 2>/dev/null)
-            if [ "$label" = "$ISO_LABEL" ]; then
-                BOOT_DEVICE="$dev"
-                break 2
-            fi
+            [ "$label" = "$ISO_LABEL" ] && add_candidate "$dev"
         done
     done
 fi
 
-# Method 3: Try to find any ISO9660 filesystem
-if [ -z "$BOOT_DEVICE" ] && command -v blkid &>/dev/null; then
-    info "Label not found, searching for ISO9660..."
+# Pass 3: any iso9660 at all. A rebuilt ISO with a changed label still boots.
+if command -v blkid &>/dev/null; then
     for pattern in $SCAN_DEVICES; do
         for dev in $pattern; do
             [ -b "$dev" ] 2>/dev/null || continue
             fstype=$(blkid -o value -s TYPE "$dev" 2>/dev/null)
-            if [ "$fstype" = "iso9660" ]; then
-                BOOT_DEVICE="$dev"
-                break 2
-            fi
+            [ "$fstype" = "iso9660" ] && add_candidate "$dev"
         done
     done
 fi
 
-# Method 4: Fallback to common CD-ROM devices
-if [ -z "$BOOT_DEVICE" ]; then
-    for dev in /dev/sr0 /dev/sr1 /dev/cdrom /dev/loop0; do
-        if [ -b "$dev" ]; then
-            BOOT_DEVICE="$dev"
-            break
-        fi
+# Pass 4: the usual suspects, even if blkid could not identify them.
+for dev in /dev/mapper/ventoy /dev/sr0 /dev/sr1 /dev/cdrom /dev/loop0; do
+    add_candidate "$dev"
+done
+
+# Last resort: there is no iso9660 block device anywhere. That is the normal
+# state under Ventoy, which keeps the ISO as a *file* on its exFAT data
+# partition and relies on its own initramfs hook to expose it as a device --
+# a hook that does not fire for a distro it has never seen. The tell is
+# /dev/mapper holding nothing but `control` while every /dev/loop* sits
+# unbacked.
+#
+# So do it ourselves: mount the data partitions, find the ISO, attach it to a
+# loop device. The kernel carries exfat/vfat/ntfs3 built in for exactly this,
+# and it makes the image bootable from a plain "copy the ISO onto a stick"
+# setup too, not just Ventoy.
+#
+# RAVEN_MEDIA_MNT records the partition the ISO lives on. It must stay mounted
+# for as long as the loop device is backed by a file inside it, so switch_root
+# moves it into the new root rather than leaving it behind in the initramfs.
+RAVEN_MEDIA_MNT=""
+
+attach_iso_from_partitions() {
+    command -v losetup &>/dev/null || return 1
+    command -v find &>/dev/null || return 1
+
+    for pattern in $SCAN_DEVICES; do
+        for dev in $pattern; do
+            [ -b "$dev" ] 2>/dev/null || continue
+
+            fstype=$(blkid -o value -s TYPE "$dev" 2>/dev/null)
+            case "$fstype" in
+                exfat|vfat|ntfs|ntfs3|ext2|ext3|ext4) ;;
+                *) continue ;;
+            esac
+
+            mount -o ro "$dev" /mnt/work 2>/dev/null || continue
+            info "  searching $dev ($fstype) for ISO images"
+
+            # Ours first -- a Ventoy stick usually carries several ISOs, and
+            # attaching each in turn is the slow way round.
+            for iso in $(find /mnt/work -maxdepth 4 -iname '*raven*.iso' 2>/dev/null) \
+                       $(find /mnt/work -maxdepth 4 -iname '*.iso' 2>/dev/null); do
+                loopdev=$(losetup -f 2>/dev/null) || break
+                losetup -r "$loopdev" "$iso" 2>/dev/null || continue
+
+                if try_boot_device "$loopdev"; then
+                    ok "Attached $(basename "$iso") from $dev"
+                    BOOT_DEVICE="$loopdev"
+                    RAVEN_MEDIA_MNT="/mnt/work"
+                    return 0
+                fi
+
+                losetup -d "$loopdev" 2>/dev/null || true
+            done
+
+            umount /mnt/work 2>/dev/null || true
+        done
     done
-fi
+
+    return 1
+}
+
+step "Mounting boot filesystems"
+
+BOOT_DEVICE=""
+for dev in $BOOT_CANDIDATES; do
+    if try_boot_device "$dev"; then
+        BOOT_DEVICE="$dev"
+        break
+    fi
+done
+
+[ -z "$BOOT_DEVICE" ] && attach_iso_from_partitions
 
 if [ -z "$BOOT_DEVICE" ]; then
-    fail "No boot device found"
+    fail "No bootable device found"
+    info "Tried:$BOOT_CANDIDATES"
     info "Available block devices:"
     ls -la $SCAN_DEVICES 2>/dev/null || true
+    info "blkid:"
+    blkid 2>/dev/null || true
     rescue_shell "Boot device not found"
 fi
 
 ok "Found boot device: $BOOT_DEVICE"
-
-# -----------------------------------------------------------------------------
-# Mount Boot Filesystems
-# -----------------------------------------------------------------------------
-step "Mounting boot filesystems"
-
-if mount -t iso9660 -o ro "$BOOT_DEVICE" /mnt/cdrom 2>/dev/null; then
-    ok "Mounted ISO9660 filesystem"
-elif mount -o ro "$BOOT_DEVICE" /mnt/cdrom 2>/dev/null; then
-    ok "Mounted boot device (auto-detected type)"
-else
-    fail "Failed to mount boot device: $BOOT_DEVICE"
-    rescue_shell "Cannot mount boot device"
-fi
-
-# Find squashfs
-SQUASHFS="/mnt/cdrom/raven/filesystem.squashfs"
-if [ ! -f "$SQUASHFS" ]; then
-    for alt in "/mnt/cdrom/live/filesystem.squashfs" "/mnt/cdrom/squashfs.img"; do
-        if [ -f "$alt" ]; then
-            SQUASHFS="$alt"
-            break
-        fi
-    done
-fi
-
-if [ ! -f "$SQUASHFS" ]; then
-    fail "Squashfs not found"
-    info "Contents of /mnt/cdrom:"
-    ls -la /mnt/cdrom/ 2>/dev/null || true
-    rescue_shell "Squashfs image not found"
-fi
-
 ok "Found squashfs: $SQUASHFS"
 
 if mount -t squashfs -o ro,loop "$SQUASHFS" /mnt/squashfs 2>/dev/null; then
@@ -877,6 +972,20 @@ if mount --bind /mnt/cdrom /mnt/root/mnt/cdrom 2>/dev/null; then
     ok "Bind mounted /mnt/cdrom"
 else
     warn "Could not bind mount /mnt/cdrom (non-critical)"
+fi
+
+# When the ISO is a file on a data partition, the loop device backing / is
+# only as alive as that partition's mount. Leaving it in the initramfs would
+# tear it down at switch_root and take the root filesystem with it, so move it
+# across. Not a bind: the initramfs copy has to stop existing.
+if [ -n "$RAVEN_MEDIA_MNT" ]; then
+    mkdir -p /mnt/root/run/raven-media
+    if mount --move "$RAVEN_MEDIA_MNT" /mnt/root/run/raven-media 2>/dev/null; then
+        ok "Moved boot media to /run/raven-media"
+    else
+        fail "Could not move boot media into the new root"
+        rescue_shell "Boot media would be unmounted at switch_root"
+    fi
 fi
 
 # Find init in the new root
