@@ -115,7 +115,7 @@ log_level = "info"
 name = "getty-tty1"
 description = "Getty login on tty1"
 exec = "/sbin/agetty"
-args = ["--noclear", "--autologin", "root", "tty1", "linux"]
+args = ["--noclear", "--autologin", "root", "--login-program", "/sbin/login", "tty1", "linux"]
 restart = true
 enabled = true
 critical = false
@@ -124,7 +124,7 @@ critical = false
 name = "getty-ttyS0"
 description = "Serial console getty on ttyS0"
 exec = "/sbin/agetty"
-args = ["--noclear", "--autologin", "root", "-L", "115200", "ttyS0", "vt102"]
+args = ["--noclear", "--autologin", "root", "--login-program", "/sbin/login", "-L", "115200", "ttyS0", "vt102"]
 restart = true
 enabled = false
 critical = false
@@ -459,8 +459,24 @@ start_wayland_session() {
     return 1
 }
 
+# Root's login shell, as recorded in /etc/passwd. stage-raven.sh points this
+# at ravenshell once ravenshell actually built; when it did not, the entry is
+# still bash. Reading it here is what keeps the two in step -- hardcoding
+# /bin/bash meant a successfully built ravenshell was never the shell you got
+# on tty1. Falls back to bash, then sh, if the recorded shell is not executable.
+login_shell() {
+    local sh
+    sh="$(sed -n 's/^root:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:\(.*\)$/\1/p' /etc/passwd 2>/dev/null | head -n1)"
+    for candidate in "$sh" /bin/bash /bin/sh; do
+        [ -n "$candidate" ] && [ -x "$candidate" ] && { echo "$candidate"; return 0; }
+    done
+    return 1
+}
+
 start_shell_loop() {
     cd /root
+
+    shell="$(login_shell)" || shell=""
 
     # Find first available TTY
     local tty_dev="/dev/tty1"
@@ -474,11 +490,9 @@ start_shell_loop() {
     # Switch to tty1 if openvt is available (only makes sense for real VTs)
     if [ "$tty_dev" = "/dev/tty1" ] && command -v openvt >/dev/null 2>&1; then
         while true; do
-            if [ -x /bin/bash ]; then
+            if [ -n "$shell" ]; then
                 # Use -- to separate openvt options from command arguments
-                openvt -c 1 -w -s -f -- /bin/bash --login || true
-            elif [ -x /bin/sh ]; then
-                openvt -c 1 -w -s -f -- /bin/sh -l || true
+                openvt -c 1 -w -s -f -- "$shell" -l || true
             else
                 echo "No shell available! Sleeping..."
                 sleep 10
@@ -493,13 +507,37 @@ start_shell_loop() {
             stty -F "$tty_dev" 115200 cs8 -cstopb -parenb 2>/dev/null || true
         fi
         exec 0<>"$tty_dev" 1>&0 2>&0
+
+        # Number of consecutive agetty/login attempts that ended immediately.
+        # A broken PAM stack (a missing unix_chkpwd, say) makes login exit at
+        # once with "Authentication service cannot retrieve authentication
+        # info", and retrying it forever leaves an unusable console with no way
+        # in. After a few of those, give up on login and run the shell directly
+        # -- this is a live image that autologs in as root regardless, so
+        # nothing is being bypassed that was protecting anything.
+        use_login=1
+        login_failures=0
+
         while true; do
-            if [ "$tty_dev" = "/dev/ttyS0" ] && [ -x /sbin/agetty ]; then
-                /sbin/agetty --noclear --autologin root -L 115200 ttyS0 vt102 || true
-            elif [ -x /bin/bash ]; then
-                /bin/bash --login -i
-            elif [ -x /bin/sh ]; then
-                /bin/sh -l
+            if [ "$use_login" = 1 ] && [ "$tty_dev" = "/dev/ttyS0" ] && [ -x /sbin/agetty ]; then
+                start=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
+                /sbin/agetty --noclear --autologin root --login-program /sbin/login -L 115200 ttyS0 vt102 || true
+                end=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
+
+                if [ "$((end - start))" -lt 2 ]; then
+                    login_failures=$((login_failures + 1))
+                else
+                    login_failures=0
+                fi
+
+                if [ "$login_failures" -ge 3 ]; then
+                    use_login=0
+                    echo ""
+                    echo "login is failing immediately -- check the PAM stack (/etc/pam.d/login,"
+                    echo "/lib/security, and the unix_chkpwd helper). Starting a shell directly."
+                fi
+            elif [ -n "$shell" ]; then
+                "$shell" -l
             else
                 echo "No shell available! Sleeping..."
                 sleep 10

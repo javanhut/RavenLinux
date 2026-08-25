@@ -60,6 +60,10 @@ RAVEN_STAGE_DIR="${PACKAGES_DIR}/raven"
 # exercised against a host target when the musl std is not installed.
 RUST_MUSL_TARGET="${RUST_MUSL_TARGET:-x86_64-unknown-linux-musl}"
 
+# The musl cross toolchain stage0 builds. Its bin/ is not on PATH by default.
+TOOLCHAIN_DIR="${TOOLCHAIN_DIR:-${BUILD_DIR}/toolchain}"
+RAVEN_CROSS_PREFIX="${RAVEN_CROSS_PREFIX:-x86_64-linux-musl}"
+
 # =============================================================================
 # Logging (use shared library or define fallbacks)
 # =============================================================================
@@ -152,6 +156,63 @@ have_rust_musl() {
     [[ -n "${libdir}" && -d "${libdir}" ]]
 }
 
+# rustup supplies the musl *std*, but not a musl *C* compiler. Any dependency
+# that ships C sources -- ring, the tree-sitter grammars, ... -- builds them
+# through cc-rs, which for this target looks for `x86_64-linux-musl-gcc` on
+# PATH. Nothing installs that system-wide, so without this every component
+# carrying a C dependency dies with
+#   error occurred in cc-rs: failed to find tool "x86_64-linux-musl-gcc"
+# and build_component() records it as a skip. stage0 already built exactly that
+# compiler into ${TOOLCHAIN_DIR}/bin; all that is missing is pointing at it.
+#
+# Only the compiler is wired up, deliberately. The link stays on rustc's
+# default self-contained musl -- that is what already links the components with
+# no C dependencies (caw, huginn), and driving the link through the cross gcc
+# instead would pull in a second set of crt objects and libc.
+setup_cross_cc() {
+    local bin="${TOOLCHAIN_DIR}/bin"
+    [[ -x "${bin}/${RAVEN_CROSS_PREFIX}-gcc" ]] || return 1
+
+    case ":${PATH}:" in
+        *":${bin}:"*) ;;
+        *) export PATH="${bin}:${PATH}" ;;
+    esac
+
+    # cc-rs reads the target-suffixed form, with dashes turned into underscores.
+    local suffix="${RUST_MUSL_TARGET//-/_}"
+    export "CC_${suffix}=${RAVEN_CROSS_PREFIX}-gcc"
+    export "CXX_${suffix}=${RAVEN_CROSS_PREFIX}-g++"
+    export "AR_${suffix}=${RAVEN_CROSS_PREFIX}-ar"
+    return 0
+}
+
+# Point git at a build-local global config that trusts the component checkouts.
+#
+# The build runs as root inside the container while build/sources is a bind
+# mount owned by the host user, so git refuses every repository there for
+# "dubious ownership" and exits 128. That is what turns every fetch into
+# "could not update <repo>, using the existing checkout" and pins every
+# revision at "unknown".
+#
+# GIT_CONFIG_GLOBAL is used rather than `git config --global` because
+# safe.directory is honoured only in protected (system/global) scope, and this
+# way the stage never writes to the invoking user's real ~/.gitconfig. Any
+# existing global config is carried over so credentials and proxies still work.
+setup_git_trust() {
+    command -v git &>/dev/null || return 0
+
+    local cfg="${BUILD_DIR}/raven-gitconfig"
+    mkdir -p "${BUILD_DIR}"
+
+    if [[ ! -f "${cfg}" ]]; then
+        local existing="${GIT_CONFIG_GLOBAL:-${HOME:-/root}/.gitconfig}"
+        [[ -f "${existing}" ]] && cat "${existing}" > "${cfg}" || : > "${cfg}"
+        printf '[safe]\n\tdirectory = *\n' >> "${cfg}"
+    fi
+
+    export GIT_CONFIG_GLOBAL="${cfg}"
+}
+
 # =============================================================================
 # Source fetching
 # =============================================================================
@@ -215,6 +276,13 @@ fetch_component() {
 #   -trimpath      strips local paths out of the binary
 #   -s -w          drops the symbol table and DWARF (these are user tools,
 #                  not something we ship debug info for)
+#   -buildvcs=false
+#                  no VCS stamping. Go shells out to git to stamp the revision,
+#                  and a git that refuses the checkout makes the *build* fail
+#                  ("error obtaining VCS status: exit status 128"), not just the
+#                  stamp. setup_git_trust() fixes the usual cause, but the stamp
+#                  is worthless here anyway -- these are pinned checkouts, and
+#                  -trimpath already drops build paths.
 build_go_component() {
     local src="$1" binaries="$2" targets="$3" outdir="$4"
 
@@ -233,7 +301,7 @@ build_go_component() {
             GOOS=linux \
             GOARCH="${RAVEN_GOARCH:-amd64}" \
             GOFLAGS="${GOFLAGS:-}" \
-            go build -trimpath -ldflags "-s -w" \
+            go build -trimpath -buildvcs=false -ldflags "-s -w" \
                 -o "${outdir}/${bins[i]}" "${targs[i]:-${targs[0]}}"
         ) || return 1
     done
@@ -365,8 +433,16 @@ component_selected() {
 build_all_components() {
     local go_ok=1 rust_ok=1
 
+    setup_git_trust
+
     have_go || go_ok=0
     have_rust_musl || rust_ok=0
+
+    if (( rust_ok == 1 )) && ! setup_cross_cc; then
+        log_warn "No ${RAVEN_CROSS_PREFIX}-gcc in ${TOOLCHAIN_DIR}/bin"
+        log_warn "  Rust components with C dependencies (rvn, ivaldi, crow, oxigen)"
+        log_warn "  will fail to build. Run stage0 first to produce the cross toolchain."
+    fi
 
     if (( go_ok == 0 )); then
         log_warn "Go toolchain not usable -- Go components will be skipped"

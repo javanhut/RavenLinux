@@ -1524,11 +1524,37 @@ EOF
             fi
         done
         if [[ -n "$src" ]]; then
-            cp -L "$src" "${SYSROOT_DIR}/sbin/${helper}"
-            chmod 4755 "${SYSROOT_DIR}/sbin/${helper}"  # SUID root
-            log_info "  Added PAM helper: ${helper} (SUID)"
+            # The path is compiled into pam_unix.so, not looked up on PATH, so
+            # installing only to /sbin is not enough: Arch's module execs
+            # /usr/bin/unix_chkpwd. When it is missing, pam_unix cannot read
+            # /etc/shadow and every PAM call -- including the account check
+            # autologin still performs -- returns PAM_AUTHINFO_UNAVAIL, i.e.
+            # "Authentication service cannot retrieve authentication info".
+            # login then exits, agetty restarts it, and the console loops.
+            #
+            # Ask the module we just copied where it expects the helper, and
+            # cover the conventional locations too, so this survives building
+            # against a PAM configured with a different --sbindir.
+            local -a helper_dests=(sbin usr/sbin usr/bin bin)
+            local p
+            while read -r p; do
+                [[ -n "${p}" ]] || continue
+                helper_dests+=("${p#/}")
+            done < <(strings "${SYSROOT_DIR}/lib/security/pam_unix.so" 2>/dev/null \
+                     | grep -E "^/.*/${helper}$" | sed "s|/${helper}$||")
+
+            local dest seen=""
+            for dest in "${helper_dests[@]}"; do
+                [[ ",${seen}," == *",${dest},"* ]] && continue
+                seen="${seen},${dest}"
+                mkdir -p "${SYSROOT_DIR}/${dest}"
+                cp -L "$src" "${SYSROOT_DIR}/${dest}/${helper}"
+                chmod 4755 "${SYSROOT_DIR}/${dest}/${helper}"  # SUID root
+            done
+            log_info "  Added PAM helper: ${helper} (SUID) -> ${seen#,}"
         else
-            log_warn "PAM helper ${helper} not found on host - su/sudo may not work for non-root users"
+            log_warn "PAM helper ${helper} not found on host - login/su/sudo will fail with"
+            log_warn "  'Authentication service cannot retrieve authentication info'"
         fi
     done
 
@@ -2492,7 +2518,7 @@ log_level = "info"
 	[[services]]
 	name = "getty-tty1"
 	description = "Getty login on tty1"
-	exec = "/bin/agetty"
+	exec = "/sbin/agetty"
 	args = ["--noclear", "--skip-login", "--login-program", "/bin/raven-shell", "tty1", "linux"]
 	restart = true
 	enabled = true
@@ -2501,7 +2527,7 @@ log_level = "info"
 [[services]]
 	name = "getty-ttyS0"
 	description = "Serial console getty on ttyS0"
-	exec = "/bin/agetty"
+	exec = "/sbin/agetty"
 	args = ["--noclear", "--skip-login", "--login-program", "/bin/raven-shell", "-L", "115200", "ttyS0", "vt102"]
 	restart = true
 	enabled = false

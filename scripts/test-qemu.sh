@@ -112,7 +112,27 @@ else
         log_info "  fix with: sudo usermod -aG kvm $(id -un)   (then log out and back in)"
     else
         log_warn "No /dev/kvm; falling back to software emulation"
-        log_info "  load the module with: sudo modprobe kvm_intel   (or kvm_amd)"
+
+        # Distinguish "the module is not loaded" from "the CPU is not offering
+        # virtualisation at all". They look identical from QEMU but have
+        # completely different fixes, and modprobe cannot help with the second:
+        # the vendor module refuses to load while the flag is absent.
+        if grep -qw vmx /proc/cpuinfo 2>/dev/null; then
+            log_info "  load the module with: sudo modprobe kvm_intel"
+        elif grep -qw svm /proc/cpuinfo 2>/dev/null; then
+            log_info "  load the module with: sudo modprobe kvm_amd"
+        else
+            vendor=""
+            vendor="$(awk -F': ' '/^vendor_id/{print $2; exit}' /proc/cpuinfo 2>/dev/null)"
+            case "${vendor}" in
+                AuthenticAMD) log_info "  This CPU reports no 'svm' flag: AMD-V is disabled in firmware." ;;
+                GenuineIntel) log_info "  This CPU reports no 'vmx' flag: VT-x is disabled in firmware." ;;
+                *)            log_info "  This CPU reports no virtualisation flag." ;;
+            esac
+            log_info "  Enable it in the BIOS/UEFI setup (usually Advanced -> CPU Configuration,"
+            log_info "  called 'SVM Mode' on AMD or 'Intel Virtualization Technology' on Intel),"
+            log_info "  then reboot. No modprobe can work until that flag appears."
+        fi
     fi
 fi
 
