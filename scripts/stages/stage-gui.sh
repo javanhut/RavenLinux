@@ -315,6 +315,31 @@ command -v "${COMPOSITOR}" >/dev/null 2>&1 || {
     exit 1
 }
 
+# The GPU drivers are modules, and raven-init does not wait for one service
+# before starting the next -- so without this the compositor races the udev
+# coldplug, wins, and takes the only DRM device that exists that early:
+# simpledrm, the EFI framebuffer. When the real driver loads seconds later the
+# kernel revokes simpledrm, the compositor's GPU disappears out from under it,
+# and it shuts down -- a blank panel that looks like a render bug and is a
+# start-order bug. raven-udev is idempotent: whoever runs second settles and
+# moves on.
+[ -x /usr/sbin/raven-udev ] && /usr/sbin/raven-udev
+
+# Belt and braces for slow GPUs: if a real card's module is loaded but its DRM
+# node has not appeared yet, give it a moment rather than grabbing simpledrm.
+i=0
+while [ $i -lt 50 ]; do
+    for card in /sys/class/drm/card*; do
+        [ -e "${card}/device/driver" ] || continue
+        case "$(basename "$(readlink "${card}/device/driver")")" in
+            simple-framebuffer|simpledrm) ;;
+            *) break 2 ;;
+        esac
+    done
+    i=$((i + 1))
+    sleep 0.1
+done
+
 # exec, not background-and-wait: with no second process to supervise there is
 # nothing for this script to do afterwards, and execing puts the compositor
 # directly under init -- so its exit status is the session's, and a signal from

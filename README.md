@@ -255,12 +255,11 @@ Two firmware settings decide whether this works at all:
 - **Secure Boot must be off.** RavenBoot is unsigned; with Secure Boot on the
   firmware refuses to load it and you get no error, just the next boot entry.
   The installer checks and warns.
-- **The storage controller must be in AHCI mode**, not RAID or Intel RST. In
-  RAID mode Linux cannot see the NVMe drive at all, and the installer will
-  report that it found no disks.
+- **RAID/Intel RST storage mode is supported** — the kernel carries VMD, so
+  the NVMe drive is visible either way. If the installer reports no disks on
+  an older image, switching the controller to AHCI mode is the workaround.
 
-On an ASUS ROG machine both are under F2 → F7 (Advanced Mode): Secure Boot under
-Security, SATA/NVMe mode under Advanced.
+On an ASUS ROG machine Secure Boot is under F2 → F7 (Advanced Mode) → Security.
 
 The installed system boots to a login prompt on tty1 rather than the live
 image's root shell. If something goes wrong, the RavenBoot menu carries a

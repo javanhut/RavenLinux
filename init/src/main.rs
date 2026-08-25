@@ -164,7 +164,12 @@ fn bring_loopback_up() {
     let flags: libc::c_short = (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
     ifreq[16..18].copy_from_slice(&flags.to_ne_bytes());
 
-    let rc = unsafe { libc::ioctl(sock.as_raw_fd(), libc::SIOCSIFFLAGS, ifreq.as_ptr()) };
+    // The cast is load-bearing: musl declares ioctl's request as c_int where
+    // glibc says c_ulong, and SIOCSIFFLAGS is a c_ulong constant on both. The
+    // value (0x8914) fits either; only the parameter type differs. Written as
+    // `as _` so it compiles against both libcs instead of failing on the one
+    // this binary actually ships against.
+    let rc = unsafe { libc::ioctl(sock.as_raw_fd(), libc::SIOCSIFFLAGS as _, ifreq.as_ptr()) };
     if rc == 0 {
         log::info!("Loopback interface up");
     } else {
