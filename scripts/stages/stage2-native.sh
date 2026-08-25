@@ -111,7 +111,7 @@ copy_system_utils() {
         # Disk utilities
         mount umount mountpoint fdisk parted mkfs.ext4 mkfs.vfat fsck blkid lsblk
         # System info
-        dmesg lspci lsusb free uptime uname hostname hostnamectl
+        dmesg lspci lsusb free uptime uname hostname
         dmidecode lscpu
         sensors smartctl nvme hdparm
         # User management
@@ -142,8 +142,13 @@ copy_system_utils() {
         weston-terminal
         # X11/Xwayland (optional, for legacy app support)
         Xorg Xwayland xinit startx xterm xclock xsetroot twm
-        # Systemd tools (if available, for compatibility)
-        journalctl systemctl udevadm
+        # udevadm only. systemctl/journalctl/hostnamectl are deliberately NOT
+        # here: RavenLinux's PID 1 is raven-init, so those binaries can only
+        # ever print "System has not been booted with systemd as init system
+        # (PID 1)". Shipping a command that cannot work is worse than not
+        # shipping it -- it sends you looking for a broken service manager
+        # instead of at raven-rc, which is the one that does work.
+        udevadm
         # Build tools (needed for source builds when host binaries unavailable)
         make cmake ninja meson gcc g++ cc c++ ld ar as nm objcopy objdump
         strip ranlib pkg-config autoconf automake autoreconf libtool m4
@@ -1793,29 +1798,76 @@ copy_firmware() {
     done
 
     if [[ -z "$host_firmware" ]]; then
-        log_warn "No host firmware directory found; WiFi (e.g. RTL8852BE) may not work"
+        log_warn "No host firmware directory found -- WiFi will not work at all."
+        log_warn "  Install linux-firmware on the build host and rerun stage2."
+        log_warn "  (In the containerized build that host is the image itself; see the Dockerfile.)"
         return 0
     fi
 
     mkdir -p "${SYSROOT_DIR}/lib/firmware"
 
-    local copied_any=0
-    # Common Realtek WiFi firmware locations (coverage across many chipsets).
-    for dir in rtw89 rtw88 rtlwifi rtl_nic rtl_bt; do
-        if [[ -d "${host_firmware}/${dir}" ]]; then
-            mkdir -p "${SYSROOT_DIR}/lib/firmware/${dir}"
-            cp -a "${host_firmware}/${dir}/." "${SYSROOT_DIR}/lib/firmware/${dir}/" 2>/dev/null || true
-            log_info "  Added ${dir} firmware"
-            copied_any=1
-        fi
+    # Every vendor whose driver the kernel builds in. Shipping only Realtek --
+    # as this did -- meant an Intel or Atheros or MediaTek card came up dead on
+    # a kernel that had perfectly good support for it compiled in.
+    local fw_dirs=(
+        intel/iwlwifi          # iwlwifi (the real blobs; see the symlink pass)
+        ath9k_htc ath10k ath11k ath12k
+        mediatek               # mt7921 and friends
+        brcm                   # brcmfmac
+        rtw88 rtw89 rtlwifi    # Realtek WiFi
+        rtl_nic rtl_bt         # Realtek ethernet + bluetooth
+        mrvl                   # Marvell
+    )
+
+    # Arch ships firmware zstd-compressed, and this kernel is built with
+    # CONFIG_FW_LOADER_COMPRESS unset, so a .zst blob is a blob the kernel
+    # cannot read. Decompressing on the way in works regardless of what the
+    # running kernel supports, and squashfs compresses it all back down.
+    local have_zstd=0
+    command -v zstd &>/dev/null && have_zstd=1
+
+    # Copies one file, decompressing and dereferencing as needed.
+    _install_fw() {
+        local src="$1" dest="$2"
+        mkdir -p "$(dirname "$dest")"
+        case "$src" in
+            *.zst)
+                if (( have_zstd )); then
+                    zstd -dqf "$src" -o "${dest%.zst}" 2>/dev/null || return 1
+                else
+                    cp -aL "$src" "$dest" 2>/dev/null || return 1
+                fi
+                ;;
+            *)  cp -aL "$src" "$dest" 2>/dev/null || return 1 ;;
+        esac
+        return 0
+    }
+
+    local copied=0 dir f rel
+    for dir in "${fw_dirs[@]}"; do
+        [[ -d "${host_firmware}/${dir}" ]] || continue
+        while IFS= read -r f; do
+            rel="${f#${host_firmware}/}"
+            _install_fw "$f" "${SYSROOT_DIR}/lib/firmware/${rel}" && copied=$((copied + 1))
+        done < <(find "${host_firmware}/${dir}" -type f -o -type l 2>/dev/null)
+        log_info "  Added ${dir} firmware"
     done
 
-    if [[ "${copied_any}" -eq 0 ]]; then
-        log_warn "No Realtek WiFi firmware found under ${host_firmware}; install linux-firmware on the host and rerun stage2"
+    # iwlwifi asks for "iwlwifi-<name>.ucode" at the firmware root. Arch keeps
+    # the real files under intel/iwlwifi and leaves top-level symlinks, which a
+    # directory-only sweep never sees -- so pick them up by name and resolve
+    # them into real files where the driver actually looks.
+    while IFS= read -r f; do
+        rel="$(basename "$f")"
+        _install_fw "$f" "${SYSROOT_DIR}/lib/firmware/${rel}" && copied=$((copied + 1))
+    done < <(find "${host_firmware}" -maxdepth 1 \( -name 'iwlwifi-*' -o -name 'regulatory.db*' \) 2>/dev/null)
+
+    if (( copied == 0 )); then
+        log_warn "Found ${host_firmware} but copied no WiFi firmware; WiFi will not work"
         return 0
     fi
 
-    log_success "Firmware installed"
+    log_success "Firmware installed (${copied} files, $(du -sh "${SYSROOT_DIR}/lib/firmware" 2>/dev/null | cut -f1))"
 }
 
 # =============================================================================
@@ -2424,19 +2476,25 @@ create_configs() {
     fi
 
     # /etc/os-release
+    #
+    # The heredoc is quoted, so ${RAVEN_VERSION} cannot expand inside it and the
+    # version has to be substituted afterwards. It was previously three
+    # hardcoded copies of the number, which meant bumping RAVEN_VERSION left the
+    # shipped system claiming the old release.
     cat > "${SYSROOT_DIR}/etc/os-release" << 'EOF'
 NAME="Raven Linux"
-PRETTY_NAME="Raven Linux 2025.12"
+PRETTY_NAME="Raven Linux @RAVEN_VERSION@"
 ID=raven
 ID_LIKE=arch
 BUILD_ID=rolling
-VERSION_ID=2025.12
-VERSION="2025.12 (Rolling)"
+VERSION_ID=@RAVEN_VERSION@
+VERSION="@RAVEN_VERSION@ (Rolling)"
 ANSI_COLOR="38;2;23;147;209"
 HOME_URL="https://github.com/javanhut/RavenLinux"
 DOCUMENTATION_URL="https://github.com/javanhut/RavenLinux"
 LOGO=raven-logo
 EOF
+    sed -i "s/@RAVEN_VERSION@/${RAVEN_VERSION:-2026.08}/g" "${SYSROOT_DIR}/etc/os-release"
 
     # Create uname wrapper to show raven-linux
     # Remove existing symlink first (stage1 creates /bin/uname -> coreutils)

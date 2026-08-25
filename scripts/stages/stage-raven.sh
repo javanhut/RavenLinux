@@ -430,6 +430,51 @@ component_selected() {
     return 0
 }
 
+# =============================================================================
+# raven-init (local crate, not a fetched component)
+# =============================================================================
+# The distro's PID 1 and its control tool live in this repo, not on GitHub, so
+# they sit outside RAVEN_COMPONENTS -- and consequently nothing built them.
+# raven-rc is what `systemctl` is not: the thing that actually talks to
+# RavenLinux's init.
+#
+# raven-rc dispatches on argv[0], so poweroff/reboot/halt/shutdown are symlinks
+# to it rather than four separate binaries.
+build_raven_init() {
+    local src="${PROJECT_ROOT}/init"
+
+    [[ -f "${src}/Cargo.toml" ]] || {
+        log_warn "No init crate at ${src}, skipping raven-init"
+        return 0
+    }
+
+    log_step "raven-init raven-rc (RavenLinux init and its control tool)"
+
+    local outdir="${RAVEN_STAGE_DIR}"
+    mkdir -p "${outdir}"
+
+    if ! build_rust_component "${src}" "raven-init,raven-rc" "." "${outdir}"; then
+        log_warn "  raven-init: build failed, skipping"
+        RAVEN_FAILED+=(raven-init raven-rc)
+        return 0
+    fi
+
+    # init belongs in /sbin; the control tool is a user-facing command.
+    mkdir -p "${SYSROOT_DIR}/sbin" "${SYSROOT_DIR}/bin"
+    install -m 0755 "${outdir}/raven-init" "${SYSROOT_DIR}/sbin/raven-init"
+    install -m 0755 "${outdir}/raven-rc"   "${SYSROOT_DIR}/bin/raven-rc"
+
+    # The poweroff/reboot/halt/shutdown names are deliberately NOT symlinked
+    # here. raven-rc asks init to shut down by writing /run/raven-init.cmd, and
+    # on the live ISO that write *succeeds* and is read by nobody -- PID 1 there
+    # is the live-init shell script, not raven-init. stage4 owns those four
+    # names and installs a dispatcher that checks PID 1 first.
+
+    RAVEN_BUILT+=(raven-init raven-rc)
+    log_success "  raven-init installed ($(du -h "${outdir}/raven-init" | cut -f1))"
+    log_success "  raven-rc installed ($(du -h "${outdir}/raven-rc" | cut -f1))"
+}
+
 build_all_components() {
     local go_ok=1 rust_ok=1
 
@@ -476,6 +521,8 @@ build_all_components() {
 
         build_component "${spec}"
     done
+
+    build_raven_init
 }
 
 # =============================================================================

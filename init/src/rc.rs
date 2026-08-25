@@ -1,15 +1,36 @@
 //! raven-rc - Control utility for RavenInit
 //!
 //! Commands:
-//!   poweroff  - Shut down the system
-//!   reboot    - Reboot the system
-//!   halt      - Halt the system
-//!   status    - Show init status
+//!   list             - List every service and its state
+//!   status [NAME]    - System status, or one service in detail
+//!   start NAME       - Start a stopped service
+//!   stop NAME        - Stop a running service, and keep it stopped
+//!   restart NAME     - Stop then start a service
+//!   enable NAME      - Start this service at boot (persists to init.toml)
+//!   disable NAME     - Do not start it at boot (persists to init.toml)
+//!   poweroff         - Shut down the system
+//!   reboot           - Reboot the system
+//!   halt             - Halt the system
+//!
+//! Service commands go over the control socket at /run/raven-init.sock and
+//! need raven-init to be PID 1. Shutdown commands fall back to the command
+//! file and then to the reboot syscall, so they still work when it is not.
 
 use std::env;
 use std::fs;
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process;
+use std::time::Duration;
+
+/// Where raven-init listens. Must match control::SOCKET_PATH.
+const SOCKET_PATH: &str = "/run/raven-init.sock";
+
+/// Bound on how long we wait for init. Short: raven-rc is interactive, and an
+/// init too busy to answer in a second is a fact worth reporting rather than
+/// hiding behind a hang.
+const TIMEOUT: Duration = Duration::from_secs(1);
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -47,10 +68,29 @@ fn main() {
         }
     };
 
+    // Everything after the verb, for commands that take a service name.
+    let operand = if program == "raven-rc" {
+        args.get(2).map(|s| s.as_str())
+    } else {
+        args.get(1).map(|s| s.as_str())
+    };
+
     match command {
         "poweroff" | "halt" => do_poweroff(),
         "reboot" => do_reboot(),
-        "status" => do_status(),
+        "status" => do_status(operand),
+        "list" => do_ask("list"),
+        "start" | "stop" | "restart" | "enable" | "disable" => match operand {
+            Some(name) => do_ask(&format!("{} {}", command, name)),
+            None => {
+                eprintln!("{}: needs a service name", command);
+                eprintln!(
+                    "try: {} {} <service>   (or `{} list`)",
+                    program, command, program
+                );
+                process::exit(1);
+            }
+        },
         "help" | "--help" | "-h" => {
             print_usage(program);
             process::exit(0);
@@ -63,14 +103,67 @@ fn main() {
     }
 }
 
+/// Send one request to init and return its reply.
+fn ask(request: &str) -> Result<String, String> {
+    let mut stream = UnixStream::connect(SOCKET_PATH).map_err(|e| {
+        format!(
+            "cannot reach raven-init on {}: {}\n\
+             (is raven-init PID 1? on the live ISO it is not -- \
+             see /proc/1/comm)",
+            SOCKET_PATH, e
+        )
+    })?;
+
+    stream.set_read_timeout(Some(TIMEOUT)).ok();
+    stream.set_write_timeout(Some(TIMEOUT)).ok();
+
+    writeln!(stream, "{}", request).map_err(|e| format!("cannot send to raven-init: {}", e))?;
+    stream.flush().ok();
+    // Tell init we are done writing, so it stops waiting for more request.
+    stream.shutdown(std::net::Shutdown::Write).ok();
+
+    let mut reply = String::new();
+    stream
+        .read_to_string(&mut reply)
+        .map_err(|e| format!("cannot read from raven-init: {}", e))?;
+
+    Ok(reply)
+}
+
+/// Send a request, print the reply, and exit non-zero if init reported an error.
+fn do_ask(request: &str) {
+    match ask(request) {
+        Ok(reply) => {
+            print!("{}", reply);
+            // init prefixes failures with "error:", which is what makes this
+            // usable from a script.
+            if reply.lines().any(|l| l.starts_with("error:")) {
+                process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            process::exit(1);
+        }
+    }
+}
+
 fn print_usage(program: &str) {
-    eprintln!("Usage: {} <command>", program);
+    eprintln!("Usage: {} <command> [SERVICE]", program);
     eprintln!();
-    eprintln!("Commands:");
-    eprintln!("  poweroff  - Power off the system");
-    eprintln!("  reboot    - Reboot the system");
-    eprintln!("  halt      - Halt the system");
-    eprintln!("  status    - Show system status");
+    eprintln!("Services:");
+    eprintln!("  list             - List every service and its state");
+    eprintln!("  status [NAME]    - System status, or one service in detail");
+    eprintln!("  start NAME       - Start a stopped service");
+    eprintln!("  stop NAME        - Stop a service, and keep it stopped");
+    eprintln!("  restart NAME     - Stop then start a service");
+    eprintln!("  enable NAME      - Start at boot      (writes init.toml)");
+    eprintln!("  disable NAME     - Do not start at boot (writes init.toml)");
+    eprintln!();
+    eprintln!("System:");
+    eprintln!("  poweroff         - Power off the system");
+    eprintln!("  reboot           - Reboot the system");
+    eprintln!("  halt             - Halt the system");
     eprintln!();
     eprintln!("This utility can also be invoked as:");
     eprintln!("  poweroff, reboot, halt, shutdown");
@@ -87,7 +180,23 @@ fn do_reboot() {
 }
 
 fn send_command(cmd: &str) {
+    // Preferred path: the control socket, which init answers synchronously so
+    // we learn whether the request actually landed.
+    if let Ok(reply) = ask(cmd) {
+        print!("{}", reply);
+        return;
+    }
+
     let cmd_path = "/run/raven-init.cmd";
+
+    // The command file is only meaningful if raven-init is the thing reading
+    // it. On the live ISO PID 1 is a shell script, and writing here *succeeds*
+    // while nothing ever acts on it -- a silent no-op is the worst outcome for
+    // a shutdown command, so go straight to the syscall instead.
+    if !init_is_raven() {
+        eprintln!("raven-init is not PID 1; asking the kernel directly.");
+        direct_reboot(cmd);
+    }
 
     // Write command to control file
     if let Err(e) = fs::write(cmd_path, cmd) {
@@ -95,31 +204,70 @@ fn send_command(cmd: &str) {
 
         // Fall back to direct syscall if we can't communicate with init
         eprintln!("Attempting direct system call...");
-
-        use nix::sys::reboot::{reboot, RebootMode};
-
-        // Sync filesystems first
-        unsafe {
-            libc::sync();
-        }
-
-        let mode = if cmd == "reboot" {
-            RebootMode::RB_AUTOBOOT
-        } else {
-            RebootMode::RB_POWER_OFF
-        };
-
-        if let Err(e) = reboot(mode) {
-            eprintln!("Reboot syscall failed: {}", e);
-            eprintln!("You may need root privileges.");
-            process::exit(1);
-        }
+        direct_reboot(cmd);
     }
 
     println!("Command sent to init.");
 }
 
-fn do_status() {
+/// True when raven-init is PID 1.
+fn init_is_raven() -> bool {
+    fs::read_to_string("/proc/1/comm")
+        .map(|c| c.trim() == "raven-init")
+        .unwrap_or(false)
+}
+
+/// Ask the kernel to reboot or power off, with no init involved.
+fn direct_reboot(cmd: &str) -> ! {
+    use nix::sys::reboot::{reboot, RebootMode};
+
+    // Sync filesystems first
+    unsafe {
+        libc::sync();
+    }
+
+    let mode = if cmd == "reboot" {
+        RebootMode::RB_AUTOBOOT
+    } else {
+        RebootMode::RB_POWER_OFF
+    };
+
+    match reboot(mode) {
+        Ok(_) => process::exit(0),
+        Err(e) => {
+            eprintln!("Reboot syscall failed: {}", e);
+            eprintln!("You may need root privileges.");
+            process::exit(1);
+        }
+    }
+}
+
+fn do_status(target: Option<&str>) {
+    // `status <service>` is a question for init, not for /proc.
+    if let Some(name) = target {
+        do_ask(&format!("status {}", name));
+        return;
+    }
+
+    do_system_status();
+
+    // The service table is the part only init can answer. Absent init, say so
+    // once and plainly rather than printing nothing and looking healthy.
+    println!();
+    match ask("list") {
+        Ok(reply) => {
+            println!("Services:");
+            for line in reply.lines() {
+                println!("  {}", line);
+            }
+        }
+        Err(e) => {
+            println!("Services: unavailable -- {}", e);
+        }
+    }
+}
+
+fn do_system_status() {
     println!("RavenLinux Init Status");
     println!("======================");
     println!();

@@ -19,6 +19,10 @@ env_logger = "0.11"
 
 # Configuration parsing
 toml = "0.8"
+# Format-preserving TOML, for rewriting `enabled` in init.toml without
+# flattening the comments and layout someone put there by hand. Already in the
+# tree underneath toml 0.8, so this costs no new dependencies.
+toml_edit = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 
 # Error handling

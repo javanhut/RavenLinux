@@ -41,7 +41,7 @@ RAVEN_PACKAGES="${RAVEN_ROOT}/packages"
 RAVEN_CONFIGS="${RAVEN_ROOT}/configs"
 
 # Build configuration
-export RAVEN_VERSION="2025.12"
+export RAVEN_VERSION="2026.08"
 export RAVEN_ARCH="${RAVEN_ARCH:-x86_64}"
 export RAVEN_TARGET="${RAVEN_ARCH}-raven-linux-musl"
 export RAVEN_JOBS="${RAVEN_JOBS:-$(nproc)}"

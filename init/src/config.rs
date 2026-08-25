@@ -17,6 +17,16 @@ pub struct InitConfig {
     /// Mount points
     #[serde(default)]
     pub mounts: Vec<MountConfig>,
+
+    /// The file this configuration was read from.
+    ///
+    /// Not part of the file format -- `enable`/`disable` need somewhere to
+    /// write back to, and "whichever path load_config happened to find" is
+    /// knowledge that was previously thrown away the moment parsing succeeded.
+    /// `None` means the built-in defaults are in use and there is no file to
+    /// edit.
+    #[serde(skip)]
+    pub source_path: Option<std::path::PathBuf>,
 }
 
 impl Default for InitConfig {
@@ -48,6 +58,7 @@ impl Default for InitConfig {
                 },
             ],
             mounts: Vec::new(),
+            source_path: None,
         }
     }
 }

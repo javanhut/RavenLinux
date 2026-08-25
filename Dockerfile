@@ -73,6 +73,18 @@ RUN pacman -Syu --noconfirm --needed \
         oniguruma \
         # Misc runtime utilities used by the build/test scripts
         kexec-tools inetutils \
+        # Device firmware. The kernel builds iwlwifi, ath9k/10k/11k/12k,
+        # rtw88/89, mt7921 and brcmfmac in (=y), but a wireless driver without
+        # its blob just fails to probe and the interface never appears -- which
+        # looks exactly like a missing driver. stage2's copy_firmware() takes
+        # these from the build host, and without this package that host is this
+        # container, which had no /lib/firmware at all.
+        linux-firmware \
+        # regulatory.db + its signature. The kernel is built with
+        # CFG80211_REQUIRE_SIGNED_REGDB, so without these cfg80211 falls back to
+        # the built-in world domain: the card associates, but loses channels and
+        # transmit power. Ships separately from linux-firmware on Arch.
+        wireless-regdb \
         # Go toolchain -- the Raven stage builds ravenshell, poxy and imlazy
         # with CGO_ENABLED=0, so no Go cgo headers are needed.
         go \

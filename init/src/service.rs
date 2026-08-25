@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use nix::fcntl::{open, OFlag};
 use nix::sys::signal::{self, Signal};
 use nix::sys::stat::Mode;
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{self, dup2, execvp, fork, setsid, ForkResult, Pid};
 
 use crate::config::ServiceConfig;
@@ -49,6 +50,13 @@ pub struct Service {
     restart_count: u32,
     /// Last restart time
     last_restart: Option<Instant>,
+    /// Set when an operator stopped this service through raven-rc.
+    ///
+    /// Without this, `stop` is a no-op with extra steps: the supervisor sees an
+    /// `Exited` service whose config says `restart = true` and starts it
+    /// straight back up. Auto-restart is for services that *crash*, not for
+    /// ones that were told to stop.
+    manually_stopped: bool,
 }
 
 impl Service {
@@ -63,6 +71,7 @@ impl Service {
             exit_signal: None,
             restart_count: 0,
             last_restart: None,
+            manually_stopped: false,
         };
 
         service.do_start()?;
@@ -125,8 +134,7 @@ impl Service {
         args_cstr.push(exec_cstr.clone());
         for arg in &self.config.args {
             args_cstr.push(
-                CString::new(arg.as_str())
-                    .with_context(|| format!("Invalid argument: {}", arg))?,
+                CString::new(arg.as_str()).with_context(|| format!("Invalid argument: {}", arg))?,
             );
         }
 
@@ -242,6 +250,10 @@ impl Service {
 
     /// Check if service should be restarted
     pub fn should_restart(&self) -> bool {
+        if self.manually_stopped {
+            return false;
+        }
+
         if !self.config.restart {
             return false;
         }
@@ -290,6 +302,7 @@ impl Service {
 
     /// Restart the service
     pub fn restart(&mut self) -> Result<()> {
+        self.manually_stopped = false;
         self.restart_count += 1;
         self.last_restart = Some(Instant::now());
 
@@ -374,11 +387,157 @@ impl Service {
     }
 
     /// Stop the service (SIGTERM)
+    ///
+    /// Does not mark the service stopped by operator intent -- shutdown uses
+    /// this too, and there the distinction is meaningless. Use
+    /// [`Service::stop_by_request`] for an operator-initiated stop.
     pub fn stop(&mut self) {
         if let Some(pid) = self.pid {
             log::debug!("Sending SIGTERM to {} (PID {})", self.config.name, pid);
             let _ = signal::kill(pid, Signal::SIGTERM);
         }
+    }
+
+    /// Stop the service on an operator's request, and keep it stopped.
+    ///
+    /// Runs the configured `stop_exec` first so a daemon can leave cleanly --
+    /// the same courtesy shutdown extends, and the reason cawd can deauthenticate
+    /// from its AP instead of vanishing mid-association.
+    pub fn stop_by_request(&mut self) {
+        self.manually_stopped = true;
+
+        if self.has_stop_exec() {
+            self.run_stop_exec();
+        }
+
+        self.stop();
+    }
+
+    /// Bring `state` up to date with the child process, without blocking.
+    ///
+    /// The main loop reaps every 100ms. A control request arriving inside that
+    /// window would otherwise see a service as running when its process has
+    /// already gone -- `start` immediately after `stop` being the obvious case,
+    /// where the honest answer is "starting it" and the stale one is "already
+    /// running".
+    pub fn poll_exit(&mut self) {
+        let Some(pid) = self.pid else {
+            return;
+        };
+
+        match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(_, status)) => self.mark_exited(status),
+            Ok(WaitStatus::Signaled(_, sig, _)) => self.mark_signaled(sig),
+            Ok(WaitStatus::StillAlive) => {}
+            // ECHILD: the main loop's reaper got there first.
+            Err(_) => {
+                self.state = ServiceState::Stopped;
+                self.pid = None;
+                self.child = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Wait for a stopping service's process to actually leave.
+    ///
+    /// `stop_by_request` only *sends* SIGTERM. Restart has to see the process
+    /// go before it starts a replacement: otherwise `is_running()` is still
+    /// true a microsecond later, `start_by_request` returns early, and the
+    /// restart quietly becomes a stop that never comes back.
+    ///
+    /// Bounded, and SIGKILLs past the deadline, because this runs on PID 1's
+    /// thread -- no service is worth hanging the supervisor over.
+    pub fn wait_for_exit(&mut self, timeout: Duration) {
+        let Some(pid) = self.pid else {
+            return;
+        };
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::Exited(_, status)) => {
+                    self.mark_exited(status);
+                    return;
+                }
+                Ok(WaitStatus::Signaled(_, sig, _)) => {
+                    self.mark_signaled(sig);
+                    return;
+                }
+                Ok(WaitStatus::StillAlive) => {
+                    if Instant::now() >= deadline {
+                        log::warn!(
+                            "{} did not exit within {:?}, sending SIGKILL",
+                            self.config.name,
+                            timeout
+                        );
+                        let _ = signal::kill(pid, Signal::SIGKILL);
+                        let _ = waitpid(pid, None);
+                        self.state = ServiceState::Stopped;
+                        self.pid = None;
+                        self.child = None;
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                // ECHILD: the main loop's reaper got there first.
+                Err(_) => {
+                    self.state = ServiceState::Stopped;
+                    self.pid = None;
+                    self.child = None;
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Start a service that is not currently running.
+    ///
+    /// Clears the operator-stopped flag and the restart budget, so a service
+    /// that previously tripped the restart rate limit gets a clean slate rather
+    /// than inheriting a refusal to run.
+    pub fn start_by_request(&mut self) -> Result<()> {
+        if self.is_running() {
+            return Ok(());
+        }
+
+        self.manually_stopped = false;
+        self.restart_count = 0;
+        self.last_restart = None;
+        self.state = ServiceState::Stopped;
+
+        self.do_start()
+    }
+
+    /// True while the service has a live process.
+    pub fn is_running(&self) -> bool {
+        self.pid.is_some() && self.state == ServiceState::Running
+    }
+
+    /// True when an operator stopped this service and it should stay down.
+    pub fn is_manually_stopped(&self) -> bool {
+        self.manually_stopped
+    }
+
+    /// How many times the supervisor has restarted this service.
+    pub fn restart_count(&self) -> u32 {
+        self.restart_count
+    }
+
+    /// Exit status of the last run, when it exited normally.
+    pub fn exit_status(&self) -> Option<i32> {
+        self.exit_status
+    }
+
+    /// Human-readable description from the service's config.
+    pub fn description(&self) -> &str {
+        &self.config.description
+    }
+
+    /// Whether the config asks for automatic restart on exit.
+    pub fn restart_configured(&self) -> bool {
+        self.config.restart
     }
 
     /// Kill the service (SIGKILL)

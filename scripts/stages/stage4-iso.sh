@@ -34,7 +34,7 @@ ESP_TYPE_GUID="C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 LOGS_DIR="${LOGS_DIR:-${BUILD_DIR}/logs}"
 
 # Version info
-RAVEN_VERSION="${RAVEN_VERSION:-2025.12}"
+RAVEN_VERSION="${RAVEN_VERSION:-2026.08}"
 RAVEN_ARCH="${RAVEN_ARCH:-x86_64}"
 ISO_LABEL="RAVEN_LIVE"
 ISO_OUTPUT="${PROJECT_ROOT}/raven-${RAVEN_VERSION}-${RAVEN_ARCH}.iso"
@@ -391,7 +391,7 @@ cat << 'BANNER'
 BANNER
 printf '\033[0m'
 printf '\033[1;33m'
-echo "                                       Version 2025.12"
+echo "                                       Version @RAVEN_VERSION@"
 printf '\033[0m'
 echo ""
 printf '\033[1;37m'
@@ -449,11 +449,35 @@ start_wayland_session() {
 
     # seatd owns the seat; libseat talks to it rather than to logind, which
     # does not exist here. Started in the background because it is a daemon.
-    if [ -x /bin/seatd ] || [ -x /usr/bin/seatd ]; then
+    #
+    # Looked up on PATH rather than probed at two fixed paths: seatd installs
+    # to /sbin here, so testing only /bin and /usr/bin meant the daemon was
+    # silently never started. libseat then found no socket to connect to and
+    # huginn died with "Failed to open session: No such file or directory",
+    # which reads like a seat/permissions problem rather than a missing daemon.
+    seatd_bin="$(command -v seatd 2>/dev/null)"
+    if [ -n "$seatd_bin" ]; then
         if ! pgrep -x seatd >/dev/null 2>&1; then
-            seatd -g video >/dev/null 2>&1 &
-            sleep 1
+            "$seatd_bin" -g video >/dev/null 2>&1 &
+
+            # Wait for the socket rather than guessing at a fixed sleep: the
+            # socket appearing is the thing the compositor actually needs.
+            i=0
+            while [ ! -S /run/seatd.sock ] && [ "$i" -lt 50 ]; do
+                i=$((i + 1))
+                sleep 0.1
+            done
         fi
+
+        if [ -S /run/seatd.sock ]; then
+            echo "seatd is up on /run/seatd.sock"
+        else
+            echo "warning: seatd started but /run/seatd.sock never appeared;"
+            echo "         the compositor will not be able to acquire a seat."
+        fi
+    else
+        echo "warning: seatd not found on PATH -- the compositor cannot acquire"
+        echo "         a seat and the Wayland session will fall back to a console."
     fi
 
     export XDG_RUNTIME_DIR=/run/user/0
@@ -563,6 +587,13 @@ start_caw_daemon
 start_wayland_session
 start_shell_loop
 INIT
+
+    # The heredoc above is quoted -- it has to be, or every $var in the init
+    # script would expand at build time -- so the banner's version is a
+    # placeholder filled in here. It used to be the literal number, which drifted
+    # the moment RAVEN_VERSION changed anywhere else.
+    sed -i "s/@RAVEN_VERSION@/${RAVEN_VERSION}/g" "${SYSROOT_DIR}/init"
+
     chmod +x "${SYSROOT_DIR}/init"
 
     # Also create /sbin/init symlink
@@ -1124,20 +1155,30 @@ prepare_bios_boot() {
 install_shutdown_commands() {
     log_step "Installing shutdown commands..."
 
+    # One dispatcher, correct in both worlds:
+    #
+    #   installed system -- PID 1 is raven-init, so hand off to raven-rc and let
+    #                       init stop services and unmount cleanly.
+    #   live ISO         -- PID 1 is the live-init shell script. raven-rc would
+    #                       write /run/raven-init.cmd, succeed, and be read by
+    #                       nobody, so the command would silently do nothing.
+    #                       Ask the kernel directly instead (CONFIG_MAGIC_SYSRQ).
+    #
+    # Checking /proc/1/comm at runtime rather than guessing at build time is
+    # what lets the same image do the right thing once installed to disk.
     local name key
-    for spec in reboot:b poweroff:o halt:o; do
+    for spec in reboot:b poweroff:o halt:o shutdown:o; do
         name="${spec%%:*}"
         key="${spec##*:}"
 
-        # Never shadow a real implementation, if one ever gets built.
-        if [[ -e "${SYSROOT_DIR}/bin/${name}" ]]; then
-            log_info "  ${name} already present, leaving it alone"
-            continue
-        fi
-
         cat > "${SYSROOT_DIR}/bin/${name}" << EOF
 #!/bin/sh
-# Ask the kernel directly: raven-init is PID 1 here, not systemd.
+# RavenLinux ${name}. There is no systemd here; raven-init is PID 1 on an
+# installed system and this script is PID 1 on the live image.
+if [ -x /bin/raven-rc ] && grep -qs raven-init /proc/1/comm 2>/dev/null; then
+    exec /bin/raven-rc ${name}
+fi
+
 sync
 [ -w /proc/sys/kernel/sysrq ] && echo 1 > /proc/sys/kernel/sysrq
 echo ${key} > /proc/sysrq-trigger
@@ -1145,10 +1186,9 @@ EOF
         chmod 0755 "${SYSROOT_DIR}/bin/${name}"
         mkdir -p "${SYSROOT_DIR}/usr/bin"
         ln -sf "../../bin/${name}" "${SYSROOT_DIR}/usr/bin/${name}" 2>/dev/null || true
-        log_info "  Installed ${name}"
     done
 
-    log_success "Shutdown commands installed"
+    log_success "Shutdown commands installed (reboot, poweroff, halt, shutdown)"
 }
 
 # =============================================================================

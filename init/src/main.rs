@@ -24,6 +24,7 @@ use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{self, Pid};
 
 mod config;
+mod control;
 mod service;
 
 use config::{InitConfig, ServiceConfig};
@@ -90,7 +91,7 @@ fn run_init() -> Result<()> {
 
     // Phase 6: Main loop - reap zombies and handle signals
     log::info!("Phase 6: Entering main loop");
-    main_loop(&mut services, &config)?;
+    main_loop(&mut services, &mut config)?;
 
     // Phase 7: Shutdown
     log::info!("Phase 7: Shutting down");
@@ -346,7 +347,8 @@ fn setup_environment() -> Result<()> {
     std::env::set_var("TERM", "linux");
 
     // Ensure XDG_RUNTIME_DIR exists for Wayland/DBus consumers.
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/0".to_string());
+    let runtime_dir =
+        std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/0".to_string());
     std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
     fs::create_dir_all(&runtime_dir).ok();
     let _ = fs::set_permissions(&runtime_dir, fs::Permissions::from_mode(0o700));
@@ -393,8 +395,10 @@ fn load_config() -> Result<InitConfig> {
     for path in &config_paths {
         if Path::new(path).exists() {
             if let Ok(content) = fs::read_to_string(path) {
-                if let Ok(config) = toml::from_str(&content) {
+                if let Ok(mut config) = toml::from_str::<InitConfig>(&content) {
                     log::info!("Loaded configuration from {}", path);
+                    // Remembered so enable/disable know what to rewrite.
+                    config.source_path = Some(std::path::PathBuf::from(path));
                     return Ok(config);
                 }
             }
@@ -514,7 +518,20 @@ fn print_welcome() {
     println!();
 }
 
-fn main_loop(services: &mut HashMap<String, Service>, config: &InitConfig) -> Result<()> {
+fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -> Result<()> {
+    // The control socket is how raven-rc asks about services and starts or
+    // stops them. A failure to bind it is not fatal: PID 1 supervising
+    // services matters more than PID 1 being controllable, and the
+    // /run/raven-init.cmd fallback below still works.
+    let control = match control::listen() {
+        Ok(listener) => Some(listener),
+        Err(e) => {
+            log::warn!("Control socket unavailable: {}", e);
+            log::warn!("  raven-rc service commands will not work this boot");
+            None
+        }
+    };
+
     log::info!("Entering main loop");
 
     loop {
@@ -533,7 +550,23 @@ fn main_loop(services: &mut HashMap<String, Service>, config: &InitConfig) -> Re
         // Sleep briefly to avoid busy-waiting
         std::thread::sleep(Duration::from_millis(100));
 
-        // Check for signals via /run/raven-init.cmd
+        // Serve any waiting raven-rc clients.
+        if let Some(ref listener) = control {
+            match control::poll(listener, services, config) {
+                control::Action::None => {}
+                control::Action::Poweroff => {
+                    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+                    REBOOT_REQUESTED.store(false, Ordering::SeqCst);
+                }
+                control::Action::Reboot => {
+                    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+                    REBOOT_REQUESTED.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+
+        // Kept alongside the socket: one word in a file needs no client at all,
+        // which is worth having when the socket is what is broken.
         check_command_file()?;
     }
 
@@ -566,9 +599,19 @@ fn reap_zombies(services: &mut HashMap<String, Service>) {
     }
 }
 
-fn check_services(services: &mut HashMap<String, Service>, config: &InitConfig) {
+fn check_services(services: &mut HashMap<String, Service>, _config: &InitConfig) {
     for svc in services.values_mut() {
-        if svc.state() == ServiceState::Exited && svc.should_restart() {
+        // Signaled counts as died, not just Exited. A service killed by
+        // SIGSEGV, SIGKILL or the OOM killer is the case `restart = true`
+        // exists for -- checking only Exited meant a clean exit was restarted
+        // while an actual crash was left lying where it fell.
+        //
+        // Safe against the operator path: `stop` marks the service manually
+        // stopped, and should_restart() refuses those. Shutdown never reaches
+        // here, because the loop breaks on SHUTDOWN_REQUESTED first.
+        let died = matches!(svc.state(), ServiceState::Exited | ServiceState::Signaled);
+
+        if died && svc.should_restart() {
             log::info!("Restarting service: {}", svc.name());
             if let Err(e) = svc.restart() {
                 log::error!("Failed to restart {}: {}", svc.name(), e);
