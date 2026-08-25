@@ -1392,6 +1392,61 @@ install_installer() {
 }
 
 # =============================================================================
+# Is the sysroot actually complete?
+# =============================================================================
+# stage2 begins by wiping the sysroot, and the Raven and GUI layers are added
+# by later stages. So `make stage2 && make iso` -- a sequence that looks
+# perfectly reasonable -- silently produces an ISO with no shell, no package
+# manager and no desktop, and every stage reports success along the way.
+#
+# stage4 is the last place that can notice. It does not refuse to build: a
+# console-only image is a legitimate thing to want. It refuses to be quiet
+# about it.
+check_sysroot_layers() {
+    local -a raven_missing=() gui_missing=()
+    local b
+
+    for b in ravenshell rvn caw cawd crow ivaldi oxigen poxy raven-init raven-rc; do
+        find "${SYSROOT_DIR}" -name "${b}" -type f -print -quit 2>/dev/null | grep -q . \
+            || raven_missing+=("${b}")
+    done
+
+    for b in huginn muninn raven-wayland-session; do
+        find "${SYSROOT_DIR}" -name "${b}" -type f -print -quit 2>/dev/null | grep -q . \
+            || gui_missing+=("${b}")
+    done
+
+    if (( ${#raven_missing[@]} == 0 && ${#gui_missing[@]} == 0 )); then
+        log_success "Sysroot carries the Raven and GUI layers"
+        return 0
+    fi
+
+    echo ""
+    log_warn "=============================================================="
+    log_warn "  This ISO is missing whole layers of the system."
+    log_warn "=============================================================="
+
+    if (( ${#raven_missing[@]} > 0 )); then
+        log_warn "  Raven layer absent: ${raven_missing[*]}"
+        log_warn "    restore with: make raven"
+    fi
+
+    if (( ${#gui_missing[@]} > 0 )); then
+        log_warn "  GUI layer absent:   ${gui_missing[*]}"
+        log_warn "    restore with: make gui"
+        log_warn "    Without it the compositor, the desktop shell and"
+        log_warn "    libinput's library closure are all missing, so a"
+        log_warn "    graphical boot has no input and nothing to draw."
+    fi
+
+    log_warn ""
+    log_warn "  stage2 resets the sysroot, so anything built after it has to"
+    log_warn "  be rebuilt too. 'make build' runs every layer in order."
+    log_warn "=============================================================="
+    echo ""
+}
+
+# =============================================================================
 # Generate ISO
 # =============================================================================
 generate_iso() {
@@ -1507,6 +1562,7 @@ main() {
     mkdir -p "${LOGS_DIR}"
 
     check_deps
+    check_sysroot_layers
     setup_iso_structure
     create_live_init
     install_shutdown_commands

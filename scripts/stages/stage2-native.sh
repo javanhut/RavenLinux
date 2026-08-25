@@ -3586,6 +3586,15 @@ main() {
         rm -rf "${SYSROOT_DIR:?}/"* 2>/dev/null || true
         shopt -u dotglob nullglob
 
+        # This wipe takes the Raven and GUI layers with it -- they are added by
+        # stages that run after this one. Said out loud because the failure is
+        # otherwise invisible: every later stage succeeds and the ISO boots, it
+        # just has no shell, no package manager and no desktop in it.
+        log_warn "  The sysroot is now empty: 'make raven' and 'make gui' must"
+        log_warn "  run again before 'make iso', or those layers will not ship."
+        log_warn "  'make build' does all of it in order."
+
+
         # If anything remains that we can't write to, it was likely created by
         # a previous root-run build. Fail early with a clear fix.
         if find "${SYSROOT_DIR}" -mindepth 1 ! -writable -print -quit 2>/dev/null | grep -q .; then
