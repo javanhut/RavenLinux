@@ -66,6 +66,7 @@ run = ["{{run}} {{build_flags}} initramfs"]
 run = [
   "cargo test --manifest-path init/Cargo.toml",
   "./scripts/installer/test-raven-install.sh",
+  "./scripts/test-console-font.sh",
 ]
 
 [commands.qemu]

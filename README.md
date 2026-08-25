@@ -267,6 +267,40 @@ image's root shell. If something goes wrong, the RavenBoot menu carries a
 **RavenLinux (rescue shell)** entry that boots the installed root with
 `init=/bin/bash` and nothing else running.
 
+## Fonts
+
+RavenLinux ships one family, **JetBrains Mono Nerd Font Mono**, and the build
+turns it into the two formats a Linux system actually needs:
+
+| Where | Format | Built by |
+|-------|--------|----------|
+| tty1, the console | PSF2 bitmap at 8x16, 10x20, 12x24 and 16x32 | `scripts/make-console-font.py`, run by stage4 |
+| the Wayland session | the `.ttf`, through fontconfig | copied to `/usr/share/fonts` |
+
+The virtual terminal cannot use a TTF, so stage4 rasterises the same typeface
+into `/usr/share/kbd/consolefonts/` and `raven-console-font` loads one at boot,
+choosing the cell size from the framebuffer width — 16x32 on a 2560px panel down
+to 8x16 on a VGA console. Without it the console falls back to the kernel's
+built-in 8x16 VGA font: no Nerd Font glyphs, box drawing that does not join up,
+and text about two millimetres tall on a laptop screen.
+
+Override it on the kernel command line, or permanently:
+
+```bash
+raven.font=12x24                              # a specific cell size
+raven.font=none                               # keep the kernel's own font
+echo 'FONT=12x24' > /etc/raven/console-font.conf
+setfont /usr/share/kbd/consolefonts/raven-12x24.psfu   # right now, no reboot
+```
+
+The console holds 512 glyphs, so the PSF carries a curated subset — ASCII,
+Latin-1, all of box drawing and block elements, and around sixty Nerd Font
+icons. `GLYPH_SET` in `scripts/make-console-font.py` is the list; see
+[fonts/README.md](fonts/README.md) for the details and for replacing the family.
+
+Generating the console font needs `python-freetype-py` on the build host. The
+build is fail-soft without it and produces a working ISO on the kernel font.
+
 Host-side tests, which need no ISO and no container:
 
 ```bash
@@ -297,6 +331,7 @@ docker run --rm -it --platform linux/amd64 ravenlinux
 │   ├── export-rootfs.sh      # package the sysroot as a container image
 │   ├── lib/logging.sh        # shared logging
 │   ├── installer/            # raven-install, the disk installer and wizard
+│   ├── make-console-font.py  # rasterises the shipped TTF into a PSF console font
 │   └── stages/               # the five build stages, plus stage-raven.sh
 ├── init/                     # raven-init and raven-rc (Rust)
 ├── bootloader/               # RavenBoot, the UEFI bootloader (Rust)
@@ -307,7 +342,7 @@ docker run --rm -it --platform linux/amd64 ravenlinux
 │   └── gui/                  # ravengui: huginn, muninn, muninn-lock
 ├── configs/                  # shell, SSH, kernel, fontconfig configuration
 ├── etc/                      # files installed into the rootfs /etc
-├── fonts/                    # console font (JetBrains Mono Nerd Font)
+├── fonts/                    # JetBrains Mono Nerd Font (console and desktop)
 └── docs/                     # build and kernel notes
 ```
 
@@ -338,6 +373,9 @@ rewiring:
   live squashfs. `make initramfs` rebuilds just that, without a stage1 rerun.
 - **Installation**: `scripts/installer/raven-install`, copied into the sysroot
   by `install_installer()` in stage4 so it ships inside the squashfs.
+- **The console font**: `GLYPH_SET` in `scripts/make-console-font.py` for which
+  glyphs it carries, `install_console_font()` in stage4 for which cell sizes get
+  built, and `configs/raven-console-font` for how one is chosen at boot.
 
 ## License
 

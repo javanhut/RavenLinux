@@ -1201,10 +1201,23 @@ fi
 ok "Ready to switch root"
 info "Executing switch_root to $NEW_INIT"
 
-# switch_root may print "failed to unlink" warnings - these are harmless
-# (busybox switch_root trying to clean up initramfs that still has mounts)
-# Redirect stderr to suppress these warnings, exec replaces this process
-exec switch_root /mnt/root "$NEW_INIT" 2>/dev/null
+# switch_root may print "failed to unlink" warnings. They are harmless -- it is
+# trying to clean up an initramfs that still has mounts -- and they used to be
+# silenced with `2>/dev/null` on this line.
+#
+# That was a mistake with a long reach. The redirection is applied before exec
+# and the exec keeps it, so it was not switch_root's stderr being discarded: it
+# was *PID 1's*, permanently, for the rest of the boot. Consequences:
+#
+#   * init=/bin/bash gave a shell that looked hung. bash decides it is
+#     interactive from isatty(0) && isatty(2); with stderr on /dev/null the
+#     second test fails, so it runs non-interactively -- no prompt, no readline,
+#     no job control. It is reading your keystrokes, it just never says so.
+#   * every error PID 1 or its children wrote to stderr vanished, which is why
+#     so much of this system failed silently.
+#
+# A few unlink warnings are a small price for a console that talks back.
+exec switch_root /mnt/root "$NEW_INIT"
 
 # If we get here, switch_root failed completely (exec didn't replace us)
 fail "switch_root failed"

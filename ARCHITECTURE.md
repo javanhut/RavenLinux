@@ -139,6 +139,25 @@ other: it copies the squashfs onto a partition, repoints `/sbin/init` at
 `raven.live` on the command line forces the live path even when a `root=` is
 present.
 
+### Console Font
+
+The Linux virtual terminal draws from a PSF bitmap font, not a scalable one, so
+the JetBrains Mono Nerd Font TTFs in `fonts/` are of no use to tty1 on their
+own. stage4 rasterises the regular face into
+`/usr/share/kbd/consolefonts/raven-<W>x<H>.psfu` at four cell sizes with
+`scripts/make-console-font.py`, and `raven-console-font` loads one at boot --
+from the live init on the ISO, and from a one-shot `console-font` service in
+`init.toml` on an installed system.
+
+The cell size is chosen from the framebuffer width rather than fixed, because
+the kernel's built-in 8x16 font is unreadable on a HiDPI laptop panel and
+oversized on a VGA console. Box-drawing and Powerline glyphs are stretched to
+the cell edge where the font's advance falls short of it, so drawn lines join
+across cells instead of coming out dashed.
+
+The generator is fail-soft: a build host without `freetype-py` produces a
+working ISO whose console runs on the kernel font.
+
 ### Installer (`scripts/installer/`)
 
 `raven-install` installs the running live image onto a disk. It ships in the
@@ -296,5 +315,8 @@ The base is designed to be grown, not modified:
   `scripts/build-initramfs.sh` (`raven_root_from_cmdline`,
   `raven_mount_disk_root`)
 - **Installation** → `scripts/installer/raven-install`
+- **The console font** → `scripts/make-console-font.py` (glyph set),
+  `install_console_font()` in stage4 (cell sizes), `configs/raven-console-font`
+  (selection at boot)
 - **The boot menu** → `bootloader/src/` (RavenBoot's menu is compiled in)
 - **Service management** → `init/src/service.rs` and `init/src/rc.rs`

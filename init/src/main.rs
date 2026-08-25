@@ -153,6 +153,15 @@ fn run_init() -> Result<()> {
     log::info!("Phase 5: Starting services");
     let mut services = start_services(&config)?;
 
+    // seatd and the compositor are started back to back, and the compositor
+    // connects to /run/seatd.sock the moment it starts. seatd has not created
+    // it yet, so the first attempt always fails -- and the restart budget can
+    // be spent on that race before seatd is ever ready.
+    //
+    // A real dependency system would express this properly; until there is one,
+    // waiting for the socket is the honest version of what "after seatd" means.
+    wait_for_seat(&services);
+
     // Display welcome message
     print_welcome();
 
@@ -183,6 +192,29 @@ fn run_init() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Find a system program, trying the paths things actually get installed to.
+///
+/// Hardcoding one path is how seatd ended up unstartable: the synthesized
+/// service named /bin/seatd while the image installs /sbin/seatd, so seatd
+/// never ran, and the compositor failed with "Failed to open session: No such
+/// file or directory" -- an error about a missing socket, which reads like a
+/// seat/permission problem rather than a daemon that was never started. The
+/// same mistake had already been made with unix_chkpwd and with login.
+fn find_program(name: &str) -> Option<String> {
+    find_program_in(&SYSTEM_BIN_DIRS, name)
+}
+
+/// Where system programs get installed, in search order.
+const SYSTEM_BIN_DIRS: [&str; 5] = ["/sbin", "/usr/sbin", "/bin", "/usr/bin", "/usr/local/bin"];
+
+/// The searchable half of [`find_program`], split out so the ordering can be
+/// tested without depending on what the build host happens to have installed.
+fn find_program_in(dirs: &[&str], name: &str) -> Option<String> {
+    dirs.iter()
+        .map(|dir| format!("{}/{}", dir, name))
+        .find(|path| Path::new(path).is_file())
 }
 
 fn fixup_getty_login_programs(config: &mut InitConfig) {
@@ -237,12 +269,20 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
     fs::create_dir_all("/run/user/0").ok();
     let _ = fs::set_permissions("/run/user/0", fs::Permissions::from_mode(0o700));
 
+    // Without seatd there is no seat, and without a seat the compositor cannot
+    // take DRM master -- so if it is missing, say so here rather than leaving
+    // the compositor to fail in a restart loop with a misleading message.
+    let seatd_path = find_program("seatd");
+    if seatd_path.is_none() {
+        log::warn!("seatd not found; a Wayland session will not be able to acquire a seat");
+    }
+
     ensure_service(
         &mut config.services,
         ServiceConfig {
             name: "seatd".to_string(),
             description: "Seat management daemon".to_string(),
-            exec: "/bin/seatd".to_string(),
+            exec: seatd_path.unwrap_or_else(|| "/sbin/seatd".to_string()),
             args: vec!["-g".to_string(), "video".to_string()],
             restart: true,
             enabled: true,
@@ -259,8 +299,8 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
     compositor_env.insert("XDG_RUNTIME_DIR".to_string(), "/run/user/0".to_string());
     compositor_env.insert("LIBSEAT_BACKEND".to_string(), "seatd".to_string());
 
-    let session_path = Path::new("/bin/raven-wayland-session");
-    if session_path.exists() {
+    let session_path = find_program("raven-wayland-session");
+    if let Some(ref session_exec) = session_path {
         let mut env = compositor_env;
         env.insert(
             "RAVEN_WAYLAND_COMPOSITOR".to_string(),
@@ -272,7 +312,7 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
             ServiceConfig {
                 name: "wayland-session".to_string(),
                 description: "Raven Wayland session".to_string(),
-                exec: "/bin/raven-wayland-session".to_string(),
+                exec: session_exec.clone(),
                 args: Vec::new(),
                 restart: true,
                 enabled: true,
@@ -849,6 +889,32 @@ fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -
     Ok(())
 }
 
+/// Wait briefly for seatd's socket, when something will need a seat.
+///
+/// Bounded: a seat that never appears is a warning, not a hang. Anything that
+/// wanted one will fail and say so, which is more use than a stalled boot.
+fn wait_for_seat(services: &HashMap<String, Service>) {
+    let needs_seat =
+        services.contains_key("wayland-session") || services.contains_key("raven-compositor");
+    if !needs_seat || !services.contains_key("seatd") {
+        return;
+    }
+
+    let socket = Path::new("/run/seatd.sock");
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    while Instant::now() < deadline {
+        if socket.exists() {
+            log::info!("seatd is ready on /run/seatd.sock");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    log::warn!("seatd did not create /run/seatd.sock within 5s;");
+    log::warn!("  the compositor will not be able to acquire a seat.");
+}
+
 fn reap_zombies(services: &mut HashMap<String, Service>) {
     loop {
         match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
@@ -1138,5 +1204,84 @@ mod tests {
         // Not a recognised form at all.
         assert_eq!(resolve_fstab_spec("tmpfs"), None);
         assert_eq!(resolve_fstab_spec("proc"), None);
+    }
+}
+
+#[cfg(test)]
+mod path_resolution_tests {
+    use super::*;
+
+    /// A directory layout mirroring the image: seatd and login in /sbin only.
+    fn fixture(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("raven-find-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in ["sbin", "bin"] {
+            fs::create_dir_all(root.join(d)).expect("mkdir");
+        }
+        fs::write(root.join("sbin/seatd"), "#!/bin/sh\n").expect("write");
+        fs::write(root.join("bin/sh"), "#!/bin/sh\n").expect("write");
+        root
+    }
+
+    #[test]
+    fn finds_a_program_that_lives_only_in_sbin() {
+        // The bug this exists for: seatd, login and unix_chkpwd all install to
+        // /sbin, and each was looked up at a hardcoded /bin path. The service
+        // then failed with an error about a missing socket or a broken auth
+        // stack rather than a program that was never run.
+        let root = fixture("sbin");
+        let dirs: Vec<String> = ["sbin", "bin"]
+            .iter()
+            .map(|d| root.join(d).display().to_string())
+            .collect();
+        let refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
+
+        let found = find_program_in(&refs, "seatd").expect("seatd must be found in sbin");
+        assert!(found.ends_with("/sbin/seatd"), "{found}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn missing_programs_report_absent_rather_than_guessing_a_path() {
+        let root = fixture("missing");
+        let dirs: Vec<String> = ["sbin", "bin"]
+            .iter()
+            .map(|d| root.join(d).display().to_string())
+            .collect();
+        let refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
+
+        assert_eq!(find_program_in(&refs, "definitely-not-installed"), None);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn search_order_prefers_sbin_over_bin() {
+        let root = fixture("order");
+        // Same name in both; /sbin is where system daemons belong.
+        fs::write(root.join("sbin/dup"), "s").expect("write");
+        fs::write(root.join("bin/dup"), "b").expect("write");
+
+        let dirs: Vec<String> = ["sbin", "bin"]
+            .iter()
+            .map(|d| root.join(d).display().to_string())
+            .collect();
+        let refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
+
+        let found = find_program_in(&refs, "dup").expect("found");
+        assert!(found.contains("/sbin/"), "{found}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_real_search_path_covers_where_the_image_installs_things() {
+        // Guards the constant itself: seatd, login and unix_chkpwd all land in
+        // /sbin in this image, so dropping it from the list would silently
+        // reintroduce every one of those bugs.
+        assert!(SYSTEM_BIN_DIRS.contains(&"/sbin"));
+        assert!(SYSTEM_BIN_DIRS.contains(&"/usr/bin"));
+        assert!(SYSTEM_BIN_DIRS.contains(&"/bin"));
     }
 }

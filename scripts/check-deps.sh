@@ -144,6 +144,9 @@ DEPENDENCIES=(
     "hostname:inetutils:-:hostname:hostname:inetutils:inetutils:Hostname utility"
     "less:-:-:-:-:-:-:File pager"
     "kexec:kexec-tools:-:kexec-tools:kexec-tools:kexec-tools:kexec-tools:Kexec reboot utility"
+    # stage2 copies setfont into the sysroot; raven-console-font needs it to
+    # load the PSF console font at boot.
+    "setfont:kbd:console-setup:kbd:kbd:kbd:kbd:Console font loader"
 )
 
 # Optional tools. Not needed to BUILD RavenLinux -- only to boot and test what
@@ -157,6 +160,10 @@ OPTIONAL_DEPENDENCIES=(
     # writes the fallback bootloader at \EFI\BOOT\BOOTX64.EFI, which boots
     # without touching NVRAM at all.
     "efibootmgr:efibootmgr:-:-:-:-:-:Register a UEFI NVRAM boot entry (raven-install --efi-nvram)"
+    # stage4 rasterises the shipped TTF into a PSF console font with this. It is
+    # optional because the build is fail-soft about it: without freetype-py the
+    # ISO still boots, on the kernel's built-in 8x16 font.
+    "freetype:python-freetype-py:python3-freetype:python3-freetype:python3-freetype:python3-freetype:py3-freetype:Rasterise the console font (stage4)"
 )
 
 # Optional package groups with no command of their own to probe. A QEMU built
@@ -181,7 +188,7 @@ OPTIONAL_PACKAGES_ALPINE="qemu-system-x86_64 ovmf"
 # supplies EGL. Missing them is not fatal -- stage-gui.sh checks for them and
 # skips itself, producing a console-only ISO -- so they are listed with the
 # rest rather than treated as a hard requirement.
-EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja oniguruma libdrm libinput mesa libxkbcommon wayland libwacom libevdev mtdev seatd parted gptfdisk efibootmgr"
+EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja oniguruma libdrm libinput mesa libxkbcommon wayland libwacom libevdev mtdev seatd parted gptfdisk efibootmgr kbd python-freetype-py"
 EXTRA_PACKAGES_DEBIAN="build-essential linux-headers-generic libelf-dev python3-jinja2 libonig-dev libdrm-dev libinput-dev libseat-dev libgbm-dev libegl-dev libxkbcommon-dev libwayland-dev libwacom-dev libevdev-dev libmtdev-dev seatd"
 EXTRA_PACKAGES_FEDORA="kernel-devel elfutils-libelf-devel python3-jinja2 oniguruma-devel libdrm-devel libinput-devel libseat-devel mesa-libgbm-devel mesa-libEGL-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd"
 EXTRA_PACKAGES_SUSE="kernel-devel libelf-devel python3-Jinja2 oniguruma-devel libdrm-devel libinput-devel libseat-devel Mesa-libgbm-devel Mesa-libEGL-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd"

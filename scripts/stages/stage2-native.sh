@@ -137,6 +137,10 @@ copy_system_utils() {
         clear reset stty tput tset
         # Virtual terminal helpers (Wayland KMS compositors often need a VT)
         openvt chvt agetty getty setsid
+        # Console font loading. stage4 rasterises JetBrains Mono Nerd Font into
+        # PSF, and raven-console-font calls setfont to load it; without setfont
+        # tty1 stays on the kernel's built-in 8x16 VGA font. From kbd.
+        setfont showconsolefont kbd_mode
         # Login/session management
         login agetty setsid
         # Locale and timezone
@@ -1428,6 +1432,47 @@ password  include     system-password
 # End /etc/pam.d/passwd
 EOF
 
+    # chpasswd: batch password setting.
+    #
+    # Not optional, and not obvious: chpasswd is built against PAM, so without
+    # its own config it falls through to /etc/pam.d/other -- which is pam_deny
+    # for every phase. It then fails with "pam_start failure 26 ... password not
+    # changed" and leaves the account's shadow field at "!", i.e. locked.
+    #
+    # The installer sets every account's password with `chpasswd -R`, so this
+    # missing file meant a freshly installed system had no working login at all:
+    # no password worked, and neither did no password.
+    cat > "${SYSROOT_DIR}/etc/pam.d/chpasswd" << 'EOF'
+#%PAM-1.0
+# Begin /etc/pam.d/chpasswd - RavenLinux
+auth      sufficient  pam_rootok.so
+account   required    pam_permit.so
+password  include     system-password
+session   required    pam_permit.so
+# End /etc/pam.d/chpasswd
+EOF
+
+    # newusers takes the same path as chpasswd and fails the same way.
+    cat > "${SYSROOT_DIR}/etc/pam.d/newusers" << 'EOF'
+#%PAM-1.0
+# Begin /etc/pam.d/newusers - RavenLinux
+auth      sufficient  pam_rootok.so
+account   required    pam_permit.so
+password  include     system-password
+session   required    pam_permit.so
+# End /etc/pam.d/newusers
+EOF
+
+    # chage reads and writes shadow ageing fields; same fallback, same failure.
+    cat > "${SYSROOT_DIR}/etc/pam.d/chage" << 'EOF'
+#%PAM-1.0
+# Begin /etc/pam.d/chage - RavenLinux
+auth      sufficient  pam_rootok.so
+account   required    pam_permit.so
+session   required    pam_permit.so
+# End /etc/pam.d/chage
+EOF
+
     # other: Secure fallback - deny unconfigured services
     cat > "${SYSROOT_DIR}/etc/pam.d/other" << 'EOF'
 #%PAM-1.0
@@ -1586,6 +1631,29 @@ EOF
             log_warn "  'Authentication service cannot retrieve authentication info'"
         fi
     done
+
+    # ==========================================================================
+    # login must exist where callers expect to find it
+    # ==========================================================================
+    # agetty's compiled-in default login program is /bin/login. This image
+    # installs login to /sbin/login only, so any agetty invoked without an
+    # explicit --login-program reads the username, fails to exec /bin/login,
+    # and exits -- the getty is restarted and reprompts, so the console loops
+    # on "login:" and never reaches a password prompt.
+    #
+    # Same shape as the unix_chkpwd and seatd problems above: a binary that
+    # exists, at a path nothing looks in.
+    for login_dir in bin usr/bin usr/sbin; do
+        if [[ -x "${SYSROOT_DIR}/sbin/login" && ! -e "${SYSROOT_DIR}/${login_dir}/login" ]]; then
+            mkdir -p "${SYSROOT_DIR}/${login_dir}"
+            ln -sf /sbin/login "${SYSROOT_DIR}/${login_dir}/login"
+        fi
+    done
+    if [[ -e "${SYSROOT_DIR}/bin/login" ]]; then
+        log_info "  login reachable at /bin/login (agetty's default)"
+    else
+        log_warn "No /sbin/login to link; agetty without --login-program will loop"
+    fi
 
     # ==========================================================================
     # Copy NSS modules (for user/group lookups)

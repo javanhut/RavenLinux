@@ -28,6 +28,20 @@ log_level = "info"
 # Services
 # =============================================================================
 
+# Console font, before the gettys draw anything on tty1.
+#
+# restart = false makes this a one-shot: setfont loads the font into the console
+# driver and exits, and there is nothing to supervise afterwards. It is not
+# critical -- a console on the kernel's built-in font is ugly, not broken.
+[[services]]
+name = "console-font"
+description = "Load the JetBrains Mono Nerd Font console font"
+exec = "/usr/sbin/raven-console-font"
+args = []
+restart = false
+enabled = true
+critical = false
+
 # tty1: PAM-free rescue shell (avoids /bin/login issues during bring-up)
 [[services]]
 name = "getty-tty1"

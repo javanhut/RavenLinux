@@ -129,9 +129,10 @@ initramfs: ## Rebuild only the initramfs (then run 'make iso')
 # display and no /dev/kvm, and these check the built artifacts rather than
 # building anything.
 .PHONY: test
-test: ## Run the host-side tests (init config schema, raven-install)
+test: ## Run the host-side tests (init, raven-install, console font)
 	cargo test --manifest-path init/Cargo.toml
 	./scripts/installer/test-raven-install.sh
+	./scripts/test-console-font.sh
 
 .PHONY: qemu
 qemu: ## Boot the built ISO in QEMU on the serial console

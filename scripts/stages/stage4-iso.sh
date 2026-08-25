@@ -122,6 +122,15 @@ enable_network = true
 log_level = "info"
 
 [[services]]
+name = "console-font"
+description = "Load the JetBrains Mono Nerd Font console font"
+exec = "/usr/sbin/raven-console-font"
+args = []
+restart = false
+enabled = true
+critical = false
+
+[[services]]
 name = "getty-tty1"
 description = "Getty login on tty1"
 exec = "/sbin/agetty"
@@ -396,6 +405,13 @@ fi
 
 # Suppress kernel messages
 dmesg -n 1 2>/dev/null || true
+
+# Load the console font before anything is drawn, so the banner and everything
+# after it render in it rather than switching typeface mid-boot. Picks a cell
+# size from the framebuffer resolution; raven.font=none on the cmdline skips it.
+if [ -x /usr/sbin/raven-console-font ]; then
+    /usr/sbin/raven-console-font 2>/dev/null || true
+fi
 
 # Clear screen and show banner
 clear 2>/dev/null || printf '\033[2J\033[H'
@@ -795,6 +811,8 @@ install_packages_to_sysroot() {
         log_warn "  No custom fonts directory found at ${font_src}; skipping font copy"
     fi
     mkdir -p "${SYSROOT_DIR}/var/cache/fontconfig" 2>/dev/null || true
+
+    install_console_font
 
     # Ensure shared library dependencies for newly installed binaries are present.
     log_info "Copying runtime libraries for sysroot binaries..."
@@ -1254,6 +1272,95 @@ EOF
     done
 
     log_success "Shutdown commands installed (reboot, poweroff, halt, shutdown)"
+}
+
+# =============================================================================
+# Console font
+# =============================================================================
+# The TTFs copied above are of no use to tty1: the Linux virtual terminal draws
+# from a PSF bitmap font, not a scalable one. Without this the console runs on
+# the kernel's built-in 8x16 VGA font, which has no box drawing worth the name
+# and no Nerd Font glyphs at all -- so crow's frames come out as ASCII soup and
+# ravenshell's prompt icons as blanks. On a 2560x1600 laptop panel it is also
+# about two millimetres tall.
+#
+# So rasterise the same typeface into PSF at four cell sizes, and let
+# raven-console-font pick one at boot from the framebuffer resolution.
+#
+# Fail-soft, like the raven and gui stages: a build host without freetype-py
+# still produces a working ISO, just one whose console looks like 1994.
+install_console_font() {
+    log_step "Building the console font..."
+
+    local generator="${PROJECT_ROOT}/scripts/make-console-font.py"
+    local ttf="${PROJECT_ROOT}/fonts/JetBrainsMonoNerdFontMono-Regular.ttf"
+    local outdir="${SYSROOT_DIR}/usr/share/kbd/consolefonts"
+
+    if [[ ! -f "${generator}" ]]; then
+        log_warn "  ${generator} not found; console stays on the kernel font"
+        return 0
+    fi
+
+    if [[ ! -f "${ttf}" ]]; then
+        log_warn "  ${ttf} not found; console stays on the kernel font"
+        return 0
+    fi
+
+    local python=""
+    for candidate in python3 python; do
+        if command -v "${candidate}" &>/dev/null && \
+           "${candidate}" -c 'import freetype' 2>/dev/null; then
+            python="${candidate}"
+            break
+        fi
+    done
+
+    if [[ -z "${python}" ]]; then
+        log_warn "  No Python with freetype-py; skipping the console font"
+        log_warn "  Install python-freetype-py (Arch) and rerun stage4 to get it"
+        return 0
+    fi
+
+    mkdir -p "${outdir}"
+
+    # 8x16 for VGA text mode and small VM displays, up to 16x32 for a HiDPI
+    # laptop panel. raven-console-font chooses between them at boot.
+    local built=0 size w h
+    for size in 8x16 10x20 12x24 16x32; do
+        w="${size%x*}"
+        h="${size#*x}"
+        if "${python}" "${generator}" "${ttf}" \
+            --width "${w}" --height "${h}" \
+            -o "${outdir}/raven-${size}.psfu" >/dev/null 2>&1; then
+            log_info "  Built raven-${size}.psfu"
+            built=$((built + 1))
+        else
+            log_warn "  Could not build raven-${size}.psfu"
+        fi
+    done
+
+    if [[ ${built} -eq 0 ]]; then
+        log_warn "  No console fonts were built"
+        rmdir "${outdir}" 2>/dev/null || true
+        return 0
+    fi
+
+    # The loader. Without setfont in the sysroot it is a no-op that exits 0,
+    # which is the right behaviour on a build that could not supply one.
+    if [[ -f "${PROJECT_ROOT}/configs/raven-console-font" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/sbin" "${SYSROOT_DIR}/sbin"
+        cp "${PROJECT_ROOT}/configs/raven-console-font" "${SYSROOT_DIR}/usr/sbin/raven-console-font"
+        chmod 0755 "${SYSROOT_DIR}/usr/sbin/raven-console-font"
+        ln -sf ../usr/sbin/raven-console-font "${SYSROOT_DIR}/sbin/raven-console-font" 2>/dev/null || true
+        log_info "  Installed raven-console-font"
+    fi
+
+    if [[ ! -x "${SYSROOT_DIR}/sbin/setfont" && ! -x "${SYSROOT_DIR}/bin/setfont" ]]; then
+        log_warn "  setfont is not in the sysroot, so the font cannot be loaded at boot"
+        log_warn "  It comes from kbd; stage2 copies it when the build host has it"
+    fi
+
+    log_success "Console font built (${built} sizes)"
 }
 
 # =============================================================================

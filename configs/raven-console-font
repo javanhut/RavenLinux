@@ -1,0 +1,112 @@
+#!/bin/sh
+# =============================================================================
+# raven-console-font -- load the JetBrains Mono Nerd Font console font
+# =============================================================================
+#
+# Ships at /usr/sbin/raven-console-font. Run from the live init and, on an
+# installed system, from a raven-init service.
+#
+# The kernel's built-in console font is 8x16, which on a laptop panel at
+# 2560x1600 is about two millimetres tall. Picking the cell size from the
+# framebuffer resolution is the difference between a usable console and a
+# magnifying glass, so that is the default behaviour and the sizes below are
+# chosen to land near the same physical size on any panel.
+#
+# Override, in order of precedence:
+#   raven.font=none|auto|16x32   on the kernel command line
+#   RAVEN_CONSOLE_FONT=...       in the environment
+#   /etc/raven/console-font.conf containing e.g. FONT=12x24
+#
+# "none" leaves the kernel font alone, which is the escape hatch if a font
+# turns out to render badly on some piece of hardware.
+
+FONTDIR="/usr/share/kbd/consolefonts"
+PREFIX="raven"
+
+# ---------------------------------------------------------------------------
+# Work out which size was asked for, if any
+# ---------------------------------------------------------------------------
+want=""
+
+if [ -f /etc/raven/console-font.conf ]; then
+    # shellcheck disable=SC1091
+    . /etc/raven/console-font.conf 2>/dev/null
+    [ -n "${FONT:-}" ] && want="$FONT"
+fi
+
+[ -n "${RAVEN_CONSOLE_FONT:-}" ] && want="$RAVEN_CONSOLE_FONT"
+
+for arg in $(cat /proc/cmdline 2>/dev/null); do
+    case "$arg" in
+        raven.font=*) want="${arg#raven.font=}" ;;
+    esac
+done
+
+[ "$want" = "none" ] && exit 0
+
+# ---------------------------------------------------------------------------
+# Pick a size from the panel when nothing specific was asked for
+# ---------------------------------------------------------------------------
+pick_size() {
+    width=""
+
+    # virtual_size is "2560,1600". fb0 is the EFI or VESA framebuffer the
+    # console is drawing on, so this is the resolution that matters -- not
+    # whatever the GPU could do.
+    if [ -r /sys/class/graphics/fb0/virtual_size ]; then
+        width=$(cut -d, -f1 < /sys/class/graphics/fb0/virtual_size 2>/dev/null)
+    fi
+
+    # No framebuffer means the VGA text console, where the cell size is fixed
+    # at 8x16 by the hardware and nothing else will load.
+    case "$width" in
+        ''|*[!0-9]*) echo "8x16"; return ;;
+    esac
+
+    if   [ "$width" -ge 2560 ]; then echo "16x32"
+    elif [ "$width" -ge 1920 ]; then echo "12x24"
+    elif [ "$width" -ge 1280 ]; then echo "10x20"
+    else                             echo "8x16"
+    fi
+}
+
+if [ -z "$want" ] || [ "$want" = "auto" ]; then
+    want=$(pick_size)
+fi
+
+font="${FONTDIR}/${PREFIX}-${want}.psfu"
+
+if [ ! -f "$font" ]; then
+    # Asked for a size that was not built. Fall back rather than leaving the
+    # console on the kernel font without explanation.
+    for candidate in 16x32 12x24 10x20 8x16; do
+        if [ -f "${FONTDIR}/${PREFIX}-${candidate}.psfu" ]; then
+            font="${FONTDIR}/${PREFIX}-${candidate}.psfu"
+            break
+        fi
+    done
+fi
+
+[ -f "$font" ] || exit 0
+command -v setfont >/dev/null 2>&1 || exit 0
+
+# ---------------------------------------------------------------------------
+# Load it
+# ---------------------------------------------------------------------------
+# -C names the console to act on. Without it setfont wants a controlling
+# terminal, which init does not have, and the load silently does nothing.
+loaded=0
+for tty in /dev/tty1 /dev/tty2 /dev/tty3 /dev/tty4 /dev/tty5 /dev/tty6; do
+    [ -c "$tty" ] || continue
+    if setfont -C "$tty" "$font" 2>/dev/null; then
+        loaded=1
+    fi
+done
+
+# Nothing to act on yet -- devtmpfs may not have caught up. The current console
+# is better than no console.
+if [ "$loaded" -eq 0 ]; then
+    setfont "$font" 2>/dev/null || exit 0
+fi
+
+exit 0

@@ -79,6 +79,11 @@ RUN pacman -Syu --noconfirm --needed \
         oniguruma \
         # Misc runtime utilities used by the build/test scripts
         kexec-tools inetutils \
+        # Console font. kbd supplies setfont, which stage2 copies into the
+        # sysroot; python-freetype-py is what stage4 rasterises the shipped
+        # JetBrains Mono Nerd Font TTF into PSF with. Without the latter the
+        # build still succeeds and the console falls back to the kernel font.
+        kbd python-freetype-py \
         # Device firmware. The kernel builds iwlwifi, ath9k/10k/11k/12k,
         # rtw88/89, mt7921 and brcmfmac in (=y), but a wireless driver without
         # its blob just fails to probe and the interface never appears -- which
