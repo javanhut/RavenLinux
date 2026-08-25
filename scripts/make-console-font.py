@@ -51,20 +51,13 @@ PSF2_MAX_GLYPHS = 256
 # characters a TUI is built out of, then icons.
 GLYPH_SET = [
     # --- text ---------------------------------------------------------------
-    ("ASCII", range(0x20, 0x7F)),
-    ("Latin-1 supplement", range(0xA0, 0x100)),
-    (
-        "punctuation",
-        [
-            0x2010, 0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D,
-            0x2022, 0x2026, 0x2030, 0x2039, 0x203A, 0x20AC, 0x2122,
-        ],
-    ),
-    # --- the characters a TUI draws itself with ------------------------------
-    # Curated, and ahead of the full ranges below: with only ~65 glyphs left
-    # after text, declaration order decides what survives, and "every box
-    # drawing character in order" would spend all of it on single-line variants
-    # before reaching the heavy and rounded ones a prompt actually uses.
+    # ASCII is not listed here: build_psf2 places it at its VGA-identity
+    # positions (glyph index == codepoint) before this list is consulted.
+    #
+    # The characters a TUI draws itself with come before Latin-1: after the
+    # 127 slots the fixed layout spends, declaration order decides what
+    # survives, and a banner with no box borders is more visible than a
+    # missing accented letter.
     (
         "box drawing (essential)",
         [
@@ -77,88 +70,19 @@ GLYPH_SET = [
         ],
     ),
     ("block elements", [0x2580, 0x2584, 0x2588, 0x258C, 0x2590, 0x2591, 0x2592, 0x2593]),
-    ("box drawing (rest)", range(0x2500, 0x2580)),
     (
-        "geometric shapes",
-        [0x25A0, 0x25AA, 0x25AB, 0x25B2, 0x25B6, 0x25BC, 0x25C0, 0x25CB, 0x25CF],
-    ),
-    ("arrows", [0x2190, 0x2191, 0x2192, 0x2193, 0x2194, 0x2195, 0x21B5]),
-    (
-        "symbols",
+        "punctuation",
         [
-            0x2018, 0x2020, 0x2021, 0x2026, 0x2190, 0x2260, 0x2264, 0x2265,
-            0x2502, 0x256D, 0x256E, 0x256F, 0x2570,
-            0x2713, 0x2714, 0x2717, 0x2718, 0x26A0, 0x2764,
+            0x2010, 0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D,
+            0x2022, 0x2026, 0x2030, 0x2039, 0x203A, 0x20AC, 0x2122,
         ],
     ),
-    # --- Nerd Font ----------------------------------------------------------
-    # Powerline first: a prompt with these missing is visibly broken in a way a
-    # missing folder icon is not.
-    ("powerline", [0xE0A0, 0xE0A1, 0xE0A2, 0xE0A3, 0xE0B0, 0xE0B1, 0xE0B2, 0xE0B3]),
+    # Letters before the symbol rows: an accented name renders, and the lost
+    # currency/ornament signs fall back to '?' harmlessly.
+    ("Latin-1 letters", range(0xC0, 0x100)),
     (
-        "powerline extra",
-        [0xE0B4, 0xE0B5, 0xE0B6, 0xE0B7, 0xE0BC, 0xE0BD, 0xE0BE, 0xE0BF],
-    ),
-    (
-        "devicons",
-        [
-            0xE702,  # git
-            0xE703,  # git branch alt
-            0xE711,  # linux
-            0xE712,  # go
-            0xE718,  # node
-            0xE71E,  # python alt
-            0xE725,  # git branch
-            0xE726,  # git merge
-            0xE727,  # git pull request
-            0xE728,  # git commit
-            0xE729,  # git compare
-            0xE73C,  # python
-            0xE7A8,  # rust
-            0xE7C5,  # vim
-        ],
-    ),
-    (
-        "file and folder icons",
-        [
-            0xF015,  # home
-            0xF016,  # file-o
-            0xF01C,  # inbox
-            0xF023,  # lock
-            0xF07B,  # folder
-            0xF07C,  # folder-open
-            0xF0A0,  # hdd
-            0xF0C4,  # scissors
-            0xF0C5,  # copy
-            0xF0E7,  # bolt
-            0xF11C,  # keyboard
-            0xF120,  # terminal
-            0xF121,  # code
-            0xF126,  # code-fork
-            0xF15B,  # file
-            0xF1C0,  # database
-            0xF233,  # server
-            0xF240,  # battery-full
-            0xF244,  # battery-empty
-        ],
-    ),
-    (
-        "status icons",
-        [
-            0xF00C,  # check
-            0xF00D,  # times
-            0xF05A,  # info-circle
-            0xF06A,  # exclamation-circle
-            0xF071,  # warning
-            0xF085,  # cogs
-            0xF0AD,  # wrench
-            0xF0E4,  # dashboard
-            0xF110,  # spinner
-            0xF017,  # clock
-            0xF1EB,  # wifi
-            0xF293,  # bluetooth
-            0xF2C7,  # thermometer
-        ],
+        "Latin-1 symbols (curated)",
+        [0xA1, 0xA3, 0xA7, 0xA9, 0xAB, 0xAE, 0xB0, 0xB1, 0xBB, 0xBF],
     ),
 ]
 
@@ -306,11 +230,52 @@ def build_psf2(ttf_path, cell_w, cell_h, verbose=False):
 
     codepoints, groups = collect_codepoints()
 
+    row_bytes = (cell_w + 7) // 8
+    charsize = row_bytes * cell_h
+    blank = bytes(charsize)
+
     glyphs = []
-    mapped = []
+    mapped = []          # one list of codepoints per glyph (PSF allows several)
     missing = []
 
+    # ------------------------------------------------------------------
+    # The fixed layout: glyph index == codepoint for 0x00-0x7E.
+    # ------------------------------------------------------------------
+    # Not a convention for its own sake. The kernel's erase character is
+    # (attr << 8) | 0x20 -- a *raw glyph index*, written into the screen
+    # buffer by scr_memsetw and never passed through the font's unicode
+    # table. Whatever bitmap sits at index 32 is what every cleared cell
+    # on the console displays. This font used to pack glyphs densely from
+    # U+0020 at index 0, which put '@' at index 32 -- and every blank
+    # cell on screen rendered as '@'.
+    #
+    # Indices 0-31 are blank fillers mapped to the C0 controls, so a stray
+    # NUL renders as nothing rather than as whatever happened to be there.
+    for cp in range(0x20):
+        glyphs.append(blank)
+        mapped.append([cp])
+
+    for cp in range(0x20, 0x7F):
+        bitmap = render_glyph(face, cp, cell_w, cell_h, baseline, hscale)
+        if bitmap is None:
+            # Keep the position honest even if the face lacks the char:
+            # a hole here would shift everything after it off-index.
+            bitmap = blank
+            missing.append(cp)
+        glyphs.append(bitmap)
+        mapped.append([cp])
+
+    # NBSP shares space's glyph: same appearance, zero slots. Without a
+    # mapping it would fall back to '?' in any UTF-8 text that uses it.
+    mapped[0x20].append(0x00A0)
+
+    # ------------------------------------------------------------------
+    # Everything else competes for the remaining slots in GLYPH_SET order.
+    # ------------------------------------------------------------------
+    placed = {cp for cps in mapped for cp in cps}
     for cp in codepoints:
+        if cp in placed:
+            continue
         if len(glyphs) >= PSF2_MAX_GLYPHS:
             missing.append(cp)
             continue
@@ -319,10 +284,7 @@ def build_psf2(ttf_path, cell_w, cell_h, verbose=False):
             missing.append(cp)
             continue
         glyphs.append(bitmap)
-        mapped.append(cp)
-
-    row_bytes = (cell_w + 7) // 8
-    charsize = row_bytes * cell_h
+        mapped.append([cp])
 
     header = (
         PSF2_MAGIC
@@ -336,8 +298,9 @@ def build_psf2(ttf_path, cell_w, cell_h, verbose=False):
     )
 
     unicode_table = bytearray()
-    for cp in mapped:
-        unicode_table += chr(cp).encode("utf-8")
+    for cps in mapped:
+        for cp in cps:
+            unicode_table += chr(cp).encode("utf-8")
         unicode_table += b"\xff"              # end of this glyph's entry
 
     if verbose:
