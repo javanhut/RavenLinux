@@ -45,8 +45,9 @@ Two binaries: `caw` is the CLI, `cawd` the daemon that holds the EAPOL socket
 so a connection survives the AP's hourly group-key rotation. Neither is useful
 alone, so the Raven stage installs both or neither.
 
-`cawd` runs from `/etc/raven/init.toml` and **replaces `iwd`, which is now
-disabled there** — both drive the same wiphy over nl80211 and cannot coexist.
+`cawd` runs from `/etc/raven/init.toml` and is **the only wireless daemon in
+the image** — iwd is neither built nor shipped, because two nl80211 daemons on
+one wiphy fight over the interface.
 The upstream `dist/cawd.service` and `dist/caw.sysusers` are systemd artifacts
 and go uninstalled; the `caw` group is created in stage2 instead. `raven-dhcp`
 still runs for wired interfaces.

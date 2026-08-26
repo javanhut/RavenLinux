@@ -32,15 +32,15 @@ fn shipped_configs_parse() {
         assert!(getty.stop_args.is_empty());
         assert_eq!(getty.stop_timeout, 5, "serde default must apply, not 0");
 
-        let iwd = cfg
+        // cawd is the only wireless daemon in the image; iwd is not shipped,
+        // because two nl80211 daemons on one wiphy fight over the interface.
+        assert!(cfg.services.iter().all(|s| s.name != "iwd"), "iwd is gone");
+        let cawd = cfg
             .services
             .iter()
-            .find(|s| s.name == "iwd")
-            .expect("iwd present");
-        assert!(
-            !iwd.enabled,
-            "iwd must stay disabled: it fights cawd for the wiphy"
-        );
+            .find(|s| s.name == "cawd")
+            .expect("cawd present");
+        assert!(cawd.enabled, "cawd must be enabled at boot");
 
         println!("{} ok: {} services", rel, cfg.services.len());
     }

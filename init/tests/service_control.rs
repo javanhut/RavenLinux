@@ -498,11 +498,11 @@ restart = true
 enabled = true
 critical = false
 
-# iwd must stay disabled: it fights cawd for the wiphy.
+# getty-ttyS0 stays disabled: nothing is on the serial port.
 [[services]]
-name = "iwd"
-description = "iNet Wireless Daemon"
-exec = "/usr/libexec/iwd"
+name = "getty-ttyS0"
+description = "Serial console getty"
+exec = "/sbin/agetty"
 args = []
 restart = true
 enabled = false
@@ -562,7 +562,7 @@ fn disable_persists_and_keeps_the_comments() {
         !reparsed
             .services
             .iter()
-            .find(|s| s.name == "iwd")
+            .find(|s| s.name == "getty-ttyS0")
             .unwrap()
             .enabled
     );
@@ -573,7 +573,7 @@ fn disable_persists_and_keeps_the_comments() {
         "header comment lost:\n{after}"
     );
     assert!(
-        after.contains("# iwd must stay disabled"),
+        after.contains("# getty-ttyS0 stays disabled"),
         "explanatory comment lost:\n{after}"
     );
     assert!(
@@ -590,8 +590,8 @@ fn enable_persists_and_survives_a_reload() {
     let mut cfg = loaded_config(&path);
     let mut services = HashMap::new();
 
-    let (reply, _) = control::dispatch("enable iwd", &mut services, &mut cfg);
-    assert!(reply.contains("Enabled iwd"), "{reply}");
+    let (reply, _) = control::dispatch("enable getty-ttyS0", &mut services, &mut cfg);
+    assert!(reply.contains("Enabled getty-ttyS0"), "{reply}");
 
     // The check that matters: a fresh load -- what the next boot does -- sees it.
     let reloaded = loaded_config(&path);
@@ -599,7 +599,7 @@ fn enable_persists_and_survives_a_reload() {
         reloaded
             .services
             .iter()
-            .find(|s| s.name == "iwd")
+            .find(|s| s.name == "getty-ttyS0")
             .unwrap()
             .enabled,
         "enable must survive a reload, or it did not persist"
@@ -715,11 +715,11 @@ fn list_separates_runtime_state_from_boot_state() {
     assert!(cawd.contains("stopped"), "{cawd}");
     assert!(cawd.contains("enabled"), "{cawd}");
 
-    let iwd = reply
+    let serial = reply
         .lines()
-        .find(|l| l.starts_with("iwd"))
-        .expect("iwd row");
-    assert!(iwd.contains("disabled"), "{iwd}");
+        .find(|l| l.starts_with("getty-ttyS0"))
+        .expect("getty-ttyS0 row");
+    assert!(serial.contains("disabled"), "{serial}");
 
     std::fs::remove_dir_all(path.parent().unwrap()).ok();
 }

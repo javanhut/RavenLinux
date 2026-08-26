@@ -486,8 +486,11 @@ fn confirm_started(name: &str, svc: &mut Service) -> String {
             };
             return format!(
                 "error: {} started but {} immediately.\n\
-                 Its own output above says why; `raven-rc status {}` has the rest.\n",
-                name, how, name
+                 Its output is in {}; `raven-rc status {}` has the rest.\n",
+                name,
+                how,
+                Service::log_dir().join(format!("{}.log", name)).display(),
+                name
             );
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -774,7 +777,7 @@ fn persist_enabled_wherever_defined(
 /// Rewrite one service's `enabled` key in the config file.
 ///
 /// Uses toml_edit rather than re-serialising the parsed config: init.toml ships
-/// with comments explaining why iwd is disabled and what each service is for,
+/// with comments explaining what each service is for and why it is set as it is,
 /// and a round-trip through serde would silently delete all of it.
 ///
 /// The write is atomic -- temp file in the same directory, then rename. A

@@ -7,7 +7,7 @@
 #   2. Building from source when not available on host (fallback)
 #
 # This ensures functionality is never limited by what's installed on the
-# build host system. Critical tools like iwd, D-Bus, etc. will be built
+# build host system. Critical tools like D-Bus, dhcpcd, etc. will be built
 # from source if not found on the host.
 #
 # Environment Variables:
@@ -15,8 +15,6 @@
 #   RAVEN_JOBS=N                - Number of parallel build jobs (default: nproc)
 #   RAVEN_EXPAT_VERSION         - expat version to build (default: 2.6.2)
 #   RAVEN_DBUS_VERSION          - D-Bus version to build (default: 1.14.10)
-#   RAVEN_ELL_VERSION           - ELL version to build (default: 0.68)
-#   RAVEN_IWD_VERSION           - iwd version to build (default: 2.19)
 #   RAVEN_DHCPCD_VERSION        - dhcpcd version to build (default: 10.0.6)
 #   RAVEN_ETHTOOL_VERSION       - ethtool version to build (default: 6.11)
 # =============================================================================
@@ -173,7 +171,7 @@ copy_system_utils() {
         login agetty setsid
         # Locale and timezone
         locale localedef localectl timedatectl hwclock date
-        # D-Bus (needed by iwd/iwctl and many GUI apps)
+        # D-Bus (needed by many GUI apps)
         dbus-daemon dbus-launch dbus-send dbus-uuidgen
         # Seat management (Wayland compositors)
         seatd
@@ -435,19 +433,16 @@ copy_networking() {
     # Ensure critical networking components are available
     # These will copy from host if available, or build from source if not
     ensure_ethtool
-    ensure_libnl3    # Required by iw and wpa_supplicant
-    ensure_iw        # Wireless utilities
-    ensure_dbus      # Required by iwd
-    ensure_iwd       # Modern WiFi daemon (preferred)
-    ensure_wpa_supplicant  # WiFi (also fallback to iwd)
+    ensure_dbus      # Message bus for GUI apps
+    # No iwd, wpa_supplicant, iw or libnl: cawd (stage-raven) is the wireless
+    # daemon and speaks nl80211 itself. A second daemon on the wiphy fights it
+    # for the interface, and the tools would have nothing to talk to.
     ensure_dhcpcd    # DHCP client
 
     local net_tools=(
         ip ping ping6 ss netstat route
         dhcpcd dhclient udhcpc
-        iwd iwctl iwmon                    # iwd (preferred WiFi backend)
-        wpa_supplicant wpa_cli wpa_passphrase  # wpa_supplicant (fallback)
-        iw iwconfig iwlist rfkill ethtool
+        rfkill ethtool
         ifconfig
         curl wget
         nc ncat
@@ -707,7 +702,7 @@ ensure_expat() {
 }
 
 # =============================================================================
-# Ensure D-Bus is available (message bus, required by iwd)
+# Ensure D-Bus is available (message bus)
 # =============================================================================
 ensure_dbus() {
     log_info "Ensuring D-Bus..."
@@ -838,491 +833,6 @@ ensure_dbus() {
         return 0
     else
         log_warn "D-Bus build completed but binary not found"
-        return 1
-    fi
-}
-
-# =============================================================================
-# Ensure ELL is available (Embedded Linux Library, required by iwd)
-# =============================================================================
-ensure_ell() {
-    log_info "Ensuring ELL (Embedded Linux Library)..."
-
-    # Check if already in sysroot
-    if [[ -f "${SYSROOT_DIR}/usr/lib/libell.so.0" ]]; then
-        log_info "  ELL already present in sysroot"
-        return 0
-    fi
-
-    # Try to copy from host
-    if ! should_force_source_build; then
-        local found=0
-        for libdir in /usr/lib /lib /usr/lib64 /lib64 /usr/lib/x86_64-linux-gnu; do
-            if [[ -f "${libdir}/libell.so.0" ]]; then
-                mkdir -p "${SYSROOT_DIR}/usr/lib"
-                cp -L "${libdir}/libell.so"* "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
-                # Copy headers
-                if [[ -d "/usr/include/ell" ]]; then
-                    mkdir -p "${SYSROOT_DIR}/usr/include"
-                    cp -r /usr/include/ell "${SYSROOT_DIR}/usr/include/" 2>/dev/null || true
-                fi
-                # Copy pkgconfig
-                if [[ -f "${libdir}/pkgconfig/ell.pc" ]]; then
-                    mkdir -p "${SYSROOT_DIR}/usr/lib/pkgconfig"
-                    cp -L "${libdir}/pkgconfig/ell.pc" "${SYSROOT_DIR}/usr/lib/pkgconfig/" 2>/dev/null || true
-                fi
-                log_info "  Copied ELL from host"
-                found=1
-                break
-            fi
-        done
-        [[ $found -eq 1 ]] && return 0
-    fi
-
-    # Build from source
-    local version="${RAVEN_ELL_VERSION:-0.68}"
-    local sources_dir="${BUILD_DIR}/sources"
-    local tarball="${sources_dir}/ell-${version}.tar.xz"
-    local url="https://mirrors.edge.kernel.org/pub/linux/libs/ell/ell-${version}.tar.xz"
-    local build_dir="${sources_dir}/ell-${version}"
-
-    mkdir -p "${sources_dir}"
-
-    if ! download_file "$url" "$tarball"; then
-        log_warn "Failed to download ELL"
-        return 1
-    fi
-
-    if ! command -v make &>/dev/null || ! command -v cc &>/dev/null; then
-        log_warn "Cannot build ELL (missing make/cc)"
-        return 1
-    fi
-
-    rm -rf "${build_dir}" 2>/dev/null || true
-    tar -xf "${tarball}" -C "${sources_dir}" 2>/dev/null || {
-        log_warn "Failed to extract ELL"
-        return 1
-    }
-
-    log_info "  Building ELL ${version}..."
-    (
-        cd "${build_dir}"
-        ./configure --prefix=/usr --enable-shared --disable-static >/dev/null 2>&1 || \
-            ./configure --prefix=/usr --enable-shared --disable-static
-        make -j"${RAVEN_JOBS:-$(nproc)}" >/dev/null 2>&1 || make -j"${RAVEN_JOBS:-$(nproc)}"
-        make DESTDIR="${SYSROOT_DIR}" install >/dev/null 2>&1 || make DESTDIR="${SYSROOT_DIR}" install
-    ) || {
-        log_warn "ELL build failed"
-        return 1
-    }
-
-    if [[ -f "${SYSROOT_DIR}/usr/lib/libell.so.0" ]] || [[ -f "${SYSROOT_DIR}/usr/lib/libell.so" ]]; then
-        log_success "  Built and installed ELL"
-        return 0
-    else
-        log_warn "ELL build completed but library not found"
-        return 1
-    fi
-}
-
-# =============================================================================
-# Ensure libnl3 is available (required by iw and wpa_supplicant)
-# =============================================================================
-ensure_libnl3() {
-    log_info "Ensuring libnl3 (netlink library)..."
-
-    # Check if already in sysroot
-    if [[ -f "${SYSROOT_DIR}/usr/lib/libnl-3.so" ]]; then
-        log_info "  libnl3 already present in sysroot"
-        return 0
-    fi
-
-    # Try to copy from host
-    if ! should_force_source_build; then
-        local found=0
-        for libdir in /usr/lib /lib /usr/lib64 /lib64 /usr/lib/x86_64-linux-gnu; do
-            if [[ -f "${libdir}/libnl-3.so" ]] || [[ -f "${libdir}/libnl-3.so.200" ]]; then
-                mkdir -p "${SYSROOT_DIR}/usr/lib"
-                cp -L "${libdir}/libnl"*.so* "${SYSROOT_DIR}/usr/lib/" 2>/dev/null || true
-                # Copy headers
-                if [[ -d "/usr/include/libnl3" ]]; then
-                    mkdir -p "${SYSROOT_DIR}/usr/include"
-                    cp -r /usr/include/libnl3 "${SYSROOT_DIR}/usr/include/" 2>/dev/null || true
-                fi
-                # Copy pkgconfig
-                if [[ -f "${libdir}/pkgconfig/libnl-3.0.pc" ]]; then
-                    mkdir -p "${SYSROOT_DIR}/usr/lib/pkgconfig"
-                    cp -L "${libdir}/pkgconfig/libnl"*.pc "${SYSROOT_DIR}/usr/lib/pkgconfig/" 2>/dev/null || true
-                fi
-                log_info "  Copied libnl3 from host"
-                found=1
-                break
-            fi
-        done
-        [[ $found -eq 1 ]] && return 0
-    fi
-
-    # Build from source
-    local version="${RAVEN_LIBNL_VERSION:-3.9.0}"
-    local sources_dir="${BUILD_DIR}/sources"
-    local tarball="${sources_dir}/libnl-${version}.tar.gz"
-    local url="https://github.com/thom311/libnl/releases/download/libnl${version//./_}/libnl-${version}.tar.gz"
-    local build_dir="${sources_dir}/libnl-${version}"
-
-    mkdir -p "${sources_dir}"
-
-    if ! download_file "$url" "$tarball"; then
-        log_warn "Failed to download libnl3"
-        return 1
-    fi
-
-    if ! command -v make &>/dev/null || ! command -v cc &>/dev/null; then
-        log_warn "Cannot build libnl3 (missing make/cc)"
-        return 1
-    fi
-
-    rm -rf "${build_dir}" 2>/dev/null || true
-    tar -xf "${tarball}" -C "${sources_dir}" 2>/dev/null || {
-        log_warn "Failed to extract libnl3"
-        return 1
-    }
-
-    log_info "  Building libnl3 ${version}..."
-    (
-        cd "${build_dir}"
-        ./configure --prefix=/usr --sysconfdir=/etc --disable-static >/dev/null 2>&1 || \
-            ./configure --prefix=/usr --disable-static
-        make -j"${RAVEN_JOBS:-$(nproc)}" >/dev/null 2>&1 || make -j"${RAVEN_JOBS:-$(nproc)}"
-        make DESTDIR="${SYSROOT_DIR}" install >/dev/null 2>&1 || make DESTDIR="${SYSROOT_DIR}" install
-    ) || {
-        log_warn "libnl3 build failed"
-        return 1
-    }
-
-    if [[ -f "${SYSROOT_DIR}/usr/lib/libnl-3.so" ]] || [[ -f "${SYSROOT_DIR}/usr/lib/libnl-3.so.200" ]]; then
-        log_success "  Built and installed libnl3"
-        return 0
-    else
-        log_warn "libnl3 build completed but library not found"
-        return 1
-    fi
-}
-
-# =============================================================================
-# Ensure iw is available (wireless utilities)
-# =============================================================================
-ensure_iw() {
-    log_info "Ensuring iw (wireless utilities)..."
-
-    # Check if already in sysroot
-    if [[ -x "${SYSROOT_DIR}/usr/bin/iw" ]]; then
-        log_info "  iw already present in sysroot"
-        return 0
-    fi
-
-    # Try to copy from host
-    if ! should_force_source_build; then
-        if copy_from_host "iw" "${SYSROOT_DIR}/usr/bin/iw"; then
-            log_info "  Copied iw from host"
-            return 0
-        fi
-    fi
-
-    # Ensure dependency
-    ensure_libnl3 || {
-        log_warn "libnl3 not available; cannot build iw"
-        return 1
-    }
-
-    # Build from source
-    local version="${RAVEN_IW_VERSION:-6.9}"
-    local sources_dir="${BUILD_DIR}/sources"
-    local tarball="${sources_dir}/iw-${version}.tar.xz"
-    local url="https://mirrors.edge.kernel.org/pub/software/network/iw/iw-${version}.tar.xz"
-    local build_dir="${sources_dir}/iw-${version}"
-
-    mkdir -p "${sources_dir}"
-
-    if ! download_file "$url" "$tarball"; then
-        log_warn "Failed to download iw"
-        return 1
-    fi
-
-    if ! command -v make &>/dev/null || ! command -v cc &>/dev/null; then
-        log_warn "Cannot build iw (missing make/cc)"
-        return 1
-    fi
-
-    rm -rf "${build_dir}" 2>/dev/null || true
-    tar -xf "${tarball}" -C "${sources_dir}" 2>/dev/null || {
-        log_warn "Failed to extract iw"
-        return 1
-    }
-
-    log_info "  Building iw ${version}..."
-
-    local pkg_config_path="${SYSROOT_DIR}/usr/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-
-    (
-        cd "${build_dir}"
-        export PKG_CONFIG_PATH="$pkg_config_path"
-        export CFLAGS="-I${SYSROOT_DIR}/usr/include/libnl3 ${CFLAGS:-}"
-        export LDFLAGS="-L${SYSROOT_DIR}/usr/lib ${LDFLAGS:-}"
-        make -j"${RAVEN_JOBS:-$(nproc)}" >/dev/null 2>&1 || make -j"${RAVEN_JOBS:-$(nproc)}"
-        make DESTDIR="${SYSROOT_DIR}" PREFIX=/usr SBINDIR=/sbin install >/dev/null 2>&1 || \
-            make DESTDIR="${SYSROOT_DIR}" install
-    ) || {
-        log_warn "iw build failed"
-        return 1
-    }
-
-    if [[ -x "${SYSROOT_DIR}/usr/bin/iw" ]]; then
-        log_success "  Built and installed iw"
-        return 0
-    else
-        log_warn "iw build completed but binary not found"
-        return 1
-    fi
-}
-
-# =============================================================================
-# Ensure iwd is available (WiFi daemon)
-# =============================================================================
-ensure_iwd() {
-    log_info "Ensuring iwd (WiFi daemon)..."
-
-    # Check if already in sysroot
-    if [[ -x "${SYSROOT_DIR}/usr/libexec/iwd" ]]; then
-        log_info "  iwd already present in sysroot"
-        return 0
-    fi
-
-    # Try to copy from host
-    if ! should_force_source_build; then
-        # iwd daemon is typically in /usr/libexec/iwd
-        local iwd_found=0
-        for iwd_path in /usr/libexec/iwd /usr/lib/iwd /usr/sbin/iwd; do
-            if [[ -x "$iwd_path" ]]; then
-                mkdir -p "${SYSROOT_DIR}/usr/libexec"
-                cp -L "$iwd_path" "${SYSROOT_DIR}/usr/libexec/iwd" 2>/dev/null || true
-                chmod +x "${SYSROOT_DIR}/usr/libexec/iwd" 2>/dev/null || true
-                log_info "  Copied iwd daemon from host"
-                iwd_found=1
-                break
-            fi
-        done
-
-        # Copy iwctl and iwmon
-        copy_from_host "iwctl" "${SYSROOT_DIR}/usr/bin/iwctl" || true
-        copy_from_host "iwmon" "${SYSROOT_DIR}/usr/bin/iwmon" || true
-
-        # Copy iwd D-Bus config
-        if [[ -d "/usr/share/dbus-1/system.d" ]]; then
-            mkdir -p "${SYSROOT_DIR}/usr/share/dbus-1/system.d"
-            cp /usr/share/dbus-1/system.d/iwd*.conf "${SYSROOT_DIR}/usr/share/dbus-1/system.d/" 2>/dev/null || true
-        fi
-        if [[ -d "/etc/dbus-1/system.d" ]]; then
-            mkdir -p "${SYSROOT_DIR}/etc/dbus-1/system.d"
-            cp /etc/dbus-1/system.d/iwd*.conf "${SYSROOT_DIR}/etc/dbus-1/system.d/" 2>/dev/null || true
-        fi
-
-        # Copy iwd config directory structure
-        mkdir -p "${SYSROOT_DIR}/var/lib/iwd"
-        mkdir -p "${SYSROOT_DIR}/etc/iwd"
-
-        if [[ $iwd_found -eq 1 ]]; then
-            return 0
-        fi
-    fi
-
-    # Ensure dependencies
-    ensure_dbus || log_warn "D-Bus not available; iwd requires D-Bus"
-    ensure_ell || {
-        log_warn "ELL not available; cannot build iwd"
-        return 1
-    }
-
-    # Build from source
-    local version="${RAVEN_IWD_VERSION:-2.19}"
-    local sources_dir="${BUILD_DIR}/sources"
-    local tarball="${sources_dir}/iwd-${version}.tar.xz"
-    local url="https://mirrors.edge.kernel.org/pub/linux/network/wireless/iwd-${version}.tar.xz"
-    local build_dir="${sources_dir}/iwd-${version}"
-
-    mkdir -p "${sources_dir}"
-
-    if ! download_file "$url" "$tarball"; then
-        log_warn "Failed to download iwd"
-        return 1
-    fi
-
-    if ! command -v make &>/dev/null || ! command -v cc &>/dev/null; then
-        log_warn "Cannot build iwd (missing make/cc)"
-        return 1
-    fi
-
-    rm -rf "${build_dir}" 2>/dev/null || true
-    tar -xf "${tarball}" -C "${sources_dir}" 2>/dev/null || {
-        log_warn "Failed to extract iwd"
-        return 1
-    }
-
-    log_info "  Building iwd ${version}..."
-
-    # Set paths to find ELL and D-Bus we built
-    local pkg_config_path="${SYSROOT_DIR}/usr/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-
-    (
-        cd "${build_dir}"
-        export PKG_CONFIG_PATH="$pkg_config_path"
-        export CFLAGS="-I${SYSROOT_DIR}/usr/include ${CFLAGS:-}"
-        export LDFLAGS="-L${SYSROOT_DIR}/usr/lib -Wl,-rpath,/usr/lib ${LDFLAGS:-}"
-
-        ./configure \
-            --prefix=/usr \
-            --sysconfdir=/etc \
-            --localstatedir=/var \
-            --libexecdir=/usr/libexec \
-            --disable-systemd-service \
-            --disable-manual-pages \
-            --enable-client \
-            --enable-monitor \
-            --disable-wired \
-            >/dev/null 2>&1 || \
-        ./configure \
-            --prefix=/usr \
-            --libexecdir=/usr/libexec \
-            --disable-systemd-service \
-            --disable-wired
-
-        make -j"${RAVEN_JOBS:-$(nproc)}" >/dev/null 2>&1 || make -j"${RAVEN_JOBS:-$(nproc)}"
-        make DESTDIR="${SYSROOT_DIR}" install >/dev/null 2>&1 || make DESTDIR="${SYSROOT_DIR}" install
-    ) || {
-        log_warn "iwd build failed"
-        return 1
-    }
-
-    if [[ -x "${SYSROOT_DIR}/usr/libexec/iwd" ]]; then
-        log_success "  Built and installed iwd"
-
-        # Create necessary directories
-        mkdir -p "${SYSROOT_DIR}/var/lib/iwd"
-        mkdir -p "${SYSROOT_DIR}/etc/iwd"
-
-        return 0
-    else
-        log_warn "iwd build completed but binary not found"
-        return 1
-    fi
-}
-
-# =============================================================================
-# Ensure wpa_supplicant is available (fallback WiFi daemon)
-# =============================================================================
-ensure_wpa_supplicant() {
-    log_info "Ensuring wpa_supplicant (WiFi daemon)..."
-
-    # Check if already in sysroot
-    if [[ -x "${SYSROOT_DIR}/usr/bin/wpa_supplicant" ]]; then
-        log_info "  wpa_supplicant already present in sysroot"
-        return 0
-    fi
-
-    # Try to copy from host
-    if ! should_force_source_build; then
-        if copy_from_host "wpa_supplicant" "${SYSROOT_DIR}/usr/bin/wpa_supplicant"; then
-            copy_from_host "wpa_cli" "${SYSROOT_DIR}/usr/bin/wpa_cli" || true
-            copy_from_host "wpa_passphrase" "${SYSROOT_DIR}/usr/bin/wpa_passphrase" || true
-
-            # Create config directory
-            mkdir -p "${SYSROOT_DIR}/etc/wpa_supplicant"
-
-            return 0
-        fi
-    fi
-
-    # Ensure dependencies
-    ensure_libnl3 || {
-        log_warn "libnl3 not available; cannot build wpa_supplicant"
-        return 1
-    }
-
-    # Build from source
-    local version="${RAVEN_WPA_VERSION:-2.11}"
-    local sources_dir="${BUILD_DIR}/sources"
-    local tarball="${sources_dir}/wpa_supplicant-${version}.tar.gz"
-    local url="https://w1.fi/releases/wpa_supplicant-${version}.tar.gz"
-    local build_dir="${sources_dir}/wpa_supplicant-${version}/wpa_supplicant"
-
-    mkdir -p "${sources_dir}"
-
-    if ! download_file "$url" "$tarball"; then
-        log_warn "Failed to download wpa_supplicant"
-        return 1
-    fi
-
-    if ! command -v make &>/dev/null || ! command -v cc &>/dev/null; then
-        log_warn "Cannot build wpa_supplicant (missing make/cc)"
-        return 1
-    fi
-
-    rm -rf "${sources_dir}/wpa_supplicant-${version}" 2>/dev/null || true
-    tar -xf "${tarball}" -C "${sources_dir}" 2>/dev/null || {
-        log_warn "Failed to extract wpa_supplicant"
-        return 1
-    }
-
-    log_info "  Building wpa_supplicant ${version}..."
-
-    # Create build configuration
-    cat > "${build_dir}/.config" <<'EOF'
-CONFIG_DRIVER_NL80211=y
-CONFIG_LIBNL32=y
-CONFIG_CTRL_IFACE=y
-CONFIG_BACKEND=file
-CONFIG_WPS=y
-CONFIG_EAP_TLS=y
-CONFIG_EAP_PEAP=y
-CONFIG_EAP_TTLS=y
-CONFIG_EAP_MSCHAPV2=y
-CONFIG_EAP_GTC=y
-CONFIG_IEEE8021X_EAPOL=y
-CONFIG_PKCS12=y
-CONFIG_READLINE=y
-EOF
-
-    local pkg_config_path="${SYSROOT_DIR}/usr/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-
-    (
-        cd "${build_dir}"
-        export PKG_CONFIG_PATH="$pkg_config_path"
-        export CFLAGS="-I${SYSROOT_DIR}/usr/include -I${SYSROOT_DIR}/usr/include/libnl3 ${CFLAGS:-}"
-        export LDFLAGS="-L${SYSROOT_DIR}/usr/lib ${LDFLAGS:-}"
-        export LIBS="-lnl-3 -lnl-genl-3"
-        make -j"${RAVEN_JOBS:-$(nproc)}" >/dev/null 2>&1 || make -j"${RAVEN_JOBS:-$(nproc)}"
-    ) || {
-        log_warn "wpa_supplicant build failed"
-        return 1
-    }
-
-    # Install binaries
-    if [[ -x "${build_dir}/wpa_supplicant" ]]; then
-        mkdir -p "${SYSROOT_DIR}/usr/bin"
-        cp "${build_dir}/wpa_supplicant" "${SYSROOT_DIR}/usr/bin/"
-        cp "${build_dir}/wpa_cli" "${SYSROOT_DIR}/usr/bin/" 2>/dev/null || true
-        cp "${build_dir}/wpa_passphrase" "${SYSROOT_DIR}/usr/bin/" 2>/dev/null || true
-        chmod +x "${SYSROOT_DIR}/usr/bin/wpa_supplicant"
-        chmod +x "${SYSROOT_DIR}/usr/bin/wpa_cli" 2>/dev/null || true
-        chmod +x "${SYSROOT_DIR}/usr/bin/wpa_passphrase" 2>/dev/null || true
-
-        # Create config directory
-        mkdir -p "${SYSROOT_DIR}/etc/wpa_supplicant"
-        mkdir -p "${SYSROOT_DIR}/run/wpa_supplicant"
-
-        log_success "  Built and installed wpa_supplicant"
-        return 0
-    else
-        log_warn "wpa_supplicant build completed but binary not found"
         return 1
     fi
 }
@@ -2843,15 +2353,6 @@ args = ["--system", "--nofork", "--nopidfile"]
 restart = true
 enabled = true
 critical = false
-
-[[services]]
-name = "iwd"
-description = "iNet Wireless Daemon"
-exec = "/usr/libexec/iwd"
-args = []
-restart = true
-enabled = true
-critical = false
 EOF
     fi
     chmod 0644 "${SYSROOT_DIR}/etc/raven/init.toml" 2>/dev/null || true
@@ -2992,9 +2493,15 @@ EOF
 EOF
 
     # Realtek rtw89 (RTL8852BE) stability defaults
+    # Both Realtek drivers below are built into the kernel (=y, see
+    # build-kernel.sh), and modprobe only reads these files while loading a
+    # module -- so on their own they do nothing. raven-init applies them at
+    # boot through /sys/module/<name>/parameters (apply_builtin_module_options
+    # in init/src/main.rs), before it re-probes the card.
     cat > "${SYSROOT_DIR}/etc/modprobe.d/rtw89.conf" << 'EOF'
 # RavenLinux: Realtek rtw89 defaults
 # RTL8852BE often fails to bring up a netdev with PCIe ASPM enabled on some laptops.
+# rtw89 is built in; raven-init applies this line at boot (modprobe never sees it).
 options rtw89_pci disable_aspm=1
 EOF
 
@@ -3008,6 +2515,7 @@ EOF
     cat > "${SYSROOT_DIR}/etc/modprobe.d/rtw88.conf" << 'EOF'
 # RavenLinux: Realtek rtw88 defaults
 # RTL8821CE/8822CE fail "mac power on" with PCIe ASPM enabled on some laptops.
+# rtw88 is built in; raven-init applies this line at boot (modprobe never sees it).
 options rtw88_pci disable_aspm=1
 EOF
 
@@ -3283,7 +2791,7 @@ export RAVEN_LINUX=1
 [ -f /etc/locale.conf ] && . /etc/locale.conf
 EOF
 
-    # D-Bus configuration (needed by iwctl/iwd and many GUI apps)
+    # D-Bus configuration (needed by many GUI apps)
     if [[ -d /usr/share/dbus-1 ]]; then
         mkdir -p "${SYSROOT_DIR}/usr/share/dbus-1"
         cp -r /usr/share/dbus-1/* "${SYSROOT_DIR}/usr/share/dbus-1/" 2>/dev/null || true

@@ -217,7 +217,7 @@ CONFIG_BT_NXPUART=y            # NXP Bluetooth
 4. Verify interface exists:
    ```
    ip link show
-   iw dev
+   caw ports
    ```
 
 ### Ethernet not working

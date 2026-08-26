@@ -179,7 +179,7 @@ impl Service {
     }
 
     /// Where service output goes. Overridable so tests need no /var/log.
-    fn log_dir() -> std::path::PathBuf {
+    pub(crate) fn log_dir() -> std::path::PathBuf {
         std::env::var_os("RAVEN_SERVICE_LOG_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("/var/log/raven"))

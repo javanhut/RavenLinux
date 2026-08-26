@@ -90,7 +90,7 @@ restart = true
 enabled = false  # Enable when klogd is installed
 critical = false
 
-# D-Bus system bus (required for iwd/iwctl and many other services)
+# D-Bus system bus (required by many services and GUI apps)
 [[services]]
 name = "dbus"
 description = "D-Bus system message bus"
@@ -142,20 +142,6 @@ critical = false
 stop_exec = "/usr/bin/caw"
 stop_args = ["shutdown"]
 stop_timeout = 5
-
-# iwd - Modern wireless daemon (requires D-Bus)
-#
-# Disabled: cawd replaces it. Both drive the same wiphy over nl80211 and would
-# fight over the interface, so exactly one of these may be enabled. Flip these
-# two `enabled` flags together to go back to iwd.
-[[services]]
-name = "iwd"
-description = "iNet Wireless Daemon"
-exec = "/usr/libexec/iwd"
-args = []
-restart = true
-enabled = false
-critical = false
 
 # Network manager (when available)
 #

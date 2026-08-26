@@ -118,6 +118,66 @@ fn init_logging() {
     }
 }
 
+/// Apply `options <module> key=value...` lines from modprobe.d to drivers
+/// built into the kernel.
+///
+/// modprobe reads those files only while loading a module. This kernel builds
+/// its wireless drivers in (=y), so `options rtw88_pci disable_aspm=1` in
+/// /etc/modprobe.d/rtw88.conf never reached the driver, and the 8821CE kept
+/// dying in "mac power on" with its workaround sitting on disk. A built-in
+/// driver's parameters still exist under /sys/module/<name>/parameters and
+/// accept writes when the driver declares them 0644 (rtw88 and rtw89 do), and
+/// the cards this is for probe after this point (see reprobe_orphan_pci_devices),
+/// so writing them here gives the conf files the meaning they claim to have.
+///
+/// Loadable modules are skipped -- they have no /sys/module entry until
+/// modprobe loads them, and modprobe applies the options itself.
+fn apply_builtin_module_options(modprobe_d: &Path, sys_module: &Path) {
+    let Ok(entries) = fs::read_dir(modprobe_d) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension() != Some(std::ffi::OsStr::new("conf")) {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in text.lines() {
+            let mut words = line.split_whitespace();
+            if words.next() != Some("options") {
+                continue;
+            }
+            let Some(module) = words.next() else {
+                continue;
+            };
+            // The kernel spells module names with underscores; modprobe.d
+            // accepts either.
+            let params = sys_module.join(module.replace('-', "_")).join("parameters");
+            if !params.is_dir() {
+                continue;
+            }
+            for assignment in words {
+                let Some((key, value)) = assignment.split_once('=') else {
+                    continue;
+                };
+                match fs::write(params.join(key), value) {
+                    Ok(()) => log::info!("Set built-in {}.{}={}", module, key, value),
+                    // A 0444 parameter is only settable on the kernel
+                    // command line; say so rather than let the conf file
+                    // keep looking like it works.
+                    Err(e) => log::warn!(
+                        "Cannot set built-in {}.{}={} ({}): pass {}.{}={} on the kernel command line",
+                        module, key, value, e, module, key, value
+                    ),
+                }
+            }
+        }
+    }
+}
+
 /// Re-probe PCI devices that have no bound driver.
 ///
 /// Writing a device address to /sys/bus/pci/drivers_probe re-runs driver
@@ -262,7 +322,12 @@ fn run_init() -> Result<()> {
     // load ENOENT, probe fails with -22, and the WiFi card sits driverless
     // forever while its firmware sits on disk. Now that the root (and
     // /lib/firmware) is here, ask the kernel to try those devices again.
+    //
+    // Before that, hand the drivers their /etc/modprobe.d options: they are
+    // built in, so modprobe never will, and the one that matters (rtw88_pci
+    // disable_aspm) has to be set before the probe it fixes.
     log::info!("Phase 2b: Re-probing driverless PCI devices");
+    apply_builtin_module_options(Path::new("/etc/modprobe.d"), Path::new("/sys/module"));
     reprobe_orphan_pci_devices();
 
     // Loopback is nobody's service, so nothing else brings it up -- and a down
@@ -1686,6 +1751,72 @@ mod tests {
         // Not a recognised form at all.
         assert_eq!(resolve_fstab_spec("tmpfs"), None);
         assert_eq!(resolve_fstab_spec("proc"), None);
+    }
+}
+
+#[cfg(test)]
+mod builtin_module_options_tests {
+    use super::*;
+
+    /// A modprobe.d and a /sys/module with one built-in module (`rtw88_pci`,
+    /// parameter `disable_aspm` = N) and nothing for `rtw89_pci`.
+    fn fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("raven-modopts-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let modprobe_d = root.join("modprobe.d");
+        let sys_module = root.join("module");
+        fs::create_dir_all(&modprobe_d).expect("mkdir");
+        fs::create_dir_all(sys_module.join("rtw88_pci/parameters")).expect("mkdir");
+        fs::write(sys_module.join("rtw88_pci/parameters/disable_aspm"), "N").expect("write");
+        (modprobe_d, sys_module)
+    }
+
+    #[test]
+    fn options_line_reaches_a_built_in_module() {
+        // The shipped file, comments and all. The rtw89 line has no
+        // /sys/module entry (loadable or absent) and must be left to modprobe
+        // without tripping over anything.
+        let (modprobe_d, sys_module) = fixture("shipped");
+        fs::write(
+            modprobe_d.join("rtw88.conf"),
+            "# RavenLinux: Realtek rtw88 defaults\noptions rtw88_pci disable_aspm=1\n",
+        )
+        .expect("write");
+        fs::write(
+            modprobe_d.join("rtw89.conf"),
+            "options rtw89_pci disable_aspm=1\n",
+        )
+        .expect("write");
+        // Not a .conf: modprobe ignores it, so must we.
+        fs::write(
+            modprobe_d.join("rtw88.conf.bak"),
+            "options rtw88_pci disable_aspm=0\n",
+        )
+        .expect("write");
+
+        apply_builtin_module_options(&modprobe_d, &sys_module);
+
+        let value =
+            fs::read_to_string(sys_module.join("rtw88_pci/parameters/disable_aspm")).expect("read");
+        assert_eq!(value, "1");
+        assert!(!sys_module.join("rtw89_pci").exists());
+    }
+
+    #[test]
+    fn dash_in_module_name_maps_to_the_kernel_spelling() {
+        let (modprobe_d, sys_module) = fixture("dash");
+        fs::write(
+            modprobe_d.join("x.conf"),
+            "options rtw88-pci disable_aspm=1 disable_msi=1\n",
+        )
+        .expect("write");
+
+        apply_builtin_module_options(&modprobe_d, &sys_module);
+
+        let value =
+            fs::read_to_string(sys_module.join("rtw88_pci/parameters/disable_aspm")).expect("read");
+        assert_eq!(value, "1");
     }
 }
 

@@ -173,3 +173,4 @@ build/
 .lazy/
 *.bin
 bootloader/target/
+*/debug/*
