@@ -264,6 +264,11 @@ setup_sysroot() {
             # only link shape that is.
             ln -sf coreutils "${SYSROOT_DIR}/usr/bin/${util}"
         done
+    else
+        # build_coreutils only logs an error, so the build reaches here with
+        # no coreutils and a sysroot whose /usr/bin will hold only whatever
+        # stage2 copies from the host. Say so, next to the consequence.
+        log_warn "uutils coreutils not built; /usr/bin gets only stage2's host copies"
     fi
 
     # Install sudo-rs bits (su/visudo). We intentionally do not ship sudo by default.

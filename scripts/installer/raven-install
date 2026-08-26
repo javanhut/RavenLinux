@@ -920,14 +920,20 @@ ensure_group() {
     grep -q "^${grp}:" "$group" 2>/dev/null && return 0
 
     # First free GID in the system range, high end first so this never collides
-    # with a distro's statically-assigned low GIDs.
-    local gid
-    for gid in $(seq 999 -1 900); do
-        grep -q "^[^:]*:[^:]*:${gid}:" "$group" 2>/dev/null || break
+    # with a distro's statically-assigned low GIDs. Brace expansion rather than
+    # seq: the live image does not ship seq, and under `set -u` a loop over an
+    # empty list left $gid unbound and aborted the whole install right after
+    # the user account had been created.
+    local gid found=""
+    for gid in {999..900}; do
+        if ! grep -q "^[^:]*:[^:]*:${gid}:" "$group" 2>/dev/null; then
+            found="$gid"
+            break
+        fi
     done
-    (( gid < 900 )) && return 1
+    [[ -n "$found" ]] || return 1
 
-    printf '%s:x:%s:\n' "$grp" "$gid" >> "$group"
+    printf '%s:x:%s:\n' "$grp" "$found" >> "$group"
 }
 
 add_group_member() {

@@ -141,6 +141,15 @@ copy_system_utils() {
         resize2fs dumpe2fs
         # Coreutils the installer uses that the uutils set does not always cover.
         df du dd sync stat truncate od install chroot column split
+        # Everything stage1 would have symlinked onto the uutils multicall
+        # binary but is not already listed above. build_coreutils only logs an
+        # error when the uutils build fails, so the sysroot can reach this
+        # point with no coreutils at all -- and then this list is the only
+        # source of these commands. raven-install died on a missing seq that
+        # way. When uutils is present these stay as coreutils symlinks (see
+        # the "Keeping" branch below), so listing them costs nothing.
+        seq yes paste chgrp dir vdir md5sum sha256sum true false
+        mktemp mknod tty
         # System info
         dmesg lspci lsusb free uptime uname hostname
         dmidecode lscpu
