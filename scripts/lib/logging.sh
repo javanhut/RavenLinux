@@ -184,8 +184,18 @@ format_duration() {
 _write_to_log() {
     local message="$1"
     if [[ "$_RAVEN_LOG_ENABLED" == "true" ]] && [[ -n "$_RAVEN_LOG_FILE" ]]; then
-        echo "$message" >> "$_RAVEN_LOG_FILE"
+        # A logging helper must never be the thing that fails a build. Every
+        # log_* function ends in this call, so a failed append returns non-zero
+        # out of log_success/log_info and `set -e` kills the caller -- which is
+        # exactly what `--clean` did: it deletes the whole build directory, log
+        # file included, and the next log line died on the missing path.
+        #
+        # The mkdir re-creates the directory rather than only tolerating its
+        # absence, so the log survives the clean instead of going quiet.
+        [[ -d "${_RAVEN_LOG_FILE%/*}" ]] || mkdir -p "${_RAVEN_LOG_FILE%/*}" 2>/dev/null || true
+        echo "$message" >> "$_RAVEN_LOG_FILE" 2>/dev/null || true
     fi
+    return 0
 }
 
 # Log info message (blue)

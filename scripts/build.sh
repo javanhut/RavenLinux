@@ -466,6 +466,10 @@ EOF
 clean_build() {
     log_warn "Cleaning build directory..."
     rm -rf "${RAVEN_BUILD}"
+    # init_logging has already opened a log file *inside* ${RAVEN_BUILD}, and
+    # the rm above just deleted the directory holding it. Put it back before
+    # anything else logs, so this run's log survives its own clean.
+    mkdir -p "${LOGS_DIR}"
     log_success "Build directory cleaned"
 }
 
