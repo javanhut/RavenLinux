@@ -288,7 +288,12 @@ install_packages_to_sysroot() {
         cp -a "/usr/share/fontconfig/." "${SYSROOT_DIR}/usr/share/fontconfig/" 2>/dev/null || true
         log_info "  Copied /usr/share/fontconfig"
     fi
-    # Copy fonts from repo only (avoid pulling host system fonts).
+    # The fonts this repository ships, on top of whatever stage2 already took
+    # from the host. Additive, not exclusive: stage2's copy_system_utils()
+    # copies /usr/share/fonts wholesale, which is where DejaVu and the emoji
+    # face come from. This step owns only the JetBrains Mono Nerd Font that
+    # install_console_font rasterises into a console PSF below, so the desktop
+    # and the console are the same typeface.
     local font_count
     local font_src
     font_src="${PROJECT_ROOT}/fonts"
@@ -302,6 +307,31 @@ install_packages_to_sysroot() {
         log_warn "  No custom fonts directory found at ${font_src}; skipping font copy"
     fi
     mkdir -p "${SYSROOT_DIR}/var/cache/fontconfig" 2>/dev/null || true
+
+    # A monospace family alone is not a font stack. huginn's shell draws every
+    # label through cosmic-text, which scans these directories directly and
+    # takes what it finds -- so with only JetBrains Mono on the image the dock,
+    # launcher and notifications all came out monospace, and any name outside
+    # Latin/Greek/Cyrillic drew as nothing at all. Say so rather than shipping
+    # it quietly; the fix is a package on the build host, not code.
+    if [[ -z "$(find "${SYSROOT_DIR}/usr/share/fonts" -iname 'DejaVuSans.ttf' 2>/dev/null)" ]]; then
+        log_warn "  No proportional font on the image: the desktop will draw"
+        log_warn "  every label in monospace. Install ttf-dejavu on the build host."
+    fi
+
+    # Build the fontconfig cache now rather than leaving each process to scan
+    # /usr/share/fonts on first use. --sysroot is what keeps this out of the
+    # build host's own cache; without it fc-cache indexes the container and
+    # writes nothing useful into the image.
+    if command -v fc-cache &>/dev/null; then
+        if fc-cache --sysroot="${SYSROOT_DIR}" -f &>/dev/null; then
+            log_info "  Built the fontconfig cache"
+        else
+            log_warn "  fc-cache failed; fonts still work, first use is just slower"
+        fi
+    else
+        log_info "  fc-cache not on the build host; skipping the font cache"
+    fi
 
     install_console_font
     install_udev_helper

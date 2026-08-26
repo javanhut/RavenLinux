@@ -188,12 +188,29 @@ OPTIONAL_PACKAGES_ALPINE="qemu-system-x86_64 ovmf"
 # supplies EGL. Missing them is not fatal -- stage-gui.sh checks for them and
 # skips itself, producing a console-only ISO -- so they are listed with the
 # rest rather than treated as a hard requirement.
-EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja oniguruma libdrm libinput mesa libxkbcommon wayland libwacom libevdev mtdev seatd parted gptfdisk efibootmgr kbd python-freetype-py"
-EXTRA_PACKAGES_DEBIAN="build-essential linux-headers-generic libelf-dev python3-jinja2 libonig-dev libdrm-dev libinput-dev libseat-dev libgbm-dev libegl-dev libxkbcommon-dev libwayland-dev libwacom-dev libevdev-dev libmtdev-dev seatd"
-EXTRA_PACKAGES_FEDORA="kernel-devel elfutils-libelf-devel python3-jinja2 oniguruma-devel libdrm-devel libinput-devel libseat-devel mesa-libgbm-devel mesa-libEGL-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd"
-EXTRA_PACKAGES_SUSE="kernel-devel libelf-devel python3-Jinja2 oniguruma-devel libdrm-devel libinput-devel libseat-devel Mesa-libgbm-devel Mesa-libEGL-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd"
-EXTRA_PACKAGES_VOID="base-devel linux-headers elfutils-devel python3-Jinja2 oniguruma-devel libdrm-devel libinput-devel seatd-devel MesaLib-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd"
-EXTRA_PACKAGES_ALPINE="build-base linux-headers elfutils-dev py3-jinja2 oniguruma-dev libdrm-dev libinput-dev libseat-dev mesa-dev libxkbcommon-dev wayland-dev libwacom-dev libevdev-dev mtdev-dev seatd"
+#
+# The last group in each list is different in kind: the icon and cursor themes
+# and the fonts are not linked or compiled against anything. They are *copied
+# from this host into the image*, by stage2's copy_system_utils() and by
+# stage_gui_data() in stage-gui.sh. They are listed here because their absence
+# is invisible at build time and produces a desktop that starts and is visibly
+# broken:
+#
+#   adwaita cursors      what /usr/share/icons/default inherits. Without it the
+#                        compositor draws no pointer over its own surfaces.
+#   breeze + hicolor     what dock and launcher Icon= names resolve against.
+#   dejavu + noto emoji  the only proportional and emoji faces on the image;
+#                        the repo ships JetBrains Mono, which is monospace.
+#
+# Package names differ more here than for the libraries above, so treat the
+# unfamiliar ones as descriptions to map rather than as gospel -- this check is
+# advisory, and the container in the Dockerfile is the supported build path.
+EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja oniguruma libdrm libinput mesa libxkbcommon wayland libwacom libevdev mtdev seatd parted gptfdisk efibootmgr kbd python-freetype-py adwaita-cursors breeze-icons hicolor-icon-theme ttf-dejavu noto-fonts-emoji"
+EXTRA_PACKAGES_DEBIAN="build-essential linux-headers-generic libelf-dev python3-jinja2 libonig-dev libdrm-dev libinput-dev libseat-dev libgbm-dev libegl-dev libxkbcommon-dev libwayland-dev libwacom-dev libevdev-dev libmtdev-dev seatd adwaita-icon-theme breeze-icon-theme hicolor-icon-theme fonts-dejavu fonts-noto-color-emoji"
+EXTRA_PACKAGES_FEDORA="kernel-devel elfutils-libelf-devel python3-jinja2 oniguruma-devel libdrm-devel libinput-devel libseat-devel mesa-libgbm-devel mesa-libEGL-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd adwaita-cursor-theme breeze-icon-theme hicolor-icon-theme dejavu-fonts-all google-noto-emoji-color-fonts"
+EXTRA_PACKAGES_SUSE="kernel-devel libelf-devel python3-Jinja2 oniguruma-devel libdrm-devel libinput-devel libseat-devel Mesa-libgbm-devel Mesa-libEGL-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd adwaita-icon-theme breeze5-icons hicolor-icon-theme dejavu-fonts noto-coloremoji-fonts"
+EXTRA_PACKAGES_VOID="base-devel linux-headers elfutils-devel python3-Jinja2 oniguruma-devel libdrm-devel libinput-devel seatd-devel MesaLib-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd adwaita-icon-theme breeze-icons hicolor-icon-theme dejavu-fonts-ttf noto-fonts-emoji"
+EXTRA_PACKAGES_ALPINE="build-base linux-headers elfutils-dev py3-jinja2 oniguruma-dev libdrm-dev libinput-dev libseat-dev mesa-dev libxkbcommon-dev wayland-dev libwacom-dev libevdev-dev mtdev-dev seatd adwaita-icon-theme breeze-icons hicolor-icon-theme ttf-dejavu font-noto-emoji"
 
 # =============================================================================
 # Functions

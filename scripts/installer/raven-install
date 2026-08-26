@@ -903,6 +903,33 @@ set_hostname() {
 # Add $2 to group $1's member list in the target's /etc/group, if not already
 # there. Editing the file directly rather than calling gpasswd keeps this
 # working on an image whose shadow tools cannot chroot.
+# Create a system group if the image does not already ship one.
+#
+# add_group_member fails on a group that does not exist, and every caller of it
+# swallowed that with `|| true` -- so a missing group was indistinguishable
+# from a successful add. `render` is the one where that had teeth: udev's
+# 50-udev-default.rules gives /dev/dri/renderD* to group `render` at mode 0660,
+# and with no such group in /etc/group the rule cannot apply and the node stays
+# root-only 0600. The compositor survives that (it reaches the card node
+# through seatd) but every GPU-accelerated Wayland client that opens the render
+# node does not.
+ensure_group() {
+    local grp="$1" group="${TARGET}/etc/group"
+
+    [[ -f "$group" ]] || return 1
+    grep -q "^${grp}:" "$group" 2>/dev/null && return 0
+
+    # First free GID in the system range, high end first so this never collides
+    # with a distro's statically-assigned low GIDs.
+    local gid
+    for gid in $(seq 999 -1 900); do
+        grep -q "^[^:]*:[^:]*:${gid}:" "$group" 2>/dev/null || break
+    done
+    (( gid < 900 )) && return 1
+
+    printf '%s:x:%s:\n' "$grp" "$gid" >> "$group"
+}
+
 add_group_member() {
     local grp="$1" user="$2" group="${TARGET}/etc/group"
     grep -q "^${grp}:" "$group" 2>/dev/null || return 1
@@ -1017,8 +1044,14 @@ grant_sudo() {
     fi
 
     # Groups a desktop session needs to reach hardware directly.
+    #
+    # Created first if the image lacks them. seatd runs with -g video, which
+    # the base image does ship, so a seat works either way; `render` is the one
+    # that was quietly absent and left /dev/dri/renderD* unopenable by anyone
+    # but root. `seat` is created for symmetry and is unused today.
     local g
     for g in audio video input render seat; do
+        ensure_group "$g" || true
         add_group_member "$g" "$USERNAME" || true
     done
 
@@ -1144,6 +1177,35 @@ switch_to_raven_init() {
     touch "${TARGET}/etc/.raven-first-boot-done"
 }
 
+# Put the seatd service definition where raven-rc can see it.
+#
+# The other templates under /usr/share/raven/services are inert until `rvn
+# install <pkg>` brings their daemon in. seatd is different: it is already in
+# the base image next to huginn, so there is no install step to hook and the
+# template would sit in /usr/share forever.
+#
+# It matters on a console boot. raven-init only creates a seatd service on
+# raven.graphics=wayland, so booting the plain entry and trying to run the
+# compositor from a TTY -- the workflow RavenGUI's scripts/tty-session.sh
+# documents -- hit "no such service" from raven-rc and "Failed to open session:
+# Function not implemented" from huginn, with nothing to start in between.
+#
+# Copied disabled. init's ensure_service overwrites enabled/exec/args from its
+# own copy on a graphical boot, so this never holds seatd off when the session
+# needs it.
+install_seat_service() {
+    local src="${TARGET}/usr/share/raven/services/seatd.toml"
+    local dest_dir="${TARGET}/etc/raven/init.d"
+
+    [[ -f "${src}" ]] || return 0
+    [[ -x "${TARGET}/sbin/seatd" || -x "${TARGET}/usr/bin/seatd" ]] || return 0
+
+    mkdir -p "${dest_dir}"
+    if cp "${src}" "${dest_dir}/seatd.toml" 2>/dev/null; then
+        ok "seatd service available to raven-rc (disabled; enable for TTY sessions)"
+    fi
+}
+
 configure_system() {
     step "Configuring the installed system"
 
@@ -1155,6 +1217,7 @@ configure_system() {
     set_passwords
     set_locale_and_time
     switch_to_raven_init
+    install_seat_service
     {
         echo "profile=${INSTALL_PROFILE}"
         echo "configured_by=raven-install"
@@ -1193,12 +1256,38 @@ install_bootloader() {
 
     local base_cmdline="root=UUID=${ROOT_UUID} rw"
 
+    # Does this root actually carry a compositor? The Desktop entry is written
+    # only if it does, so everything below keys off the same answer.
+    local has_desktop=0
+    if [[ -x "${TARGET}/usr/bin/huginn" || -x "${TARGET}/bin/huginn" ]]; then
+        has_desktop=1
+    fi
+
+    # Which entry the menu preselects.
+    #
+    # This was a hardcoded `default = 0` -- the console entry -- so
+    # `raven-install --profile desktop` installed a compositor, wrote a Desktop
+    # entry for it, and then booted past it to a text console every time.
+    # raven-init starts seatd and the session only on raven.graphics=wayland,
+    # so the machine came up with no seat, no /run/user/0 and no huginn: a
+    # desktop install with no desktop, unless you caught the five-second menu
+    # and arrowed down one.
+    #
+    # Console profiles still default to console. Only a profile that asked for
+    # a graphical system gets one without being asked twice.
+    local default_entry=0
+    if (( has_desktop )); then
+        case "${INSTALL_PROFILE}" in
+            desktop|developer) default_entry=1 ;;
+        esac
+    fi
+
     {
         echo "# RavenBoot configuration -- written by raven-install"
         echo "# Paths are relative to the EFI System Partition."
         echo
         echo "timeout = 5"
-        echo "default = 0"
+        echo "default = ${default_entry}"
         echo
         echo "[entry]"
         echo "name = \"RavenLinux\""
@@ -1208,7 +1297,7 @@ install_bootloader() {
         echo "type = linux-efi"
         echo
 
-        if [[ -x "${TARGET}/usr/bin/huginn" || -x "${TARGET}/bin/huginn" ]]; then
+        if (( has_desktop )); then
             echo "[entry]"
             echo "name = \"RavenLinux (Desktop)\""
             echo "kernel = \"\\EFI\\raven\\vmlinuz\""

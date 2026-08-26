@@ -64,6 +64,7 @@ impl Default for InitConfig {
                     environment: HashMap::new(),
             pre_exec: Vec::new(),
                     tty: Some("/dev/tty1".to_string()),
+                    user: None,
                     stop_exec: None,
                     stop_args: Vec::new(),
                     stop_timeout: 5,
@@ -194,6 +195,27 @@ pub struct ServiceConfig {
     /// If set, the service will be spawned with proper session and job control
     #[serde(default)]
     pub tty: Option<String>,
+
+    /// Account this service runs as. `None` keeps it as root.
+    ///
+    /// Init is PID 1 and therefore root, and every service it started
+    /// inherited that -- which for a daemon that needs a raw socket or DRM
+    /// master is right, and for a desktop session is not. The graphical
+    /// session is the case this exists for: without it the compositor and
+    /// every application launched from its dock ran as uid 0, which also made
+    /// the `video`/`render`/`input` membership the installer sets up
+    /// meaningless, because root bypasses all of it.
+    ///
+    /// The name is resolved against `/etc/passwd` at start time rather than
+    /// being stored as a uid, so a definition stays correct if the account is
+    /// recreated with a different number, and a drop-in may name a user that
+    /// does not exist yet without being wrong until it does.
+    ///
+    /// A name that cannot be resolved fails the start. Falling back to root
+    /// would hand a service more privilege than its definition asked for,
+    /// which is the one outcome nobody writing `user =` wants.
+    #[serde(default)]
+    pub user: Option<String>,
 
     /// Directories to create before the service starts.
     ///

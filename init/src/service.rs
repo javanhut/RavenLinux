@@ -24,6 +24,51 @@ const MAX_RESTARTS: u32 = 5;
 /// How long a service must survive for its restart budget to be refilled.
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
 
+/// Make `cmd` exec as `account`: supplementary groups, then gid, then uid.
+///
+/// All three happen inside one `pre_exec` closure rather than through
+/// `CommandExt::uid`/`gid`, and that is not a style choice. `std` applies the
+/// uid and gid it was given *before* it runs any `pre_exec` closure, so a
+/// closure calling `setgroups` would run after `setuid` had already dropped
+/// the privilege `setgroups` requires, and fail with `EPERM`. The service
+/// would then start with the wrong groups or not at all, depending on whether
+/// the error was checked. Doing the whole sequence in the closure is what
+/// makes the ordering ours to state.
+///
+/// The order within the closure matters for the same reason and is the
+/// classic one: supplementary groups first, then the primary gid, then the
+/// uid last. Each step gives away privilege the next one would need, so any
+/// other order silently leaves the process over-privileged -- `setuid` first
+/// is the well-known way to end up still in root's groups.
+fn apply_credentials(cmd: &mut Command, account: &crate::user::Account) {
+    use std::os::unix::process::CommandExt;
+
+    let uid = unistd::Uid::from_raw(account.uid);
+    let gid = unistd::Gid::from_raw(account.gid);
+    let groups: Vec<unistd::Gid> = account
+        .groups
+        .iter()
+        .copied()
+        .map(unistd::Gid::from_raw)
+        .collect();
+
+    // SAFETY: `pre_exec` runs in the forked child between `fork` and `exec`,
+    // where only async-signal-safe work is permitted. `setgroups`, `setgid`
+    // and `setuid` are raw syscalls and allocate nothing -- the `Vec` they
+    // read was built in the parent before the fork, and the closure only
+    // borrows it. No locks are taken and nothing is logged, so there is no
+    // allocator or mutex state to be inherited in a locked state from another
+    // thread at the moment of fork.
+    unsafe {
+        cmd.pre_exec(move || {
+            unistd::setgroups(&groups).map_err(std::io::Error::from)?;
+            unistd::setgid(gid).map_err(std::io::Error::from)?;
+            unistd::setuid(uid).map_err(std::io::Error::from)?;
+            Ok(())
+        });
+    }
+}
+
 /// Why `exec` cannot be run, if it cannot.
 ///
 /// `spawn` reports "not installed" and "not executable" alike as a bare errno,
@@ -206,6 +251,17 @@ impl Service {
             cmd.env(key, value);
         }
 
+        // Drop to the configured account, if there is one.
+        //
+        // Resolved here rather than in the child so that an unknown name is a
+        // start failure naming the account, instead of an exit status from a
+        // process that had no way left to say what went wrong.
+        if let Some(name) = &self.config.user {
+            let account = crate::user::by_name(name)
+                .with_context(|| format!("{}: cannot run as '{}'", self.config.name, name))?;
+            apply_credentials(&mut cmd, &account);
+        }
+
         // Set up stdio. Output goes to /var/log/raven/<name>.log, not the
         // console: inherited stdio meant every daemon's chatter -- dbus's
         // config warnings, cawd's periodic "no wireless port" -- printed
@@ -254,6 +310,25 @@ impl Service {
             self.config.name,
             tty_path
         );
+
+        // `user` is refused here rather than ignored. This path forks and
+        // execs by hand and does not drop privilege, so honouring the field
+        // would take work that nothing yet needs -- the one service that wants
+        // an account is the graphical session, which has no tty. Ignoring it
+        // instead would start the process as root having been asked not to,
+        // and that failure is invisible: the service comes up and looks right.
+        //
+        // A getty is the natural tty service and it genuinely needs root, so
+        // there is no case here waiting to be unblocked. If one appears, the
+        // sequence in `apply_credentials` is what belongs in the child branch
+        // below, after `setsid` and before `execvp`.
+        if let Some(name) = &self.config.user {
+            bail!(
+                "{}: `user = \"{name}\"` is not supported for a service with a tty; \
+                 it would run as root instead",
+                self.config.name
+            );
+        }
 
         // Prepare command and arguments as CStrings for execvp
         let exec_cstr = CString::new(self.config.exec.as_str())

@@ -124,14 +124,36 @@ rather than a row in the component table.
 
 | Status | Binary | Repo |
 |--------|--------|------|
-| not wired | `raven-terminal` | [javanhut/RavenTerminal](https://github.com/javanhut/RavenTerminal) |
+| **wired** | `raven-terminal` | [javanhut/RavenTerminal](https://github.com/javanhut/RavenTerminal) |
 
 RavenTerminal is GPU-accelerated and links OpenGL and GLFW through cgo, so it
-needs a display server and a graphics stack. The console base has none of that.
-It belongs with whatever graphical layer gets built back — at which point it
-wants its own stage, not a slot in the Raven layer. That layer now exists:
-RavenGUI below provides the display server, and `stage-gui.sh` is where
-RavenTerminal would go.
+needs a display server and a graphics stack. The console base has none of that,
+which is why it sat unwired while the Raven layer was all that existed. It is
+built by `scripts/stages/stage-gui.sh` — the stage that builds the display
+server it was waiting for.
+
+It is not optional there. Huginn names `raven-terminal` in two compiled-in
+places — `theme::TERMINAL`, what `Super`+`Shift`+`T` spawns, and `dock::PINNED`,
+the one application on the dock — so a desktop without it boots to a dock
+holding a dead icon and can start no process at all.
+
+Two details of how the stage builds it are load-bearing:
+
+- **`-tags wayland`, stated rather than detected.** Its Makefile chooses a
+  backend with `BACKEND ?= auto`, which reads `$XDG_SESSION_TYPE` and falls back
+  to X11 when unset — and it is always unset in a container. Left alone, the
+  build would quietly produce the X11 backend, and the terminal would run
+  through XWayland on a Wayland-only machine, or not at all on an image where
+  Xwayland was never staged.
+- **`CGO_ENABLED=1`, set rather than inherited.** The Raven stage exports
+  `CGO_ENABLED=0` for its static binaries, and a leaked `0` turns this into a
+  link failure against `-lwayland-client` that names nothing about cgo.
+
+Its GLFW is vendored in-tree with the xdg-shell and viewporter protocol sources
+pre-generated, so the build needs no wayland-scanner and no wayland-protocols —
+only `wayland`, `libxkbcommon` and `mesa`, all of which the Dockerfile already
+installs for huginn. Its Nerd Fonts are embedded in the binary, so it needs
+nothing from `/usr/share/fonts` either.
 
 ## Compositor and Desktop Shell
 
@@ -165,12 +187,23 @@ were missing; the GUI stage resolves them with `ldd` against the binaries it
 just built rather than from a hand-written list, because the list is not
 knowable from the manifests and would rot the first time a dependency changed.
 
-raven-init needed no changes at all. Booting with `raven.graphics=wayland`
-already made it disable the tty1 getty, ensure `seatd`, create `/run/user/0`
-with `LIBSEAT_BACKEND=seatd`, and exec `/bin/raven-wayland-session` with
-`RAVEN_WAYLAND_COMPOSITOR` taken from `raven.wayland=<name>`. That launcher
-simply did not exist — init fell through to a `/bin/raven-compositor` that
-nothing built. The GUI stage installs it: it sets up `XDG_RUNTIME_DIR` and
+raven-init needed one change, and it is the one worth knowing about. Booting
+with `raven.graphics=wayland` already made it disable the tty1 getty, ensure
+`seatd`, set `LIBSEAT_BACKEND=seatd`, and exec `/bin/raven-wayland-session`
+with `RAVEN_WAYLAND_COMPOSITOR` taken from `raven.wayland=<name>`. That
+launcher simply did not exist — init fell through to a `/bin/raven-compositor`
+that nothing built.
+
+What init did *not* do was give the session an owner. Services inherit PID 1's
+credentials, so the compositor and everything launched from its dock ran as
+uid 0, and the `video`/`render`/`input` groups the installer sets up meant
+nothing because root ignores them. `ServiceConfig` now takes a `user` field:
+init resolves `raven.user=<name>`, or failing that the lowest-uid regular
+account, creates `/run/user/<uid>` owned by them, and drops supplementary
+groups, gid and uid — in that order — between `fork` and `exec`. A name that
+cannot be resolved fails the start rather than falling back to root.
+
+The GUI stage installs the launcher: it sets up `XDG_RUNTIME_DIR` and
 `LIBSEAT_BACKEND` and then `exec`s the compositor, so huginn runs directly under
 init — its exit status is the session's, and a signal from init reaches it
 rather than a wrapper that would have to forward it. There is nothing to start
@@ -182,5 +215,8 @@ in the compositor. The shell is still software-rendered; the iced renderer is
 deliberately deferred, and the protocol plumbing does not change when it
 lands.
 
-This is the prerequisite for RavenTerminal rather than a peer of it: it is the
-display server RavenTerminal has been waiting for.
+This was the prerequisite for RavenTerminal rather than a peer of it, and the
+dependency now runs the other way too: the same stage builds both, because
+huginn names `raven-terminal` in two compiled-in places and a desktop that
+cannot open a terminal cannot start anything at all. Neither ships usefully
+without the other.

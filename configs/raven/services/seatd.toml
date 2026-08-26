@@ -1,0 +1,43 @@
+# seatd -- seat management daemon.
+#
+# RavenLinux runs raven-init, not systemd, so there is no logind to hand out
+# DRM master and open input devices. Huginn is built against smithay's
+# backend_session_libseat and talks to this daemon over /run/seatd.sock.
+#
+# On a raven.graphics=wayland boot you do not need this file: raven-init
+# synthesizes the same service itself and starts it before the session. It is
+# shipped for the other case -- a console boot where you want to run the
+# compositor by hand from a TTY, which is the workflow RavenGUI documents in
+# scripts/tty-session.sh. Without a seatd on a console boot huginn exits with
+#
+#   Failed to open session: Function not implemented (os error 38)
+#
+# which reads like a permissions problem and is a daemon that was never
+# started. There was previously no way to start one: the service existed only
+# inside init's Wayland path, so `raven-rc start seatd` answered "no such
+# service" on the very boot you needed it.
+#
+#   raven-rc start seatd     # run it now
+#   raven-rc enable seatd    # start it at every boot
+#
+# Ships disabled: on a console boot nothing needs a seat until you ask for one,
+# and a raven.graphics=wayland boot enables it regardless. init's ensure_service
+# overwrites enabled/exec/args from its own copy, so this cannot hold seatd off
+# on a graphical boot.
+#
+# -g video, matching what init synthesizes. The socket is group-owned by
+# `video`, which is the group raven-install already puts the first user in, so
+# a TTY session opens a seat without being root. There is no `seat` group on
+# RavenLinux and adding one here would split the two paths apart.
+
+[[services]]
+name = "seatd"
+description = "Seat management daemon"
+exec = "/sbin/seatd"
+args = ["-g", "video"]
+after = ["udev"]
+ready_path = "/run/seatd.sock"
+ready_timeout = 5
+restart = true
+enabled = false
+critical = false

@@ -10,3 +10,30 @@ mesa-utils
 vulkan-tools
 vulkan-radeon
 vulkan-intel
+
+# The graphics stack huginn links against.
+#
+# The ISO stages these as bare .so files copied off the build host -- stage2's
+# copy_libraries() and stage-gui.sh's stage_gui_libraries(). That is what makes
+# the live image work, but `rvn owns` reports no package owns any of them, so
+# on an installed system they were invisible to the package manager: never
+# updated, never repaired, and no way to tell a corrupted one from a missing
+# one. Declaring them here puts the same files under package management on any
+# machine that asked for a desktop.
+#
+# These are the runtime half of ravengui's [dependencies] in
+# packages/gui/ravengui/package.toml; keep the two in step.
+#
+# Two names from that list are deliberately absent. `libseat` is not a package
+# on Arch -- the library ships inside seatd, so seatd covers both the daemon
+# and the .so huginn links. `libudev` is not a package either; it comes from
+# systemd-libs, which is already a base dependency. Listing either by name
+# fails the whole profile, because raven-postinstall hands the entire list to
+# one `rvn install`.
+mesa
+libdrm
+libinput
+libxkbcommon
+wayland
+seatd
+xorg-xwayland

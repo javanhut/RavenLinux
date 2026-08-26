@@ -52,12 +52,35 @@ And a graphical layer, built separately because it cannot be static:
 |------|------------|
 | `huginn` | [RavenGUI](https://github.com/javanhut/RavenGUI)'s Wayland compositor, which also draws the desktop — dock, launcher, notifications |
 | `muninn-lock` | the session lock screen, a separate process so a compositor bug cannot unlock the screen |
+| `raven-terminal` | [RavenTerminal](https://github.com/javanhut/RavenTerminal), the terminal the desktop opens — on the dock and on `Super`+`Shift`+`T` |
 
 Boot the `Raven Desktop (Huginn)` entry, or add `raven.graphics=wayland` to the
 kernel cmdline, and raven-init starts the session instead of a getty.
 
-What's deliberately absent: a graphical terminal and hosted Rust/Go toolchains.
-Those are the things still to build back.
+RavenTerminal is built by the same stage as the compositor, from its own
+repository, with the **Wayland** GLFW backend rather than X11 — its Makefile
+picks a backend from `$XDG_SESSION_TYPE`, which is never set in a container, so
+the stage passes `-tags wayland` explicitly instead of getting an XWayland
+dependency by accident. It renders through OpenGL 4.1 and carries its own Nerd
+Fonts inside the binary, so it needs nothing from `/usr/share/fonts`.
+
+It takes `-e` to run something other than a shell, which is what lets a terminal
+program have a launcher entry at all: `crow` is in the menu as
+`Exec=raven-terminal -e crow %F`. Only the first tab runs the command; tabs
+opened afterwards are ordinary shells.
+
+The entry has to name the terminal explicitly rather than set `Terminal=true`,
+because huginn parses that key and then ignores it — `Entry::argv` goes straight
+to `Command::spawn` either way, so such an entry would exec a bare TUI with no
+controlling terminal, open no window, and report no error.
+
+`caw`, `rvn`, `ivaldi`, `imlazy` and `poxy` still have no entries, and `-e` does
+not change that: each is a subcommand CLI that prints usage and exits when run
+bare, so a menu entry would be a window that flashes and closes. They are run by
+typing their names, which is what they were built for.
+
+What's deliberately absent: hosted Rust/Go toolchains. That's the thing still to
+build back.
 
 ## Building
 
@@ -119,7 +142,7 @@ qemu-user — use Docker Desktop or colima with Rosetta, or build on x86_64.
 | `stage2` | `scripts/stages/stage2-native.sh` | Native rebuild of the sysroot: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | `stage3` | `scripts/stages/stage3-packages.sh` | Base packages: core libraries (zlib, ncurses, readline, attr, acl), shells, OpenSSH, RavenBoot |
 | `raven` | `scripts/stages/stage-raven.sh` | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw |
-| `gui` | `scripts/stages/stage-gui.sh` | Compositor and lock screen: huginn, muninn-lock, plus the shared libraries they need |
+| `gui` | `scripts/stages/stage-gui.sh` | The desktop: huginn, muninn-lock, raven-terminal, the application menu, and the shared libraries, icon themes and cursor theme they need |
 | `stage4` | `scripts/stages/stage4-iso.sh` | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
 
 The Raven layer is unnumbered on purpose. Stages 0–4 build a base system that
@@ -148,14 +171,25 @@ RAVEN_PACMAN_FROM_HOST=1 imlazy raven       # give rvn the host's pacman.conf
 ```
 
 The GUI stage is fail-soft the same way, and skips itself when the build host
-lacks the libraries huginn links:
+lacks the libraries huginn links. The terminal is fail-soft *within* it, so a
+build host that can compile the compositor but not the terminal still produces a
+desktop — one that cannot launch anything, which the stage summary says outright
+rather than leaving to be discovered at boot:
 
 ```bash
-./scripts/build.sh gui                    # huginn, muninn, muninn-lock
+./scripts/build.sh gui                    # huginn, muninn-lock, raven-terminal
 GUI_SKIP=1 imlazy build                     # console-only ISO
 GUI_REF=v0.1.0 imlazy gui                   # pin RavenGUI to a git ref
-GUI_OFFLINE=1 imlazy gui                    # reuse the existing clone
+GUI_OFFLINE=1 imlazy gui                    # reuse the existing clones
+TERMINAL_SKIP=1 imlazy gui                  # compositor only, no terminal
+TERMINAL_REF=v0.2.0 imlazy gui              # pin RavenTerminal to a git ref
 ```
+
+The stage ends with a **Desktop:** summary reporting the terminal, the
+application menu, the cursor theme, the icon theme and the fonts. Each of those
+was missing at once at one point, none of them failed the build, and the result
+was a green ISO whose desktop booted to a dock with a dead icon, an empty
+launcher, no mouse pointer and a single monospace font.
 
 Artifacts land in `./build/`:
 
@@ -272,13 +306,30 @@ image's root shell. If something goes wrong, the RavenBoot menu carries a
 
 ## Fonts
 
-RavenLinux ships one family, **JetBrains Mono Nerd Font Mono**, and the build
-turns it into the two formats a Linux system actually needs:
+**JetBrains Mono Nerd Font Mono** is the identity typeface, shipped in this
+repository and turned by the build into the two formats a Linux system actually
+needs. Two more families come from the build host, because a desktop cannot be
+drawn in a monospace face alone:
 
 | Where | Format | Built by |
 |-------|--------|----------|
-| tty1, the console | PSF2 bitmap at 8x16, 10x20, 12x24 and 16x32 | `scripts/make-console-font.py`, run by stage4 |
-| the Wayland session | the `.ttf`, through fontconfig | copied to `/usr/share/fonts` |
+| tty1, the console | JetBrains Mono as a PSF2 bitmap at 8x16, 10x20, 12x24 and 16x32 | `scripts/make-console-font.py`, run by stage4 |
+| the Wayland session | JetBrains Mono's `.ttf`, through fontconfig | copied to `/usr/share/fonts` by stage4 |
+| the shell's own text | **DejaVu Sans/Serif** — the proportional faces the dock, launcher and notifications draw in | `ttf-dejavu` on the build host, copied by stage2 |
+| emoji, anywhere | **Noto Color Emoji** | `noto-fonts-emoji` on the build host, copied by stage2 |
+
+Only the first is vendored. The other two are host packages named in the
+`Dockerfile`, and stage2's `copy_system_utils()` copies `/usr/share/fonts`
+wholesale, so installing them there is what puts them on the image. stage4 warns
+if no proportional face made it: huginn draws its labels through cosmic-text,
+which takes whatever it finds, so a monospace-only image produces a desktop
+where every label is monospace and anything outside Latin, Greek and Cyrillic
+draws as nothing at all.
+
+CJK is deliberately absent — `noto-fonts-cjk` is around 120MB against DejaVu's
+7, and huginn has no way to type it either, since there is no `text-input-v3`
+for an input method to attach to. Add the package to the `Dockerfile` when that
+changes; nothing in the font handling needs a code change to pick it up.
 
 The virtual terminal cannot use a TTF, so stage4 rasterises the same typeface
 into `/usr/share/kbd/consolefonts/` and `raven-console-font` loads one at boot,

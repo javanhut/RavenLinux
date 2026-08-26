@@ -47,15 +47,28 @@ command -v rvn >/dev/null 2>&1 || {
     exit 1
 }
 
+# --dry-run belongs to the install subcommand, not to rvn itself. As
+# `rvn --dry-run install` it never ran: rvn exits with "unexpected argument
+# '--dry-run' found" and the tip "'install --dry-run' exists", so the one flag
+# whose entire job is to change nothing was the only one that could not run.
 if [ "$dry_run" -eq 1 ]; then
     # shellcheck disable=SC2086 -- profile words intentionally become argv
-    exec rvn --dry-run install $packages
+    exec rvn install --dry-run $packages
 fi
 
 if [ "$assume_yes" -ne 1 ]; then
     printf "Install this profile now? [y/N] "
     read -r answer
     case "$answer" in [Yy]*) ;; *) echo "No changes made."; exit 0 ;; esac
+fi
+
+# -y is forwarded rather than only consumed here. Answering this script's own
+# prompt still left rvn free to ask its own, so `raven-postinstall -y` blocked
+# on a second question -- which is exactly the case that has nobody at the
+# keyboard.
+# shellcheck disable=SC2086 -- profile words intentionally become argv
+if [ "$assume_yes" -eq 1 ]; then
+    exec rvn install -y $packages
 fi
 
 # shellcheck disable=SC2086 -- profile words intentionally become argv

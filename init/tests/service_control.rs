@@ -12,9 +12,12 @@ use std::time::{Duration, Instant};
 
 #[path = "../src/config.rs"]
 mod config;
+// service.rs resolves a `user =` account through `crate::user`, so that module
+// has to exist under this test binary's crate root too.
+#[path = "../src/user.rs"]
+mod user;
 #[path = "../src/service.rs"]
 mod service;
-
 // control.rs refers to its siblings as `crate::config` / `crate::service`; in a
 // test binary the crate root is this file, so those paths resolve here.
 use config as _config_for_control;
@@ -39,6 +42,7 @@ fn sleeper(name: &str) -> ServiceConfig {
         environment: HashMap::new(),
         pre_exec: Vec::new(),
         tty: None,
+        user: None,
         runtime_dirs: Vec::new(),
         after: Vec::new(),
         ready_path: None,
@@ -833,6 +837,7 @@ fn runtime_dirs_are_created_and_output_goes_to_the_log() {
         environment: HashMap::new(),
         pre_exec: Vec::new(),
         tty: None,
+        user: None,
         runtime_dirs: vec![rundir.display().to_string()],
         after: Vec::new(),
         ready_path: None,
@@ -1202,4 +1207,73 @@ fn reload_forgets_a_removed_service_that_was_not_running() {
         "a stopped service whose file is gone should be forgotten"
     );
 
+}
+
+/// An account that does not exist must fail the start, not fall back to root.
+///
+/// This is the whole safety property of `user =`. A service asked to drop
+/// privilege and started as uid 0 anyway is worse than one that did not start:
+/// nothing is wrong on the surface, and the privilege is only discovered when
+/// something uses it. The desktop session is the case that matters -- before
+/// `user` existed it ran as root unconditionally, and a silent fallback would
+/// quietly restore exactly that.
+#[test]
+fn a_service_naming_an_unknown_account_refuses_to_start() {
+    let mut svc = sleeper("wayland-session");
+    svc.user = Some("nosuchuser-9f3a".to_string());
+    let mut cfg = config_with(vec![svc]);
+    let mut services = HashMap::new();
+
+    let (reply, _) = control::dispatch("start wayland-session", &mut services, &mut cfg);
+
+    assert!(reply.starts_with("error:"), "{reply}");
+    assert!(
+        reply.contains("nosuchuser-9f3a"),
+        "the reply must name the account: {reply}"
+    );
+    assert!(
+        !services.contains_key("wayland-session"),
+        "a service that could not drop privilege must not be left running: {reply}"
+    );
+}
+
+/// The tty path cannot drop privilege, so it must refuse rather than ignore.
+///
+/// Silently running as root here would be the same failure as above, reached
+/// by a different route: the field is set, nothing complains, and the process
+/// is root anyway.
+#[test]
+fn a_tty_service_naming_an_account_refuses_rather_than_running_as_root() {
+    let mut svc = sleeper("getty-tty1");
+    svc.tty = Some("/dev/tty1".to_string());
+    // A real account, so the failure is about the tty path and not resolution.
+    svc.user = Some("root".to_string());
+    let mut cfg = config_with(vec![svc]);
+    let mut services = HashMap::new();
+
+    let (reply, _) = control::dispatch("start getty-tty1", &mut services, &mut cfg);
+
+    assert!(reply.starts_with("error:"), "{reply}");
+    assert!(
+        reply.contains("tty"),
+        "the reply must say the tty path is why: {reply}"
+    );
+}
+
+/// A service with no `user` still starts, and starts as whoever init is.
+///
+/// The guard against a regression that makes privilege dropping mandatory:
+/// seatd, udev and dbus all need root and all leave `user` unset.
+#[test]
+fn a_service_without_a_user_still_starts() {
+    let mut cfg = config_with(vec![sleeper("plain")]);
+    let mut services = HashMap::new();
+
+    let (reply, _) = control::dispatch("start plain", &mut services, &mut cfg);
+
+    assert!(!reply.starts_with("error:"), "{reply}");
+    assert!(services.contains_key("plain"), "{reply}");
+
+    // Leave nothing behind for the next test.
+    let _ = control::dispatch("stop plain", &mut services, &mut cfg);
 }

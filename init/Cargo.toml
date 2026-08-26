@@ -8,7 +8,9 @@ license = "MIT"
 
 [dependencies]
 # Unix/Linux system calls
-nix = { version = "0.28", features = ["signal", "process", "mount", "fs", "hostname", "reboot", "term", "ioctl"] }
+# "user" is what setgroups/setgid/setuid live behind -- see apply_credentials
+# in service.rs, which drops a service to its configured account.
+nix = { version = "0.28", features = ["signal", "process", "mount", "fs", "hostname", "reboot", "term", "ioctl", "user"] }
 
 # Direct libc access for sync()
 libc = "0.2"

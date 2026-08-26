@@ -279,7 +279,15 @@ copy_system_utils() {
     mkdir -p "${SYSROOT_DIR}/var/cache/fontconfig" 2>/dev/null || true
     if [[ -d "/usr/share/icons" ]]; then
         mkdir -p "${SYSROOT_DIR}/usr/share/icons"
-        for theme in default breeze_cursors Adwaita hicolor; do
+        # `default` and `Adwaita` are the cursor path and must stay together:
+        # default/index.theme is a two-line file that says `Inherits=Adwaita`,
+        # so copying it without the theme it points at leaves the compositor
+        # resolving the default pointer to nothing and drawing no cursor at all
+        # over its own dock, launcher and background. `breeze`/`breeze-dark`
+        # are the application icons the dock and launcher resolve Icon= names
+        # against; hicolor is the base every theme falls back through, and
+        # carries almost nothing on its own.
+        for theme in default breeze_cursors Adwaita hicolor breeze breeze-dark; do
             if [[ -d "/usr/share/icons/${theme}" ]]; then
                 mkdir -p "${SYSROOT_DIR}/usr/share/icons/${theme}"
                 cp -a "/usr/share/icons/${theme}/." "${SYSROOT_DIR}/usr/share/icons/${theme}/" 2>/dev/null || true

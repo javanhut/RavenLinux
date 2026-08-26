@@ -19,11 +19,12 @@ use anyhow::{Context, Result};
 use nix::mount::{mount, MsFlags};
 use nix::sys::reboot::{reboot, RebootMode};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::Pid;
+use nix::unistd::{self, Pid};
 
 mod config;
 mod control;
 mod service;
+mod user;
 
 use config::{InitConfig, ServiceConfig};
 use service::{Service, ServiceState};
@@ -403,9 +404,67 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
         }
     }
 
-    // Ensure runtime dirs for root session exist.
-    fs::create_dir_all("/run/user/0").ok();
-    let _ = fs::set_permissions("/run/user/0", fs::Permissions::from_mode(0o700));
+    // Who the graphical session belongs to.
+    //
+    // `raven.user=<name>` on the kernel cmdline decides it; otherwise the
+    // lowest-uid regular account, which on a machine installed by
+    // raven-install is the one account it created.
+    //
+    // The fallback is root, and it is a real fallback rather than the design:
+    // an image that has never had a user added has nobody else to be. It is
+    // logged at warn because a desktop running as uid 0 is worth noticing --
+    // that used to be the only behaviour, which made every compositor process
+    // and everything launched from the dock run as root, and made the
+    // video/render/input groups the installer sets up irrelevant because root
+    // ignores them.
+    let session_user = cmdline
+        .split_whitespace()
+        .find_map(|arg| arg.strip_prefix("raven.user="))
+        .and_then(|name| match user::by_name(name) {
+            Ok(account) => Some(account),
+            Err(e) => {
+                log::warn!("raven.user={name} is unusable ({e}); falling back");
+                None
+            }
+        })
+        .or_else(user::first_regular);
+
+    match &session_user {
+        Some(account) => log::info!(
+            "Wayland session will run as {} (uid {})",
+            account.name,
+            account.uid
+        ),
+        None => log::warn!(
+            "No regular account found; the Wayland session will run as root. \
+             Create a user and it will be picked up on the next boot, or set \
+             raven.user=<name> on the kernel command line."
+        ),
+    }
+
+    // The session's XDG_RUNTIME_DIR. Wayland puts its socket here, so it has
+    // to exist and be owned by whoever the compositor runs as before the
+    // compositor starts -- there is no logind here to make it on login.
+    let (session_uid, session_gid) = session_user
+        .as_ref()
+        .map(|a| (a.uid, a.gid))
+        .unwrap_or((0, 0));
+    let runtime_dir = format!("/run/user/{session_uid}");
+
+    fs::create_dir_all(&runtime_dir).ok();
+    let _ = fs::set_permissions(&runtime_dir, fs::Permissions::from_mode(0o700));
+    // 0700 is only a lock if the owner is the session, not root. chown after
+    // the mkdir rather than before: /run is a fresh tmpfs each boot, so this
+    // directory is always ours to claim and never someone else's to steal.
+    if session_uid != 0 {
+        if let Err(e) = unistd::chown(
+            runtime_dir.as_str(),
+            Some(unistd::Uid::from_raw(session_uid)),
+            Some(unistd::Gid::from_raw(session_gid)),
+        ) {
+            log::warn!("Cannot chown {runtime_dir} to {session_uid}: {e}");
+        }
+    }
 
     // Without seatd there is no seat, and without a seat the compositor cannot
     // take DRM master -- so if it is missing, say so here rather than leaving
@@ -428,6 +487,7 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
             environment: HashMap::new(),
             pre_exec: Vec::new(),
             tty: None,
+            user: None,
             runtime_dirs: Vec::new(),
             after: vec!["udev".to_string()],
             ready_path: Some("/run/seatd.sock".to_string()),
@@ -439,8 +499,40 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
     );
 
     let mut compositor_env = HashMap::new();
-    compositor_env.insert("XDG_RUNTIME_DIR".to_string(), "/run/user/0".to_string());
+    compositor_env.insert("XDG_RUNTIME_DIR".to_string(), runtime_dir.clone());
     compositor_env.insert("LIBSEAT_BACKEND".to_string(), "seatd".to_string());
+
+    // The rest of what a login would have set. Nothing here has a sensible
+    // default once the session is not root: a compositor started with HOME
+    // still pointing at /root writes its state, its font cache and every
+    // application's dotfiles into a directory the session user cannot read,
+    // and the failure surfaces as unrelated breakage in whatever runs first.
+    if let Some(account) = &session_user {
+        compositor_env.insert("HOME".to_string(), account.home.clone());
+        compositor_env.insert("USER".to_string(), account.name.clone());
+        compositor_env.insert("LOGNAME".to_string(), account.name.clone());
+        compositor_env.insert("SHELL".to_string(), account.shell.clone());
+    }
+
+    // The account the session service runs as, or None to stay root.
+    let session_account = session_user.as_ref().map(|a| a.name.clone());
+
+    // Settle udev before the session starts, as root.
+    //
+    // The GPU drivers are modules and nothing waits for the coldplug, so a
+    // compositor that starts too early takes the only DRM device that exists
+    // yet -- simpledrm, the EFI framebuffer -- and dies when the real driver
+    // loads and the kernel revokes it. The session script used to do this
+    // itself, which worked only while the session was root; it now runs as a
+    // regular user and cannot drive udev at all.
+    //
+    // pre_exec is the right place because init runs it before dropping
+    // privilege, so it still happens as root no matter who the session
+    // belongs to. raven-udev is idempotent -- whoever runs second settles and
+    // moves on.
+    let udev_settle = find_program("raven-udev")
+        .map(|p| vec![p])
+        .unwrap_or_default();
 
     let session_path = find_program("raven-wayland-session");
     if let Some(ref session_exec) = session_path {
@@ -461,8 +553,9 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
                 enabled: true,
                 critical: false,
                 environment: env,
-                pre_exec: Vec::new(),
+                pre_exec: udev_settle.clone(),
                 tty: None,
+                user: session_account.clone(),
                 runtime_dirs: Vec::new(),
                 after: vec!["udev".to_string(), "seatd".to_string()],
                 ready_path: None,
@@ -485,8 +578,9 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
                 enabled: true,
                 critical: false,
                 environment: compositor_env,
-                pre_exec: Vec::new(),
+                pre_exec: udev_settle,
                 tty: None,
+                user: session_account,
                 runtime_dirs: Vec::new(),
                 after: vec!["udev".to_string(), "seatd".to_string()],
                 ready_path: None,
@@ -995,6 +1089,7 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
             environment: HashMap::new(),
             pre_exec: Vec::new(),
             tty: Some("/dev/tty1".to_string()),
+            user: None,
             stop_exec: None,
             stop_args: Vec::new(),
             stop_timeout: 5,
@@ -1017,6 +1112,7 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
                 environment: HashMap::new(),
             pre_exec: Vec::new(),
                 tty: Some("/dev/tty1".to_string()),
+                user: None,
                 stop_exec: None,
                 stop_args: Vec::new(),
                 stop_timeout: 5,
@@ -1577,10 +1673,15 @@ mod tests {
             Some("/dev/nvme0n1p3".to_string())
         );
 
-        // No /dev/disk/by-uuid in a test environment, so these fall through.
-        assert_eq!(resolve_fstab_spec("UUID=1234-5678-90ab"), None);
-        assert_eq!(resolve_fstab_spec("LABEL=RAVEN_ROOT"), None);
-        assert_eq!(resolve_fstab_spec("PARTUUID=deadbeef-01"), None);
+        // These must name nothing that can exist, because this test runs on
+        // real machines too. `LABEL=RAVEN_ROOT` used to be here, and on an
+        // installed RavenLinux it resolves -- raven-install labels the root
+        // exactly that -- so the suite passed in a build container and failed
+        // on the operating system it belongs to. A test whose result depends
+        // on the disks in the machine running it is testing the machine.
+        assert_eq!(resolve_fstab_spec("UUID=00000000-no-such-uuid"), None);
+        assert_eq!(resolve_fstab_spec("LABEL=RAVEN_NO_SUCH_LABEL_9f3a"), None);
+        assert_eq!(resolve_fstab_spec("PARTUUID=00000000-no-such-part"), None);
 
         // Not a recognised form at all.
         assert_eq!(resolve_fstab_spec("tmpfs"), None);

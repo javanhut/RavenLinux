@@ -11,8 +11,10 @@ network, and can be rebuilt from source in one command. On top of it sits the
 Raven layer — the shell, package managers, version control, editor, task runner
 and language RavenLinux provides for itself rather than inheriting.
 
-What is still intentionally left out: a desktop, a graphical terminal, and
-hosted Rust/Go toolchains.
+Above that sits the graphical layer: the Huginn compositor, which draws the
+desktop itself, and RavenTerminal, the terminal it opens.
+
+What is still intentionally left out: hosted Rust/Go toolchains.
 
 ## Design Principles
 
@@ -61,15 +63,23 @@ line:
 |--------|--------|----------|------|
 | `huginn` | RavenGUI | Rust | Wayland compositor (Smithay, udev/DRM backend) |
 | `muninn-lock` | RavenGUI | Rust | Session lock screen |
+| `raven-terminal` | RavenTerminal | Go + cgo | Terminal emulator (OpenGL 4.1 via GLFW, Wayland backend) |
 
 These link glibc and seventeen shared libraries — libdrm, libgbm, libinput,
 libseat, libudev and the chain behind them — with Mesa's EGL/GLES drivers
 dlopened at run time. The stage resolves that closure with `ldd` against the
 binaries it just built and stages whatever stage2 did not already provide.
 
-RavenTerminal is deliberately not part of this layer. It is a GPU-accelerated
-terminal that needs OpenGL, GLFW and a display server, none of which exist in
-the console base; it belongs with whatever graphical stack gets built back.
+RavenTerminal is deliberately not part of the *Raven* layer, for the same reason
+huginn is not: it is a GPU-accelerated terminal binding OpenGL and GLFW through
+cgo, so it cannot be the static musl binary every component of that layer is. It
+belongs here instead, with the display server it needs — and not as an optional
+extra, because huginn names `raven-terminal` in two compiled-in places and a
+desktop that cannot open a terminal can start no process at all.
+
+The stage builds it with `-tags wayland` rather than letting its Makefile detect
+a backend from `$XDG_SESSION_TYPE`, which is never set in a container and would
+silently select X11.
 
 ### Init System (`init/`)
 
@@ -220,7 +230,7 @@ working shell; the Raven layer takes that over once `ravenshell` is installed.
 | **Stage 2** | Rebuild the sysroot natively: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | **Stage 3** | Base packages: core libraries, shells, OpenSSH, RavenBoot |
 | **Raven** | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw |
-| **GUI** | Compositor and lock screen: huginn, muninn-lock, and the shared libraries they link |
+| **GUI** | The desktop: huginn, muninn-lock, raven-terminal, the application menu, and the shared libraries, icon themes and cursor theme they need |
 | **Stage 4** | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
 
 The Raven layer carries no stage number. Stages 0–4 are the base system and
@@ -292,7 +302,8 @@ Sets:
 - `packages/core/` — musl, linux, openssl, openssh, libssh, sudo-rs, uutils-coreutils
 - `packages/base/` — bash, fish
 - `packages/raven/` — ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw
-- `packages/gui/` — ravengui: huginn, muninn-lock
+- `packages/gui/` — ravengui: huginn, muninn-lock. raven-terminal is built by
+  the same stage from its own repository and has no manifest here yet
 
 ## Extending the System
 
@@ -314,5 +325,11 @@ The base is designed to be grown, not modified:
 - **The console font** → `scripts/make-console-font.py` (glyph set),
   `install_console_font()` in stage4 (cell sizes), `configs/raven-console-font`
   (selection at boot)
+- **What the desktop can launch** → `install_desktop_entries()` in stage-gui
+  (the `.desktop` files), and RavenGUI's `dock::PINNED` and `theme::TERMINAL`
+  (the two compiled-in names the entries have to match)
+- **The desktop's cursor, icons and fonts** → `stage_gui_data()` in stage-gui
+  and the icon-theme list in stage2's `copy_system_utils()`; the packages
+  themselves come from the `Dockerfile`
 - **The boot menu** → `bootloader/src/` (RavenBoot's menu is compiled in)
 - **Service management** → `init/src/service.rs` and `init/src/rc.rs`

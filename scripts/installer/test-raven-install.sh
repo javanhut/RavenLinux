@@ -86,7 +86,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 die()  { echo "unexpected die: $*" >&2; exit 9; }
 
 import_fn partdev valid_username valid_hostname \
-          add_group_member remove_group_member next_free_uid \
+          ensure_group add_group_member remove_group_member next_free_uid \
           create_user grant_sudo set_hostname set_locale_and_time \
           switch_to_raven_init
 
@@ -227,6 +227,16 @@ matches "added to wheel"                  '^wheel:x:10:javan$' "$TARGET/etc/grou
 matches "added to audio"                  '^audio:x:92:javan$' "$TARGET/etc/group"
 matches "added to video"                  '^video:x:91:javan$' "$TARGET/etc/group"
 matches "added to input"                  '^input:x:97:javan$' "$TARGET/etc/group"
+
+# render was silently skipped before ensure_group existed: the image ships no
+# such group, add_group_member fails on a group that is not there, and the
+# caller swallowed it with `|| true`. udev gives /dev/dri/renderD* to group
+# `render` at 0660, so with the group absent the node stayed root-only 0600 and
+# no GPU-accelerated Wayland client could open it. No pinned gid here: unlike
+# audio/video/input these have no canonical Arch number, so the test asserts
+# the membership and lets ensure_group pick.
+matches "render group created"            '^render:x:[0-9]+:javan$' "$TARGET/etc/group"
+matches "seat group created"              '^seat:x:[0-9]+:javan$' "$TARGET/etc/group"
 matches "sudoers.d grants wheel"          '^%wheel ALL=\(ALL:ALL\) ALL$' "$TARGET/etc/sudoers.d/10-wheel"
 matches "sudoers reads sudoers.d"         '@includedir /etc/sudoers\.d' "$TARGET/etc/sudoers"
 

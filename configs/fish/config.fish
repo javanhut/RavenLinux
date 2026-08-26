@@ -44,8 +44,15 @@ alias ..='cd ..'
 alias ...='cd ../..'
 
 # RavenLinux specific
-alias rvn='rvn'
-alias raven-update='rvn upgrade'
+#
+# `rvn upgrade` is not a subcommand: rvn exits with "unrecognized subcommand
+# 'upgrade'" and the tip "a similar subcommand exists: 'update'". The one alias
+# whose whole job was keeping the system current is the one that never ran.
+# `rvn update` with no package names updates everything.
+#
+# The `alias rvn='rvn'` that sat here was a no-op -- it expanded a name to
+# itself and shadowed the real binary to no effect.
+alias raven-update='rvn update'
 
 # fzf integration (if installed)
 if test -f /usr/share/fzf/key-bindings.fish

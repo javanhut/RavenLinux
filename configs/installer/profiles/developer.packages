@@ -1,4 +1,8 @@
 # Desktop profile plus a hosted build environment.
+#
+# raven-postinstall reads exactly one .packages file, so this is a standalone
+# list rather than an include of desktop.packages. Everything above the build
+# section must stay in step with desktop.packages by hand.
 linux-firmware
 sof-firmware
 alsa-ucm-conf
@@ -10,7 +14,37 @@ mesa-utils
 vulkan-tools
 vulkan-radeon
 vulkan-intel
+
+# The graphics stack huginn links against -- see desktop.packages for why these
+# are declared rather than left as the unowned .so files the ISO stages, and
+# for why libseat and libudev are not listed by name.
+mesa
+libdrm
+libinput
+libxkbcommon
+wayland
+seatd
+xorg-xwayland
+
 base-devel
 git
 rustup
 go
+
+# The development side of what RavenGUI links.
+#
+# On Arch these are not split -devel packages: headers and .pc files ship in
+# the main package, so the graphics names above cover the build too. What is
+# missing without this section is the rest of the toolchain's discovery path.
+#
+# The image ships huginn but carried no header and no .pc file anywhere, so an
+# installed system could not rebuild the compositor it was running: `cargo
+# check` dies in libseat-sys's build script with "Package libseat was not found
+# in the pkg-config search path". A confusing place to land when the binary is
+# already on the machine.
+#
+# pkgconf is what every one of those lookups goes through, and it was otherwise
+# present only as a stray unowned file. wayland-protocols is build-only: the
+# XML the wayland-scanner build step reads, needed by nothing at runtime.
+pkgconf
+wayland-protocols

@@ -118,6 +118,50 @@ RUN pacman -Syu --noconfirm --needed \
         # binary and its libraries into the sysroot; without it in the image the
         # stage warns and moves on, and the ISO ships with no X11 support at all.
         xorg-xwayland \
+        # The terminal needs no packages of its own. stage-gui.sh builds
+        # RavenTerminal from source with `go build -tags wayland`, whose GLFW
+        # compiles from vendored C against wayland-client/cursor/egl and
+        # xkbcommon, and whose go-gl bindings run `pkg-config --cflags -- gl`
+        # for libGL. Every one of those is already here: `wayland`,
+        # `libxkbcommon`, and `mesa` (which brings libglvnd, and with it gl.pc).
+        # Its xdg-shell and viewporter protocol sources are pre-generated in
+        # tree, so no wayland-scanner or wayland-protocols is needed either.
+        #
+        # Written out rather than left implicit because "the terminal has no
+        # build deps of its own" is surprising, and because the next person to
+        # trim this list needs to know that dropping `wayland`, `libxkbcommon`
+        # or `mesa` costs the terminal as well as the compositor.
+        #
+        # Cursor theme. huginn loads the default pointer through
+        # xcursor::CursorTheme::load(XCURSOR_THEME or "default"), and
+        # /usr/share/icons/default/index.theme says `Inherits=Adwaita`. With no
+        # Adwaita on the host that lookup returns None and there is no visible
+        # pointer anywhere over the compositor's own surfaces -- the dock, the
+        # launcher, the background. This package is what that inherit resolves
+        # to. It is the cursors alone; the icon theme below is a separate one.
+        adwaita-cursors \
+        # Application icons for the dock and launcher. hicolor is the spec's
+        # base theme and carries only what applications install for themselves,
+        # so generic Icon= names resolve to nothing against it -- RavenGUI's
+        # theme.rs measured 10 of 36 applications with no icon under hicolor
+        # and 1 under breeze-dark, which is why ICON_THEME names the latter.
+        # hicolor-icon-theme ships the index.theme every other theme falls back
+        # through, so it is not optional even when it holds no icons itself.
+        breeze-icons hicolor-icon-theme \
+        # Fonts. stage4 rasterises the shipped JetBrains Mono Nerd Font into a
+        # console PSF and copies the TTFs, and that was the *only* font on the
+        # image: the shell drew every label in a monospace face, and anything
+        # outside Latin/Greek/Cyrillic drew blank. DejaVu adds the proportional
+        # sans and serif families plus far wider coverage, and the emoji font
+        # is what stops an emoji in a window title from being a blank box.
+        # stage2's copy_system_utils() copies /usr/share/fonts wholesale, so
+        # installing them here is what puts them on the image.
+        #
+        # CJK is deliberately absent: noto-fonts-cjk is ~120MB against DejaVu's
+        # 7, and huginn has no way to type it either -- there is no
+        # text-input-v3 yet, so an IME cannot attach. Add it here when that
+        # changes; the font stack needs no code change to pick it up.
+        ttf-dejavu noto-fonts-emoji \
     && pacman -Scc --noconfirm
 
 # -----------------------------------------------------------------------------

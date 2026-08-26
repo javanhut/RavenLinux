@@ -32,7 +32,24 @@ build_flags = ["--release", "--locked", "-p", "huginn-comp", "-p", "muninn-lock"
 # sense that the compositor starts without it and logs "XWayland unavailable" --
 # but X11 applications then cannot run at all, so it is listed as runtime rather
 # than left to chance.
-runtime = ["mesa", "libdrm", "libinput", "libseat", "libudev", "libxkbcommon", "seatd", "xorg-xwayland"]
+# The icon themes and the fonts are runtime dependencies in the strongest
+# sense: the compositor starts without them and is visibly broken.
+# adwaita-cursors is what /usr/share/icons/default inherits, and without it the
+# compositor draws no pointer at all over its own surfaces. breeze-icons is
+# what dock and launcher Icon= names resolve against. ttf-dejavu is the only
+# proportional face on the image; without it every label the shell draws is
+# monospace, and anything outside Latin/Greek/Cyrillic draws blank.
+#
+# raven-terminal is not listed here because it is not a package this one
+# depends on -- stage-gui.sh builds it from its own repository alongside
+# huginn. It is a hard runtime requirement of the *desktop* all the same:
+# huginn names it in two compiled-in places, so without it a running desktop
+# can launch nothing at all.
+runtime = [
+    "mesa", "libdrm", "libinput", "libseat", "libudev", "libxkbcommon", "seatd",
+    "xorg-xwayland", "adwaita-cursors", "breeze-icons", "hicolor-icon-theme",
+    "ttf-dejavu", "noto-fonts-emoji",
+]
 build = ["rust", "cargo", "pkg-config", "libdrm", "libinput", "libudev", "mesa"]
 
 [install]
@@ -52,3 +69,10 @@ symlinks = []
 # from the repo: raven-init starts it when the kernel cmdline carries
 # raven.graphics=wayland, and it execs huginn. There is no shell client after
 # it: the dock, launcher and notifications are drawn by the compositor.
+#
+# /bin/raven-terminal comes from a different repository entirely --
+# javanhut/RavenTerminal, built by the same stage with `go build -tags wayland`.
+# It is not part of this package and has no manifest of its own yet; the stage
+# is the only place it is described. The GUI stage also writes
+# /usr/share/applications, which nothing populated before -- the launcher
+# enumerated an empty directory and the dock's pinned entry matched nothing.
