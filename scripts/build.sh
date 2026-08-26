@@ -61,6 +61,15 @@ export TOOLCHAIN_DIR SYSROOT_DIR STAGING_DIR SOURCES_DIR LOGS_DIR PACKAGES_DIR
 # Source shared logging library
 source "${SCRIPT_DIR}/lib/logging.sh"
 
+# The rootfs layout is usr-merged (/bin, /sbin, /lib, /lib64 are symlinks into
+# /usr). See scripts/lib/usrmerge.sh for why, and for the rule every install
+# site in this file has to follow.
+if [[ -f "${SCRIPT_DIR}/lib/usrmerge.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${SCRIPT_DIR}/lib/usrmerge.sh"
+fi
+
+
 # =============================================================================
 # Functions
 # =============================================================================
@@ -200,8 +209,15 @@ setup_directories() {
         log_warn "Sysroot is not writable: ${SYSROOT_DIR}"
         log_warn "Skipping sysroot directory creation. To rebuild sysroot stages, delete/chown it or set RAVEN_BUILD to a new directory."
     else
-        mkdir -p "${SYSROOT_DIR}"/{bin,boot,dev,etc,home,lib,mnt,opt,proc,root,run,sbin,sys,tmp,usr,var}
-        mkdir -p "${SYSROOT_DIR}"/usr/{bin,include,lib,share,src}
+        # usr-merged: /bin, /sbin, /lib and /lib64 are symlinks into /usr.
+        # See scripts/lib/usrmerge.sh -- a split-usr root cannot have Arch
+        # packages extracted onto it at all.
+        if declare -F raven_usrmerge_root >/dev/null 2>&1; then
+            raven_usrmerge_root "${SYSROOT_DIR}" || log_fatal "usr-merge skeleton failed"
+        else
+            log_fatal "scripts/lib/usrmerge.sh is missing; cannot create a usr-merged sysroot"
+        fi
+        mkdir -p "${SYSROOT_DIR}"/{boot,dev,etc,home,mnt,opt,proc,root,run,sys,tmp,var}
         mkdir -p "${SYSROOT_DIR}"/var/{cache,lib,log,tmp}
     fi
 

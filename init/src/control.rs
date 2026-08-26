@@ -411,7 +411,7 @@ fn start_service_raw(
         }
         return match svc.start_by_request() {
             Ok(()) => confirm_started(name, svc),
-            Err(e) => format!("error: failed to start {}: {}\n", name, e),
+            Err(e) => format!("error: failed to start {}: {:#}\n", name, e),
         };
     }
 
@@ -428,7 +428,7 @@ fn start_service_raw(
             services.insert(name.to_string(), svc);
             reply
         }
-        Err(e) => format!("error: failed to start {}: {}\n", name, e),
+        Err(e) => format!("error: failed to start {}: {:#}\n", name, e),
     }
 }
 
@@ -498,7 +498,7 @@ fn restart_service(
 
     match svc.start_by_request() {
         Ok(()) => format!("Restarted {}\n", name),
-        Err(e) => format!("error: failed to restart {}: {}\n", name, e),
+        Err(e) => format!("error: failed to restart {}: {:#}\n", name, e),
     }
 }
 
@@ -552,7 +552,7 @@ fn set_enabled(name: &str, enabled: bool, config: &mut InitConfig) -> String {
             if let Some(svc) = config.services.iter_mut().find(|c| c.name == name) {
                 svc.enabled = was;
             }
-            format!("error: cannot {} {}: {}\n", verb, name, e)
+            format!("error: cannot {} {}: {:#}\n", verb, name, e)
         }
     }
 }

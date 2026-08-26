@@ -1236,11 +1236,17 @@ install_bootloader() {
         echo "type = linux-efi"
         echo
 
-        # RavenBoot's parser drops any entry whose kernel is empty, so these two
-        # carry a placeholder path. It is never read: handle_entry_selection
+        # RavenBoot's parser drops any entry whose kernel is empty, so these
+        # three carry a placeholder path. It is never read: handle_entry_selection
         # dispatches on the type and returns before anything is loaded.
         echo "# The kernel lines below are placeholders that RavenBoot's parser"
         echo "# requires. The type field is what decides what these entries do."
+        echo "[entry]"
+        echo "name = \"System UEFI Settings\""
+        echo "kernel = \"firmware-setup\""
+        echo "type = firmware-setup"
+        echo
+
         echo "[entry]"
         echo "name = \"Reboot\""
         echo "kernel = \"reboot\""

@@ -404,14 +404,21 @@ build_component() {
     done
 }
 
-# Install a staged binary into the sysroot, with the /bin compatibility
-# symlink the rest of the base system uses.
+# Install a staged binary into the sysroot.
+#
+# /usr/bin is the only destination. /bin is a symlink onto it (see
+# scripts/lib/usrmerge.sh), so the binary is reachable at both names with no
+# link of our own. The compat link this used to create --
+#   ln -sf "../usr/bin/${binary}" "${SYSROOT_DIR}/bin/${binary}"
+# -- resolved to /usr/usr/bin/${binary} post-merge, and because ln -sf unlinks
+# its target first it DELETED the binary it had just installed. Silently, exit
+# 0, for every Raven-layer component: ravenshell, rvn, caw, cawd, crow, ivaldi,
+# oxigen, poxy.
 install_component_binary() {
     local binary="$1" src="$2"
 
-    mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/bin"
+    mkdir -p "${SYSROOT_DIR}/usr/bin"
     install -m 0755 "${src}" "${SYSROOT_DIR}/usr/bin/${binary}"
-    ln -sf "../usr/bin/${binary}" "${SYSROOT_DIR}/bin/${binary}"
 }
 
 # =============================================================================
@@ -462,10 +469,12 @@ build_raven_init() {
         return 0
     fi
 
-    # init belongs in /sbin; the control tool is a user-facing command.
-    mkdir -p "${SYSROOT_DIR}/sbin" "${SYSROOT_DIR}/bin"
-    install -m 0755 "${outdir}/raven-init" "${SYSROOT_DIR}/sbin/raven-init"
-    install -m 0755 "${outdir}/raven-rc"   "${SYSROOT_DIR}/bin/raven-rc"
+    # Both land in /usr/bin. /sbin/raven-init and /bin/raven-rc still resolve
+    # there -- init.toml, stage4's PID 1 check and the installer all name the
+    # /sbin path, and the merge link keeps every one of them working.
+    mkdir -p "${SYSROOT_DIR}/usr/bin"
+    install -m 0755 "${outdir}/raven-init" "${SYSROOT_DIR}/usr/bin/raven-init"
+    install -m 0755 "${outdir}/raven-rc"   "${SYSROOT_DIR}/usr/bin/raven-rc"
 
     # stage4 owns the poweroff/reboot/halt/shutdown names and installs a
     # dispatcher that uses raven-rc when raven-init is PID 1, with an emergency

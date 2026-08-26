@@ -859,3 +859,92 @@ fn runtime_dirs_are_created_and_output_goes_to_the_log() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// The failure from the openssh screenshot: `raven-rc start sshd` on a system
+/// where openssh was never installed replied `failed to start sshd: Failed to
+/// start sshd`. The outer context was formatted with `{}`, which prints only
+/// the top of an anyhow chain, and the context it printed said nothing the
+/// operator did not already know.
+#[test]
+fn starting_a_service_whose_binary_is_missing_names_the_binary() {
+    let mut missing = sleeper("sshd");
+    missing.exec = "/usr/bin/definitely-not-installed".to_string();
+    missing.args = Vec::new();
+    // Not in the running set, exactly like a daemon boot skipped as absent.
+    let mut cfg = config_with(vec![missing]);
+    let mut services = HashMap::new();
+
+    let (reply, _) = control::dispatch("start sshd", &mut services, &mut cfg);
+
+    assert!(reply.starts_with("error:"), "{reply}");
+    assert!(
+        reply.contains("/usr/bin/definitely-not-installed"),
+        "the reply must name the missing path: {reply}"
+    );
+    assert!(
+        reply.contains("not installed"),
+        "the reply must say why: {reply}"
+    );
+    // The old doubled message must not come back.
+    assert!(
+        !reply.contains("Failed to start"),
+        "context must add information, not repeat the prefix: {reply}"
+    );
+    // A service that could not start must not be recorded as running.
+    assert!(!services.contains_key("sshd"), "{reply}");
+}
+
+/// The same check on the other branch of `start`: a service that is in the
+/// running set but stopped, which is where `raven-rc start` lands after a stop
+/// or a crash.
+#[test]
+fn restarting_onto_a_deleted_binary_names_the_binary() {
+    let path = std::env::temp_dir().join("raven-init-vanishing-sleeper");
+    std::fs::write(&path, "#!/bin/sh\nexec /bin/sleep 300\n").expect("writes");
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("chmods");
+
+    let mut cfg_svc = sleeper("vanishing");
+    cfg_svc.exec = path.display().to_string();
+    cfg_svc.args = Vec::new();
+    let mut cfg = config_with(vec![cfg_svc.clone()]);
+
+    let mut services = HashMap::new();
+    let svc = Service::start(&cfg_svc).expect("starts");
+    let pid = svc.pid().expect("has a pid").as_raw();
+    services.insert("vanishing".to_string(), svc);
+
+    let (reply, _) = control::dispatch("stop vanishing", &mut services, &mut cfg);
+    assert!(reply.contains("Stopping"), "{reply}");
+    assert!(wait_gone(pid, Duration::from_secs(5)), "process should exit");
+
+    // The package is removed while the service is stopped.
+    std::fs::remove_file(&path).expect("removes");
+
+    let (reply, _) = control::dispatch("start vanishing", &mut services, &mut cfg);
+    assert!(reply.contains(&path.display().to_string()), "{reply}");
+    assert!(reply.contains("not installed"), "{reply}");
+}
+
+/// A binary that exists but is not executable is a different mistake and must
+/// read as one -- `spawn` reports both as a bare errno.
+#[test]
+fn starting_a_non_executable_binary_says_so() {
+    let path = std::env::temp_dir().join("raven-init-not-executable");
+    std::fs::write(&path, "#!/bin/sh\ntrue\n").expect("writes");
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+        .expect("chmods");
+
+    let mut svc = sleeper("chmodless");
+    svc.exec = path.display().to_string();
+    svc.args = Vec::new();
+    let mut cfg = config_with(vec![svc]);
+    let mut services = HashMap::new();
+
+    let (reply, _) = control::dispatch("start chmodless", &mut services, &mut cfg);
+
+    assert!(reply.contains("not executable"), "{reply}");
+    assert!(reply.contains("0644"), "the mode belongs in the message: {reply}");
+
+    let _ = std::fs::remove_file(&path);
+}

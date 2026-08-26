@@ -42,6 +42,14 @@ LOGS_DIR="${LOGS_DIR:-${BUILD_DIR}/logs}"
 # Logging (use shared library or define fallbacks)
 # =============================================================================
 
+# The rootfs layout is usr-merged (/bin, /sbin, /lib, /lib64 are symlinks into
+# /usr). See scripts/lib/usrmerge.sh for why, and for the rule every install
+# site in this file has to follow.
+if [[ -f "${PROJECT_ROOT}/scripts/lib/usrmerge.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${PROJECT_ROOT}/scripts/lib/usrmerge.sh"
+fi
+
 if [[ -f "${PROJECT_ROOT}/scripts/lib/logging.sh" ]]; then
     source "${PROJECT_ROOT}/scripts/lib/logging.sh"
 else
@@ -55,6 +63,7 @@ else
     log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
     log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
     log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+    log_fatal() { echo -e "${RED}[FATAL]${NC} $1"; exit "${2:-1}"; }
 fi
 
 
@@ -68,13 +77,14 @@ copy_shells() {
 
     # Copy bash
     if command -v bash &>/dev/null; then
-        cp "$(which bash)" "${SYSROOT_DIR}/bin/bash" && have_bash=true
+        cp "$(which bash)" "${SYSROOT_DIR}/usr/bin/bash" && have_bash=true
         log_info "  Added bash"
     fi
 
-    # Create sh symlink
+    # Same-directory alias. /bin/sh and /bin/bash still resolve here through
+    # the /bin -> usr/bin merge link, which is what 19 shebangs depend on.
     if $have_bash; then
-        ln -sf bash "${SYSROOT_DIR}/bin/sh"
+        ln -sf bash "${SYSROOT_DIR}/usr/bin/sh"
     else
         log_warn "  WARNING: No shell available for /bin/sh!"
     fi
@@ -88,7 +98,7 @@ copy_shells() {
 copy_system_utils() {
     log_info "Copying system utilities..."
 
-    local coreutils_bin="${SYSROOT_DIR}/bin/coreutils"
+    local coreutils_bin="${SYSROOT_DIR}/usr/bin/coreutils"
     local coreutils_list=""
     if [[ -x "${coreutils_bin}" ]]; then
         coreutils_list="$("${coreutils_bin}" --list 2>/dev/null || true)"
@@ -178,15 +188,15 @@ copy_system_utils() {
             src="$(which "$util" 2>/dev/null)" || continue
             [[ -f "$src" ]] || continue
 
-            # Determine destination
-            local dest="${SYSROOT_DIR}/bin/${util}"
-            if [[ "$src" == */sbin/* ]]; then
-                dest="${SYSROOT_DIR}/sbin/${util}"
-            fi
+            # Destination is always /usr/bin. The host's split between /bin
+            # and /sbin does not survive the usr-merge: /sbin is a symlink onto
+            # /usr/bin, so branching on the source path only produced two names
+            # for one directory.
+            local dest="${SYSROOT_DIR}/usr/bin/${util}"
 
             # Special handling for uname - save as uname.real for wrapper script
             if [[ "$util" == "uname" ]]; then
-                dest="${SYSROOT_DIR}/bin/uname.real"
+                dest="${SYSROOT_DIR}/usr/bin/uname.real"
             fi
 
             # Avoid overwriting symlink targets (e.g. uutils coreutils multi-call setup)
@@ -214,8 +224,8 @@ copy_system_utils() {
     # This ensures PAM authentication works properly.
 
     # Set SUID on passwd so users can change their own passwords
-    if [[ -f "${SYSROOT_DIR}/bin/passwd" ]]; then
-        chmod 4755 "${SYSROOT_DIR}/bin/passwd" 2>/dev/null || chmod 755 "${SYSROOT_DIR}/bin/passwd" || true
+    if [[ -f "${SYSROOT_DIR}/usr/bin/passwd" ]]; then
+        chmod 4755 "${SYSROOT_DIR}/usr/bin/passwd" 2>/dev/null || chmod 755 "${SYSROOT_DIR}/usr/bin/passwd" || true
         log_info "  Set SUID on passwd"
     fi
 
@@ -230,8 +240,8 @@ copy_system_utils() {
 
     # Raven Wayland session launcher (optional, used when booting with raven.graphics=wayland)
     if [[ -f "${PROJECT_ROOT}/configs/raven-wayland-session" ]]; then
-        cp "${PROJECT_ROOT}/configs/raven-wayland-session" "${SYSROOT_DIR}/bin/raven-wayland-session" 2>/dev/null || true
-        chmod +x "${SYSROOT_DIR}/bin/raven-wayland-session" 2>/dev/null || true
+        cp "${PROJECT_ROOT}/configs/raven-wayland-session" "${SYSROOT_DIR}/usr/bin/raven-wayland-session" 2>/dev/null || true
+        chmod +x "${SYSROOT_DIR}/usr/bin/raven-wayland-session" 2>/dev/null || true
         log_info "  Added raven-wayland-session"
     fi
 
@@ -270,7 +280,7 @@ copy_system_utils() {
     fi
 
     # If weston is available on the build host, copy its runtime data/plugins.
-    if [[ -x "${SYSROOT_DIR}/bin/weston" ]]; then
+    if [[ -x "${SYSROOT_DIR}/usr/bin/weston" ]]; then
         for d in /usr/lib/weston /usr/lib64/weston /usr/share/weston \
             /usr/lib/libweston-* /usr/lib64/libweston-*; do
             if [[ -d "$d" ]]; then
@@ -317,9 +327,12 @@ copy_system_utils() {
     # Install xkbcomp into the sysroot and symlink it to the expected path.
     if [[ -x "/usr/bin/xkbcomp" ]]; then
         log_info "Copying xkbcomp (required for XWayland)..."
-        mkdir -p "${SYSROOT_DIR}/bin" "${SYSROOT_DIR}/usr/bin"
-        cp -a "/usr/bin/xkbcomp" "${SYSROOT_DIR}/bin/xkbcomp" 2>/dev/null || true
-        ln -sf ../../bin/xkbcomp "${SYSROOT_DIR}/usr/bin/xkbcomp" 2>/dev/null || true
+        mkdir -p "${SYSROOT_DIR}/usr/bin"
+        # Straight into /usr/bin. The old form copied to /bin and then linked
+        # /usr/bin/xkbcomp -> ../../bin/xkbcomp, which is a self-reference once
+        # /bin is a symlink: XWayland would die with "Failed to activate
+        # virtual core keyboard" and the link would look fine in `ls`.
+        cp -a "/usr/bin/xkbcomp" "${SYSROOT_DIR}/usr/bin/xkbcomp" 2>/dev/null || true
         log_info "  Added /usr/bin/xkbcomp"
     else
         log_warn "  /usr/bin/xkbcomp not found on host; XWayland may fail to start"
@@ -366,25 +379,23 @@ copy_system_utils() {
     # Some distros ship udevd in /sbin; copy it too if available.
     for udevd in /sbin/udevd /usr/sbin/udevd /usr/lib/udev/udevd; do
         if [[ -e "${udevd}" ]]; then
-            mkdir -p "${SYSROOT_DIR}/sbin"
-            cp -L "${udevd}" "${SYSROOT_DIR}/sbin/udevd" 2>/dev/null || true
-            chmod +x "${SYSROOT_DIR}/sbin/udevd" 2>/dev/null || true
+            mkdir -p "${SYSROOT_DIR}/usr/bin"
+            cp -L "${udevd}" "${SYSROOT_DIR}/usr/bin/udevd" 2>/dev/null || true
+            chmod +x "${SYSROOT_DIR}/usr/bin/udevd" 2>/dev/null || true
             log_info "  Copied ${udevd} -> /sbin/udevd"
             break
         fi
     done
 
     # Provide /sbin/udevd symlink if we only have systemd-udevd.
-    if [[ ! -e "${SYSROOT_DIR}/sbin/udevd" ]] && [[ -e "${SYSROOT_DIR}/usr/lib/systemd/systemd-udevd" ]]; then
-        mkdir -p "${SYSROOT_DIR}/sbin"
-        ln -sf /usr/lib/systemd/systemd-udevd "${SYSROOT_DIR}/sbin/udevd" 2>/dev/null || true
+    if [[ ! -e "${SYSROOT_DIR}/usr/bin/udevd" ]] && [[ -e "${SYSROOT_DIR}/usr/lib/systemd/systemd-udevd" ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/bin"
+        ln -sf /usr/lib/systemd/systemd-udevd "${SYSROOT_DIR}/usr/bin/udevd" 2>/dev/null || true
     fi
 
-    # Some udev/module loaders expect modprobe in /sbin.
-    if [[ -x "${SYSROOT_DIR}/bin/modprobe" ]] && [[ ! -e "${SYSROOT_DIR}/sbin/modprobe" ]]; then
-        mkdir -p "${SYSROOT_DIR}/sbin"
-        ln -sf /bin/modprobe "${SYSROOT_DIR}/sbin/modprobe" 2>/dev/null || true
-    fi
+    # /sbin/modprobe used to be linked to /bin/modprobe for udev's benefit.
+    # Under the merge both names are /usr/bin/modprobe, so the link is a
+    # self-reference and the copy in /usr/bin already satisfies every caller.
 
     log_success "System utilities installed"
 }
@@ -424,9 +435,9 @@ copy_networking() {
             src="$(which "$tool" 2>/dev/null)" || continue
             [[ -f "$src" ]] || continue
 
-            local dest="${SYSROOT_DIR}/bin/${tool}"
+            local dest="${SYSROOT_DIR}/usr/bin/${tool}"
             if [[ "$src" == */sbin/* ]]; then
-                dest="${SYSROOT_DIR}/sbin/${tool}"
+                dest="${SYSROOT_DIR}/usr/bin/${tool}"
             fi
 
             cp "$src" "$dest" 2>/dev/null && log_info "  Added ${tool}" || true
@@ -450,7 +461,7 @@ ensure_ethtool() {
     fi
 
     # Already present in sysroot from a previous step.
-    if [[ -x "${SYSROOT_DIR}/bin/ethtool" ]] || [[ -x "${SYSROOT_DIR}/sbin/ethtool" ]]; then
+    if [[ -x "${SYSROOT_DIR}/usr/bin/ethtool" ]]; then
         return 0
     fi
 
@@ -501,7 +512,10 @@ ensure_ethtool() {
     log_info "Building ethtool ${version}..."
     (
         cd "${build_dir}"
-        ./configure --prefix=/usr --sbindir=/sbin >/dev/null 2>&1 || ./configure --prefix=/usr --sbindir=/sbin
+        # --sbindir=/usr/bin: /sbin and /usr/sbin are both symlinks onto
+        # /usr/bin, so name the real directory rather than installing through
+        # a merge link.
+        ./configure --prefix=/usr --sbindir=/usr/bin >/dev/null 2>&1 || ./configure --prefix=/usr --sbindir=/usr/bin
         make -j"${RAVEN_JOBS:-$(nproc)}" >/dev/null 2>&1 || make -j"${RAVEN_JOBS:-$(nproc)}"
         make DESTDIR="${SYSROOT_DIR}" install-strip >/dev/null 2>&1 || make DESTDIR="${SYSROOT_DIR}" install
     ) || {
@@ -509,7 +523,7 @@ ensure_ethtool() {
         return 0
     }
 
-    if [[ -x "${SYSROOT_DIR}/sbin/ethtool" ]] || [[ -x "${SYSROOT_DIR}/bin/ethtool" ]]; then
+    if [[ -x "${SYSROOT_DIR}/usr/bin/ethtool" ]]; then
         log_info "  Installed ethtool into sysroot"
     else
         log_warn "ethtool build completed but binary not found in sysroot"
@@ -594,7 +608,7 @@ ensure_expat() {
     log_info "Ensuring expat (XML parser)..."
 
     # Check if already in sysroot
-    if [[ -f "${SYSROOT_DIR}/usr/lib/libexpat.so.1" ]] || [[ -f "${SYSROOT_DIR}/lib/libexpat.so.1" ]]; then
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libexpat.so.1" ]]; then
         log_info "  expat already present in sysroot"
         return 0
     fi
@@ -673,7 +687,7 @@ ensure_dbus() {
     log_info "Ensuring D-Bus..."
 
     # Check if dbus-daemon already in sysroot
-    if [[ -x "${SYSROOT_DIR}/usr/bin/dbus-daemon" ]] || [[ -x "${SYSROOT_DIR}/bin/dbus-daemon" ]]; then
+    if [[ -x "${SYSROOT_DIR}/usr/bin/dbus-daemon" ]]; then
         log_info "  D-Bus already present in sysroot"
         return 0
     fi
@@ -809,7 +823,7 @@ ensure_ell() {
     log_info "Ensuring ELL (Embedded Linux Library)..."
 
     # Check if already in sysroot
-    if [[ -f "${SYSROOT_DIR}/usr/lib/libell.so.0" ]] || [[ -f "${SYSROOT_DIR}/lib/libell.so.0" ]]; then
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libell.so.0" ]]; then
         log_info "  ELL already present in sysroot"
         return 0
     fi
@@ -892,7 +906,7 @@ ensure_libnl3() {
     log_info "Ensuring libnl3 (netlink library)..."
 
     # Check if already in sysroot
-    if [[ -f "${SYSROOT_DIR}/usr/lib/libnl-3.so" ]] || [[ -f "${SYSROOT_DIR}/lib/libnl-3.so" ]]; then
+    if [[ -f "${SYSROOT_DIR}/usr/lib/libnl-3.so" ]]; then
         log_info "  libnl3 already present in sysroot"
         return 0
     fi
@@ -975,14 +989,14 @@ ensure_iw() {
     log_info "Ensuring iw (wireless utilities)..."
 
     # Check if already in sysroot
-    if [[ -x "${SYSROOT_DIR}/sbin/iw" ]] || [[ -x "${SYSROOT_DIR}/usr/sbin/iw" ]]; then
+    if [[ -x "${SYSROOT_DIR}/usr/bin/iw" ]]; then
         log_info "  iw already present in sysroot"
         return 0
     fi
 
     # Try to copy from host
     if ! should_force_source_build; then
-        if copy_from_host "iw" "${SYSROOT_DIR}/sbin/iw"; then
+        if copy_from_host "iw" "${SYSROOT_DIR}/usr/bin/iw"; then
             log_info "  Copied iw from host"
             return 0
         fi
@@ -1036,7 +1050,7 @@ ensure_iw() {
         return 1
     }
 
-    if [[ -x "${SYSROOT_DIR}/sbin/iw" ]] || [[ -x "${SYSROOT_DIR}/usr/sbin/iw" ]]; then
+    if [[ -x "${SYSROOT_DIR}/usr/bin/iw" ]]; then
         log_success "  Built and installed iw"
         return 0
     else
@@ -1183,16 +1197,16 @@ ensure_wpa_supplicant() {
     log_info "Ensuring wpa_supplicant (WiFi daemon)..."
 
     # Check if already in sysroot
-    if [[ -x "${SYSROOT_DIR}/usr/sbin/wpa_supplicant" ]] || [[ -x "${SYSROOT_DIR}/sbin/wpa_supplicant" ]]; then
+    if [[ -x "${SYSROOT_DIR}/usr/bin/wpa_supplicant" ]]; then
         log_info "  wpa_supplicant already present in sysroot"
         return 0
     fi
 
     # Try to copy from host
     if ! should_force_source_build; then
-        if copy_from_host "wpa_supplicant" "${SYSROOT_DIR}/usr/sbin/wpa_supplicant"; then
-            copy_from_host "wpa_cli" "${SYSROOT_DIR}/usr/sbin/wpa_cli" || true
-            copy_from_host "wpa_passphrase" "${SYSROOT_DIR}/usr/sbin/wpa_passphrase" || true
+        if copy_from_host "wpa_supplicant" "${SYSROOT_DIR}/usr/bin/wpa_supplicant"; then
+            copy_from_host "wpa_cli" "${SYSROOT_DIR}/usr/bin/wpa_cli" || true
+            copy_from_host "wpa_passphrase" "${SYSROOT_DIR}/usr/bin/wpa_passphrase" || true
 
             # Create config directory
             mkdir -p "${SYSROOT_DIR}/etc/wpa_supplicant"
@@ -1267,13 +1281,13 @@ EOF
 
     # Install binaries
     if [[ -x "${build_dir}/wpa_supplicant" ]]; then
-        mkdir -p "${SYSROOT_DIR}/usr/sbin"
-        cp "${build_dir}/wpa_supplicant" "${SYSROOT_DIR}/usr/sbin/"
-        cp "${build_dir}/wpa_cli" "${SYSROOT_DIR}/usr/sbin/" 2>/dev/null || true
-        cp "${build_dir}/wpa_passphrase" "${SYSROOT_DIR}/usr/sbin/" 2>/dev/null || true
-        chmod +x "${SYSROOT_DIR}/usr/sbin/wpa_supplicant"
-        chmod +x "${SYSROOT_DIR}/usr/sbin/wpa_cli" 2>/dev/null || true
-        chmod +x "${SYSROOT_DIR}/usr/sbin/wpa_passphrase" 2>/dev/null || true
+        mkdir -p "${SYSROOT_DIR}/usr/bin"
+        cp "${build_dir}/wpa_supplicant" "${SYSROOT_DIR}/usr/bin/"
+        cp "${build_dir}/wpa_cli" "${SYSROOT_DIR}/usr/bin/" 2>/dev/null || true
+        cp "${build_dir}/wpa_passphrase" "${SYSROOT_DIR}/usr/bin/" 2>/dev/null || true
+        chmod +x "${SYSROOT_DIR}/usr/bin/wpa_supplicant"
+        chmod +x "${SYSROOT_DIR}/usr/bin/wpa_cli" 2>/dev/null || true
+        chmod +x "${SYSROOT_DIR}/usr/bin/wpa_passphrase" 2>/dev/null || true
 
         # Create config directory
         mkdir -p "${SYSROOT_DIR}/etc/wpa_supplicant"
@@ -1294,14 +1308,14 @@ ensure_dhcpcd() {
     log_info "Ensuring dhcpcd..."
 
     # Check if already in sysroot
-    if [[ -x "${SYSROOT_DIR}/usr/bin/dhcpcd" ]] || [[ -x "${SYSROOT_DIR}/sbin/dhcpcd" ]]; then
+    if [[ -x "${SYSROOT_DIR}/usr/bin/dhcpcd" ]]; then
         log_info "  dhcpcd already present in sysroot"
         return 0
     fi
 
     # Try to copy from host
     if ! should_force_source_build; then
-        if copy_from_host "dhcpcd" "${SYSROOT_DIR}/sbin/dhcpcd"; then
+        if copy_from_host "dhcpcd" "${SYSROOT_DIR}/usr/bin/dhcpcd"; then
             # Copy config
             if [[ -f "/etc/dhcpcd.conf" ]]; then
                 cp /etc/dhcpcd.conf "${SYSROOT_DIR}/etc/" 2>/dev/null || true
@@ -1356,7 +1370,7 @@ ensure_dhcpcd() {
         return 1
     }
 
-    if [[ -x "${SYSROOT_DIR}/sbin/dhcpcd" ]]; then
+    if [[ -x "${SYSROOT_DIR}/usr/bin/dhcpcd" ]]; then
         log_success "  Built and installed dhcpcd"
         mkdir -p "${SYSROOT_DIR}/var/lib/dhcpcd"
         return 0
@@ -1374,7 +1388,7 @@ setup_pam_and_nss() {
     log_info "Setting up PAM and NSS runtime modules (LFS-based)..."
 
     mkdir -p "${SYSROOT_DIR}/etc/pam.d" "${SYSROOT_DIR}/etc/security"
-    mkdir -p "${SYSROOT_DIR}/lib/security" "${SYSROOT_DIR}/usr/lib/security"
+    mkdir -p "${SYSROOT_DIR}/usr/lib/security"
     mkdir -p "${SYSROOT_DIR}/etc/security/limits.d"
 
     # ==========================================================================
@@ -1495,7 +1509,7 @@ EOF
     # /etc/environment (required by pam_env.so)
     cat > "${SYSROOT_DIR}/etc/environment" << 'EOF'
 # /etc/environment - System-wide environment variables
-PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
 EOF
 
     # /etc/security/pam_env.conf (required by pam_env.so)
@@ -1561,7 +1575,7 @@ EOF
             fi
         done
         if [[ -n "$src" ]]; then
-            cp -L "$src" "${SYSROOT_DIR}/lib/security/${mod}" 2>/dev/null || true
+            cp -L "$src" "${SYSROOT_DIR}/usr/lib/security/${mod}" 2>/dev/null || true
             cp -L "$src" "${SYSROOT_DIR}/usr/lib/security/${mod}" 2>/dev/null || true
             copied_any=1
         fi
@@ -1576,7 +1590,7 @@ EOF
     # ==========================================================================
     # Copy PAM helper binaries (CRITICAL for password verification)
     # ==========================================================================
-    mkdir -p "${SYSROOT_DIR}/sbin" "${SYSROOT_DIR}/usr/sbin"
+    mkdir -p "${SYSROOT_DIR}/usr/bin"
     local pam_helpers=(
         unix_chkpwd
         unix_update
@@ -1609,21 +1623,39 @@ EOF
             # Ask the module we just copied where it expects the helper, and
             # cover the conventional locations too, so this survives building
             # against a PAM configured with a different --sbindir.
-            local -a helper_dests=(sbin usr/sbin usr/bin bin)
+            # Under the usr-merge sbin, usr/sbin, usr/bin and bin are ONE
+            # directory, so the old four-entry list wrote the same SUID binary
+            # four times. Everything from `strings` still matters: a PAM built
+            # with a different --sbindir can name /usr/lib/security or similar,
+            # which is a genuinely different directory.
+            local -a helper_dests=(usr/bin)
             local p
             while read -r p; do
                 [[ -n "${p}" ]] || continue
                 helper_dests+=("${p#/}")
-            done < <(strings "${SYSROOT_DIR}/lib/security/pam_unix.so" 2>/dev/null \
+            done < <(strings "${SYSROOT_DIR}/usr/lib/security/pam_unix.so" 2>/dev/null \
                      | grep -E "^/.*/${helper}$" | sed "s|/${helper}$||")
 
-            local dest seen=""
+            local dest canon seen=""
             for dest in "${helper_dests[@]}"; do
-                [[ ",${seen}," == *",${dest},"* ]] && continue
-                seen="${seen},${dest}"
-                mkdir -p "${SYSROOT_DIR}/${dest}"
-                cp -L "$src" "${SYSROOT_DIR}/${dest}/${helper}"
-                chmod 4755 "${SYSROOT_DIR}/${dest}/${helper}"  # SUID root
+                # Collapse the merged aliases so a path named bin, sbin or
+                # usr/sbin is recognised as the usr/bin we already wrote.
+                canon="${dest}"
+                case "/${dest}" in
+                    /bin|/sbin|/usr/sbin)   canon="usr/bin" ;;
+                    /lib|/lib64|/usr/lib64) canon="usr/lib" ;;
+                    /bin/*)        canon="usr/bin/${dest#bin/}" ;;
+                    /sbin/*)       canon="usr/bin/${dest#sbin/}" ;;
+                    /usr/sbin/*)   canon="usr/bin/${dest#usr/sbin/}" ;;
+                    /lib/*)        canon="usr/lib/${dest#lib/}" ;;
+                    /lib64/*)      canon="usr/lib/${dest#lib64/}" ;;
+                    /usr/lib64/*)  canon="usr/lib/${dest#usr/lib64/}" ;;
+                esac
+                [[ ",${seen}," == *",${canon},"* ]] && continue
+                seen="${seen},${canon}"
+                mkdir -p "${SYSROOT_DIR}/${canon}"
+                cp -L "$src" "${SYSROOT_DIR}/${canon}/${helper}"
+                chmod 4755 "${SYSROOT_DIR}/${canon}/${helper}"  # SUID root
             done
             log_info "  Added PAM helper: ${helper} (SUID) -> ${seen#,}"
         else
@@ -1643,13 +1675,11 @@ EOF
     #
     # Same shape as the unix_chkpwd and seatd problems above: a binary that
     # exists, at a path nothing looks in.
-    for login_dir in bin usr/bin usr/sbin; do
-        if [[ -x "${SYSROOT_DIR}/sbin/login" && ! -e "${SYSROOT_DIR}/${login_dir}/login" ]]; then
-            mkdir -p "${SYSROOT_DIR}/${login_dir}"
-            ln -sf /sbin/login "${SYSROOT_DIR}/${login_dir}/login"
-        fi
-    done
-    if [[ -e "${SYSROOT_DIR}/bin/login" ]]; then
+    # The usr-merge is what actually fixes this: /bin, /sbin, /usr/bin and
+    # /usr/sbin are all one directory, so a login installed anywhere is login
+    # everywhere. The old fan-out linked /bin/login, /usr/bin/login and
+    # /usr/sbin/login to /sbin/login -- three self-references post-merge.
+    if [[ -e "${SYSROOT_DIR}/usr/bin/login" ]]; then
         log_info "  login reachable at /bin/login (agetty's default)"
     else
         log_warn "No /sbin/login to link; agetty without --login-program will loop"
@@ -1658,7 +1688,7 @@ EOF
     # ==========================================================================
     # Copy NSS modules (for user/group lookups)
     # ==========================================================================
-    mkdir -p "${SYSROOT_DIR}/lib" "${SYSROOT_DIR}/usr/lib"
+    mkdir -p "${SYSROOT_DIR}/usr/lib"
     local nss_libs=(
         libnss_files.so.2
         libnss_dns.so.2
@@ -1667,7 +1697,8 @@ EOF
     for lib in "${nss_libs[@]}"; do
         for d in /lib /lib64 /usr/lib /usr/lib64 /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu; do
             if [[ -e "${d}/${lib}" ]]; then
-                cp -L "${d}/${lib}" "${SYSROOT_DIR}/lib/${lib}" 2>/dev/null || true
+                # /lib is /usr/lib now; the second cp used to just overwrite
+                # the first with the same bytes.
                 cp -L "${d}/${lib}" "${SYSROOT_DIR}/usr/lib/${lib}" 2>/dev/null || true
                 break
             fi
@@ -1684,13 +1715,18 @@ setup_sudo() {
     log_info "Setting up sudo (GNU sudo from host)..."
 
     # Create target directories
-    mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/bin"
+    mkdir -p "${SYSROOT_DIR}/usr/bin"
 
     # Copy sudo from host
     if [[ -x "/usr/bin/sudo" ]]; then
         cp -L "/usr/bin/sudo" "${SYSROOT_DIR}/usr/bin/sudo"
         chmod 4755 "${SYSROOT_DIR}/usr/bin/sudo"  # SUID root
-        ln -sf /usr/bin/sudo "${SYSROOT_DIR}/bin/sudo"
+        # There used to be `ln -sf /usr/bin/sudo "${SYSROOT_DIR}/bin/sudo"`
+        # here. Post-merge ${SYSROOT}/bin/sudo IS ${SYSROOT}/usr/bin/sudo, so
+        # that unlinked the SUID binary and replaced it with a link to itself.
+        # Worse, during the build the absolute target escaped the sysroot and
+        # resolved against the BUILD HOST's /usr/bin/sudo, so every build-time
+        # check passed while the ISO shipped nothing.
         log_info "  Installed sudo binary (SUID)"
     else
         log_error "sudo not found on host system"
@@ -1791,7 +1827,7 @@ EOF
 setup_su() {
     log_info "Setting up su (GNU su from host)..."
 
-    mkdir -p "${SYSROOT_DIR}/bin"
+    mkdir -p "${SYSROOT_DIR}/usr/bin"
 
     # Find and copy su from host
     local su_src=""
@@ -1803,8 +1839,8 @@ setup_su() {
     done
 
     if [[ -n "$su_src" ]]; then
-        cp -L "$su_src" "${SYSROOT_DIR}/bin/su"
-        chmod 4755 "${SYSROOT_DIR}/bin/su"  # SUID root
+        cp -L "$su_src" "${SYSROOT_DIR}/usr/bin/su"
+        chmod 4755 "${SYSROOT_DIR}/usr/bin/su"  # SUID root
         log_info "  Installed su binary (SUID)"
 
         # Copy su's library dependencies
@@ -1896,7 +1932,7 @@ copy_firmware() {
         return 0
     fi
 
-    mkdir -p "${SYSROOT_DIR}/lib/firmware"
+    mkdir -p "${SYSROOT_DIR}/usr/lib/firmware"
 
     # Every vendor whose driver the kernel builds in. Shipping only Realtek --
     # as this did -- meant an Intel or Atheros or MediaTek card came up dead on
@@ -1959,7 +1995,7 @@ copy_firmware() {
         [[ -d "${host_firmware}/${dir}" ]] || continue
         while IFS= read -r f; do
             rel="${f#${host_firmware}/}"
-            _install_fw "$f" "${SYSROOT_DIR}/lib/firmware/${rel}" && copied=$((copied + 1))
+            _install_fw "$f" "${SYSROOT_DIR}/usr/lib/firmware/${rel}" && copied=$((copied + 1))
         done < <(find "${host_firmware}/${dir}" -type f -o -type l 2>/dev/null)
         log_info "  Added ${dir} firmware"
     done
@@ -1970,7 +2006,7 @@ copy_firmware() {
     # them into real files where the driver actually looks.
     while IFS= read -r f; do
         rel="$(basename "$f")"
-        _install_fw "$f" "${SYSROOT_DIR}/lib/firmware/${rel}" && copied=$((copied + 1))
+        _install_fw "$f" "${SYSROOT_DIR}/usr/lib/firmware/${rel}" && copied=$((copied + 1))
     done < <(find "${host_firmware}" -maxdepth 1 \( -name 'iwlwifi-*' -o -name 'regulatory.db*' \) 2>/dev/null)
 
     if (( copied == 0 )); then
@@ -1978,7 +2014,7 @@ copy_firmware() {
         return 0
     fi
 
-    log_success "Firmware installed (${copied} files, $(du -sh "${SYSROOT_DIR}/lib/firmware" 2>/dev/null | cut -f1))"
+    log_success "Firmware installed (${copied} files, $(du -sh "${SYSROOT_DIR}/usr/lib/firmware" 2>/dev/null | cut -f1))"
 }
 
 # =============================================================================
@@ -1989,7 +2025,9 @@ copy_libraries() {
 
     local lib_count=0
 
-    for bin in "${SYSROOT_DIR}"/bin/* "${SYSROOT_DIR}"/sbin/*; do
+    # /bin, /sbin and /usr/sbin all resolve to /usr/bin; iterating them
+    # separately walked the same directory four times.
+    for bin in "${SYSROOT_DIR}"/usr/bin/*; do
         [[ -f "$bin" && -x "$bin" && ! -L "$bin" ]] || continue
 
         # Skip statically linked binaries
@@ -2012,9 +2050,9 @@ copy_libraries() {
     # main executable). Copy deps for common module locations we ship.
     log_info "Copying runtime libraries for dlopened modules..."
     for so in \
-        "${SYSROOT_DIR}"/lib/security/*.so \
         "${SYSROOT_DIR}"/usr/lib/security/*.so \
-        "${SYSROOT_DIR}"/lib/libnss_*.so.* \
+        "${SYSROOT_DIR}"/usr/lib/security/*.so \
+        "${SYSROOT_DIR}"/usr/lib/libnss_*.so.* \
         "${SYSROOT_DIR}"/usr/lib/libnss_*.so.* \
         "${SYSROOT_DIR}"/usr/lib/libweston-*/*.so \
         "${SYSROOT_DIR}"/usr/lib64/libweston-*/*.so \
@@ -2031,21 +2069,23 @@ copy_libraries() {
         done || true
     done
 
-    # Setup lib directories - use real directories, not symlinks
-    mkdir -p "${SYSROOT_DIR}/lib"
-    mkdir -p "${SYSROOT_DIR}/lib64"
+    # /lib, /lib64 and /usr/lib64 are usr-merge symlinks onto /usr/lib. Do NOT
+    # turn them back into real directories: /bin, /sbin, /lib and /lib64 have
+    # to be symlinks for Arch's `filesystem` package to extract at all.
     mkdir -p "${SYSROOT_DIR}/usr/lib"
-    mkdir -p "${SYSROOT_DIR}/usr/lib64"
 
-    # Copy dynamic linker to /lib64/ - this is where glibc binaries expect it
+    # The dynamic linker. 217 binaries in the sysroot carry PT_INTERP
+    # /lib64/ld-linux-x86-64.so.2, so that path must resolve -- it does, via
+    # /lib64 -> usr/lib. One copy is enough; /lib64, /lib and /usr/lib64 are
+    # all the same directory now, and the old three-way copy was 3x the bytes
+    # for one file.
     log_info "Copying dynamic linker..."
     for ld in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-x86-64.so.2 /lib/ld-musl-x86_64.so.1 /usr/lib/ld-linux-x86-64.so.2; do
         if [[ -f "$ld" ]] || [[ -L "$ld" ]]; then
             local ld_name
             ld_name="$(basename "$ld")"
-            # Copy to both /lib64 and /lib for maximum compatibility
-            cp -L "$ld" "${SYSROOT_DIR}/lib64/${ld_name}" 2>/dev/null && log_info "  Copied ${ld_name} to /lib64/" || true
-            cp -L "$ld" "${SYSROOT_DIR}/lib/${ld_name}" 2>/dev/null || true
+            cp -L "$ld" "${SYSROOT_DIR}/usr/lib/${ld_name}" 2>/dev/null \
+                && log_info "  Copied ${ld_name} to /usr/lib/ (reachable as /lib64/${ld_name})" || true
         fi
     done
 
@@ -2200,7 +2240,7 @@ copy_libraries() {
     log_info "Copying runtime libraries for Xorg/Xwayland modules..."
     for modules_dir in \
         "${SYSROOT_DIR}/usr/lib/xorg/modules" \
-        "${SYSROOT_DIR}/usr/lib64/xorg/modules" \
+        "${SYSROOT_DIR}/usr/lib/xorg/modules" \
         "${SYSROOT_DIR}/usr/lib/x86_64-linux-gnu/xorg/modules"; do
         [[ -d "${modules_dir}" ]] || continue
         while IFS= read -r -d '' so; do
@@ -2255,34 +2295,17 @@ copy_libraries() {
     sync_runtime_lib "libstdc++.so.6"
     sync_runtime_lib "libgcc_s.so.1"
 
-    # Create symlinks for PAM libraries in /lib (PAM modules in /lib/security look here)
-    # This fixes "PAM error: Authentication service cannot retrieve authentication info"
-    log_info "Creating PAM library symlinks in /lib..."
-    if [[ -f "${SYSROOT_DIR}/usr/lib/libpam.so.0" ]] && [[ ! -e "${SYSROOT_DIR}/lib/libpam.so.0" ]]; then
-        ln -sf /usr/lib/libpam.so.0 "${SYSROOT_DIR}/lib/libpam.so.0" 2>/dev/null || \
-            cp -L "${SYSROOT_DIR}/usr/lib/libpam.so.0" "${SYSROOT_DIR}/lib/libpam.so.0" 2>/dev/null || true
-        log_info "  Created /lib/libpam.so.0"
-    fi
-    if [[ -f "${SYSROOT_DIR}/usr/lib/libpam_misc.so.0" ]] && [[ ! -e "${SYSROOT_DIR}/lib/libpam_misc.so.0" ]]; then
-        ln -sf /usr/lib/libpam_misc.so.0 "${SYSROOT_DIR}/lib/libpam_misc.so.0" 2>/dev/null || \
-            cp -L "${SYSROOT_DIR}/usr/lib/libpam_misc.so.0" "${SYSROOT_DIR}/lib/libpam_misc.so.0" 2>/dev/null || true
-        log_info "  Created /lib/libpam_misc.so.0"
-    fi
-    if [[ -f "${SYSROOT_DIR}/usr/lib/libpamc.so.0" ]] && [[ ! -e "${SYSROOT_DIR}/lib/libpamc.so.0" ]]; then
-        ln -sf /usr/lib/libpamc.so.0 "${SYSROOT_DIR}/lib/libpamc.so.0" 2>/dev/null || \
-            cp -L "${SYSROOT_DIR}/usr/lib/libpamc.so.0" "${SYSROOT_DIR}/lib/libpamc.so.0" 2>/dev/null || true
-        log_info "  Created /lib/libpamc.so.0"
-    fi
+    # libpam / libpam_misc / libpamc used to be linked from /lib to /usr/lib so
+    # that linker lookups hitting /lib first would find them. /lib IS /usr/lib
+    # now, so the lookup succeeds with no link at all -- and creating one would
+    # be a self-reference.
 
-    # Ensure libcrypt symlink exists (needed by pam_unix.so)
-    if [[ ! -e "${SYSROOT_DIR}/lib/libcrypt.so.1" ]]; then
-        if [[ -f "${SYSROOT_DIR}/lib/libcrypt.so.2" ]]; then
-            ln -sf libcrypt.so.2 "${SYSROOT_DIR}/lib/libcrypt.so.1" 2>/dev/null || true
-            log_info "  Created /lib/libcrypt.so.1 -> libcrypt.so.2"
-        elif [[ -f "${SYSROOT_DIR}/usr/lib/libcrypt.so.2" ]]; then
-            ln -sf /usr/lib/libcrypt.so.2 "${SYSROOT_DIR}/lib/libcrypt.so.1" 2>/dev/null || true
-            log_info "  Created /lib/libcrypt.so.1 -> /usr/lib/libcrypt.so.2"
-        fi
+    # libcrypt.so.1 -> libcrypt.so.2 is a DIFFERENT basename, so it is a real
+    # alias and still needed by pam_unix.so. Same-directory form only.
+    if [[ ! -e "${SYSROOT_DIR}/usr/lib/libcrypt.so.1" ]] \
+        && [[ -f "${SYSROOT_DIR}/usr/lib/libcrypt.so.2" ]]; then
+        ln -sf libcrypt.so.2 "${SYSROOT_DIR}/usr/lib/libcrypt.so.1" 2>/dev/null || true
+        log_info "  Created /usr/lib/libcrypt.so.1 -> libcrypt.so.2"
     fi
 
     # Explicitly copy PAM-related libraries (pam_unix.so dependencies that may be missed)
@@ -2299,7 +2322,7 @@ copy_libraries() {
             for src_dir in /usr/lib /lib /usr/lib64 /lib64; do
                 if [[ -f "${src_dir}/${lib}" ]]; then
                     cp -L "${src_dir}/${lib}" "${SYSROOT_DIR}/usr/lib/${lib}" 2>/dev/null || true
-                    cp -L "${src_dir}/${lib}" "${SYSROOT_DIR}/lib/${lib}" 2>/dev/null || true
+                    cp -L "${src_dir}/${lib}" "${SYSROOT_DIR}/usr/lib/${lib}" 2>/dev/null || true
                     log_info "  Copied ${lib}"
                     break
                 fi
@@ -2307,29 +2330,11 @@ copy_libraries() {
         fi
     done
 
-    # Create /lib symlinks for libraries that exist in /usr/lib but not /lib
-    # This fixes linker lookups that check /lib first (seen in strace of sudo/PAM)
-    log_info "Creating /lib -> /usr/lib symlinks for missing libraries..."
-    local lib_symlinks=(
-        libgcc_s.so.1
-        libaudit.so.1
-        libcap-ng.so.0
-        libtirpc.so.3
-        libgssapi_krb5.so.2
-        libkrb5.so.3
-        libk5crypto.so.3
-        libcom_err.so.2
-        libkrb5support.so.0
-        libkeyutils.so.1
-        libsystemd.so.0
-        libcap.so.2
-    )
-    for lib in "${lib_symlinks[@]}"; do
-        if [[ -f "${SYSROOT_DIR}/usr/lib/${lib}" ]] && [[ ! -e "${SYSROOT_DIR}/lib/${lib}" ]]; then
-            ln -sf "../usr/lib/${lib}" "${SYSROOT_DIR}/lib/${lib}" 2>/dev/null || true
-            log_info "  Created /lib/${lib} -> ../usr/lib/${lib}"
-        fi
-    done
+    # There was a list of twelve libraries here that got linked /lib/X ->
+    # ../usr/lib/X, to satisfy linker lookups that check /lib first. The
+    # usr-merge makes /lib and /usr/lib the same directory, so those lookups
+    # now succeed against the real file and every one of those links would be
+    # a self-reference that unlinked the library it was meant to expose.
 
     log_success "Libraries copied"
 }
@@ -2342,9 +2347,9 @@ generate_ldconfig_cache() {
 
     # Copy ldconfig to sysroot (it's statically linked so it can run anywhere)
     if [[ -x "/usr/bin/ldconfig" ]]; then
-        cp -L "/usr/bin/ldconfig" "${SYSROOT_DIR}/sbin/ldconfig" 2>/dev/null || true
+        cp -L "/usr/bin/ldconfig" "${SYSROOT_DIR}/usr/bin/ldconfig" 2>/dev/null || true
     elif [[ -x "/sbin/ldconfig" ]]; then
-        cp -L "/sbin/ldconfig" "${SYSROOT_DIR}/sbin/ldconfig" 2>/dev/null || true
+        cp -L "/sbin/ldconfig" "${SYSROOT_DIR}/usr/bin/ldconfig" 2>/dev/null || true
     fi
 
     # Run ldconfig with -r to use sysroot as root
@@ -2670,9 +2675,9 @@ create_configs() {
 
     # Default shell preference: bash > sh
     local default_shell="/bin/sh"
-    if [[ -x "${SYSROOT_DIR}/bin/bash" ]]; then
+    if [[ -x "${SYSROOT_DIR}/usr/bin/bash" ]]; then
         default_shell="/bin/bash"
-    elif [[ -x "${SYSROOT_DIR}/bin/sh" ]]; then
+    elif [[ -x "${SYSROOT_DIR}/usr/bin/sh" ]]; then
         default_shell="/bin/sh"
     fi
 
@@ -2699,8 +2704,8 @@ EOF
 
     # Create uname wrapper to show raven-linux
     # Remove existing symlink first (stage1 creates /bin/uname -> coreutils)
-    rm -f "${SYSROOT_DIR}/bin/uname"
-    cat > "${SYSROOT_DIR}/bin/uname" << 'UNAMESCRIPT'
+    rm -f "${SYSROOT_DIR}/usr/bin/uname"
+    cat > "${SYSROOT_DIR}/usr/bin/uname" << 'UNAMESCRIPT'
 #!/bin/sh
 # Raven Linux uname wrapper
 REAL_UNAME=/bin/uname.real
@@ -2734,7 +2739,7 @@ case "$1" in
         ;;
 esac
 UNAMESCRIPT
-    chmod +x "${SYSROOT_DIR}/bin/uname"
+    chmod +x "${SYSROOT_DIR}/usr/bin/uname"
 
 	    # /etc/hostname
 	    echo "raven-linux" > "${SYSROOT_DIR}/etc/hostname"
@@ -2747,10 +2752,10 @@ UNAMESCRIPT
 EOF
 
 	    # /bin/raven-shell: used by agetty --skip-login as a PAM-free rescue shell
-	    mkdir -p "${SYSROOT_DIR}/bin"
+	    mkdir -p "${SYSROOT_DIR}/usr/bin"
 	    if [[ -f "${PROJECT_ROOT}/etc/raven/raven-shell" ]]; then
-	        cp "${PROJECT_ROOT}/etc/raven/raven-shell" "${SYSROOT_DIR}/bin/raven-shell"
-	        chmod 0755 "${SYSROOT_DIR}/bin/raven-shell" 2>/dev/null || true
+	        cp "${PROJECT_ROOT}/etc/raven/raven-shell" "${SYSROOT_DIR}/usr/bin/raven-shell"
+	        chmod 0755 "${SYSROOT_DIR}/usr/bin/raven-shell" 2>/dev/null || true
 	    fi
 
 	    # /etc/raven/init.toml (service configuration for raven-init)
@@ -2976,9 +2981,29 @@ ccache = true
 build_dir = "/tmp/rvn-build"
 EOF
 
-    # /bin/whoami (standalone, does not depend on uutils multicall behavior)
-    rm -f "${SYSROOT_DIR}/bin/whoami" 2>/dev/null || true
-    cat > "${SYSROOT_DIR}/bin/whoami" << 'EOF'
+    # /usr/bin/whoami -- a standalone shim that does not depend on uutils
+    # multicall behaviour.
+    #
+    # Only install it when there is no REAL whoami to install it over. Before
+    # the usr-merge this shim lived at /bin/whoami while the real GNU coreutils
+    # binary sat at /sbin/whoami, so the two never collided and both shipped.
+    # /bin and /sbin are one directory now, and writing the shim
+    # unconditionally would clobber the real binary -- the one name in the
+    # whole sysroot where both sides were real files with different content.
+    #
+    # The real binary wins. Note this is a behaviour change from the shim: the
+    # shim never fails, whereas coreutils whoami errors out when the uid has no
+    # passwd entry.
+    local _whoami="${SYSROOT_DIR}/usr/bin/whoami"
+    local _install_whoami=1
+    if [[ -f "${_whoami}" && ! -L "${_whoami}" ]] \
+        && head -c 4 "${_whoami}" 2>/dev/null | grep -q 'ELF'; then
+        log_info "  Keeping the real whoami binary; not overwriting it with the shell shim"
+        _install_whoami=0
+    fi
+    if [[ "${_install_whoami}" == "1" ]]; then
+    rm -f "${_whoami}" 2>/dev/null || true
+    cat > "${_whoami}" << 'EOF'
 #!/bin/sh
 
 uid=""
@@ -3026,11 +3051,12 @@ fi
 
 printf '%s\n' "$name"
 EOF
-    chmod 755 "${SYSROOT_DIR}/bin/whoami" 2>/dev/null || true
+    chmod 755 "${_whoami}" 2>/dev/null || true
+    fi
 
-    # /bin/switch-user - Clean user switching utility for RavenLinux
+    # /usr/bin/switch-user - Clean user switching utility for RavenLinux
     # Uses runuser/setpriv instead of su to avoid PAM issues
-    cat > "${SYSROOT_DIR}/bin/switch-user" << 'SWITCHUSER'
+    cat > "${SYSROOT_DIR}/usr/bin/switch-user" << 'SWITCHUSER'
 #!/bin/bash
 # switch-user - RavenLinux User Switching Utility
 # Usage: switch-user <username>
@@ -3156,7 +3182,7 @@ fi
 
 error "No method available to switch user"
 SWITCHUSER
-    chmod 755 "${SYSROOT_DIR}/bin/switch-user"
+    chmod 755 "${SYSROOT_DIR}/usr/bin/switch-user"
     log_info "  Created switch-user utility"
 
     # /etc/profile
@@ -3370,9 +3396,12 @@ xvc0
 EOF
 
     # /etc/environment - system-wide environment variables
+    # PATH names /usr/bin and /usr/sbin only. /bin and /sbin still resolve
+    # there through the usr-merge links, so listing them as well just made the
+    # shell hash the same directory four times.
     cat > "${SYSROOT_DIR}/etc/environment" << 'EOF'
 # /etc/environment - system-wide environment variables
-PATH="/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin"
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
 LANG="en_US.UTF-8"
 EOF
 
@@ -3384,12 +3413,13 @@ multi on
 EOF
 
     # /etc/ld.so.conf - dynamic linker configuration
+    # /lib, /lib64 and /usr/lib64 are all symlinks onto /usr/lib, so listing
+    # them made ldconfig scan the same directory four times and write four
+    # spellings of every entry into the cache.
     cat > "${SYSROOT_DIR}/etc/ld.so.conf" << 'EOF'
 # /etc/ld.so.conf - dynamic linker configuration
-/lib
-/lib64
+# This root is usr-merged: /lib and /lib64 are symlinks onto /usr/lib.
 /usr/lib
-/usr/lib64
 /usr/local/lib
 include /etc/ld.so.conf.d/*.conf
 EOF
@@ -3620,7 +3650,21 @@ main() {
             log_fatal "Sysroot contains non-writable paths. Fix with: sudo chown -R \"$(id -un 2>/dev/null || echo root)\":\"$(id -gn 2>/dev/null || echo root)\" \"${SYSROOT_DIR}\""
         fi
     fi
-    mkdir -p "${SYSROOT_DIR}"/{bin,sbin,lib,lib64,usr/{bin,sbin,lib,share},etc,home,root}
+    # stage2 wipes the sysroot above, which takes the usr-merge symlinks with
+    # it, so the merged skeleton has to be rebuilt HERE as well as in stage1.
+    # `imlazy stage2` is the documented entry point and never runs stage1, so
+    # skipping this silently un-merges the tree for that whole flow.
+    if declare -F raven_usrmerge_root >/dev/null 2>&1; then
+        # log_fatal, not log_error: log_error only echoes and returns 0, so a
+        # failed merge would carry on and build the rest of the system onto a
+        # half-merged sysroot -- /bin a real directory, /lib a symlink. That
+        # ships an image that cannot resolve its own libraries. build.sh has
+        # always used log_fatal here; the others had drifted.
+        raven_usrmerge_root "${SYSROOT_DIR}" || log_fatal "usr-merge skeleton failed"
+    else
+        log_fatal "scripts/lib/usrmerge.sh is missing; cannot create a usr-merged sysroot"
+    fi
+    mkdir -p "${SYSROOT_DIR}"/{etc,home,root}
 
     copy_shells
     copy_system_utils
@@ -3629,7 +3673,7 @@ main() {
     if [[ "${RAVEN_ENABLE_SUDO}" == "1" ]]; then
         setup_sudo
     else
-        rm -f "${SYSROOT_DIR}/bin/sudo" "${SYSROOT_DIR}/usr/bin/sudo" 2>/dev/null || true
+        rm -f "${SYSROOT_DIR}/usr/bin/sudo" 2>/dev/null || true
     fi
     setup_su
     copy_ca_certificates

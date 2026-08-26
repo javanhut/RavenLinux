@@ -318,6 +318,52 @@ else
 fi
 
 # =============================================================================
+section "initramfs: boot banner label"
+# The banner is printed before /proc is mounted and before the root-mode
+# parser runs, so it decides for itself from the command line. It used to say
+# "Live Boot" unconditionally, which meant an installed machine announced
+# itself as a live image on every boot. Its answer must agree with the parser
+# tested above, so the two are checked against the same command lines.
+banner_label() { # CMDLINE -> the label the initramfs would print
+    local cl="$1" fixture
+    fixture="$(mktemp)"
+    printf '%s\n' "$cl" > "$fixture"
+    local label="Live Boot"
+    if grep -qE '(^| )root=[^ ]' "$fixture" 2>/dev/null \
+        && ! grep -qE '(^| )raven\.live( |$)' "$fixture" 2>/dev/null; then
+        label="Installed System"
+    fi
+    rm -f "$fixture"
+    printf '%s' "$label"
+}
+
+check_banner() { # DESC CMDLINE WANT
+    eq "$1" "$(banner_label "$2")" "$3"
+}
+
+check_banner "live ISO says Live Boot" \
+    "rdinit=/init quiet loglevel=3 console=tty0" "Live Boot"
+check_banner "installed disk does not say Live Boot" \
+    "root=UUID=abc-123 rw quiet console=tty0" "Installed System"
+check_banner "raven.live still says Live Boot" \
+    "root=UUID=abc-123 rw raven.live" "Live Boot"
+check_banner "no root= at all says Live Boot" \
+    "BOOT_IMAGE=/vmlinuz rootwait" "Live Boot"
+
+# The logic above mirrors what is embedded in build-initramfs.sh. If that
+# drifts, these four checks are testing a copy and measuring nothing, so pin
+# them to the real source -- unconditionally, because a pin that quietly skips
+# itself is the same as no pin.
+if grep -q 'RAVEN_BOOT_LABEL="Installed System"' "${INITRAMFS_BUILDER}" \
+    && grep -q 'raven\\.live' "${INITRAMFS_BUILDER}" \
+    && ! grep -q '${WHITE}Live Boot${NC}' "${INITRAMFS_BUILDER}"; then
+    pass "build-initramfs.sh derives the banner label from the command line"
+else
+    failed "build-initramfs.sh no longer derives the banner label" \
+           "the banner checks above are testing a copy that has drifted from it"
+fi
+
+# =============================================================================
 section "result"
 if [[ $FAILURES -eq 0 ]]; then
     echo "  ${GREEN}All raven-install tests passed.${NC}"

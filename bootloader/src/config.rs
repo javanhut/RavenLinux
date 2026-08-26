@@ -135,7 +135,7 @@ impl BootEntry {
     /// Create a firmware settings entry.
     pub fn firmware_setup() -> Self {
         Self {
-            name: String::from("UEFI Firmware Settings"),
+            name: String::from("System UEFI Settings"),
             kernel: String::new(),
             initrd: None,
             cmdline: String::new(),
@@ -341,6 +341,15 @@ impl BootConfig {
                                 "back" => EntryType::Back,
                                 "reboot" => EntryType::Reboot,
                                 "shutdown" | "poweroff" => EntryType::Shutdown,
+                                // The enum and the dispatch in main.rs have
+                                // always had this; the parser had no spelling
+                                // for it, so `type = firmware-setup` fell
+                                // through the catch-all below and became a
+                                // Linux entry that tried to boot the literal
+                                // string in `kernel`.
+                                "firmware-setup" | "uefi-setup" | "firmware" => {
+                                    EntryType::FirmwareSetup
+                                }
                                 _ => EntryType::LinuxEfi,
                             };
                         }

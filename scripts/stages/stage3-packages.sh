@@ -615,13 +615,14 @@ build_fish() {
         local host_fish=$(command -v fish)
         log_info "Copying host fish and dependencies..."
 
-        mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/bin"
+        mkdir -p "${SYSROOT_DIR}/usr/bin"
         mkdir -p "${SYSROOT_DIR}/usr/share/fish"
 
-        # Copy fish binaries
+        # Copy fish binaries. No /bin/fish link: /bin is a symlink onto
+        # /usr/bin, so `ln -sf ../usr/bin/fish ${SYSROOT}/bin/fish` would
+        # unlink the binary and leave a dangler pointing at /usr/usr/bin/fish.
         cp "${host_fish}" "${SYSROOT_DIR}/usr/bin/fish"
         chmod 755 "${SYSROOT_DIR}/usr/bin/fish"
-        ln -sf ../usr/bin/fish "${SYSROOT_DIR}/bin/fish"
 
         # Copy fish_indent and fish_key_reader if available
         for bin in fish_indent fish_key_reader; do
@@ -686,7 +687,7 @@ build_fish() {
     if cmake .. -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF && \
        make -j$(nproc) && \
        make DESTDIR="${SYSROOT_DIR}" install; then
-        ln -sf ../usr/bin/fish "${SYSROOT_DIR}/bin/fish"
+        # --prefix=/usr already put it in /usr/bin, which IS /bin post-merge.
         log_success "fish ${fish_ver} built and installed"
     else
         log_warn "fish build failed"
@@ -704,7 +705,7 @@ build_bash() {
 
     # Force rebuild to ensure correct linking against our libs (ncurses, readline)
     # even if stage2 copied a host bash.
-    rm -f "${SYSROOT_DIR}/bin/bash" "${SYSROOT_DIR}/usr/bin/bash" "${SYSROOT_DIR}/bin/sh"
+    rm -f "${SYSROOT_DIR}/usr/bin/bash" "${SYSROOT_DIR}/usr/bin/sh"
 
     local bash_tarball="${cache_dir}/bash-${bash_ver}.tar.gz"
     local bash_src="${cache_dir}/bash-${bash_ver}"
@@ -735,19 +736,23 @@ build_bash() {
     # Configure bash
     # --without-bash-malloc: use glibc malloc (better for compatibility)
     # Use bundled readline to avoid symbol mismatch issues (rl_print_keybinding error)
+    # --bindir=/usr/bin, not /bin. With bindir=/bin the install landed in the
+    # merge symlink and then needed two "repair" links --
+    #   ln -sf ../../bin/bash "${SYSROOT_DIR}/usr/bin/bash"
+    #   ln -sf ../../bin/bash "${SYSROOT_DIR}/usr/bin/sh"
+    # -- each of which is a self-reference once /bin is a symlink, i.e. ELOOP
+    # on /usr/bin/bash and /usr/bin/sh. That is the single worst failure in the
+    # merge: /init and 18 other scripts have a #!/bin/sh or #!/bin/bash
+    # shebang, so the ISO would build clean and boot with no shell at all.
     ./configure \
         --prefix=/usr \
-        --bindir=/bin \
+        --bindir=/usr/bin \
         --without-bash-malloc \
         --with-curses
 
     if make -j$(nproc) && make DESTDIR="${SYSROOT_DIR}" install; then
-        # Create symlinks
-        ln -sf bash "${SYSROOT_DIR}/bin/sh"
-        # Ensure /usr/bin/bash exists (bindir=/bin puts it in /bin)
-        mkdir -p "${SYSROOT_DIR}/usr/bin"
-        ln -sf ../../bin/bash "${SYSROOT_DIR}/usr/bin/bash"
-        ln -sf ../../bin/bash "${SYSROOT_DIR}/usr/bin/sh"
+        # Same-directory alias, the only shape that is safe here.
+        ln -sf bash "${SYSROOT_DIR}/usr/bin/sh"
 
         log_success "Bash ${bash_ver} built and installed"
     else
@@ -755,8 +760,8 @@ build_bash() {
         # Fallback to host copy if build fails
         if command -v bash &>/dev/null; then
             log_warn "Falling back to host bash..."
-            cp "$(which bash)" "${SYSROOT_DIR}/bin/bash"
-            ln -sf bash "${SYSROOT_DIR}/bin/sh"
+            cp "$(which bash)" "${SYSROOT_DIR}/usr/bin/bash"
+            ln -sf bash "${SYSROOT_DIR}/usr/bin/sh"
         fi
     fi
 
@@ -913,10 +918,9 @@ install_essential_libs() {
 
     # If both built and host libs were copied, prefer the newest minor version for SONAME links.
     # This prevents breakage like "/bin/bash: undefined symbol: rl_print_keybinding".
+    # /usr/lib64, /lib and /lib64 are all symlinks onto /usr/lib now, so one
+    # call covers what used to be four passes over the same directory.
     fixup_readline_history_symlinks "${SYSROOT_DIR}/usr/lib"
-    fixup_readline_history_symlinks "${SYSROOT_DIR}/usr/lib64"
-    fixup_readline_history_symlinks "${SYSROOT_DIR}/lib"
-    fixup_readline_history_symlinks "${SYSROOT_DIR}/lib64"
 
     log_info "Copied ${copied} libraries (${skipped} already present)"
 
@@ -1078,7 +1082,7 @@ print_summary() {
 
     echo "Shells:"
     for shell in bash fish; do
-        if [[ -f "${SYSROOT_DIR}/usr/bin/${shell}" ]] || [[ -f "${SYSROOT_DIR}/bin/${shell}" ]]; then
+        if [[ -f "${SYSROOT_DIR}/usr/bin/${shell}" ]]; then
             echo "  [OK] ${shell}"
         else
             echo "  [--] ${shell}"
@@ -1088,7 +1092,7 @@ print_summary() {
     echo ""
     echo "Networking:"
     for tool in ssh scp sshd sftp; do
-        if [[ -f "${SYSROOT_DIR}/usr/bin/${tool}" ]] || [[ -f "${SYSROOT_DIR}/usr/sbin/${tool}" ]]; then
+        if [[ -f "${SYSROOT_DIR}/usr/bin/${tool}" ]]; then
             echo "  [OK] ${tool}"
         else
             echo "  [--] ${tool}"

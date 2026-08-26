@@ -630,6 +630,26 @@ echo ""
 echo ""
 echo ""
 
+# The subtitle has to tell the truth. This one initramfs boots both the live
+# ISO and every installed disk, and it said "Live Boot" on both -- so a machine
+# with Raven installed announced itself as a live image on every boot.
+#
+# The kernel command line is the only thing that distinguishes them at this
+# point: the ISO entries carry rdinit=/init and no root=, while raven-install
+# writes root=UUID=... into boot.cfg. That is the same signal
+# raven_root_from_cmdline uses further down to pick disk mode over live mode;
+# this reads it early, before /proc is officially mounted, because the banner
+# is printed first. `raven.live` is the documented escape hatch for booting the
+# live image from a disk that does have a root=, so it wins here too.
+[ -r /proc/cmdline ] || mount -t proc proc /proc 2>/dev/null || true
+RAVEN_BOOT_LABEL="Live Boot"
+if [ -r /proc/cmdline ]; then
+    if grep -qE '(^| )root=[^ ]' /proc/cmdline 2>/dev/null \
+        && ! grep -qE '(^| )raven\.live( |$)' /proc/cmdline 2>/dev/null; then
+        RAVEN_BOOT_LABEL="Installed System"
+    fi
+fi
+
 # Display centered boot banner
 echo -e "${CYAN}              ██████╗  █████╗ ██╗   ██╗███████╗███╗   ██╗    ██╗     ██╗███╗   ██╗██╗   ██╗██╗  ██╗${NC}"
 echo -e "${CYAN}              ██╔══██╗██╔══██╗██║   ██║██╔════╝████╗  ██║    ██║     ██║████╗  ██║██║   ██║╚██╗██╔╝${NC}"
@@ -638,7 +658,13 @@ echo -e "${CYAN}              ██╔══██╗██╔══██║�
 echo -e "${CYAN}              ██║  ██║██║  ██║ ╚████╔╝ ███████╗██║ ╚████║    ███████╗██║██║ ╚████║╚██████╔╝██╔╝ ██╗${NC}"
 echo -e "${CYAN}              ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝    ╚══════╝╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝${NC}"
 echo ""
-echo -e "                                              ${WHITE}Live Boot${NC}"
+# Centred under the logo. 46 was the hard-coded indent when the only possible
+# label was "Live Boot" (9 characters), so the centre stays exactly where it
+# was and a longer label grows evenly either side of it.
+RAVEN_BOOT_PAD=$(( 46 + (9 - ${#RAVEN_BOOT_LABEL}) / 2 ))
+[ "$RAVEN_BOOT_PAD" -lt 0 ] && RAVEN_BOOT_PAD=0
+printf '%*s' "$RAVEN_BOOT_PAD" ""
+echo -e "${WHITE}${RAVEN_BOOT_LABEL}${NC}"
 echo ""
 echo ""
 
@@ -647,8 +673,14 @@ echo ""
 # -----------------------------------------------------------------------------
 step "Mounting virtual filesystems"
 
+# Possibly already mounted: the banner above needs the command line to know
+# whether this is a live boot or an installed disk, and mounts /proc to read
+# it. Mounting it twice is harmless, but a kernel that refuses is not a
+# failure when the thing we wanted is already there.
 if mount -t proc proc /proc 2>/dev/null; then
     ok "Mounted /proc"
+elif [ -r /proc/cmdline ]; then
+    ok "Mounted /proc (already mounted for the boot banner)"
 else
     fail "Failed to mount /proc"
     rescue_shell "Critical filesystem mount failed"

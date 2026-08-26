@@ -54,7 +54,7 @@ fn main() {
 
     // Run the init sequence
     if let Err(e) = run_init() {
-        log::error!("Init failed: {}", e);
+        log::error!("Init failed: {:#}", e);
         // Try to drop to emergency shell
         emergency_shell();
     }
@@ -968,7 +968,7 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
                     services.insert(svc_config.name.clone(), svc);
                 }
                 Err(e) => {
-                    log::error!("Failed to start {}: {}", svc_config.name, e);
+                    log::error!("Failed to start {}: {:#}", svc_config.name, e);
                     if svc_config.critical {
                         return Err(e)
                             .context(format!("Critical service {} failed", svc_config.name));
@@ -1092,7 +1092,7 @@ fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -
     let control = match control::listen() {
         Ok(listener) => Some(listener),
         Err(e) => {
-            log::warn!("Control socket unavailable: {}", e);
+            log::warn!("Control socket unavailable: {:#}", e);
             log::warn!("  raven-rc service commands will not work this boot");
             None
         }
@@ -1206,7 +1206,7 @@ fn check_services(services: &mut HashMap<String, Service>, _config: &InitConfig)
         if died && svc.should_restart() {
             log::info!("Restarting service: {}", svc.name());
             if let Err(e) = svc.restart() {
-                log::error!("Failed to restart {}: {}", svc.name(), e);
+                log::error!("Failed to restart {}: {:#}", svc.name(), e);
             }
         }
     }

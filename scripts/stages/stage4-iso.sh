@@ -43,6 +43,14 @@ ISO_OUTPUT="${PROJECT_ROOT}/raven-${RAVEN_VERSION}-${RAVEN_ARCH}.iso"
 # Logging (use shared library or define fallbacks)
 # =============================================================================
 
+# The rootfs layout is usr-merged (/bin, /sbin, /lib, /lib64 are symlinks into
+# /usr). See scripts/lib/usrmerge.sh for why, and for the rule every install
+# site in this file has to follow.
+if [[ -f "${PROJECT_ROOT}/scripts/lib/usrmerge.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${PROJECT_ROOT}/scripts/lib/usrmerge.sh"
+fi
+
 if [[ -f "${PROJECT_ROOT}/scripts/lib/logging.sh" ]]; then
     source "${PROJECT_ROOT}/scripts/lib/logging.sh"
 else
@@ -103,8 +111,8 @@ setup_iso_structure() {
 create_managed_live_init() {
     log_step "Configuring raven-init as PID 1..."
 
-    [[ -x "${SYSROOT_DIR}/sbin/raven-init" ]] || {
-        log_error "${SYSROOT_DIR}/sbin/raven-init is missing; run stage2 first"
+    [[ -x "${SYSROOT_DIR}/usr/bin/raven-init" ]] || {
+        log_error "${SYSROOT_DIR}/usr/bin/raven-init is missing; run stage2 first"
         return 1
     }
 
@@ -116,7 +124,9 @@ create_managed_live_init() {
 exec /sbin/raven-init
 EOF
     chmod 0755 "${SYSROOT_DIR}/init"
-    ln -sf raven-init "${SYSROOT_DIR}/sbin/init"
+    # Same-directory alias. /sbin/init -- which is what the kernel and the
+    # installer name -- resolves here through /sbin -> usr/bin.
+    ln -sf raven-init "${SYSROOT_DIR}/usr/bin/init"
 
     log_success "raven-init configured for live and installed boots"
 }
@@ -210,11 +220,11 @@ copy_kernel_modules() {
         return 0
     fi
 
-    mkdir -p "${SYSROOT_DIR}/lib/modules"
-    rm -rf "${SYSROOT_DIR}/lib/modules/${release}" 2>/dev/null || true
-    cp -a "${modules_root}/${release}" "${SYSROOT_DIR}/lib/modules/" 2>/dev/null || true
+    mkdir -p "${SYSROOT_DIR}/usr/lib/modules"
+    rm -rf "${SYSROOT_DIR}/usr/lib/modules/${release}" 2>/dev/null || true
+    cp -a "${modules_root}/${release}" "${SYSROOT_DIR}/usr/lib/modules/" 2>/dev/null || true
 
-    if [[ -d "${SYSROOT_DIR}/lib/modules/${release}" ]]; then
+    if [[ -d "${SYSROOT_DIR}/usr/lib/modules/${release}" ]]; then
         log_info "  Copied /lib/modules/${release}"
 
         # Generate modules.dep/modules.alias so udev + modprobe can auto-load drivers.
@@ -240,7 +250,7 @@ copy_kernel_modules() {
 install_packages_to_sysroot() {
     log_step "Installing packages to sysroot..."
 
-    mkdir -p "${SYSROOT_DIR}/bin"
+    mkdir -p "${SYSROOT_DIR}/usr/bin"
 
     # Copy all built packages from packages/bin
     if [[ -d "${PACKAGES_DIR}/bin" ]]; then
@@ -248,8 +258,8 @@ install_packages_to_sysroot() {
             [[ -f "$pkg" ]] || continue
             local name
             name="$(basename "$pkg")"
-            cp "$pkg" "${SYSROOT_DIR}/bin/"
-            chmod +x "${SYSROOT_DIR}/bin/${name}"
+            cp "$pkg" "${SYSROOT_DIR}/usr/bin/"
+            chmod +x "${SYSROOT_DIR}/usr/bin/${name}"
             log_info "  Installed ${name}"
         done
     fi
@@ -289,7 +299,7 @@ install_packages_to_sysroot() {
 
     # Ensure shared library dependencies for newly installed binaries are present.
     log_info "Copying runtime libraries for sysroot binaries..."
-    for bin in "${SYSROOT_DIR}"/bin/* "${SYSROOT_DIR}"/sbin/*; do
+    for bin in "${SYSROOT_DIR}"/usr/bin/*; do
         [[ -f "$bin" && -x "$bin" && ! -L "$bin" ]] || continue
         if file "$bin" 2>/dev/null | grep -q "statically linked"; then
             continue
@@ -333,7 +343,11 @@ cleanup_sysroot() {
     find "${SYSROOT_DIR}" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
     
     # Strip binaries (reduce size significantly)
-    find "${SYSROOT_DIR}/bin" "${SYSROOT_DIR}/sbin" "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/usr/sbin" \
+    # One start point. /bin, /sbin and /usr/sbin are symlinks onto /usr/bin,
+    # and `find` given a symlink as a start point without -H/-L prints NOTHING
+    # at all -- so naming them looked like four directories were covered while
+    # two of the arguments were silently no-ops.
+    find "${SYSROOT_DIR}/usr/bin" \
         -type f -executable 2>/dev/null | while read -r bin; do
         strip --strip-unneeded "$bin" 2>/dev/null || true
     done
@@ -364,10 +378,24 @@ create_squashfs() {
     # Clean up to reduce size
     cleanup_sysroot
 
+    # The real last gate. It used to run before create_squashfs, but both
+    # install_packages_to_sysroot and cleanup_sysroot mutate the tree after
+    # that point -- and install_packages_to_sysroot's ldd loop does
+    # `mkdir -p "$(dirname "${SYSROOT_DIR}${lib}")"` on host paths such as
+    # /lib64/ld-linux-x86-64.so.2, which recreates /lib64 as a real directory
+    # and puts the ELF interpreter somewhere nothing in the booted image
+    # reads. Checking before those ran verified a layout that no longer
+    # existed by the time it was sealed.
+    check_usrmerge_layout || return 1
+
     local pseudo="${LOGS_DIR}/squashfs.pseudo"
     : > "${pseudo}"
-    [[ -e "${SYSROOT_DIR}/bin/sudo" ]] && echo "bin/sudo m 4755 0 0" >> "${pseudo}"
-    [[ -e "${SYSROOT_DIR}/bin/su" ]] && echo "bin/su m 4755 0 0" >> "${pseudo}"
+    # These are paths INSIDE the squashfs, not host paths. They must name the
+    # real directory: `bin` is a symlink in the image now, and a pseudo-file
+    # entry on a path that goes through a symlink does not apply -- the SUID
+    # bit would silently not be set on sudo or su.
+    [[ -e "${SYSROOT_DIR}/usr/bin/sudo" ]] && echo "usr/bin/sudo m 4755 0 0" >> "${pseudo}"
+    [[ -e "${SYSROOT_DIR}/usr/bin/su" ]] && echo "usr/bin/su m 4755 0 0" >> "${pseudo}"
     [[ -e "${SYSROOT_DIR}/etc/shadow" ]] && echo "etc/shadow m 600 0 0" >> "${pseudo}"
 
     mksquashfs "${SYSROOT_DIR}" "${ISO_ROOT}/raven/filesystem.squashfs" \
@@ -456,6 +484,17 @@ submenu "System >" --class raven {
         linux /boot/vmlinuz rdinit=/init single console=ttyS0,115200 console=tty0
         initrd /boot/initramfs.img
     }
+
+    # fwsetup reboots into the firmware's own configuration screen. It only
+    # exists on EFI, and calling it on BIOS drops an "unknown command" error
+    # into the menu -- hence the platform guard rather than an unconditional
+    # entry. Firmware that does not advertise OsIndicationsSupported cannot do
+    # this at all, so the entry says what happened instead of failing silently.
+    if [ "$grub_platform" = "efi" ]; then
+        menuentry "System UEFI Settings" --class uefi {
+            fwsetup || echo "This firmware does not support rebooting into its setup screen."
+        }
+    fi
 
     menuentry "Reboot" --class restart {
         reboot
@@ -726,7 +765,7 @@ install_shutdown_commands() {
         name="${spec%%:*}"
         key="${spec##*:}"
 
-        cat > "${SYSROOT_DIR}/bin/${name}" << EOF
+        cat > "${SYSROOT_DIR}/usr/bin/${name}" << EOF
 #!/bin/sh
 # RavenLinux ${name}. There is no systemd here; raven-init is PID 1 on normal
 # live and installed boots. The fallback below is for an emergency shell.
@@ -738,9 +777,7 @@ sync
 [ -w /proc/sys/kernel/sysrq ] && echo 1 > /proc/sys/kernel/sysrq
 echo ${key} > /proc/sysrq-trigger
 EOF
-        chmod 0755 "${SYSROOT_DIR}/bin/${name}"
-        mkdir -p "${SYSROOT_DIR}/usr/bin"
-        ln -sf "../../bin/${name}" "${SYSROOT_DIR}/usr/bin/${name}" 2>/dev/null || true
+        chmod 0755 "${SYSROOT_DIR}/usr/bin/${name}"
     done
 
     log_success "Shutdown commands installed (reboot, poweroff, halt, shutdown)"
@@ -820,14 +857,17 @@ install_console_font() {
     # The loader. Without setfont in the sysroot it is a no-op that exits 0,
     # which is the right behaviour on a build that could not supply one.
     if [[ -f "${PROJECT_ROOT}/configs/raven-console-font" ]]; then
-        mkdir -p "${SYSROOT_DIR}/usr/sbin" "${SYSROOT_DIR}/sbin"
-        cp "${PROJECT_ROOT}/configs/raven-console-font" "${SYSROOT_DIR}/usr/sbin/raven-console-font"
-        chmod 0755 "${SYSROOT_DIR}/usr/sbin/raven-console-font"
-        ln -sf ../usr/sbin/raven-console-font "${SYSROOT_DIR}/sbin/raven-console-font" 2>/dev/null || true
+        mkdir -p "${SYSROOT_DIR}/usr/bin"
+        cp "${PROJECT_ROOT}/configs/raven-console-font" "${SYSROOT_DIR}/usr/bin/raven-console-font"
+        chmod 0755 "${SYSROOT_DIR}/usr/bin/raven-console-font"
+        # init.toml names /usr/sbin/raven-console-font; that still resolves,
+        # because /usr/sbin is a symlink onto bin. The compat link that used to
+        # be here deleted the script and left a dangler -- and it was wrapped in
+        # `2>/dev/null || true`, so it could not even report the damage.
         log_info "  Installed raven-console-font"
     fi
 
-    if [[ ! -x "${SYSROOT_DIR}/sbin/setfont" && ! -x "${SYSROOT_DIR}/bin/setfont" ]]; then
+    if [[ ! -x "${SYSROOT_DIR}/usr/bin/setfont" ]]; then
         log_warn "  setfont is not in the sysroot, so the font cannot be loaded at boot"
         log_warn "  It comes from kbd; stage2 copies it when the build host has it"
     fi
@@ -844,13 +884,13 @@ install_udev_helper() {
         return 0
     fi
 
-    mkdir -p "${SYSROOT_DIR}/usr/sbin" "${SYSROOT_DIR}/sbin"
-    cp "${PROJECT_ROOT}/configs/raven-udev" "${SYSROOT_DIR}/usr/sbin/raven-udev"
-    chmod 0755 "${SYSROOT_DIR}/usr/sbin/raven-udev"
-    ln -sf ../usr/sbin/raven-udev "${SYSROOT_DIR}/sbin/raven-udev" 2>/dev/null || true
+    mkdir -p "${SYSROOT_DIR}/usr/bin"
+    cp "${PROJECT_ROOT}/configs/raven-udev" "${SYSROOT_DIR}/usr/bin/raven-udev"
+    chmod 0755 "${SYSROOT_DIR}/usr/bin/raven-udev"
+    # init.toml's exec = "/usr/sbin/raven-udev" resolves here via /usr/sbin -> bin.
     log_info "  Installed raven-udev"
 
-    if [[ ! -x "${SYSROOT_DIR}/sbin/udevd" && ! -x "${SYSROOT_DIR}/usr/sbin/udevd" ]]; then
+    if [[ ! -x "${SYSROOT_DIR}/usr/bin/udevd" ]]; then
         log_warn "  udevd is not in the sysroot; modules will not autoload"
         log_warn "  It comes from eudev; stage2 copies it when the build host has it"
     fi
@@ -875,25 +915,55 @@ install_installer() {
         return 0
     fi
 
-    mkdir -p "${SYSROOT_DIR}/usr/sbin" "${SYSROOT_DIR}/sbin"
-    cp "${src}" "${SYSROOT_DIR}/usr/sbin/raven-install"
-    chmod 0755 "${SYSROOT_DIR}/usr/sbin/raven-install"
+    mkdir -p "${SYSROOT_DIR}/usr/bin"
+    cp "${src}" "${SYSROOT_DIR}/usr/bin/raven-install"
+    chmod 0755 "${SYSROOT_DIR}/usr/bin/raven-install"
 
-    # /sbin is where the rest of the system administration commands live in this
-    # sysroot, and it is on root's PATH; /usr/sbin is not always.
-    ln -sf ../usr/sbin/raven-install "${SYSROOT_DIR}/sbin/raven-install" 2>/dev/null || true
-
+    # The old /sbin compat link existed because /sbin was on root's PATH and
+    # /usr/sbin was not always. The merge removes the problem at the root:
+    # /bin, /sbin, /usr/bin and /usr/sbin are one directory, so raven-install
+    # is on every one of those PATH entries with no link. The link itself was
+    # actively harmful -- it unlinked the installer and left a dangler, so the
+    # ISO shipped with no way to install itself.
     if [[ -f "${post}" ]]; then
-        cp "${post}" "${SYSROOT_DIR}/usr/sbin/raven-postinstall"
-        chmod 0755 "${SYSROOT_DIR}/usr/sbin/raven-postinstall"
-        ln -sf ../usr/sbin/raven-postinstall "${SYSROOT_DIR}/sbin/raven-postinstall" 2>/dev/null || true
+        cp "${post}" "${SYSROOT_DIR}/usr/bin/raven-postinstall"
+        chmod 0755 "${SYSROOT_DIR}/usr/bin/raven-postinstall"
     fi
     if [[ -d "${profiles}" ]]; then
         mkdir -p "${SYSROOT_DIR}/etc/raven/install-profiles"
         cp "${profiles}"/*.packages "${SYSROOT_DIR}/etc/raven/install-profiles/"
     fi
 
-    log_success "raven-install installed to /usr/sbin/raven-install"
+    log_success "raven-install installed to /usr/bin/raven-install (also /sbin/raven-install)"
+}
+
+# =============================================================================
+# Is the layout still usr-merged?
+# =============================================================================
+# The last gate before the sysroot is sealed into a squashfs. Every failure
+# mode this catches is silent otherwise: a stage that recreated /bin as a real
+# directory un-merges the root, so `rvn install <anything>` on the shipped
+# system dies with "filesystem: File exists (os error 17)"; and a symlink loop
+# on /usr/bin/sh or /usr/bin/bash boots to an image with no working shell.
+#
+# It fails the build rather than warning. An ISO that cannot install a package
+# or reach a shell is not a console-only image, it is a broken one.
+check_usrmerge_layout() {
+    log_step "Verifying the usr-merged layout..."
+
+    if ! declare -F raven_usrmerge_verify >/dev/null 2>&1; then
+        log_warn "scripts/lib/usrmerge.sh not loaded; skipping the layout check"
+        return 0
+    fi
+
+    if raven_usrmerge_verify "${SYSROOT_DIR}"; then
+        log_success "  /bin /sbin /lib /lib64 -> usr, no symlink loops"
+        return 0
+    fi
+
+    log_error "The sysroot is not usr-merged. Arch packages cannot be installed on it,"
+    log_error "and a symlink loop under /usr/bin can leave the image with no shell."
+    return 1
 }
 
 # =============================================================================

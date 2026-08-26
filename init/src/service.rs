@@ -5,7 +5,7 @@ use std::os::unix::io::RawFd;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use nix::fcntl::{open, OFlag};
 use nix::sys::signal::{self, Signal};
 use nix::sys::stat::Mode;
@@ -23,6 +23,42 @@ const MAX_RESTARTS: u32 = 5;
 
 /// How long a service must survive for its restart budget to be refilled.
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
+
+/// Why `exec` cannot be run, if it cannot.
+///
+/// `spawn` reports "not installed" and "not executable" alike as a bare errno,
+/// and the path -- the one thing the operator needs -- is not in the message.
+/// init.toml deliberately lists daemons that may never be installed (the sshd
+/// entry exists so that `rvn install openssh` is all a person has to do), so a
+/// missing binary is the single likeliest reason a manual start fails and it
+/// deserves to be said in those words.
+///
+/// A bare command name is left alone: `Command` resolves it through PATH, and
+/// second-guessing that lookup here would reject things that do in fact run.
+fn exec_problem(exec: &str) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !exec.contains('/') {
+        return None;
+    }
+
+    let Ok(meta) = std::fs::metadata(exec) else {
+        return Some(format!(
+            "{exec} does not exist -- whatever package provides it is not installed"
+        ));
+    };
+
+    if meta.is_dir() {
+        return Some(format!("{exec} is a directory, not a program"));
+    }
+
+    let mode = meta.permissions().mode();
+    if mode & 0o111 == 0 {
+        return Some(format!("{exec} is not executable (mode {:04o})", mode & 0o7777));
+    }
+
+    None
+}
 
 /// Service state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +152,12 @@ impl Service {
     }
 
     fn do_start(&mut self) -> Result<()> {
+        // Checked before anything is created or forked, so the reply names the
+        // real problem instead of an errno from deep inside spawn().
+        if let Some(problem) = exec_problem(&self.config.exec) {
+            bail!("{problem}");
+        }
+
         // A daemon that binds a socket under /run cannot mkdir its own parent
         // there after a boot -- /run is a fresh tmpfs every time. dbus is the
         // canonical case; see ServiceConfig::runtime_dirs.
@@ -167,7 +209,7 @@ impl Service {
         // Spawn the process
         let child = cmd
             .spawn()
-            .with_context(|| format!("Failed to start {}", self.config.name))?;
+            .with_context(|| format!("cannot exec {}", self.config.exec))?;
 
         let pid = Pid::from_raw(child.id() as i32);
 

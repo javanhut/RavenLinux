@@ -245,7 +245,7 @@ stage_gui_libraries() {
 
         # Already staged by stage2/stage3? Leave it alone: those copies are
         # the ones the rest of the system was linked against.
-        if [[ -e "${SYSROOT_DIR}/usr/lib/${base}" || -e "${SYSROOT_DIR}/lib/${base}" ]]; then
+        if [[ -e "${SYSROOT_DIR}/usr/lib/${base}" ]]; then
             present=$((present + 1))
             continue
         fi
@@ -288,9 +288,9 @@ stage_gui_data() {
 # compositor -- there is no shell client to start afterwards, and nothing to
 # wait for a socket for, because the compositor draws the shell itself.
 install_session_launcher() {
-    local dest="${SYSROOT_DIR}/bin/raven-wayland-session"
+    local dest="${SYSROOT_DIR}/usr/bin/raven-wayland-session"
 
-    mkdir -p "${SYSROOT_DIR}/bin"
+    mkdir -p "${SYSROOT_DIR}/usr/bin"
     cat > "${dest}" << 'LAUNCHER'
 #!/bin/sh
 # RavenLinux Wayland session: Huginn.
@@ -358,12 +358,15 @@ LAUNCHER
 # =============================================================================
 # Install
 # =============================================================================
+# /usr/bin only -- /bin is a symlink onto it. The old
+# `ln -sf ../usr/bin/${binary} ${SYSROOT}/bin/${binary}` unlinked the binary it
+# had just installed and left a dangling link in its place, which for this
+# stage meant huginn and muninn-lock silently missing from the ISO.
 install_gui_binary() {
     local binary="$1" src="$2"
 
-    mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/bin"
+    mkdir -p "${SYSROOT_DIR}/usr/bin"
     install -m 0755 "${src}" "${SYSROOT_DIR}/usr/bin/${binary}"
-    ln -sf "../usr/bin/${binary}" "${SYSROOT_DIR}/bin/${binary}"
 }
 
 # =============================================================================
@@ -390,7 +393,7 @@ print_gui_summary() {
 
     echo ""
     echo "Session:"
-    if [[ -x "${SYSROOT_DIR}/bin/raven-wayland-session" ]]; then
+    if [[ -x "${SYSROOT_DIR}/usr/bin/raven-wayland-session" ]]; then
         echo "  [OK] raven-wayland-session (boot with raven.graphics=wayland)"
     else
         echo "  [--] raven-wayland-session"

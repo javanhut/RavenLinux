@@ -23,6 +23,14 @@ RAVEN_JOBS="${RAVEN_JOBS:-$(nproc)}"
 # Logging (use shared library or define fallbacks)
 # =============================================================================
 
+# The rootfs layout is usr-merged (/bin, /sbin, /lib, /lib64 are symlinks into
+# /usr). See scripts/lib/usrmerge.sh for why, and for the rule every install
+# site in this file has to follow.
+if [[ -f "${PROJECT_ROOT}/scripts/lib/usrmerge.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${PROJECT_ROOT}/scripts/lib/usrmerge.sh"
+fi
+
 if [[ -f "${PROJECT_ROOT}/scripts/lib/logging.sh" ]]; then
     source "${PROJECT_ROOT}/scripts/lib/logging.sh"
 else
@@ -130,6 +138,12 @@ build_initramfs() {
         log_warn "build-initramfs.sh not found, creating minimal initramfs"
 
         local initramfs_dir="${BUILD_DIR}/initramfs"
+        # DELIBERATELY split-usr, unlike the sysroot. The initramfs is a
+        # separate root that early userspace switch_root's away from before rvn
+        # ever runs, so no Arch package is extracted into it and the EEXIST
+        # problem that forces the sysroot merge cannot arise here. Its links
+        # are all same-directory (`ln -sf coreutils bin/X`), so it is not
+        # exposed to the merge failure modes either. Do not "fix" this line.
         mkdir -p "${initramfs_dir}"/{bin,sbin,etc,proc,sys,dev,lib,lib64,usr/bin,usr/lib,tmp,run,mnt,root}
 
         # Copy essential binaries
@@ -185,13 +199,40 @@ EOF
 setup_sysroot() {
     log_info "Setting up sysroot..."
 
-    mkdir -p "${SYSROOT_DIR}"/{bin,sbin,lib,lib64,usr/{bin,sbin,lib,lib64,include,share},etc,var,tmp,root,home,dev,proc,sys,run,mnt,opt,boot}
+    # -------------------------------------------------------------------------
+    # usr-merged layout. /bin, /sbin, /lib and /lib64 are SYMLINKS into /usr;
+    # /usr/sbin and /usr/lib64 are symlinks back into /usr/bin and /usr/lib.
+    #
+    # This is not cosmetic. Arch's `filesystem` package ships those names as
+    # symlinks in its payload, so on a split-usr root extracting it tries to
+    # create a symlink where a directory already exists and the kernel returns
+    # EEXIST -- `rvn install openssh` died with "filesystem: File exists
+    # (os error 17)". `filesystem` is a dependency of essentially every Arch
+    # package, so split-usr makes the whole repo uninstallable.
+    #
+    # Consequence for everything below: install real files into /usr/bin and
+    # /usr/lib, and never create a symlink whose link path and target collapse
+    # to the same file after the merge. scripts/lib/usrmerge.sh spells out the
+    # three shapes that do, all of which exit 0 while destroying the binary.
+    # -------------------------------------------------------------------------
+    if declare -F raven_usrmerge_root >/dev/null 2>&1; then
+        # log_fatal, not log_error: log_error only echoes and returns 0, so a
+        # failed merge would carry on and build the rest of the system onto a
+        # half-merged sysroot -- /bin a real directory, /lib a symlink. That
+        # ships an image that cannot resolve its own libraries. build.sh has
+        # always used log_fatal here; the others had drifted.
+        raven_usrmerge_root "${SYSROOT_DIR}" || log_fatal "usr-merge skeleton failed"
+    else
+        log_error "scripts/lib/usrmerge.sh is missing; cannot create a usr-merged sysroot"
+        return 1
+    fi
+    mkdir -p "${SYSROOT_DIR}"/{etc,var,tmp,root,home,dev,proc,sys,run,mnt,opt,boot}
     mkdir -p "${SYSROOT_DIR}"/var/{log,cache,lib,tmp,run}
     mkdir -p "${SYSROOT_DIR}"/etc/{skel,xdg}
 
     # Install coreutils to sysroot
     if [[ -f "${BUILD_DIR}/bin/coreutils" ]]; then
-        cp "${BUILD_DIR}/bin/coreutils" "${SYSROOT_DIR}/bin/"
+        cp "${BUILD_DIR}/bin/coreutils" "${SYSROOT_DIR}/usr/bin/"
 
         local utils=(
             cat cp mv rm ln mkdir rmdir touch chmod chown chgrp
@@ -203,24 +244,26 @@ setup_sysroot() {
         )
 
         for util in "${utils[@]}"; do
-            ln -sf coreutils "${SYSROOT_DIR}/bin/${util}"
+            # Same-directory alias link: correct under the merge, and the
+            # only link shape that is.
+            ln -sf coreutils "${SYSROOT_DIR}/usr/bin/${util}"
         done
     fi
 
     # Install sudo-rs bits (su/visudo). We intentionally do not ship sudo by default.
     # Set RAVEN_ENABLE_SUDO=1 to include sudo in the sysroot.
-    rm -f "${SYSROOT_DIR}/bin/sudo" "${SYSROOT_DIR}/usr/bin/sudo" 2>/dev/null || true
+    rm -f "${SYSROOT_DIR}/usr/bin/sudo" 2>/dev/null || true
     if [[ "${RAVEN_ENABLE_SUDO:-0}" == "1" ]] && [[ -f "${BUILD_DIR}/bin/sudo" ]]; then
-        cp "${BUILD_DIR}/bin/sudo" "${SYSROOT_DIR}/bin/sudo"
-        chmod 4755 "${SYSROOT_DIR}/bin/sudo" 2>/dev/null || chmod 755 "${SYSROOT_DIR}/bin/sudo"
+        cp "${BUILD_DIR}/bin/sudo" "${SYSROOT_DIR}/usr/bin/sudo"
+        chmod 4755 "${SYSROOT_DIR}/usr/bin/sudo" 2>/dev/null || chmod 755 "${SYSROOT_DIR}/usr/bin/sudo"
     fi
     if [[ -f "${BUILD_DIR}/bin/su" ]]; then
-        cp "${BUILD_DIR}/bin/su" "${SYSROOT_DIR}/bin/su"
-        chmod 4755 "${SYSROOT_DIR}/bin/su" 2>/dev/null || chmod 755 "${SYSROOT_DIR}/bin/su"
+        cp "${BUILD_DIR}/bin/su" "${SYSROOT_DIR}/usr/bin/su"
+        chmod 4755 "${SYSROOT_DIR}/usr/bin/su" 2>/dev/null || chmod 755 "${SYSROOT_DIR}/usr/bin/su"
     fi
     if [[ -f "${BUILD_DIR}/bin/visudo" ]]; then
-        cp "${BUILD_DIR}/bin/visudo" "${SYSROOT_DIR}/bin/visudo"
-        chmod 755 "${SYSROOT_DIR}/bin/visudo" 2>/dev/null || true
+        cp "${BUILD_DIR}/bin/visudo" "${SYSROOT_DIR}/usr/bin/visudo"
+        chmod 755 "${SYSROOT_DIR}/usr/bin/visudo" 2>/dev/null || true
     fi
 
     log_success "Sysroot setup complete"

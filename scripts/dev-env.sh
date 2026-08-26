@@ -19,6 +19,14 @@ DEV_MERGED="${RAVEN_BUILD}/dev-merged"
 # Logging (use shared library or define fallbacks)
 # =============================================================================
 
+# The rootfs layout is usr-merged (/bin, /sbin, /lib, /lib64 are symlinks into
+# /usr). See scripts/lib/usrmerge.sh for why, and for the rule every install
+# site in this file has to follow.
+if [[ -f "${SCRIPT_DIR}/lib/usrmerge.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${SCRIPT_DIR}/lib/usrmerge.sh"
+fi
+
 if [[ -f "${SCRIPT_DIR}/lib/logging.sh" ]]; then
     source "${SCRIPT_DIR}/lib/logging.sh"
 else
@@ -103,8 +111,17 @@ setup_dev_env() {
     if [[ ! -d "${RAVEN_BUILD}/sysroot/usr" ]]; then
         log_info "Creating minimal sysroot structure..."
         local sysroot="${RAVEN_BUILD}/sysroot"
-        mkdir -p "${sysroot}"/{bin,boot,dev,etc,home,lib,lib64,mnt,opt,proc,root,run,sbin,sys,tmp,usr,var}
-        mkdir -p "${sysroot}"/usr/{bin,include,lib,share,src}
+        # Same usr-merged layout as a real build -- the dev environment has to
+        # match, or a package installed inside it behaves differently from one
+        # installed on the ISO. See scripts/lib/usrmerge.sh.
+        if declare -F raven_usrmerge_root >/dev/null 2>&1; then
+            # See the note in stage1-base.sh: a failed merge must stop the build,
+            # not leave a half-merged sysroot behind.
+            raven_usrmerge_root "${sysroot}" || log_fatal "usr-merge skeleton failed"
+        else
+            log_error "scripts/lib/usrmerge.sh is missing; the dev sysroot will be split-usr"
+        fi
+        mkdir -p "${sysroot}"/{boot,dev,etc,home,mnt,opt,proc,root,run,sys,tmp,var}
         mkdir -p "${sysroot}"/var/{cache,lib,log,tmp}
 
         # Copy os-release

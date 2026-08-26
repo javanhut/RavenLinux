@@ -243,11 +243,15 @@ setup_sysroot() {
             cp -a "${toolchain_sysroot}/include/"* "${SYSROOT_DIR}/usr/include/" 2>/dev/null || true
         fi
 
-        # Create dynamic linker symlink
+        # Create dynamic linker symlink.
+        # Same-directory only. The second link here used to be
+        #   ln -sf ../usr/lib/${ld_musl} "${SYSROOT_DIR}/lib/${ld_musl}"
+        # which, with /lib a symlink onto usr/lib, overwrote the good link on
+        # the line above with one pointing at /usr/usr/lib -- i.e. it left the
+        # musl dynamic loader dangling, and exited 0 doing it.
         local ld_musl="ld-musl-${RAVEN_ARCH}.so.1"
         if [[ -f "${SYSROOT_DIR}/usr/lib/libc.so" ]]; then
             ln -sf libc.so "${SYSROOT_DIR}/usr/lib/${ld_musl}"
-            ln -sf ../usr/lib/${ld_musl} "${SYSROOT_DIR}/lib/${ld_musl}"
         fi
     fi
 
