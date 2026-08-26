@@ -869,7 +869,12 @@ raven_skeleton_verify() {
         name="${entry%%:*}"; want="${entry##*:}"
         f="${root}/etc/group"
         [[ -f "$f" ]] || continue
-        line="$(grep "^${name}:" "$f" 2>/dev/null | head -1)"
+        # `|| true`: grep exits 1 when the group is absent, which is a finding
+        # to report, not a reason to abort. Without it a caller running under
+        # `set -e` -- apply-skeleton.sh does -- dies on the first missing group
+        # and prints a truncated report that looks like a clean one.
+        line="$(grep "^${name}:" "$f" 2>/dev/null || true)"
+        line="$(head -1 <<< "$line")"
         if [[ -z "$line" ]]; then
             echo "  missing group      ${name} (gid ${want})"
             fails=$((fails + 1))

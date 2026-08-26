@@ -114,6 +114,10 @@ RUN pacman -Syu --noconfirm --needed \
         # seatd, not libseat: on Arch there is no libseat package -- the seatd
         # package owns both the daemon and /usr/lib/libseat.so.
         seatd \
+        # The X server huginn drives for X11 clients. stage-gui.sh copies this
+        # binary and its libraries into the sysroot; without it in the image the
+        # stage warns and moves on, and the ISO ships with no X11 support at all.
+        xorg-xwayland \
     && pacman -Scc --noconfirm
 
 # -----------------------------------------------------------------------------

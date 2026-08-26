@@ -283,7 +283,12 @@ stage_gui_libraries() {
 # the data xkbcomp reads. See the comment at stage2-native.sh:334.
 stage_xwayland() {
     local src
-    src="$(command -v Xwayland 2>/dev/null)"
+    # `|| true` is load-bearing under `set -euo pipefail`: when Xwayland is not
+    # installed, `command -v` exits 1, the assignment takes that status, and the
+    # whole stage dies before reaching the check below. The graceful path is
+    # unreachable without it -- which is exactly how this first failed, with
+    # "[STEP] Staging XWayland..." and nothing after it.
+    src="$(command -v Xwayland 2>/dev/null || true)"
 
     if [[ -z "${src}" ]]; then
         log_warn "  Xwayland not found on the build host; X11 apps will not run"
