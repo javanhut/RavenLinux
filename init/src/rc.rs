@@ -8,6 +8,7 @@
 //!   restart NAME     - Stop then start a service
 //!   enable NAME      - Start this service at boot (persists to init.toml)
 //!   disable NAME     - Do not start it at boot (persists to init.toml)
+//!   reload           - Re-read init.toml and /etc/raven/init.d without a reboot
 //!   poweroff         - Shut down the system
 //!   reboot           - Reboot the system
 //!   halt             - Halt the system
@@ -183,6 +184,7 @@ fn print_usage(program: &str) {
     eprintln!("  restart NAME     - Stop then start a service");
     eprintln!("  enable NAME      - Start at boot      (writes init.toml)");
     eprintln!("  disable NAME     - Do not start at boot (writes init.toml)");
+    eprintln!("  reload           - Re-read config; picks up newly installed services");
     eprintln!();
     eprintln!("System:");
     eprintln!("  poweroff         - Power off the system");

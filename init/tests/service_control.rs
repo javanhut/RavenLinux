@@ -980,6 +980,8 @@ fn a_dropin_defined_service_can_be_disabled_and_enabled() {
 
     let mut services = HashMap::new();
 
+    // Same process-global variable the reload tests use, so the same lock.
+    let _env = DROPIN_ENV.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("RAVEN_INIT_DROPIN_DIR", &dir);
     let (reply, _) = control::dispatch("disable sshd", &mut services, &mut cfg);
     std::env::remove_var("RAVEN_INIT_DROPIN_DIR");
@@ -1019,4 +1021,185 @@ fn pre_exec_runs_first_and_its_failure_stops_the_start() {
     };
     let msg = format!("{err:#}");
     assert!(msg.contains("pre_exec"), "the error names the phase: {msg}");
+}
+
+// ---------------------------------------------------------------------------
+// reload
+// ---------------------------------------------------------------------------
+// The bug these protect against: /etc/raven/init.d was read once, at boot, so a
+// daemon installed afterwards -- the normal case, since the base image ships
+// none -- was invisible until a reboot. `rvn install openssh` printed "service
+// 'sshd' is now available" while `raven-rc start sshd` answered "no such
+// service".
+//
+// RAVEN_INIT_DROPIN_DIR is what makes this testable without touching /etc.
+
+/// RAVEN_INIT_DROPIN_DIR is process-global and the test harness runs threads in
+/// parallel, so the reload tests take this in turn. Without it they overwrite
+/// each other's environment mid-run and the failures look like reload bugs.
+static DROPIN_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Point init's drop-in loader at a private directory for the duration of a
+/// test, and put the environment back afterwards.
+struct Dropins {
+    dir: std::path::PathBuf,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Dropins {
+    /// `key` must be unique per test: these are real directories, and two tests
+    /// sharing one path delete each other's files. Naming them by entry count
+    /// was the first version of this and produced exactly that collision.
+    fn new(key: &str, entries: &[(&str, &str)]) -> Self {
+        let guard = DROPIN_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = dropin_dir(key, entries);
+        std::env::set_var("RAVEN_INIT_DROPIN_DIR", &dir);
+        Self { dir, _guard: guard }
+    }
+}
+
+impl Drop for Dropins {
+    fn drop(&mut self) {
+        std::env::remove_var("RAVEN_INIT_DROPIN_DIR");
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// A drop-in directory holding one `[[services]]` file per entry.
+fn dropin_dir(key: &str, entries: &[(&str, &str)]) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "raven-reload-{}-{}",
+        std::process::id(),
+        key
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create drop-in dir");
+    for (name, body) in entries {
+        std::fs::write(dir.join(format!("{name}.toml")), body).expect("write drop-in");
+    }
+    dir
+}
+
+fn dropin_toml(name: &str) -> String {
+    format!(
+        "[[services]]\nname = \"{name}\"\nexec = \"/bin/sleep\"\nargs = [\"300\"]\nenabled = false\n"
+    )
+}
+
+#[test]
+fn reload_picks_up_a_service_installed_after_boot() {
+    let _dropins = Dropins::new("late", &[("late-arrival", &dropin_toml("late-arrival"))]);
+
+    // Boot-time state: init knows nothing about it.
+    let mut services: HashMap<String, Service> = HashMap::new();
+    let mut cfg = config_with(Vec::new());
+
+    let (before, _) = control::dispatch("start late-arrival", &mut services, &mut cfg);
+    assert!(
+        before.contains("no such service"),
+        "expected the pre-reload failure, got: {before}"
+    );
+
+    let (reply, action) = control::dispatch("reload", &mut services, &mut cfg);
+    assert!(matches!(action, Action::None));
+    assert!(reply.contains("added"), "reload should report it: {reply}");
+    assert!(reply.contains("late-arrival"), "reload should name it: {reply}");
+
+    // And it is now a real service.
+    assert!(
+        cfg.services.iter().any(|s| s.name == "late-arrival"),
+        "definition should be live after reload"
+    );
+
+}
+
+#[test]
+fn reload_does_not_disturb_a_running_service() {
+    // The property that makes reload safe to run on a live machine: it reloads
+    // definitions, never processes. Same pid before and after.
+    let _dropins = Dropins::new("untouched", &[("untouched", &dropin_toml("untouched"))]);
+
+    let mut services = HashMap::new();
+    let svc = Service::start(&sleeper("untouched")).expect("start");
+    let pid_before = svc.pid().expect("pid").as_raw();
+    services.insert("untouched".to_string(), svc);
+    let mut cfg = config_with(vec![sleeper("untouched")]);
+
+    let (reply, _) = control::dispatch("reload", &mut services, &mut cfg);
+
+    let svc = services.get("untouched").expect("still tracked");
+    assert!(svc.is_running(), "reload must not stop it: {reply}");
+    assert_eq!(
+        svc.pid().expect("pid").as_raw(),
+        pid_before,
+        "reload must not restart it: {reply}"
+    );
+
+    services.get_mut("untouched").unwrap().stop();
+}
+
+#[test]
+fn reload_reports_a_changed_definition_as_pending_while_running() {
+    // A running process was started from the old definition and still matches
+    // it. Reporting the change as applied would be a lie; `restart` is how the
+    // operator opts in.
+    let _dropins = Dropins::new("mutable", &[("mutable", &dropin_toml("mutable"))]);
+
+    let mut services = HashMap::new();
+    let svc = Service::start(&sleeper("mutable")).expect("start");
+    services.insert("mutable".to_string(), svc);
+
+    // Live definition differs from what is on disk (args differ from sleeper()).
+    let mut cfg = config_with(vec![sleeper("mutable")]);
+
+    let (reply, _) = control::dispatch("reload", &mut services, &mut cfg);
+    assert!(
+        reply.contains("changed while running"),
+        "expected a pending report, got: {reply}"
+    );
+    assert!(reply.contains("restart"), "should say how to apply: {reply}");
+
+    services.get_mut("mutable").unwrap().stop();
+}
+
+#[test]
+fn reload_keeps_a_removed_but_still_running_service_addressable() {
+    // Dropping the definition of a running process would leave something on the
+    // system that `raven-rc stop` could no longer name.
+    let _dropins = Dropins::new("orphan", &[]);
+
+    let mut services = HashMap::new();
+    let svc = Service::start(&sleeper("orphan")).expect("start");
+    services.insert("orphan".to_string(), svc);
+    let mut cfg = config_with(vec![sleeper("orphan")]);
+
+    let (reply, _) = control::dispatch("reload", &mut services, &mut cfg);
+    assert!(
+        reply.contains("removed but still running"),
+        "expected the orphan report, got: {reply}"
+    );
+    assert!(
+        cfg.services.iter().any(|s| s.name == "orphan"),
+        "definition must survive so `stop orphan` still works"
+    );
+
+    let (stopped, _) = control::dispatch("stop orphan", &mut services, &mut cfg);
+    assert!(!stopped.contains("no such service"), "{stopped}");
+
+}
+
+#[test]
+fn reload_forgets_a_removed_service_that_was_not_running() {
+    let _dropins = Dropins::new("gone", &[]);
+
+    let mut services: HashMap<String, Service> = HashMap::new();
+    let mut cfg = config_with(vec![sleeper("gone")]);
+
+    let (reply, _) = control::dispatch("reload", &mut services, &mut cfg);
+    assert!(reply.contains("removed"), "{reply}");
+    assert!(
+        !cfg.services.iter().any(|s| s.name == "gone"),
+        "a stopped service whose file is gone should be forgotten"
+    );
+
 }

@@ -313,9 +313,32 @@ RAVEN_SKELETON_LINKS=(
     "var/lock:../run/lock"             # UUCP-style serial device locks
     "var/mail:spool/mail"              # $MAIL, login's new-mail check
     "usr/local/share/man:../man"       # locally installed manpages
-    "etc/os-release:../usr/lib/os-release"
-    "etc/localtime:../usr/share/zoneinfo/UTC"
 )
+
+# ---------------------------------------------------------------------------
+# NOT linked here, deliberately.
+# ---------------------------------------------------------------------------
+# /etc/os-release was in the table above and had to come out. The UAPI spec
+# puts the canonical file at /usr/lib/os-release with /etc/os-release as a
+# symlink to it, which is correct for a distribution that owns /usr/lib -- and
+# wrong for this one, because Arch's `filesystem` package OWNS
+# /usr/lib/os-release and ships `ID=arch` in it. `filesystem` is a dependency
+# of essentially every Arch package, so the first `rvn install <anything>`
+# overwrites it and the symlink hands Raven's identity to Arch: the running
+# system reports NAME="Arch Linux".
+#
+# It broke the version string on the way there too. stage2-native.sh writes a
+# real /etc/os-release and then `sed -i`s @RAVEN_VERSION@ out of it; with the
+# symlink in place the heredoc wrote THROUGH it into /usr/lib/os-release, and
+# the later skeleton pass replaced the substituted file with the link again --
+# leaving PRETTY_NAME="Raven Linux @RAVEN_VERSION@" on the shipped image.
+#
+# So Raven's identity lives in a real /etc/os-release, at a path no Arch
+# package claims, written and owned by stage2. Do not add it back.
+#
+# /etc/localtime is likewise absent: it is a real decision (the installer
+# writes the timezone the operator picked), and a table that re-points it on
+# every run would silently reset every installed system to UTC.
 
 # =============================================================================
 # Groups and users: "name:id"
@@ -493,8 +516,8 @@ raven_skeleton_links() {
         fi
 
         # The parent has to exist; /usr/local/share/man's parent is created by
-        # the directory table, but etc/os-release's is not guaranteed on a
-        # bare root.
+        # the directory table, but a link added later may sit somewhere the
+        # table does not create.
         mkdir -p "$(dirname "$full")"
         ln -sfn "$target" "$full" || rc=1
     done

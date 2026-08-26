@@ -149,6 +149,16 @@ if [[ "$QUIET" != "true" ]]; then
     echo ""
 fi
 
+# The skeleton must not hand Raven's identity to an Arch-owned file. See the
+# note in scripts/lib/skeleton.sh; this is the cheap regression guard.
+if grep -qE '^\s*"etc/os-release:' "${PROJECT_ROOT}/scripts/lib/skeleton.sh" 2>/dev/null; then
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    FAILURES+=("scripts/lib/skeleton.sh links /etc/os-release to /usr/lib/os-release, which Arch's filesystem package owns")
+    echo -e "  ${RED}[FAIL]${NC} scripts/lib/skeleton.sh"
+    echo -e "         ${RED}etc/os-release must not be a symlink into /usr/lib${NC}"
+    echo -e "         ${CYAN}Arch's filesystem package owns /usr/lib/os-release and ships ID=arch${NC}"
+fi
+
 if [[ $FAIL_COUNT -eq 0 ]]; then
     log_success "No self-referential symlinks in any package manifest"
     exit 0

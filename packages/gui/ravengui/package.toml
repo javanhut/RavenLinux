@@ -11,7 +11,7 @@ categories = ["gui", "wayland"]
 [source]
 type = "git"
 url = "https://github.com/javanhut/RavenGUI.git"
-commit = "fc29a4715106faf007ae88e71ccba519b38b5633"
+commit = "69a741434e0da1c4960a2018dafd11eede059897"
 
 [build]
 system = "cargo"

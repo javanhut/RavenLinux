@@ -1,7 +1,18 @@
-//! Configuration structures for RavenInit
+//! Configuration structures for RavenInit, and the loader that fills them.
+//!
+//! Loading lives here rather than in `main.rs` because it has two callers with
+//! equal claim: init at boot, and `raven-rc reload` on a live system. Reload
+//! must produce exactly what a boot would -- same search order, same drop-in
+//! merge, same precedence -- and the only way to guarantee that is for both to
+//! run this code. A second loader written for reload would be a second answer
+//! to "what is configured", and the one that only runs on reload is the one
+//! that rots unnoticed.
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 
 /// Main init configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,7 +146,11 @@ fn default_log_level() -> String {
 }
 
 /// Service configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` is what `raven-rc reload` compares to tell a definition that
+/// actually changed from one that was merely re-read: without it every reload
+/// would report every service as updated, and the report is the whole point.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceConfig {
     /// Service name (identifier)
     pub name: String,
@@ -255,4 +270,86 @@ pub struct MountConfig {
     /// Mount at boot
     #[serde(default = "default_true")]
     pub mount_at_boot: bool,
+}
+
+pub fn load() -> Result<InitConfig> {
+    let config_paths = ["/etc/raven/init.toml", "/etc/init.toml"];
+
+    for path in &config_paths {
+        if Path::new(path).exists() {
+            if let Ok(content) = fs::read_to_string(path) {
+                if let Ok(mut config) = toml::from_str::<InitConfig>(&content) {
+                    log::info!("Loaded configuration from {}", path);
+                    // Remembered so enable/disable know what to rewrite.
+                    config.source_path = Some(std::path::PathBuf::from(path));
+                    load_dropins(&mut config);
+                    return Ok(config);
+                }
+            }
+        }
+    }
+
+    log::info!("Using default configuration");
+    let mut config = InitConfig::default();
+    load_dropins(&mut config);
+    Ok(config)
+}
+
+/// Folds /etc/raven/init.d/*.toml into the service list.
+///
+/// The base image ships only what Raven itself provides; daemons arrive later
+/// through `rvn install`, and a freshly installed daemon needs a service
+/// definition without anyone hand-editing init.toml. Each drop-in is a file of
+/// `[[services]]` blocks in exactly init.toml's schema, so a definition can be
+/// moved between the two verbatim.
+///
+/// init.toml wins a name collision: the operator's main config outranks a file
+/// a package (or a copy-paste) dropped in. Files are read in sorted order so
+/// the outcome does not depend on directory enumeration.
+fn load_dropins(config: &mut InitConfig) {
+    let dir = std::env::var_os("RAVEN_INIT_DROPIN_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/etc/raven/init.d"));
+
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
+
+    let mut paths: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "toml"))
+        .collect();
+    paths.sort();
+
+    for path in paths {
+        let Ok(content) = fs::read_to_string(&path) else {
+            log::warn!("Cannot read drop-in {}", path.display());
+            continue;
+        };
+        // Parsed as a full InitConfig so the schema is identical, but only the
+        // services are taken -- a drop-in must not be able to change the
+        // hostname or shutdown timeout as a side effect.
+        let parsed: InitConfig = match toml::from_str(&content) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                // A daemon's definition being broken must not take the boot
+                // with it; the service just does not exist until it is fixed.
+                log::warn!("Ignoring drop-in {}: {}", path.display(), e);
+                continue;
+            }
+        };
+        for svc in parsed.services {
+            if config.services.iter().any(|s| s.name == svc.name) {
+                log::warn!(
+                    "Drop-in {} redefines '{}'; keeping the init.toml definition",
+                    path.display(),
+                    svc.name
+                );
+                continue;
+            }
+            log::info!("Service '{}' defined by drop-in {}", svc.name, path.display());
+            config.services.push(svc);
+        }
+    }
 }

@@ -172,6 +172,8 @@ pub fn dispatch(
         "enable" => with_target(target, verb, |name| set_enabled(name, true, config)),
         "disable" => with_target(target, verb, |name| set_enabled(name, false, config)),
 
+        "reload" => (reload_config(services, config), Action::None),
+
         "start" => with_target(target, verb, |name| start_service(name, services, config)),
         "stop" => with_target(target, verb, |name| stop_service(name, services)),
         "restart" => with_target(target, verb, |name| restart_service(name, services, config)),
@@ -184,7 +186,7 @@ pub fn dispatch(
             format!(
                 "error: unknown command '{}'\n\
                  commands: list, status [NAME], start NAME, stop NAME, restart NAME, \
-                 enable NAME, disable NAME, poweroff, reboot, halt\n",
+                 enable NAME, disable NAME, reload, poweroff, reboot, halt\n",
                 other
             ),
             Action::None,
@@ -425,13 +427,30 @@ fn start_service_raw(
         // rvn copies the template in automatically when it installs the
         // matching binary, so landing here usually means the software is not
         // installed yet -- or was put on disk by something other than rvn.
+        // A definition already on disk means init simply has not read it:
+        // drop-ins are loaded once, at boot. Telling the operator to copy a
+        // file that is already there is how this message used to send people
+        // in a circle.
+        let dropin = format!("/etc/raven/init.d/{}.toml", name);
+        if std::path::Path::new(&dropin).exists() {
+            return format!(
+                "error: no such service '{}'\n\
+                 Its definition exists at {} but has not been loaded --\n\
+                 drop-ins are read at boot. Load it now with:\n\
+                 \x20 raven-rc reload\n",
+                name, dropin
+            );
+        }
+
         let template = format!("/usr/share/raven/services/{}.toml", name);
         if std::path::Path::new(&template).exists() {
             return format!(
                 "error: no such service '{}'\n\
                  Its software is not installed. `rvn install` sets the service\n\
-                 up with it; installed some other way, copy the definition:\n\
-                 \x20 cp {} /etc/raven/init.d/\n",
+                 up with it; installed some other way, copy the definition and\n\
+                 load it:\n\
+                 \x20 cp {} /etc/raven/init.d/\n\
+                 \x20 raven-rc reload\n",
                 name, template
             );
         }
@@ -527,6 +546,135 @@ fn restart_service(
 // both directions.
 
 /// Flip a service's `enabled` flag, in memory and on disk.
+/// Re-read the configuration from disk and reconcile it with what is running.
+///
+/// This exists because `/etc/raven/init.d` was read exactly once, at boot. A
+/// daemon installed afterwards -- which is the normal case, since the base
+/// image ships no daemons -- left `rvn` printing "service 'sshd' is now
+/// available: `raven-rc start sshd`" while that command answered "no such
+/// service". The definition was on disk and PID 1 had never looked again.
+///
+/// # What reload does and does not do
+///
+/// It reloads *definitions*, never processes. A running service keeps running
+/// across a reload, keeps its pid, and does not notice one happened. That is
+/// the property that makes it safe to run on a live machine, and it is why a
+/// changed definition for a running service is reported as pending rather than
+/// applied: the process on the other end was started from the old definition
+/// and still matches it. `restart` is how the operator opts into the new one.
+///
+/// Only `[[services]]` is taken. `system` and `mounts` are deliberately
+/// ignored: re-running mounts or renaming the host underneath a running system
+/// is not a configuration reload, it is a boot, and the honest way to ask for
+/// one is `reboot`. This mirrors the rule `load_dropin_services` already
+/// applies to drop-ins for the same reason.
+///
+/// # Why it calls the boot path
+///
+/// `crate::config::load()` is the function init itself uses at startup, search
+/// order, drop-in merge, `source_path` and all. Reload deliberately reuses it
+/// rather than reimplementing the search: two loaders would be two answers to
+/// "what is configured", and the one that only runs on reload is the one that
+/// would rot unnoticed.
+fn reload_config(services: &mut HashMap<String, Service>, config: &mut InitConfig) -> String {
+    let fresh = match crate::config::load() {
+        Ok(fresh) => fresh,
+        Err(e) => {
+            // The live configuration is untouched -- nothing has been merged
+            // yet at this point, which is why parsing happens before any
+            // mutation rather than field by field.
+            return format!(
+                "error: could not reload configuration: {e}\n\
+                 the running configuration is unchanged\n"
+            );
+        }
+    };
+
+    let running = |name: &str| {
+        services
+            .get(name)
+            .is_some_and(|svc| svc.is_running())
+    };
+
+    let mut added: Vec<String> = Vec::new();
+    let mut updated: Vec<String> = Vec::new();
+    let mut pending: Vec<String> = Vec::new();
+    let mut dropped: Vec<String> = Vec::new();
+    let mut orphaned: Vec<String> = Vec::new();
+
+    for incoming in &fresh.services {
+        match config.services.iter_mut().find(|s| s.name == incoming.name) {
+            Some(current) => {
+                if current == incoming {
+                    continue;
+                }
+                let was_running = running(&incoming.name);
+                *current = incoming.clone();
+                if was_running {
+                    pending.push(incoming.name.clone());
+                } else {
+                    updated.push(incoming.name.clone());
+                }
+            }
+            None => {
+                config.services.push(incoming.clone());
+                added.push(incoming.name.clone());
+            }
+        }
+    }
+
+    // Definitions whose file is gone. A stopped one is simply forgotten; a
+    // running one keeps its definition, because dropping it would leave a
+    // process on the system that `raven-rc stop` could no longer name.
+    config.services.retain(|svc| {
+        if fresh.services.iter().any(|f| f.name == svc.name) {
+            return true;
+        }
+        if running(&svc.name) {
+            orphaned.push(svc.name.clone());
+            true
+        } else {
+            dropped.push(svc.name.clone());
+            false
+        }
+    });
+
+    config.source_path = fresh.source_path;
+
+    if added.is_empty()
+        && updated.is_empty()
+        && pending.is_empty()
+        && dropped.is_empty()
+        && orphaned.is_empty()
+    {
+        return "Configuration reloaded; nothing changed\n".to_string();
+    }
+
+    let mut out = String::from("Configuration reloaded\n");
+    let mut section = |label: &str, names: &[String], note: &str| {
+        if names.is_empty() {
+            return;
+        }
+        out.push_str(&format!("  {label}: {}", names.join(", ")));
+        if note.is_empty() {
+            out.push('\n');
+        } else {
+            out.push_str(&format!(" ({note})\n"));
+        }
+    };
+
+    section("added", &added, "not started; `raven-rc start NAME`");
+    section("updated", &updated, "");
+    section("changed while running", &pending, "`raven-rc restart NAME` to apply");
+    section("removed", &dropped, "");
+    section(
+        "removed but still running",
+        &orphaned,
+        "`raven-rc stop NAME` to retire",
+    );
+    out
+}
+
 fn set_enabled(name: &str, enabled: bool, config: &mut InitConfig) -> String {
     let verb = if enabled { "enable" } else { "disable" };
 
