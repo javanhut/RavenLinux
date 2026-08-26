@@ -482,6 +482,51 @@ copy_libraries() {
     log_success "Libraries copied"
 }
 
+# Firmware for drivers that are built into the kernel rather than modules.
+#
+# cfg80211 is =y, and it asks for regulatory.db from a late_initcall -- before
+# /init has run, when the only filesystem is this initramfs. The copy that
+# stage2 puts in the squashfs is not mounted yet, so it is never seen, and
+# dmesg says "cfg80211: failed to load regulatory.db" on every boot. cfg80211
+# then falls back to the built-in world domain: the card still associates,
+# but with fewer channels and lower transmit power. With
+# CFG80211_REQUIRE_SIGNED_REGDB the .p7s signature has to travel with it.
+#
+# The kernel searches /lib/firmware, not /usr/lib/firmware, and this tree is
+# not usr-merged, so the files go under /lib explicitly.
+copy_builtin_firmware() {
+    log_step "Copying firmware for built-in drivers..."
+
+    local sysroot="${RAVEN_BUILD}/sysroot"
+    local src=""
+    for candidate in "${sysroot}/usr/lib/firmware" /usr/lib/firmware /lib/firmware; do
+        if [[ -f "${candidate}/regulatory.db" ]]; then
+            src="$candidate"
+            break
+        fi
+    done
+
+    if [[ -z "$src" ]]; then
+        log_warn "regulatory.db not found in the sysroot or on the build host;"
+        log_warn "  cfg80211 will fall back to the world regulatory domain."
+        log_warn "  Install wireless-regdb on the build host (the Dockerfile does) and rebuild."
+        return 0
+    fi
+
+    mkdir -p "${INITRAMFS_DIR}/lib/firmware"
+    local f copied=0
+    for f in regulatory.db regulatory.db.p7s; do
+        if [[ -f "${src}/${f}" ]]; then
+            cp -L "${src}/${f}" "${INITRAMFS_DIR}/lib/firmware/${f}"
+            copied=$((copied + 1))
+        else
+            log_warn "  ${src}/${f} missing; the kernel rejects an unsigned regulatory.db"
+        fi
+    done
+
+    log_success "Regulatory database installed (${copied} files from ${src})"
+}
+
 create_device_nodes() {
     log_step "Creating device nodes..."
 
@@ -1325,6 +1370,7 @@ main() {
     create_directory_structure
     copy_binaries
     copy_libraries
+    copy_builtin_firmware
     create_device_nodes
     create_config_files
     create_init

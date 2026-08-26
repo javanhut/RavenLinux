@@ -2998,6 +2998,19 @@ EOF
 options rtw89_pci disable_aspm=1
 EOF
 
+    # Realtek rtw88 (RTL8821CE and friends): the same trap one generation back.
+    # Seen on the ASUS ROG test laptop: the 8821CE probes and loads its firmware,
+    # then every `ip link set up` dies in the power-on sequence --
+    # "failed to poll offset=0x6 mask=0x2 value=0x2 / mac power on failed" --
+    # and the interface never leaves ENETDOWN. disable_aspm makes the driver
+    # skip its CLKREQ and ASPM L1 programming (rtw88/pci.c), which is what
+    # leaves the chip's power controller reachable on these boards.
+    cat > "${SYSROOT_DIR}/etc/modprobe.d/rtw88.conf" << 'EOF'
+# RavenLinux: Realtek rtw88 defaults
+# RTL8821CE/8822CE fail "mac power on" with PCIe ASPM enabled on some laptops.
+options rtw88_pci disable_aspm=1
+EOF
+
     # rvn package manager config
     mkdir -p "${SYSROOT_DIR}/etc/rvn"
     cat > "${SYSROOT_DIR}/etc/rvn/config.toml" << 'EOF'
