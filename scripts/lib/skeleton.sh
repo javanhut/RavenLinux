@@ -292,6 +292,17 @@ RAVEN_SKELETON_DIRS_RAVEN=(
     "var/lib/pacman/sync:755"
     "var/lib/pacman/local:755"
     "var/lib/rvn:755"         # rvn's devel.json registry (src/devel.rs)
+    # cawd's saved wifi passphrases. 0700 for the same reason CAW gives: the
+    # file mode alone would not stop another user listing which networks this
+    # machine knows.
+    #
+    # This has to exist before cawd runs, and cawd cannot create it. Its
+    # `profile::save` makes the `profiles` leaf with a single-level mkdir(2),
+    # so a missing parent gives ENOENT, the save fails, and the passphrase is
+    # never written -- `caw connect` still associates, and the machine simply
+    # does not rejoin after a reboot. Upstream relies on systemd creating it
+    # from `StateDirectory=caw`; nothing honours that here.
+    "var/lib/caw:700"
     "var/cache/pacman:755"
     "var/cache/pacman/pkg:755"
 )

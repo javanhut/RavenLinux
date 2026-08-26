@@ -43,9 +43,30 @@ files = [
 # /bin/<name> through the merge link -- see scripts/lib/usrmerge.sh.
 symlinks = []
 
-# cawd creates /run/caw (mode 0755, for the CLI socket) and
-# /var/lib/caw/profiles (mode 0700, saved passphrases) itself on first start,
-# so there is nothing to pre-create here. dist/cawd.service and
+# Declarative only: nothing in the build reads these manifests today, so this
+# records the requirement rather than satisfying it. The directory is actually
+# created by scripts/lib/skeleton.sh, at 0700 to match StateDirectoryMode.
+directories = [
+    "/var/lib/caw"
+]
+
+# /var/lib/caw has to exist before cawd starts, and cawd cannot make it.
+#
+# This comment used to say cawd creates both its directories itself and there
+# was nothing to pre-create. Half true, and the wrong half. `profile::save`
+# calls a helper that is a single-level `mkdir(2)` (caw-core/src/profile.rs),
+# so it creates the `profiles` leaf and not its parent. /run/caw works for
+# exactly that reason -- its parent /run always exists -- while
+# /var/lib/caw/profiles fails with ENOENT, `save` returns Err, and the
+# passphrase is silently never written. `caw connect` still associates, so the
+# only visible symptom is that the machine does not rejoin after a reboot.
+#
+# CAW is not wrong to expect this: its systemd unit declares
+# `StateDirectory=caw` with `StateDirectoryMode=0700`, and systemd creates the
+# directory before the daemon runs. Nothing honours that contract here, so the
+# package does -- with the same mode upstream asks for.
+#
+# dist/cawd.service and
 # dist/caw.sysusers from the upstream tree are systemd artifacts and are not
 # installed: RavenLinux runs raven-init, which takes its service definition
 # from /etc/raven/init.toml, and the `caw` group is created in stage2.

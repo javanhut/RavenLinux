@@ -321,13 +321,11 @@ fn run_init() -> Result<()> {
     // Determine shutdown mode
     if REBOOT_REQUESTED.load(Ordering::SeqCst) {
         log::info!("Rebooting system...");
-        sync_filesystems();
-        unmount_filesystems();
+        quiesce_filesystems();
         let _ = reboot(RebootMode::RB_AUTOBOOT);
     } else {
         log::info!("Powering off system...");
-        sync_filesystems();
-        unmount_filesystems();
+        quiesce_filesystems();
         let _ = reboot(RebootMode::RB_POWER_OFF);
     }
 
@@ -1304,6 +1302,22 @@ fn run_shutdown_scripts() {
     }
 }
 
+/// Leave every filesystem in a state the imminent `reboot(2)` cannot corrupt.
+///
+/// The order is the whole content of this function:
+///
+/// 1. `sync` -- push dirty pages out while everything is still writable.
+/// 2. unmount what can be unmounted, deepest first.
+/// 3. remount the rest read-only, ending with `/`, which closes the journal.
+/// 4. `sync` again -- step 3 can itself dirty metadata, and this is the last
+///    chance to write it, since `reboot(2)` syncs nothing.
+fn quiesce_filesystems() {
+    sync_filesystems();
+    unmount_filesystems();
+    remount_readonly();
+    sync_filesystems();
+}
+
 fn sync_filesystems() {
     log::info!("Syncing filesystems...");
     unsafe {
@@ -1311,34 +1325,110 @@ fn sync_filesystems() {
     }
 }
 
+/// Filesystem types the kernel owns. Unmounting them achieves nothing (they
+/// hold no dirty data and vanish with the reboot), and remounting them
+/// read-only can fail in ways that are noise rather than signal.
+const VIRTUAL_FSTYPES: &[&str] = &[
+    "proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "ramfs", "cgroup", "cgroup2",
+    "securityfs", "debugfs", "tracefs", "configfs", "fusectl", "bpf", "nsfs",
+    "mqueue", "hugetlbfs", "pstore", "efivarfs", "autofs", "binfmt_misc",
+];
+
+/// One line of /proc/mounts: where it is mounted, and what kind it is.
+fn read_mounts() -> Vec<(String, String)> {
+    let Ok(file) = File::open("/proc/mounts") else {
+        return Vec::new();
+    };
+    BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            // device, mountpoint, fstype, ...
+            (parts.len() >= 3).then(|| (parts[1].to_string(), parts[2].to_string()))
+        })
+        .collect()
+}
+
+/// Real filesystems from a mount list, deepest first.
+///
+/// Deepest first is what lets a nested mount go before the one it sits inside;
+/// sorting by path length is enough for that, since a child's mount point is
+/// always longer than its parent's. Pure so the ordering can be tested without
+/// a real /proc/mounts -- getting it backwards is silent, and shows up only as
+/// a filesystem that was still busy at reboot.
+fn real_mounts_deepest_first(mounts: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = mounts
+        .into_iter()
+        .filter(|(_, fstype)| !VIRTUAL_FSTYPES.contains(&fstype.as_str()))
+        .collect();
+    out.sort_by_key(|(mount_point, _)| std::cmp::Reverse(mount_point.len()));
+    out
+}
+
 fn unmount_filesystems() {
     log::info!("Unmounting filesystems...");
 
-    // Read current mounts
-    let mounts: Vec<String> = if let Ok(file) = File::open("/proc/mounts") {
-        let reader = BufReader::new(file);
-        reader
-            .lines()
-            .map_while(Result::ok)
-            .filter_map(|line| {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    Some(parts[1].to_string())
-                } else {
-                    None
-                }
-            })
-            .collect()
-    } else {
-        return;
-    };
+    // Deepest first, and more than once: a mount can be busy on the first pass
+    // only because something nested inside it has not gone yet, and unmounting
+    // that child frees the parent. Three passes settles any realistic nesting;
+    // whatever is still held after that is handled by the read-only remount,
+    // which does not require the mount to be idle.
+    for _ in 0..3 {
+        let mut progress = false;
 
-    // Unmount in reverse order, skipping essential ones
-    let skip = ["/proc", "/sys", "/dev", "/run", "/"];
-    for mount_point in mounts.iter().rev() {
-        if !skip.contains(&mount_point.as_str()) {
-            log::debug!("Unmounting {}", mount_point);
-            let _ = nix::mount::umount(mount_point.as_str());
+        for (mount_point, _) in real_mounts_deepest_first(read_mounts()) {
+            if mount_point == "/" {
+                continue;
+            }
+            if nix::mount::umount(mount_point.as_str()).is_ok() {
+                log::debug!("Unmounted {}", mount_point);
+                progress = true;
+            }
+        }
+
+        if !progress {
+            break;
+        }
+    }
+}
+
+/// Remount every remaining real filesystem read-only, ending with `/`.
+///
+/// `sync()` alone is not enough to leave a filesystem clean. It pushes dirty
+/// pages out, but the filesystem stays mounted read-write with an open journal,
+/// so `reboot(2)` -- which does not unmount anything -- leaves it marked dirty.
+/// The next boot then replays the journal, and `fsck` treats the filesystem as
+/// having come from a crash. Any write that lands between the `sync` and the
+/// reboot is lost outright.
+///
+/// A read-only remount is what closes that window: the kernel flushes the
+/// journal and marks the filesystem clean, and nothing can dirty it afterwards.
+/// It is the step `unmount_filesystems` cannot do for `/`, which can never be
+/// unmounted while it is the root.
+///
+/// EBUSY is expected and not an error. Something may still hold a file open for
+/// write -- a service that ignored SIGTERM, or init's own log -- and a reboot
+/// with a dirty root is exactly the state this was already in, so it is logged
+/// and stepped over rather than retried forever.
+fn remount_readonly() {
+    log::info!("Remounting filesystems read-only...");
+
+    let flags = MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY;
+
+    // Deepest first, so `/` is last: remounting it read-only while a real
+    // filesystem below is still read-write would be the wrong order to leave
+    // them in if a later remount fails.
+    for (mount_point, _) in real_mounts_deepest_first(read_mounts()) {
+        match mount(
+            None::<&str>,
+            mount_point.as_str(),
+            None::<&str>,
+            flags,
+            None::<&str>,
+        ) {
+            Ok(()) => log::info!("Remounted {} read-only", mount_point),
+            Err(e) => log::warn!("Could not remount {} read-only: {}", mount_point, e),
         }
     }
 }
@@ -1421,6 +1511,60 @@ mod tests {
 
         let (flags, _) = parse_mount_options("ro");
         assert_eq!(flags, MsFlags::MS_RDONLY);
+    }
+
+    // A `sync` leaves a filesystem with its data written and its journal open,
+    // so `reboot(2)` -- which unmounts nothing -- still marks it dirty. These
+    // cover the ordering and filtering that the read-only remount depends on;
+    // the remount itself needs a real mount table and a reboot to observe.
+
+    #[test]
+    fn kernel_filesystems_are_left_alone() {
+        // Unmounting or remounting these achieves nothing: they hold no dirty
+        // data and go away with the reboot. Only the real ones matter.
+        let mounts = vec![
+            ("/proc".to_string(), "proc".to_string()),
+            ("/sys".to_string(), "sysfs".to_string()),
+            ("/dev".to_string(), "devtmpfs".to_string()),
+            ("/dev/shm".to_string(), "tmpfs".to_string()),
+            ("/run".to_string(), "tmpfs".to_string()),
+            ("/sys/fs/cgroup".to_string(), "cgroup2".to_string()),
+            ("/".to_string(), "ext4".to_string()),
+        ];
+        let real = real_mounts_deepest_first(mounts);
+        assert_eq!(
+            real,
+            vec![("/".to_string(), "ext4".to_string())],
+            "only the real filesystem should survive the filter"
+        );
+    }
+
+    #[test]
+    fn the_root_is_remounted_last() {
+        // `/` must come last. Remounting it read-only while a real filesystem
+        // below it is still read-write leaves them inconsistent if a later
+        // remount fails.
+        let mounts = vec![
+            ("/".to_string(), "ext4".to_string()),
+            ("/home".to_string(), "ext4".to_string()),
+            ("/boot".to_string(), "vfat".to_string()),
+            ("/home/javan/data".to_string(), "xfs".to_string()),
+        ];
+        let order: Vec<String> = real_mounts_deepest_first(mounts)
+            .into_iter()
+            .map(|(mount_point, _)| mount_point)
+            .collect();
+
+        assert_eq!(order.last().map(String::as_str), Some("/"), "{order:?}");
+        assert_eq!(
+            order.first().map(String::as_str),
+            Some("/home/javan/data"),
+            "deepest should go first: {order:?}"
+        );
+        // A child must precede the parent it sits inside.
+        let child = order.iter().position(|m| m == "/home/javan/data").unwrap();
+        let parent = order.iter().position(|m| m == "/home").unwrap();
+        assert!(child < parent, "nested mount must come first: {order:?}");
     }
 
     // Anything that is not an absolute path needs a blkid-style scan, which at

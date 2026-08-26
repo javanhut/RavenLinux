@@ -36,6 +36,47 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// successful slow restart look like raven-rc could not execute the command.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How many operands a verb takes.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Arity {
+    /// `raven-rc list`
+    None,
+    /// `raven-rc status [NAME]`
+    Optional,
+    /// `raven-rc start NAME`
+    Required,
+}
+
+/// Every service verb, its arity, and its one-line help.
+///
+/// One table because the dispatcher and `print_usage` used to be separate
+/// lists 120 lines apart, and they drifted the first time a verb was added:
+/// `reload` reached the help text and not the `match`, so it was advertised
+/// and then rejected with "Unknown command". Anything listed here is
+/// dispatchable by construction, and `verbs_are_dispatchable` fails the build
+/// if that ever stops being true.
+const SERVICE_VERBS: &[(&str, Arity, &str)] = &[
+    ("list", Arity::None, "List every service and its state"),
+    ("status", Arity::Optional, "System status, or one service in detail"),
+    ("start", Arity::Required, "Start a stopped service"),
+    ("stop", Arity::Required, "Stop a service, and keep it stopped"),
+    ("restart", Arity::Required, "Stop then start a service"),
+    ("enable", Arity::Required, "Start at boot      (writes init.toml)"),
+    ("disable", Arity::Required, "Do not start at boot (writes init.toml)"),
+    (
+        "reload",
+        Arity::None,
+        "Re-read config; picks up newly installed services",
+    ),
+];
+
+fn arity_of(verb: &str) -> Option<Arity> {
+    SERVICE_VERBS
+        .iter()
+        .find(|(name, _, _)| *name == verb)
+        .map(|(_, arity, _)| *arity)
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let program = Path::new(&args[0])
@@ -82,28 +123,35 @@ fn main() {
     match command {
         "poweroff" | "halt" => do_poweroff(),
         "reboot" => do_reboot(),
-        "status" => do_status(operand),
-        "list" => do_ask("list"),
-        "start" | "stop" | "restart" | "enable" | "disable" => match operand {
-            Some(name) => do_ask(&format!("{} {}", command, name)),
-            None => {
-                eprintln!("{}: needs a service name", command);
-                eprintln!(
-                    "try: {} {} <service>   (or `{} list`)",
-                    program, command, program
-                );
-                process::exit(1);
-            }
-        },
         "help" | "--help" | "-h" => {
             print_usage(program);
             process::exit(0);
         }
-        _ => {
-            eprintln!("Unknown command: {}", command);
-            print_usage(program);
-            process::exit(1);
-        }
+        // `status` formats its own reply, so it does not go through do_ask.
+        "status" => do_status(operand),
+        verb => match arity_of(verb) {
+            Some(Arity::None) => do_ask(verb),
+            Some(Arity::Optional) => match operand {
+                Some(name) => do_ask(&format!("{} {}", verb, name)),
+                None => do_ask(verb),
+            },
+            Some(Arity::Required) => match operand {
+                Some(name) => do_ask(&format!("{} {}", verb, name)),
+                None => {
+                    eprintln!("{}: needs a service name", verb);
+                    eprintln!(
+                        "try: {} {} <service>   (or `{} list`)",
+                        program, verb, program
+                    );
+                    process::exit(1);
+                }
+            },
+            None => {
+                eprintln!("Unknown command: {}", verb);
+                print_usage(program);
+                process::exit(1);
+            }
+        },
     }
 }
 
@@ -177,14 +225,14 @@ fn print_usage(program: &str) {
     eprintln!("Usage: {} <command> [SERVICE]", program);
     eprintln!();
     eprintln!("Services:");
-    eprintln!("  list             - List every service and its state");
-    eprintln!("  status [NAME]    - System status, or one service in detail");
-    eprintln!("  start NAME       - Start a stopped service");
-    eprintln!("  stop NAME        - Stop a service, and keep it stopped");
-    eprintln!("  restart NAME     - Stop then start a service");
-    eprintln!("  enable NAME      - Start at boot      (writes init.toml)");
-    eprintln!("  disable NAME     - Do not start at boot (writes init.toml)");
-    eprintln!("  reload           - Re-read config; picks up newly installed services");
+    for (verb, arity, help) in SERVICE_VERBS {
+        let operand = match arity {
+            Arity::None => "",
+            Arity::Optional => " [NAME]",
+            Arity::Required => " NAME",
+        };
+        eprintln!("  {:<16} - {}", format!("{verb}{operand}"), help);
+    }
     eprintln!();
     eprintln!("System:");
     eprintln!("  poweroff         - Power off the system");
@@ -394,5 +442,62 @@ fn parse_meminfo_line(line: &str) -> Option<u64> {
         parts[1].parse().ok()
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The regression this table exists to prevent.
+    ///
+    /// `reload` was added to the help text and to the server's dispatch, but
+    /// not to the client's `match`, so `raven-rc reload` printed
+    /// "Unknown command: reload" and then a menu listing `reload` three lines
+    /// below it. The verb never reached the socket.
+    #[test]
+    fn reload_is_dispatchable() {
+        assert_eq!(
+            arity_of("reload"),
+            Some(Arity::None),
+            "raven-rc reload must dispatch, and must not demand a service name"
+        );
+    }
+
+    /// Help text and dispatch now read the same table, so the only way they can
+    /// disagree again is a verb that is handled outside it. `status` is the one
+    /// deliberate case (it formats its own reply); anything else added to the
+    /// `match` without a table entry would be advertised nowhere.
+    #[test]
+    fn every_advertised_verb_has_an_arity() {
+        for (verb, _, help) in SERVICE_VERBS {
+            assert!(
+                arity_of(verb).is_some(),
+                "{verb} is advertised but not dispatchable"
+            );
+            assert!(!help.is_empty(), "{verb} has no help text");
+        }
+    }
+
+    #[test]
+    fn the_table_has_no_duplicates() {
+        let mut seen: Vec<&str> = SERVICE_VERBS.iter().map(|(v, _, _)| *v).collect();
+        let before = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(before, seen.len(), "duplicate verb in SERVICE_VERBS");
+    }
+
+    /// A service verb that needs a name must not be silently sent without one:
+    /// init would answer "unknown command", which reads like the verb is wrong
+    /// rather than the invocation.
+    #[test]
+    fn service_verbs_require_a_name() {
+        for verb in ["start", "stop", "restart", "enable", "disable"] {
+            assert_eq!(arity_of(verb), Some(Arity::Required), "{verb}");
+        }
+        for verb in ["list", "reload"] {
+            assert_eq!(arity_of(verb), Some(Arity::None), "{verb}");
+        }
     }
 }

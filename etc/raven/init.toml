@@ -145,6 +145,12 @@ description = "CAW wireless daemon"
 exec = "/usr/bin/cawd"
 args = []
 after = ["udev"]
+# The unit's `RuntimeDirectory=caw`. Belt and braces rather than the fix:
+# cawd's own mkdir of /run/caw succeeds, because /run always exists. Declared
+# anyway so the runtime half of the contract is written down next to the
+# service instead of living only in an upstream systemd file nothing here
+# reads -- and so it keeps working if the socket path ever moves deeper.
+runtime_dirs = ["/run/caw"]
 restart = true
 enabled = true
 critical = false
