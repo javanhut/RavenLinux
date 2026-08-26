@@ -36,7 +36,7 @@ LOGS_DIR="${LOGS_DIR:-${BUILD_DIR}/logs}"
 # Version info
 RAVEN_VERSION="${RAVEN_VERSION:-2026.08}"
 RAVEN_ARCH="${RAVEN_ARCH:-x86_64}"
-ISO_LABEL="RAVEN_LIVE"
+ISO_LABEL="RAVENLINUX"
 ISO_OUTPUT="${PROJECT_ROOT}/raven-${RAVEN_VERSION}-${RAVEN_ARCH}.iso"
 
 # =============================================================================
@@ -93,601 +93,32 @@ setup_iso_structure() {
 }
 
 # =============================================================================
-# Create live init script in sysroot
+# Create the live-root hand-off in the sysroot
 # =============================================================================
-create_live_init() {
-    log_step "Creating live init system..."
+# The mounted live root uses the same PID 1 and service graph as an installed
+# system. Keeping a second shell-based supervisor here caused the desktop,
+# wireless, shutdown, and raven-rc paths to behave differently on the ISO.
+# The initramfs still performs discovery/mounting; after switch_root this small
+# hand-off makes raven-init responsible for the actual RavenLinux system.
+create_managed_live_init() {
+    log_step "Configuring raven-init as PID 1..."
 
-    mkdir -p "${SYSROOT_DIR}"/{bin,sbin,etc}
-
-    # Provide a default raven-init config in the ISO so tools can reference it.
-    mkdir -p "${SYSROOT_DIR}/etc/raven"
-    if [[ -f "${PROJECT_ROOT}/etc/raven/init.toml" ]]; then
-        cp "${PROJECT_ROOT}/etc/raven/init.toml" "${SYSROOT_DIR}/etc/raven/init.toml" 2>/dev/null || true
-    elif [[ -f "${PROJECT_ROOT}/init/config/init.toml" ]]; then
-        cp "${PROJECT_ROOT}/init/config/init.toml" "${SYSROOT_DIR}/etc/raven/init.toml" 2>/dev/null || true
-    fi
-    if [[ ! -f "${SYSROOT_DIR}/etc/raven/init.toml" ]]; then
-        cat > "${SYSROOT_DIR}/etc/raven/init.toml" << 'EOF'
-# RavenLinux Init Configuration
-# /etc/raven/init.toml
-
-[system]
-hostname = "raven-linux"
-default_runlevel = "default"
-shutdown_timeout = 10
-load_modules = true
-enable_udev = true
-enable_network = true
-log_level = "info"
-
-[[services]]
-name = "udev"
-description = "Device manager: start udevd and coldplug attached hardware"
-exec = "/usr/sbin/raven-udev"
-args = []
-restart = false
-enabled = true
-critical = false
-
-[[services]]
-name = "console-font"
-description = "Load the JetBrains Mono Nerd Font console font"
-exec = "/usr/sbin/raven-console-font"
-args = []
-restart = false
-enabled = true
-critical = false
-
-[[services]]
-name = "getty-tty1"
-description = "Getty login on tty1"
-exec = "/sbin/agetty"
-args = ["--noclear", "--autologin", "root", "--login-program", "/sbin/login", "tty1", "linux"]
-restart = true
-enabled = true
-critical = false
-
-[[services]]
-name = "getty-ttyS0"
-description = "Serial console getty on ttyS0"
-exec = "/sbin/agetty"
-args = ["--noclear", "--autologin", "root", "--login-program", "/sbin/login", "-L", "115200", "ttyS0", "vt102"]
-restart = true
-enabled = false
-critical = false
-
-[[services]]
-name = "dbus"
-description = "D-Bus system message bus"
-exec = "/usr/bin/dbus-daemon"
-args = ["--system", "--nofork", "--nopidfile"]
-runtime_dirs = ["/run/dbus"]
-restart = true
-enabled = true
-critical = false
-
-[[services]]
-name = "iwd"
-description = "iNet Wireless Daemon"
-exec = "/usr/libexec/iwd"
-args = []
-restart = true
-enabled = true
-critical = false
-EOF
-    fi
-    chmod 0644 "${SYSROOT_DIR}/etc/raven/init.toml" 2>/dev/null || true
-
-    # If earlier build stages weren't run, create minimal auth/NSS files so sudo/login work.
-    local default_shell="/bin/sh"
-    if [[ -x "${SYSROOT_DIR}/bin/bash" ]]; then
-        default_shell="/bin/bash"
-    fi
-
-    if [[ ! -f "${SYSROOT_DIR}/etc/nsswitch.conf" ]]; then
-        cat > "${SYSROOT_DIR}/etc/nsswitch.conf" << 'EOF'
-passwd: files
-group: files
-shadow: files
-
-hosts: files dns
-networks: files
-
-protocols: files
-services: files
-ethers: files
-rpc: files
-EOF
-    fi
-
-    if [[ ! -f "${SYSROOT_DIR}/etc/passwd" ]]; then
-        cat > "${SYSROOT_DIR}/etc/passwd" << EOF
-root:x:0:0:root:/root:${default_shell}
-raven:x:1000:1000:Raven User:/home/raven:${default_shell}
-nobody:x:65534:65534:Nobody:/:/bin/false
-EOF
-    fi
-
-    if [[ ! -f "${SYSROOT_DIR}/etc/group" ]]; then
-        cat > "${SYSROOT_DIR}/etc/group" << 'EOF'
-root:x:0:
-wheel:x:10:raven
-audio:x:11:raven
-video:x:12:raven
-input:x:13:raven
-users:x:100:raven
-raven:x:1000:
-caw:x:970:raven
-nobody:x:65534:
-EOF
-    fi
-
-    if [[ ! -f "${SYSROOT_DIR}/etc/shadow" ]]; then
-        cat > "${SYSROOT_DIR}/etc/shadow" << 'EOF'
-root::0:0:99999:7:::
-raven::0:0:99999:7:::
-nobody:!:0:0:99999:7:::
-EOF
-        chmod 600 "${SYSROOT_DIR}/etc/shadow" 2>/dev/null || true
-    fi
-
-    if [[ ! -f "${SYSROOT_DIR}/etc/pam.d/sudo" ]]; then
-        mkdir -p "${SYSROOT_DIR}/etc/pam.d" "${SYSROOT_DIR}/etc/security" "${SYSROOT_DIR}/etc/security/limits.d"
-        cat > "${SYSROOT_DIR}/etc/pam.d/sudo" << 'EOF'
-#%PAM-1.0
-auth       sufficient   pam_rootok.so
-auth       required     pam_unix.so nullok try_first_pass
-account    sufficient   pam_rootok.so
-account    required     pam_unix.so
-session    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
-EOF
-        cat > "${SYSROOT_DIR}/etc/pam.d/su" << 'EOF'
-#%PAM-1.0
-auth       sufficient   pam_rootok.so
-auth       required     pam_unix.so nullok try_first_pass
-account    sufficient   pam_rootok.so
-account    required     pam_unix.so
-session    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
-EOF
-        cat > "${SYSROOT_DIR}/etc/pam.d/login" << 'EOF'
-#%PAM-1.0
-auth       required     pam_unix.so nullok try_first_pass
-account    required     pam_unix.so
-session    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
-EOF
-        cat > "${SYSROOT_DIR}/etc/pam.d/passwd" << 'EOF'
-#%PAM-1.0
-password   required     pam_unix.so nullok sha512
-EOF
-        cat > "${SYSROOT_DIR}/etc/security/limits.conf" << 'EOF'
-# /etc/security/limits.conf
-# Minimal defaults (RavenLinux). Add custom limits in /etc/security/limits.d/.
-EOF
-    fi
-
-    cat > "${SYSROOT_DIR}/init" << 'INIT'
-#!/bin/bash
-# RavenLinux Live Init
-
-export PATH=/bin:/sbin:/usr/bin:/usr/sbin
-export HOME=/root
-export TERM=linux
-export PS1='[\u@raven-linux]# '
-
-# Take the locale from what the build actually compiled, rather than naming one
-# here. Hardcoding en_US.UTF-8 in four places while the build shipped none is
-# what had every shell opening with "cannot change locale".
-if [ -r /etc/locale.conf ]; then
-    . /etc/locale.conf
-fi
-export LANG="${LANG:-C.UTF-8}"
-
-# Mount essential filesystems if not already mounted
-mountpoint -q /proc || mount -t proc proc /proc
-mountpoint -q /sys || mount -t sysfs sysfs /sys
-mountpoint -q /dev || mount -t devtmpfs devtmpfs /dev 2>/dev/null || mount -t tmpfs tmpfs /dev
-mkdir -p /dev/pts /dev/shm /tmp /run
-mountpoint -q /dev/pts || mount -t devpts devpts /dev/pts
-mountpoint -q /dev/shm || mount -t tmpfs tmpfs /dev/shm
-mountpoint -q /tmp || mount -t tmpfs tmpfs /tmp
-mountpoint -q /run || mount -t tmpfs tmpfs /run
-
-# Fix common permission/ownership issues that break PAM/sudo in live images.
-fix_auth_perms() {
-    command -v chown >/dev/null 2>&1 || return 0
-    command -v chmod >/dev/null 2>&1 || return 0
-
-    # PAM rejects insecure shadow files (wrong owner/mode), and sudo requires setuid root.
-    if [ -e /etc/shadow ]; then
-        chown 0:0 /etc/shadow 2>/dev/null || true
-        chmod 600 /etc/shadow 2>/dev/null || true
-    fi
-
-    for f in /etc/passwd /etc/group; do
-        [ -e "$f" ] || continue
-        chown 0:0 "$f" 2>/dev/null || true
-        chmod 644 "$f" 2>/dev/null || true
-    done
-
-    for b in /bin/sudo /bin/su; do
-        [ -e "$b" ] || continue
-        chown 0:0 "$b" 2>/dev/null || true
-        chmod 4755 "$b" 2>/dev/null || true
-    done
-}
-fix_auth_perms || true
-
-# Create /dev/log syslog socket (required by PAM/sudo for audit logging)
-# Without this, sudo fails with "PAM error: Authentication service cannot retrieve authentication info"
-start_syslog_socket() {
-    [ -S /dev/log ] && return 0
-    if command -v python3 >/dev/null 2>&1; then
-        python3 -c '
-import socket, os
-try:
-    os.unlink("/dev/log")
-except: pass
-s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-s.bind("/dev/log")
-os.chmod("/dev/log", 0o666)
-while True:
-    try: s.recv(4096)
-    except: pass
-' >/dev/null 2>&1 &
-    fi
-}
-start_syslog_socket
-
-# Set hostname (use /proc method as fallback if hostname binary is missing)
-if command -v hostname >/dev/null 2>&1; then
-    hostname raven-linux 2>/dev/null || true
-else
-    echo raven-linux > /proc/sys/kernel/hostname 2>/dev/null || true
-fi
-
-# Start udevd. Not optional for a graphical session: libinput enumerates
-# input devices through libudev, so an empty udev database means a compositor
-# with no keyboard and no touchpad -- and the failure is completely silent from
-# the compositor's side.
-#
-# Errors are shown rather than sent to /dev/null. Hiding them is why that class
-# of failure had no evidence to work from.
-udevd_bin=""
-for candidate in /sbin/udevd /usr/lib/systemd/systemd-udevd /usr/bin/udevd; do
-    [ -x "$candidate" ] && { udevd_bin="$candidate"; break; }
-done
-
-if [ -n "$udevd_bin" ]; then
-    if "$udevd_bin" --daemon; then
-        echo "udevd started ($udevd_bin)"
-    else
-        echo "warning: $udevd_bin failed to start; input devices will not be"
-        echo "         enumerated and a graphical session will have no input."
-    fi
-else
-    echo "warning: no udevd found; input devices will not be enumerated."
-fi
-
-# Drivers built into the kernel probed at ~1s, when only the initramfs --
-# which ships no firmware -- existed. A WiFi chip whose firmware load got
-# ENOENT then failed its probe permanently (rtw88_8821ce, error -22, on real
-# hardware) even though the blob is right here in the squashfs. Now that
-# /lib/firmware is mounted, re-run driver matching for anything driverless.
-if [ -w /sys/bus/pci/drivers_probe ]; then
-    reprobed=0
-    for dev in /sys/bus/pci/devices/*; do
-        [ -e "$dev/driver" ] && continue
-        if printf '%s' "$(basename "$dev")" > /sys/bus/pci/drivers_probe 2>/dev/null; then
-            reprobed=$((reprobed + 1))
-        fi
-    done
-    [ "$reprobed" -gt 0 ] && echo "Re-probed $reprobed driverless PCI device(s)"
-fi
-
-# Loopback: nothing else brings it up, and a down lo breaks 127.0.0.1.
-ip link set lo up 2>/dev/null || ifconfig lo up 2>/dev/null || true
-
-# Unprivileged ping. /sbin/ping ships with neither setuid nor capabilities, and
-# the kernel's ICMP datagram fallback is off by default (empty group range).
-echo "0 2147483647" > /proc/sys/net/ipv4/ping_group_range 2>/dev/null || true
-
-# Devices that already exist when udevd starts generate no uevents of their
-# own, so without this trigger the database stays empty for exactly the
-# hardware that was present at boot -- the keyboard and touchpad included.
-if command -v udevadm >/dev/null 2>&1; then
-    udevadm trigger --action=add 2>/dev/null || udevadm trigger 2>/dev/null || true
-    udevadm settle --timeout=10 2>/dev/null || true
-    echo "udev: $(udevadm info --export-db 2>/dev/null | grep -c '^P: /devices') devices enumerated"
-fi
-
-# Start D-Bus system bus (needed by iwd/iwctl and many GUI apps)
-if [ ! -S /run/dbus/system_bus_socket ] && command -v dbus-daemon >/dev/null 2>&1; then
-    mkdir -p /run/dbus
-    if command -v dbus-uuidgen >/dev/null 2>&1; then
-        dbus-uuidgen --ensure=/etc/machine-id >/dev/null 2>&1 || true
-    fi
-    dbus-daemon --system --fork --nopidfile >/dev/null 2>&1 || true
-fi
-
-# Start iwd if available (WiFi daemon)
-if ! pgrep -x iwd >/dev/null 2>&1; then
-    if [ -x /usr/libexec/iwd ]; then
-        /usr/libexec/iwd >/dev/null 2>&1 &
-    elif command -v iwd >/dev/null 2>&1; then
-        iwd >/dev/null 2>&1 &
-    fi
-fi
-
-# Bring up wired networking automatically (WiFi still needs a connect step)
-if command -v raven-dhcp >/dev/null 2>&1; then
-    raven-dhcp --all -q >/dev/null 2>&1 || true
-elif command -v dhcpcd >/dev/null 2>&1; then
-    dhcpcd -q >/dev/null 2>&1 || true
-elif command -v udhcpc >/dev/null 2>&1; then
-    udhcpc -q -f >/dev/null 2>&1 || true
-fi
-
-# Start the device manager and coldplug what is attached. The graphics and
-# wireless drivers are modules, so until this runs the machine has no GPU and no
-# wireless device -- only whatever the kernel bound without firmware.
-if [ -x /usr/sbin/raven-udev ]; then
-    /usr/sbin/raven-udev 2>/dev/null || true
-fi
-
-# Belt and braces for the VM case, where the driver is modular and the device
-# may not generate a uevent the coldplug above matches.
-if command -v modprobe >/dev/null 2>&1; then
-    modprobe -a virtio_gpu vmwgfx vboxvideo qxl bochs cirrus_qemu i915 amdgpu nouveau simpledrm 2>/dev/null || true
-fi
-
-# Suppress kernel messages
-dmesg -n 1 2>/dev/null || true
-
-# Load the console font before anything is drawn, so the banner and everything
-# after it render in it rather than switching typeface mid-boot. Picks a cell
-# size from the framebuffer resolution; raven.font=none on the cmdline skips it.
-if [ -x /usr/sbin/raven-console-font ]; then
-    /usr/sbin/raven-console-font 2>/dev/null || true
-fi
-
-# Clear screen and show banner
-clear 2>/dev/null || printf '\033[2J\033[H'
-printf '\033[1;36m'
-cat << 'BANNER'
-
-  ╔════════════════════════════════════════════════════════════════════════════════════════════╗
-  ║                                                                                            ║
-  ║    ██████╗  █████╗ ██╗   ██╗███████╗███╗   ██╗    ██╗     ██╗███╗   ██╗██╗   ██╗██╗  ██╗   ║
-  ║    ██╔══██╗██╔══██╗██║   ██║██╔════╝████╗  ██║    ██║     ██║████╗  ██║██║   ██║╚██╗██╔╝   ║
-  ║    ██████╔╝███████║██║   ██║█████╗  ██╔██╗ ██║    ██║     ██║██╔██╗ ██║██║   ██║ ╚███╔╝    ║
-  ║    ██╔══██╗██╔══██║╚██╗ ██╔╝██╔══╝  ██║╚██╗██║    ██║     ██║██║╚██╗██║██║   ██║ ██╔██╗    ║
-  ║    ██║  ██║██║  ██║ ╚████╔╝ ███████╗██║ ╚████║    ███████╗██║██║ ╚████║╚██████╔╝██╔╝ ██╗   ║
-  ║    ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝    ╚══════╝╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝   ║
-  ║                                                                                            ║
-  ║                          A Developer-Focused Linux Distribution                            ║
-  ║                                                                                            ║
-  ╚════════════════════════════════════════════════════════════════════════════════════════════╝
-
-BANNER
-printf '\033[0m'
-printf '\033[1;33m'
-echo "                                       Version @RAVEN_VERSION@"
-printf '\033[0m'
-echo ""
-printf '\033[1;37m'
-echo "  ┌────────────────────────────────────────────────────────────────────────────────────────┐"
-echo "  │  This is the RavenLinux base system: a musl userland, bash, and OpenSSH.                │"
-echo "  └────────────────────────────────────────────────────────────────────────────────────────┘"
-printf '\033[0m'
-echo ""
-printf '\033[1;36m'
-echo "  Run 'raven-install' to install RavenLinux onto this machine's disk."
-printf '\033[0m'
-printf '\033[0;32m'
-echo "  Type 'poweroff' to shutdown, 'reboot' to restart"
-printf '\033[0m'
-echo ""
-
-cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
-
-# The live image's PID 1 is this script, not raven-init, so the cmdline
-# handling raven-init does on an installed system has to be repeated here.
-# Without this, booting the "Raven Desktop (Huginn)" entry lands on a console
-# with raven.graphics=wayland silently ignored.
-# cawd is enabled in /etc/raven/init.toml, but that file is raven-init's and
-# raven-init is not PID 1 here -- this script is. Starting it by hand is what
-# makes the wireless stack actually usable from the live image: without it,
-# `caw scan` finds no daemon and autoconnect never runs.
-#
-# There is no clean-stop counterpart: raven-init calls `caw shutdown` through
-# its stop_exec hook, and this script has no shutdown path at all, so a live
-# reboot leaves the station on the air until the AP times it out.
-start_caw_daemon() {
-    [ -x /bin/cawd ] || [ -x /usr/bin/cawd ] || return 0
-    pgrep -x cawd >/dev/null 2>&1 && return 0
-
-    echo "Starting the CAW wireless daemon..."
-    cawd >/dev/null 2>&1 &
-
-    # cawd creates /run/caw itself; wait briefly so the first `caw` command
-    # finds a socket rather than racing it.
-    i=0
-    while [ $i -lt 20 ] && [ ! -S /run/caw/caw.sock ]; do
-        i=$((i + 1))
-        sleep 0.1
-    done
-}
-
-start_wayland_session() {
-    echo "$cmdline" | grep -qE '(^| )raven\.graphics=wayland($| )' || return 1
-    [ -x /bin/raven-wayland-session ] || {
-        echo "raven.graphics=wayland requested, but no compositor is installed."
+    [[ -x "${SYSROOT_DIR}/sbin/raven-init" ]] || {
+        log_error "${SYSROOT_DIR}/sbin/raven-init is missing; run stage2 first"
         return 1
     }
 
-    # raven.wayland=<name> picks the compositor; the launcher defaults to
-    # huginn and maps the older "raven" onto it.
-    compositor="$(echo "$cmdline" | sed -n 's/.*[[:space:]]raven\.wayland=\([^[:space:]]*\).*/\1/p')"
-    [ -n "$compositor" ] && export RAVEN_WAYLAND_COMPOSITOR="$compositor"
+    cat > "${SYSROOT_DIR}/init" << 'EOF'
+#!/bin/sh
+# RavenLinux live-root hand-off. Early userspace has already mounted the
+# squashfs/overlay and switch_root'ed here; from this point live and installed
+# systems deliberately share the same init and service manager.
+exec /sbin/raven-init
+EOF
+    chmod 0755 "${SYSROOT_DIR}/init"
+    ln -sf raven-init "${SYSROOT_DIR}/sbin/init"
 
-    # seatd owns the seat; libseat talks to it rather than to logind, which
-    # does not exist here. Started in the background because it is a daemon.
-    #
-    # Looked up on PATH rather than probed at two fixed paths: seatd installs
-    # to /sbin here, so testing only /bin and /usr/bin meant the daemon was
-    # silently never started. libseat then found no socket to connect to and
-    # huginn died with "Failed to open session: No such file or directory",
-    # which reads like a seat/permissions problem rather than a missing daemon.
-    seatd_bin="$(command -v seatd 2>/dev/null)"
-    if [ -n "$seatd_bin" ]; then
-        if ! pgrep -x seatd >/dev/null 2>&1; then
-            "$seatd_bin" -g video >/dev/null 2>&1 &
-
-            # Wait for the socket rather than guessing at a fixed sleep: the
-            # socket appearing is the thing the compositor actually needs.
-            i=0
-            while [ ! -S /run/seatd.sock ] && [ "$i" -lt 50 ]; do
-                i=$((i + 1))
-                sleep 0.1
-            done
-        fi
-
-        if [ -S /run/seatd.sock ]; then
-            echo "seatd is up on /run/seatd.sock"
-        else
-            echo "warning: seatd started but /run/seatd.sock never appeared;"
-            echo "         the compositor will not be able to acquire a seat."
-        fi
-    else
-        echo "warning: seatd not found on PATH -- the compositor cannot acquire"
-        echo "         a seat and the Wayland session will fall back to a console."
-    fi
-
-    export XDG_RUNTIME_DIR=/run/user/0
-    export LIBSEAT_BACKEND=seatd
-    mkdir -p "$XDG_RUNTIME_DIR"
-    chmod 0700 "$XDG_RUNTIME_DIR"
-
-    echo "Starting the Wayland session..."
-    # Not exec: if the compositor dies we fall through to a console rather
-    # than leaving the machine with no PID 1 and nothing on screen.
-    /bin/raven-wayland-session
-    echo "Wayland session exited; falling back to a console."
-    return 1
-}
-
-# Root's login shell, as recorded in /etc/passwd. stage-raven.sh points this
-# at ravenshell once ravenshell actually built; when it did not, the entry is
-# still bash. Reading it here is what keeps the two in step -- hardcoding
-# /bin/bash meant a successfully built ravenshell was never the shell you got
-# on tty1. Falls back to bash, then sh, if the recorded shell is not executable.
-login_shell() {
-    local sh
-    sh="$(sed -n 's/^root:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:\(.*\)$/\1/p' /etc/passwd 2>/dev/null | head -n1)"
-    for candidate in "$sh" /bin/bash /bin/sh; do
-        [ -n "$candidate" ] && [ -x "$candidate" ] && { echo "$candidate"; return 0; }
-    done
-    return 1
-}
-
-start_shell_loop() {
-    cd /root
-
-    shell="$(login_shell)" || shell=""
-
-    # Find first available TTY
-    local tty_dev="/dev/tty1"
-    if echo "$cmdline" | grep -qE '(^| )raven\.console=serial($| )'; then
-        tty_dev="/dev/ttyS0"
-    fi
-    if [ ! -c "$tty_dev" ]; then
-        tty_dev="/dev/console"
-    fi
-
-    # Switch to tty1 if openvt is available (only makes sense for real VTs)
-    if [ "$tty_dev" = "/dev/tty1" ] && command -v openvt >/dev/null 2>&1; then
-        while true; do
-            if [ -n "$shell" ]; then
-                # Use -- to separate openvt options from command arguments
-                openvt -c 1 -w -s -f -- "$shell" -l || true
-            else
-                echo "No shell available! Sleeping..."
-                sleep 10
-            fi
-            echo "Shell exited. Restarting..."
-            sleep 1
-        done
-    else
-        # Fallback: redirect to TTY device directly
-        # Close inherited fds and reopen on the TTY
-        if [ "$tty_dev" = "/dev/ttyS0" ] && command -v stty >/dev/null 2>&1; then
-            stty -F "$tty_dev" 115200 cs8 -cstopb -parenb 2>/dev/null || true
-        fi
-        exec 0<>"$tty_dev" 1>&0 2>&0
-
-        # Number of consecutive agetty/login attempts that ended immediately.
-        # A broken PAM stack (a missing unix_chkpwd, say) makes login exit at
-        # once with "Authentication service cannot retrieve authentication
-        # info", and retrying it forever leaves an unusable console with no way
-        # in. After a few of those, give up on login and run the shell directly
-        # -- this is a live image that autologs in as root regardless, so
-        # nothing is being bypassed that was protecting anything.
-        use_login=1
-        login_failures=0
-
-        while true; do
-            if [ "$use_login" = 1 ] && [ "$tty_dev" = "/dev/ttyS0" ] && [ -x /sbin/agetty ]; then
-                start=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
-                /sbin/agetty --noclear --autologin root --login-program /sbin/login -L 115200 ttyS0 vt102 || true
-                end=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
-
-                if [ "$((end - start))" -lt 2 ]; then
-                    login_failures=$((login_failures + 1))
-                else
-                    login_failures=0
-                fi
-
-                if [ "$login_failures" -ge 3 ]; then
-                    use_login=0
-                    echo ""
-                    echo "login is failing immediately -- check the PAM stack (/etc/pam.d/login,"
-                    echo "/lib/security, and the unix_chkpwd helper). Starting a shell directly."
-                fi
-            elif [ -n "$shell" ]; then
-                "$shell" -l
-            else
-                echo "No shell available! Sleeping..."
-                sleep 10
-            fi
-            echo ""
-            echo "Shell exited. Restarting..."
-            sleep 1
-        done
-    fi
-}
-
-start_caw_daemon
-start_wayland_session
-start_shell_loop
-INIT
-
-    # The heredoc above is quoted -- it has to be, or every $var in the init
-    # script would expand at build time -- so the banner's version is a
-    # placeholder filled in here. It used to be the literal number, which drifted
-    # the moment RAVEN_VERSION changed anywhere else.
-    sed -i "s/@RAVEN_VERSION@/${RAVEN_VERSION}/g" "${SYSROOT_DIR}/init"
-
-    chmod +x "${SYSROOT_DIR}/init"
-
-    # Also create /sbin/init symlink
-    mkdir -p "${SYSROOT_DIR}/sbin"
-    ln -sf /init "${SYSROOT_DIR}/sbin/init" 2>/dev/null || true
-
-    log_success "Live init created"
+    log_success "raven-init configured for live and installed boots"
 }
 
 # =============================================================================
@@ -924,8 +355,8 @@ cleanup_sysroot() {
 create_squashfs() {
     log_step "Creating squashfs filesystem..."
 
-    # Add live init if not present
-    [[ -f "${SYSROOT_DIR}/init" ]] || create_live_init
+    # Add the live-root hand-off if not present.
+    [[ -f "${SYSROOT_DIR}/init" ]] || create_managed_live_init
 
     # Install packages to sysroot before creating squashfs
     install_packages_to_sysroot
@@ -1285,10 +716,8 @@ install_shutdown_commands() {
     #
     #   installed system -- PID 1 is raven-init, so hand off to raven-rc and let
     #                       init stop services and unmount cleanly.
-    #   live ISO         -- PID 1 is the live-init shell script. raven-rc would
-    #                       write /run/raven-init.cmd, succeed, and be read by
-    #                       nobody, so the command would silently do nothing.
-    #                       Ask the kernel directly instead (CONFIG_MAGIC_SYSRQ).
+    #   emergency shell  -- if raven-init is unavailable, ask the kernel
+    #                       directly instead (CONFIG_MAGIC_SYSRQ).
     #
     # Checking /proc/1/comm at runtime rather than guessing at build time is
     # what lets the same image do the right thing once installed to disk.
@@ -1299,8 +728,8 @@ install_shutdown_commands() {
 
         cat > "${SYSROOT_DIR}/bin/${name}" << EOF
 #!/bin/sh
-# RavenLinux ${name}. There is no systemd here; raven-init is PID 1 on an
-# installed system and this script is PID 1 on the live image.
+# RavenLinux ${name}. There is no systemd here; raven-init is PID 1 on normal
+# live and installed boots. The fallback below is for an emergency shell.
 if [ -x /bin/raven-rc ] && grep -qs raven-init /proc/1/comm 2>/dev/null; then
     exec /bin/raven-rc ${name}
 fi
@@ -1407,9 +836,8 @@ install_console_font() {
 }
 
 # raven-udev starts the device manager and coldplugs attached hardware. It has
-# to ship in the sysroot rather than only in the live init, because the whole
-# point of it is the installed system: the graphics and wireless drivers are
-# modules now, and nothing binds them without a coldplug.
+# to ship in the sysroot rather than early userspace, because graphics and
+# wireless drivers are modules and nothing binds them without a coldplug.
 install_udev_helper() {
     if [[ ! -f "${PROJECT_ROOT}/configs/raven-udev" ]]; then
         log_warn "  configs/raven-udev not found; hardware will not be coldplugged"
@@ -1439,6 +867,8 @@ install_installer() {
     log_step "Installing raven-install..."
 
     local src="${PROJECT_ROOT}/scripts/installer/raven-install"
+    local post="${PROJECT_ROOT}/scripts/installer/raven-postinstall"
+    local profiles="${PROJECT_ROOT}/configs/installer/profiles"
 
     if [[ ! -f "${src}" ]]; then
         log_warn "scripts/installer/raven-install not found; the ISO will not be able to install itself"
@@ -1453,6 +883,16 @@ install_installer() {
     # sysroot, and it is on root's PATH; /usr/sbin is not always.
     ln -sf ../usr/sbin/raven-install "${SYSROOT_DIR}/sbin/raven-install" 2>/dev/null || true
 
+    if [[ -f "${post}" ]]; then
+        cp "${post}" "${SYSROOT_DIR}/usr/sbin/raven-postinstall"
+        chmod 0755 "${SYSROOT_DIR}/usr/sbin/raven-postinstall"
+        ln -sf ../usr/sbin/raven-postinstall "${SYSROOT_DIR}/sbin/raven-postinstall" 2>/dev/null || true
+    fi
+    if [[ -d "${profiles}" ]]; then
+        mkdir -p "${SYSROOT_DIR}/etc/raven/install-profiles"
+        cp "${profiles}"/*.packages "${SYSROOT_DIR}/etc/raven/install-profiles/"
+    fi
+
     log_success "raven-install installed to /usr/sbin/raven-install"
 }
 
@@ -1460,7 +900,7 @@ install_installer() {
 # Is the sysroot actually complete?
 # =============================================================================
 # stage2 begins by wiping the sysroot, and the Raven and GUI layers are added
-# by later stages. So `make stage2 && make iso` -- a sequence that looks
+# by later stages. So `imlazy stage2 && imlazy iso` -- a sequence that looks
 # perfectly reasonable -- silently produces an ISO with no shell, no package
 # manager and no desktop, and every stage reports success along the way.
 #
@@ -1493,12 +933,12 @@ check_sysroot_layers() {
 
     if (( ${#raven_missing[@]} > 0 )); then
         log_warn "  Raven layer absent: ${raven_missing[*]}"
-        log_warn "    restore with: make raven"
+        log_warn "    restore with: imlazy raven"
     fi
 
     if (( ${#gui_missing[@]} > 0 )); then
         log_warn "  GUI layer absent:   ${gui_missing[*]}"
-        log_warn "    restore with: make gui"
+        log_warn "    restore with: imlazy gui"
         log_warn "    Without it the compositor, the desktop shell and"
         log_warn "    libinput's library closure are all missing, so a"
         log_warn "    graphical boot has no input and nothing to draw."
@@ -1506,7 +946,7 @@ check_sysroot_layers() {
 
     log_warn ""
     log_warn "  stage2 resets the sysroot, so anything built after it has to"
-    log_warn "  be rebuilt too. 'make build' runs every layer in order."
+    log_warn "  be rebuilt too. 'imlazy build' runs every layer in order."
     log_warn "=============================================================="
     echo ""
 }
@@ -1570,8 +1010,11 @@ generate_iso() {
     fi
 
     # Generate checksums
-    sha256sum "${ISO_OUTPUT}" > "${ISO_OUTPUT}.sha256"
-    md5sum "${ISO_OUTPUT}" > "${ISO_OUTPUT}.md5"
+    (
+        cd "$(dirname "${ISO_OUTPUT}")"
+        sha256sum "$(basename "${ISO_OUTPUT}")" > "$(basename "${ISO_OUTPUT}").sha256"
+        md5sum "$(basename "${ISO_OUTPUT}")" > "$(basename "${ISO_OUTPUT}").md5"
+    )
 
     log_success "ISO generated: ${ISO_OUTPUT}"
 }
@@ -1629,7 +1072,7 @@ main() {
     check_deps
     check_sysroot_layers
     setup_iso_structure
-    create_live_init
+    create_managed_live_init
     install_shutdown_commands
     install_installer
     copy_boot_files

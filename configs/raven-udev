@@ -53,8 +53,8 @@ if [ -d "/lib/modules/${KVER}" ] && [ ! -f "/lib/modules/${KVER}/modules.dep.bin
     fi
 fi
 
-# A second udevd would fight the first for the control socket. The live init and
-# a raven-init service both call this, and on the live path both run.
+# A second udevd would fight the first for the control socket. The helper is
+# idempotent because dependency checks and manual recovery may call it again.
 if [ ! -S /run/udev/control ]; then
     mkdir -p /run/udev 2>/dev/null || true
     "${UDEVD}" --daemon 2>/dev/null || "${UDEVD}" -d 2>/dev/null || {

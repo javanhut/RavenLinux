@@ -20,6 +20,9 @@
 #   RAVEN_ENGINE   Force the container engine: "docker" or "podman"
 #   RAVEN_IMAGE    Image tag to build/use (default: ravenlinux-build)
 #   RAVEN_NO_BUILD Set to 1 to skip the image build (assume it exists)
+#   RAVEN_ONLY     Build only the named Raven application component(s)
+#   RAVEN_SKIP     Skip the named Raven application component(s)
+#   RAVEN_OFFLINE  Refuse network fetches while building Raven components
 #
 # Notes:
 #   - The container runs --privileged because the build uses chroot, overlayfs
@@ -154,6 +157,28 @@ if [[ -n "${RAVEN_NO_DEVNODES:-}" ]]; then
     RUN_FLAGS+=(-e "RAVEN_NO_DEVNODES=${RAVEN_NO_DEVNODES}")
     echo ">> RAVEN_NO_DEVNODES=${RAVEN_NO_DEVNODES} (initramfs will ship no static /dev nodes)"
 fi
+
+# Forward supported build policy into the otherwise isolated container.  Keep
+# this an explicit allow-list: passing the host environment wholesale makes
+# builds depend on unrelated host settings and credentials.  This also makes
+# documented invocations such as `RAVEN_ONLY=crow imlazy raven` actually work.
+BUILD_ENV_VARS=(
+    RAVEN_ENABLE_SUDO
+    RAVEN_FORCE_SOURCE_BUILD
+    RAVEN_FW_NVIDIA
+    RAVEN_KEEP_BASH_DEFAULT
+    RAVEN_OFFLINE
+    RAVEN_ONLY
+    RAVEN_SKIP
+    RAVEN_SKIP_RUST_CHECK
+    RAVEN_SYSTEM_LANG
+    RAVEN_WAYLAND_COMPOSITOR
+)
+for env_name in "${BUILD_ENV_VARS[@]}"; do
+    if [[ -v "$env_name" ]]; then
+        RUN_FLAGS+=(-e "${env_name}=${!env_name}")
+    fi
+done
 
 echo ">> Running: ${CMD[*]}"
 exec "$ENGINE" run "${PLATFORM_FLAGS[@]}" "${RUN_FLAGS[@]}" "$IMAGE" "${CMD[@]}"

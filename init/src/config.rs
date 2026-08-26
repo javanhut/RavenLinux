@@ -56,6 +56,9 @@ impl Default for InitConfig {
                     stop_args: Vec::new(),
                     stop_timeout: 5,
                     runtime_dirs: Vec::new(),
+                    after: Vec::new(),
+                    ready_path: None,
+                    ready_timeout: 5,
                 },
             ],
             mounts: Vec::new(),
@@ -179,6 +182,19 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub runtime_dirs: Vec<String>,
 
+    /// Services which must be started before this service.
+    #[serde(default)]
+    pub after: Vec<String>,
+
+    /// Optional filesystem object that proves this service is ready, such as
+    /// a control socket. Dependants wait for it instead of racing spawn().
+    #[serde(default)]
+    pub ready_path: Option<String>,
+
+    /// Maximum time to wait for `ready_path`, in seconds.
+    #[serde(default = "default_ready_timeout")]
+    pub ready_timeout: u32,
+
     /// Command run to stop this service cleanly, before any signal is sent.
     ///
     /// Some daemons cannot be stopped by SIGTERM alone. `cawd` is the case
@@ -204,6 +220,10 @@ pub struct ServiceConfig {
 /// Long enough for a deauthentication to reach the AP, short enough that a
 /// wedged stop command does not hold up a reboot.
 fn default_stop_timeout() -> u32 {
+    5
+}
+
+fn default_ready_timeout() -> u32 {
     5
 }
 

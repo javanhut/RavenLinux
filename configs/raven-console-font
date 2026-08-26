@@ -3,8 +3,8 @@
 # raven-console-font -- load the JetBrains Mono Nerd Font console font
 # =============================================================================
 #
-# Ships at /usr/sbin/raven-console-font. Run from the live init and, on an
-# installed system, from a raven-init service.
+# Ships at /usr/sbin/raven-console-font and runs as a raven-init one-shot on
+# live and installed systems.
 #
 # The kernel's built-in console font is 8x16, which on a laptop panel at
 # 2560x1600 is about two millimetres tall. Picking the cell size from the

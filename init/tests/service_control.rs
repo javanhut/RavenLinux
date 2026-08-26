@@ -39,6 +39,9 @@ fn sleeper(name: &str) -> ServiceConfig {
         environment: HashMap::new(),
         tty: None,
         runtime_dirs: Vec::new(),
+        after: Vec::new(),
+        ready_path: None,
+        ready_timeout: 5,
         stop_exec: None,
         stop_args: Vec::new(),
         stop_timeout: 5,
@@ -185,6 +188,26 @@ fn start_can_bring_up_a_service_disabled_at_boot() {
     assert!(svc.is_running());
 
     services.get_mut("on-demand").unwrap().kill();
+}
+
+#[test]
+fn start_brings_up_direct_dependencies_first() {
+    let mut dependency = sleeper("dependency");
+    dependency.enabled = false;
+    let mut dependent = sleeper("dependent");
+    dependent.enabled = false;
+    dependent.after = vec!["dependency".to_string()];
+
+    let mut cfg = config_with(vec![dependency, dependent]);
+    let mut services = HashMap::new();
+    let (reply, _) = control::dispatch("start dependent", &mut services, &mut cfg);
+
+    assert!(reply.contains("Started dependent"), "{reply}");
+    assert!(services.get("dependency").is_some_and(Service::is_running));
+    assert!(services.get("dependent").is_some_and(Service::is_running));
+
+    services.get_mut("dependent").unwrap().kill();
+    services.get_mut("dependency").unwrap().kill();
 }
 
 #[test]
@@ -809,6 +832,9 @@ fn runtime_dirs_are_created_and_output_goes_to_the_log() {
         environment: HashMap::new(),
         tty: None,
         runtime_dirs: vec![rundir.display().to_string()],
+        after: Vec::new(),
+        ready_path: None,
+        ready_timeout: 5,
         stop_exec: None,
         stop_args: Vec::new(),
         stop_timeout: 5,

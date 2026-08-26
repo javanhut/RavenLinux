@@ -171,3 +171,5 @@ init/target/release
 init/target/tmp
 build/
 .lazy/
+*.bin
+bootloader/target/

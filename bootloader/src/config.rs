@@ -41,6 +41,8 @@ pub enum EntryType {
     Submenu,
     /// UEFI Shell
     UefiShell,
+    /// Ask firmware to open its setup interface after reboot
+    FirmwareSetup,
     /// Back to parent menu
     Back,
     /// Reboot system
@@ -129,6 +131,18 @@ impl BootEntry {
             children: Vec::new(),
         }
     }
+
+    /// Create a firmware settings entry.
+    pub fn firmware_setup() -> Self {
+        Self {
+            name: String::from("UEFI Firmware Settings"),
+            kernel: String::new(),
+            initrd: None,
+            cmdline: String::new(),
+            entry_type: EntryType::FirmwareSetup,
+            children: Vec::new(),
+        }
+    }
 }
 
 impl Default for BootConfig {
@@ -142,12 +156,13 @@ impl Default for BootConfig {
             name: String::from("Raven Linux"),
             kernel: String::from("\\EFI\\raven\\vmlinuz"),
             initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
-            cmdline: String::from("rdinit=/init quiet loglevel=3 console=ttyS0,115200 console=tty0"),
+            cmdline: String::from(
+                "rdinit=/init quiet loglevel=3 console=ttyS0,115200 console=tty0",
+            ),
             entry_type: EntryType::LinuxEfi,
             children: Vec::new(),
         });
         let mut serial_entries: Vec<BootEntry> = Vec::new();
-
 
         // Serial-first entries for headless debugging (make ttyS0 the primary console)
         serial_entries.push(BootEntry {
@@ -200,8 +215,11 @@ impl Default for BootConfig {
 
         graphical_entries.push(BootEntry::back());
 
-        entries.push(BootEntry::submenu("Raven Linux (Graphical) >", graphical_entries));
-        
+        entries.push(BootEntry::submenu(
+            "Raven Linux (Graphical) >",
+            graphical_entries,
+        ));
+
         let mut recovery_entries: Vec<BootEntry> = Vec::new();
         // Recovery mode
         recovery_entries.push(BootEntry {
@@ -223,10 +241,11 @@ impl Default for BootConfig {
             entry_type: EntryType::LinuxEfi,
             children: Vec::new(),
         });
-        recovery_entries.push(BootEntry::back()); 
+        recovery_entries.push(BootEntry::back());
         entries.push(BootEntry::submenu("Recovery >", recovery_entries));
         // System submenu
         let mut system_entries: Vec<BootEntry> = Vec::new();
+        system_entries.push(BootEntry::firmware_setup());
         system_entries.push(BootEntry::uefi_shell());
         system_entries.push(BootEntry::reboot());
         system_entries.push(BootEntry::shutdown());

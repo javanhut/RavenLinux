@@ -4,7 +4,7 @@ The software RavenLinux provides for itself. Everything marked **wired** is
 built and installed by `scripts/stages/stage-raven.sh` and has a definition
 under `packages/raven/`.
 
-Build it with `make raven` (or `./scripts/build.sh raven`). See the Build Stages
+Build it with `imlazy raven` (or `./scripts/build.sh raven`). See the Build Stages
 section of [README.md](README.md) for the per-component env knobs.
 
 ## Shell — not bash, not fish
@@ -140,7 +140,7 @@ RavenTerminal would go.
 | **wired** | `huginn`, `muninn-lock` | [javanhut/RavenGUI](https://github.com/javanhut/RavenGUI) |
 
 Built by `scripts/stages/stage-gui.sh` — **its own stage**, not the Raven
-layer. Build it with `make gui`; it runs between `raven` and `stage4`.
+layer. Build it with `imlazy gui`; it runs between `raven` and `stage4`.
 
 `huginn` is a Wayland compositor on Smithay, and it draws the desktop itself —
 dock, launcher, overview, notifications — inside its own render loop rather than

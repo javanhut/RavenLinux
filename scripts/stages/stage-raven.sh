@@ -467,11 +467,9 @@ build_raven_init() {
     install -m 0755 "${outdir}/raven-init" "${SYSROOT_DIR}/sbin/raven-init"
     install -m 0755 "${outdir}/raven-rc"   "${SYSROOT_DIR}/bin/raven-rc"
 
-    # The poweroff/reboot/halt/shutdown names are deliberately NOT symlinked
-    # here. raven-rc asks init to shut down by writing /run/raven-init.cmd, and
-    # on the live ISO that write *succeeds* and is read by nobody -- PID 1 there
-    # is the live-init shell script, not raven-init. stage4 owns those four
-    # names and installs a dispatcher that checks PID 1 first.
+    # stage4 owns the poweroff/reboot/halt/shutdown names and installs a
+    # dispatcher that uses raven-rc when raven-init is PID 1, with an emergency
+    # kernel fallback for rescue environments.
 
     RAVEN_BUILT+=(raven-init raven-rc)
     log_success "  raven-init installed ($(du -h "${outdir}/raven-init" | cut -f1))"

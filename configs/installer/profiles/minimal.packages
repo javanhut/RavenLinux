@@ -1,0 +1,2 @@
+# The bootable RavenLinux base. Drivers required to discover hardware and get
+# online remain in the ISO; this profile adds nothing.

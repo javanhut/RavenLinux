@@ -109,31 +109,29 @@ struct InitrdDevicePath {
 static mut INITRD_DEVICE_PATH: InitrdDevicePath = InitrdDevicePath {
     vendor: VendorDevicePath {
         header: DevicePathHeader {
-            device_type: 0x04,  // MEDIA_DEVICE_PATH
-            sub_type: 0x03,     // MEDIA_VENDOR_DP
-            length: [24, 0],    // sizeof(VendorDevicePath) = 4 + 16 + 4 = 24... wait, it's 4 + 16 = 20
+            device_type: 0x04, // MEDIA_DEVICE_PATH
+            sub_type: 0x03,    // MEDIA_VENDOR_DP
+            length: [24, 0], // sizeof(VendorDevicePath) = 4 + 16 + 4 = 24... wait, it's 4 + 16 = 20
         },
-        vendor_guid: [0; 16],   // Will be set at runtime
+        vendor_guid: [0; 16], // Will be set at runtime
     },
     end: EndDevicePath {
         header: DevicePathHeader {
-            device_type: 0x7f,  // END_DEVICE_PATH_TYPE
-            sub_type: 0xff,     // END_ENTIRE_DEVICE_PATH_SUBTYPE
-            length: [4, 0],     // sizeof(EndDevicePath) = 4
+            device_type: 0x7f, // END_DEVICE_PATH_TYPE
+            sub_type: 0xff,    // END_ENTIRE_DEVICE_PATH_SUBTYPE
+            length: [4, 0],    // sizeof(EndDevicePath) = 4
         },
     },
 };
 
 // Raw EFI Boot Services function types
-type InstallMultipleProtocolInterfacesFn = unsafe extern "efiapi" fn(
-    handle: *mut *mut c_void,
-    ...
-) -> uefi::Status;
+type InstallMultipleProtocolInterfacesFn =
+    unsafe extern "efiapi" fn(handle: *mut *mut c_void, ...) -> uefi::Status;
 
 // Partial raw EFI_BOOT_SERVICES structure
 #[repr(C)]
 struct RawBootServices {
-    hdr: [u8; 24],                           // EFI_TABLE_HEADER (24 bytes)
+    hdr: [u8; 24], // EFI_TABLE_HEADER (24 bytes)
     // Task Priority Services (2 functions)
     raise_tpl: usize,
     restore_tpl: usize,
@@ -249,7 +247,10 @@ pub fn boot_efi_stub(
             // Set up the vendor device path with Linux initrd GUID
             // The GUID bytes need to be in the correct order
             let guid_bytes = LINUX_EFI_INITRD_MEDIA_GUID.to_bytes();
-            INITRD_DEVICE_PATH.vendor.vendor_guid.copy_from_slice(&guid_bytes);
+            INITRD_DEVICE_PATH
+                .vendor
+                .vendor_guid
+                .copy_from_slice(&guid_bytes);
             // Fix the length field: VendorDevicePath = 4 (header) + 16 (guid) = 20 bytes
             INITRD_DEVICE_PATH.vendor.header.length = [20, 0];
 
@@ -374,7 +375,10 @@ fn read_file(
         .open(&path_cstr, FileMode::Read, FileAttribute::empty())
         .map_err(|_| KernelError::NotFound)?;
 
-    let mut file = match file_handle.into_type().map_err(|_| KernelError::InvalidFormat)? {
+    let mut file = match file_handle
+        .into_type()
+        .map_err(|_| KernelError::InvalidFormat)?
+    {
         uefi::proto::media::file::FileType::Regular(f) => f,
         _ => return Err(KernelError::InvalidFormat),
     };

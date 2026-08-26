@@ -1,0 +1,62 @@
+#!/bin/sh
+# Install an optional RavenLinux package profile after the small base system is
+# online. Profiles are plain package lists under /etc/raven/install-profiles;
+# copy one to create a local template without modifying this script.
+set -eu
+
+PROFILE_DIR="${RAVEN_PROFILE_DIR:-/etc/raven/install-profiles}"
+profile="${RAVEN_INSTALL_PROFILE:-}"
+assume_yes=0
+dry_run=0
+
+usage() {
+    echo "Usage: raven-postinstall [--profile NAME] [--dry-run] [-y]"
+    echo "Profiles available in ${PROFILE_DIR}:"
+    for file in "${PROFILE_DIR}"/*.packages; do
+        [ -f "$file" ] && echo "  $(basename "$file" .packages)"
+    done
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --profile) profile="${2:-}"; shift 2 ;;
+        --dry-run) dry_run=1; shift ;;
+        -y|--yes) assume_yes=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+if [ -z "$profile" ] && [ -r /etc/raven/install-profile ]; then
+    profile=$(sed -n 's/^profile=//p' /etc/raven/install-profile | head -n1)
+fi
+profile="${profile:-minimal}"
+file="${PROFILE_DIR}/${profile}.packages"
+[ -f "$file" ] || { echo "Unknown profile: ${profile}" >&2; usage >&2; exit 1; }
+
+packages=$(sed 's/#.*//' "$file" | awk 'NF { printf "%s ", $0 }')
+echo "RavenLinux post-install profile: ${profile}"
+if [ -z "$packages" ]; then
+    echo "The minimal profile needs no additional packages."
+    exit 0
+fi
+echo "Packages: ${packages}"
+
+command -v rvn >/dev/null 2>&1 || {
+    echo "rvn is not installed; cannot apply the profile." >&2
+    exit 1
+}
+
+if [ "$dry_run" -eq 1 ]; then
+    # shellcheck disable=SC2086 -- profile words intentionally become argv
+    exec rvn --dry-run install $packages
+fi
+
+if [ "$assume_yes" -ne 1 ]; then
+    printf "Install this profile now? [y/N] "
+    read -r answer
+    case "$answer" in [Yy]*) ;; *) echo "No changes made."; exit 0 ;; esac
+fi
+
+# shellcheck disable=SC2086 -- profile words intentionally become argv
+exec rvn install $packages

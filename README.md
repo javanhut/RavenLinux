@@ -65,21 +65,17 @@ The build runs inside a container so it works from macOS, Windows, or Linux. It
 needs Docker or Podman, and the container runs `--privileged` because the build
 uses chroot, overlayfs mounts, and loop devices.
 
-```bash
-make image      # build the toolchain image (cached after the first run)
-make build      # build everything -> ./build/ and raven-<ver>-x86_64.iso
-make raven      # build just the Raven layer into an existing sysroot
-make gui        # build just the compositor and shell
-make shell      # drop into the build environment interactively
-make help       # list every target
-```
-
-Every target also exists as an [ImLazy](https://github.com/javanhut/ImLazy)
-command in `lazy.toml`, which is what RavenLinux uses on itself:
+RavenLinux uses [ImLazy](https://github.com/javanhut/ImLazy) as its build
+interface. `lazy.toml` is the canonical build graph; the small Makefile only
+forwards old commands to ImLazy.
 
 ```bash
-imlazy list     # every command with a description
-imlazy build    # same as make build
+imlazy image    # build the toolchain image (cached after the first run)
+imlazy build    # build everything -> ./build/ and raven-<ver>-x86_64.iso
+imlazy raven    # build just the Raven layer into an existing sysroot
+imlazy gui      # build just the compositor and shell
+imlazy shell    # drop into the build environment interactively
+imlazy list     # list every command with a description
 imlazy -n qemu  # dry run: print what a command would execute
 ```
 
@@ -98,9 +94,9 @@ to a rootful build, so rule that difference out first if it misbehaves at boot.
 Common overrides:
 
 ```bash
-make build JOBS=8          # 8 parallel compile jobs
-make build ENGINE=podman   # force Podman instead of Docker
-make iso ARCH=x86_64       # target architecture
+imlazy build jobs=8          # 8 parallel compile jobs
+imlazy build engine=podman   # force Podman instead of Docker
+imlazy iso arch=x86_64       # target architecture
 ```
 
 To build on a Linux host directly, without the container:
@@ -131,8 +127,8 @@ has to stand on its own; the Raven layer sits on top of stage3 and must run
 before stage4, because stage4 squashes the sysroot into the ISO and anything
 installed afterwards would not ship.
 
-Run one stage at a time with `make stage2` or `./scripts/build.sh stage2`.
-`make initramfs` rebuilds only the initramfs, which stage1 would otherwise
+Run one stage at a time with `imlazy stage2` or `./scripts/build.sh stage2`.
+`imlazy initramfs` rebuilds only the initramfs, which stage1 would otherwise
 rebuild behind the kernel — useful because its init script, the thing that
 decides between the live squashfs and a `root=` on disk, changes far more often
 than the kernel does.
@@ -142,13 +138,13 @@ logged and skipped, and the ISO still builds. Narrow it while iterating:
 
 ```bash
 ./scripts/build.sh raven                  # all eight components
-RAVEN_ONLY=crow,ivaldi make raven         # just these two
-RAVEN_ONLY=caw make raven                 # caw ships two binaries, caw and cawd
-RAVEN_SKIP=oxigen make raven              # everything but this one
-RAVEN_OFFLINE=1 make raven                # reuse existing clones, no network
-RAVEN_IVALDI_REF=v0.1.2 make raven        # pin one component to a git ref
-RAVEN_KEEP_BASH_DEFAULT=1 make raven      # install ravenshell, keep bash default
-RAVEN_PACMAN_FROM_HOST=1 make raven       # give rvn the host's pacman.conf
+RAVEN_ONLY=crow,ivaldi imlazy raven         # just these two
+RAVEN_ONLY=caw imlazy raven                 # caw ships two binaries, caw and cawd
+RAVEN_SKIP=oxigen imlazy raven              # everything but this one
+RAVEN_OFFLINE=1 imlazy raven                # reuse existing clones, no network
+RAVEN_IVALDI_REF=v0.1.2 imlazy raven        # pin one component to a git ref
+RAVEN_KEEP_BASH_DEFAULT=1 imlazy raven      # install ravenshell, keep bash default
+RAVEN_PACMAN_FROM_HOST=1 imlazy raven       # give rvn the host's pacman.conf
 ```
 
 The GUI stage is fail-soft the same way, and skips itself when the build host
@@ -156,9 +152,9 @@ lacks the libraries huginn links:
 
 ```bash
 ./scripts/build.sh gui                    # huginn, muninn, muninn-lock
-GUI_SKIP=1 make build                     # console-only ISO
-GUI_REF=v0.1.0 make gui                   # pin RavenGUI to a git ref
-GUI_OFFLINE=1 make gui                    # reuse the existing clone
+GUI_SKIP=1 imlazy build                     # console-only ISO
+GUI_REF=v0.1.0 imlazy gui                   # pin RavenGUI to a git ref
+GUI_OFFLINE=1 imlazy gui                    # reuse the existing clone
 ```
 
 Artifacts land in `./build/`:
@@ -181,7 +177,7 @@ when it is not -- that fallback boots in minutes rather than seconds, which is
 worth knowing before a slow boot reads as a hang.
 
 ```bash
-imlazy qemu           # serial console (make qemu)
+imlazy qemu           # serial console
 imlazy qemu-uefi      # boot through OVMF firmware
 imlazy qemu-desktop   # with a virtio GPU, for the Wayland session
 imlazy smoke          # boot for 180s unattended, then exit
@@ -212,7 +208,7 @@ sudo dd if=raven-*.iso of=/dev/sdX bs=4M status=progress
 ```
 
 The ISO boots to a root shell on tty1, and is hybrid: BIOS boots through GRUB,
-UEFI through RavenBoot. `cawd` is started by the live init, so `caw scan` and
+UEFI through RavenBoot. `cawd` is supervised by raven-init, so `caw scan` and
 `caw connect <ssid>` work from that shell -- though saved profiles live on a
 tmpfs overlay and do not survive a reboot of a live image.
 
@@ -233,10 +229,18 @@ raven-install --dry-run              # every check and the full plan, no writes
 raven-install --disk /dev/nvme0n1    # skip the disk question
 raven-install --swap none            # no swap partition
 raven-install --efi-nvram            # also register a UEFI NVRAM boot entry
+raven-install --profile minimal      # smallest install; add packages later
+raven-install --profile desktop      # record the desktop package template
 ```
 
 The layout is GPT, and **the target disk is erased completely** — there is no
 dual-boot mode yet, and no manual partitioning:
+
+The base installation stays small. After the installed system has networking,
+run `sudo raven-postinstall` to preview and apply the selected package profile,
+or `sudo raven-postinstall --profile developer`. Profiles are editable package
+lists in `/etc/raven/install-profiles`, following archinstall's separation of
+disk installation from a reusable system profile.
 
 | Partition | Size | Filesystem | Mount |
 |-----------|------|------------|-------|
@@ -303,14 +307,14 @@ build is fail-soft without it and produces a working ISO on the kernel font.
 Host-side tests, which need no ISO and no container:
 
 ```bash
-imlazy test     # or: make test
+imlazy test
 ```
 
 You can also run the built rootfs as a container image, which is much faster
 than booting a VM when you only want to poke at the userland:
 
 ```bash
-make rootfs
+imlazy rootfs
 docker run --rm -it --platform linux/amd64 ravenlinux
 ```
 
@@ -362,14 +366,14 @@ rewiring:
   than growing stage 3 indefinitely.
 - **Host build dependencies**: add them to both `scripts/check-deps.sh` and the
   `Dockerfile` — the two are kept deliberately parallel so they're easy to diff.
-- **Boot behavior**: the live init is a heredoc inside
-  `create_live_init()` in `scripts/stages/stage4-iso.sh`; the GRUB menu is in
-  `setup_grub()` and RavenBoot staging in `setup_ravenboot()` in the same file.
-  RavenBoot's own menu is compiled in — see `bootloader/src/`.
+- **Boot behavior**: both live and installed roots run `raven-init`; stage4
+  installs the small `/init` hand-off. The GRUB menu is in `setup_grub()` and
+  RavenBoot staging in `setup_ravenboot()` in the same file. RavenBoot's own
+  menu is compiled in — see `bootloader/src/`.
 - **How an installed disk boots**: the initramfs init script, generated by
   `scripts/build-initramfs.sh`. It reads `root=` from the kernel command line
   and mounts that partition; with no `root=` it falls back to hunting for the
-  live squashfs. `make initramfs` rebuilds just that, without a stage1 rerun.
+  live squashfs. `imlazy initramfs` rebuilds just that, without a stage1 rerun.
 - **Installation**: `scripts/installer/raven-install`, copied into the sysroot
   by `install_installer()` in stage4 so it ships inside the squashfs.
 - **The console font**: `GLYPH_SET` in `scripts/make-console-font.py` for which

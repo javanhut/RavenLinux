@@ -97,6 +97,7 @@ OPT_ESP_SIZE="${ESP_SIZE_DEFAULT}"
 OPT_NVRAM=0
 OPT_DRY_RUN=0
 OPT_YES=0
+OPT_PROFILE=""
 
 usage() {
     cat <<USAGE
@@ -115,6 +116,9 @@ Options:
                      efibootmgr. Off by default: the fallback bootloader path
                      boots without it, and writing NVRAM can reorder the
                      firmware's existing entries.
+  --profile NAME      Post-install package template: minimal (default), desktop,
+                     or developer. Packages are installed later with
+                     raven-postinstall, after networking is available.
   --dry-run          Run every check and print the plan, then stop before the
                      first write. Nothing is partitioned, formatted, or copied.
   -y, --yes          Skip the final typed confirmation. THIS DESTROYS THE DISK
@@ -133,6 +137,7 @@ while [[ $# -gt 0 ]]; do
         --swap)      OPT_SWAP="${2:-}"; shift 2 ;;
         --esp-size)  OPT_ESP_SIZE="${2:-}"; shift 2 ;;
         --efi-nvram) OPT_NVRAM=1; shift ;;
+        --profile)   OPT_PROFILE="${2:-}"; shift 2 ;;
         --dry-run)   OPT_DRY_RUN=1; shift ;;
         -y|--yes)    OPT_YES=1; shift ;;
         -h|--help)   usage; exit 0 ;;
@@ -237,7 +242,7 @@ preflight() {
         echo
         echo "  These come from util-linux and dosfstools and are copied into the"
         echo "  sysroot by stage2. If you are on an ISO built before they were added"
-        echo "  to that list, rebuild with 'make stage2 && make iso'."
+        echo "  to that list, rebuild with 'imlazy stage2 && imlazy iso'."
         die "Cannot continue without the tools above."
     fi
     ok "Disk tools present"
@@ -363,7 +368,7 @@ locate_source() {
         warn "This initramfs may not support booting from a disk"
         echo "        It was built before root= handling was added, and will look for"
         echo "        the live squashfs instead of your new root partition."
-        echo "        Rebuild with 'make initramfs && make iso' if the install does"
+        echo "        Rebuild with 'imlazy initramfs && imlazy iso' if the install does"
         echo "        not boot."
     fi
 }
@@ -548,7 +553,7 @@ run_wizard() {
     ask FULLNAME "Full name for ${USERNAME} (optional)" "${USERNAME}"
     ask_password USER_PASSWORD "${USERNAME}'s"
 
-    if ask_yn "Give ${USERNAME} administrator access via sudo?" "Y"; then
+    if ask_yn "Allow ${USERNAME} to run administrative commands with sudo?" "Y"; then
         USER_SUDO=1
     else
         USER_SUDO=0
@@ -593,6 +598,17 @@ run_wizard() {
 
     ask LOCALE "Locale" "en_US.UTF-8"
     ask KEYMAP "Console keymap" "us"
+
+    echo
+    if [[ -n "$OPT_PROFILE" ]]; then
+        INSTALL_PROFILE="$OPT_PROFILE"
+    else
+        ask INSTALL_PROFILE "Post-install profile (minimal/desktop/developer)" "minimal"
+    fi
+    case "$INSTALL_PROFILE" in
+        minimal|desktop|developer) ;;
+        *) die "Unknown install profile: ${INSTALL_PROFILE}" ;;
+    esac
 
     echo
     if [[ -z "${OPT_SWAP}" ]]; then
@@ -646,11 +662,12 @@ PLAN
       ${ROOT_DEV}   rest  ${OPT_FS} -> /
 
     Hostname       ${HOSTNAME}
-    User           ${USERNAME}${FULLNAME:+ (${FULLNAME})}$([[ $USER_SUDO -eq 1 ]] && echo ", sudo via wheel")
+    User           ${USERNAME}${FULLNAME:+ (${FULLNAME})}$([[ $USER_SUDO -eq 1 ]] && echo ", may use sudo via wheel")
     root password  $([[ -n "$ROOT_PASSWORD" ]] && echo "set" || echo "${YELLOW}not set${NC}")
     Timezone       ${TIMEZONE}
     Locale         ${LOCALE}
     Keymap         ${KEYMAP}
+    Package profile ${INSTALL_PROFILE} (applied later with raven-postinstall)
     Bootloader     RavenBoot at \\EFI\\raven and \\EFI\\BOOT\\BOOTX64.EFI$([[ $OPT_NVRAM -eq 1 ]] && echo ", plus an NVRAM entry")
 
 PLAN
@@ -1089,10 +1106,9 @@ set_locale_and_time() {
     printf '%s\n' "$mid" > "${TARGET}/etc/machine-id"
 }
 
-# The live image boots a shell script at /init, and /sbin/init is a symlink to
-# it. That is right for the ISO and wrong for a disk: an installed system wants
-# raven-init as PID 1, with services, shutdown and the whole runlevel machinery.
-# The initramfs execs /sbin/init, so repointing that symlink is the handoff.
+# The live image enters raven-init through a small /init hand-off. An installed
+# root enters it through /sbin/init, so remove the live-only hand-off and make
+# that relationship explicit on disk.
 switch_to_raven_init() {
     if [[ -x "${TARGET}/sbin/raven-init" ]]; then
         rm -f "${TARGET}/sbin/init"
@@ -1100,8 +1116,7 @@ switch_to_raven_init() {
         rm -f "${TARGET}/init"
         ok "PID 1 on the installed system: raven-init"
     else
-        warn "raven-init not found in the image; leaving the live init in place"
-        echo "        The installed system will boot to a root shell without services."
+        die "raven-init not found in the image; this build cannot be installed safely"
     fi
 
     # The live image autologins root on tty1 with no password, which is correct
@@ -1140,6 +1155,10 @@ configure_system() {
     set_passwords
     set_locale_and_time
     switch_to_raven_init
+    {
+        echo "profile=${INSTALL_PROFILE}"
+        echo "configured_by=raven-install"
+    } > "${TARGET}/etc/raven/install-profile"
 
     sync
 }

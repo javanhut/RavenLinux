@@ -7,7 +7,7 @@
 # it to run RavenLinux in a container and test terminal tools without booting
 # the ISO:
 #
-#   ./scripts/build.sh all        # (or: make build)  -> populates the sysroot
+#   imlazy build                  # populates the sysroot
 #   ./scripts/export-rootfs.sh    # -> image 'ravenlinux:latest'
 #   docker run --rm -it --platform linux/amd64 ravenlinux
 #
@@ -63,7 +63,7 @@ echo ">> Reading RavenLinux sysroot from ${SYSROOT_LOC}"
 if ! "$ENGINE" run --rm "${PLATFORM_FLAGS[@]}" "${MOUNT[@]}" "$BUILDER_IMAGE" \
         bash -c '[[ -e /raven/build/sysroot/bin/bash || -e /raven/build/sysroot/bin/sh ]]'; then
     echo "ERROR: no built RavenLinux sysroot found (no /bin/sh in ${SYSROOT_LOC})." >&2
-    echo "       Run a build first:  make build" >&2
+    echo "       Run a build first:  imlazy build" >&2
     exit 1
 fi
 

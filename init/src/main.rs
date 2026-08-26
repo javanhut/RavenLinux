@@ -13,15 +13,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use nix::mount::{mount, MsFlags};
 use nix::sys::reboot::{reboot, RebootMode};
-use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::{self, Pid};
+use nix::unistd::Pid;
 
 mod config;
 mod control;
@@ -38,7 +36,7 @@ fn main() {
     // Refuse to be a second supervisor before doing anything at all -- not
     // even logging setup. This used to be a warning followed by "continue
     // anyway for testing purposes", which is how a raven-init started from a
-    // shell on a running system ended up fighting the live init for cawd's
+    // shell on a running system ended up fighting PID 1 for cawd's
     // socket.
     //
     // Exits rather than dropping to the emergency shell: that shell exists for
@@ -81,7 +79,14 @@ impl log::Log for DualLogger {
             return;
         }
         let line = format!("[raven-init] {}: {}\n", record.level(), record.args());
-        eprint!("{}", line);
+        // The console shows only what needs a human: WARN and ERROR. INFO
+        // lines -- every "Started service", every clean exit -- go to the log
+        // file alone, because after the gettys are up the console belongs to
+        // whoever is logging in, and init chatter printed over a login prompt
+        // reads as a broken boot to exactly the person it should reassure.
+        if record.level() <= log::Level::Warn {
+            eprint!("{}", line);
+        }
         if let Ok(mut guard) = self.file.lock() {
             // Opened lazily: /var/log may not be writable until the root is
             // mounted rw, and boot must not wait on it.
@@ -173,10 +178,7 @@ fn bring_loopback_up() {
     if rc == 0 {
         log::info!("Loopback interface up");
     } else {
-        log::warn!(
-            "Could not bring lo up: {}",
-            std::io::Error::last_os_error()
-        );
+        log::warn!("Could not bring lo up: {}", std::io::Error::last_os_error());
     }
 }
 
@@ -194,8 +196,9 @@ fn bring_loopback_up() {
 /// legitimately holds. That is not a cawd bug, and no amount of restarting
 /// fixes it.
 ///
-/// On the live ISO PID 1 is the live-init shell script, so raven-init started
-/// from a shell there is always the second supervisor.
+/// Live and installed RavenLinux systems both use raven-init as PID 1. This
+/// guard still protects containers, rescue environments, and accidental
+/// interactive invocations from starting a second supervisor.
 ///
 /// RAVEN_INIT_ALLOW_NONPID1=1 overrides this, for testing in a container where
 /// the harness knows nothing else is running.
@@ -427,6 +430,9 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
             environment: HashMap::new(),
             tty: None,
             runtime_dirs: Vec::new(),
+            after: vec!["udev".to_string()],
+            ready_path: Some("/run/seatd.sock".to_string()),
+            ready_timeout: 5,
             stop_exec: None,
             stop_args: Vec::new(),
             stop_timeout: 5,
@@ -458,6 +464,9 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
                 environment: env,
                 tty: None,
                 runtime_dirs: Vec::new(),
+                after: vec!["udev".to_string(), "seatd".to_string()],
+                ready_path: None,
+                ready_timeout: 5,
                 stop_exec: None,
                 stop_args: Vec::new(),
                 stop_timeout: 5,
@@ -478,6 +487,9 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
                 environment: compositor_env,
                 tty: None,
                 runtime_dirs: Vec::new(),
+                after: vec!["udev".to_string(), "seatd".to_string()],
+                ready_path: None,
+                ready_timeout: 5,
                 stop_exec: None,
                 stop_args: Vec::new(),
                 stop_timeout: 5,
@@ -881,10 +893,75 @@ fn setup_signal_handlers() -> Result<()> {
 
 fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
     let mut services = HashMap::new();
+    let mut pending: Vec<&ServiceConfig> = config.services.iter().filter(|s| s.enabled).collect();
+    let mut unavailable: Vec<String> = Vec::new();
 
-    // Start configured services
-    for svc_config in &config.services {
-        if svc_config.enabled {
+    // Resolve the small dependency graph as services are started. Configuration
+    // order remains the tie-breaker, but `after` is authoritative.
+    while !pending.is_empty() {
+        let mut progressed = false;
+        let mut index = 0;
+        while index < pending.len() {
+            let svc_config = pending[index];
+            if svc_config.after.iter().any(|d| unavailable.contains(d)) {
+                log::error!(
+                    "Service {} skipped: dependency unavailable ({:?})",
+                    svc_config.name,
+                    svc_config.after
+                );
+                unavailable.push(svc_config.name.clone());
+                pending.remove(index);
+                progressed = true;
+                continue;
+            }
+            if !svc_config.after.iter().all(|d| services.contains_key(d)) {
+                index += 1;
+                continue;
+            }
+
+            let mut dependencies_ready = true;
+            for dependency in &svc_config.after {
+                if let Some(dep_cfg) = config.services.iter().find(|s| &s.name == dependency) {
+                    if let Some(path) = dep_cfg.ready_path.as_deref() {
+                        if !wait_for_ready_path(path, dep_cfg.ready_timeout) {
+                            log::error!(
+                                "Service {} skipped: {} did not become ready at {}",
+                                svc_config.name,
+                                dependency,
+                                path
+                            );
+                            dependencies_ready = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !dependencies_ready {
+                unavailable.push(svc_config.name.clone());
+                pending.remove(index);
+                progressed = true;
+                continue;
+            }
+
+            // A binary that is not installed is not a failure. Half of this
+            // list is software the owner may add later -- init.toml ships an
+            // sshd entry precisely so that `rvn install openssh` makes the
+            // next boot start it -- and an ERROR on the console for every
+            // absent optional daemon buries the login prompt under noise.
+            // Skipped, not registered: `raven-rc start` falls back to the
+            // config for services outside the running set, so the day the
+            // binary appears it can be started by hand or by the next boot.
+            if !std::path::Path::new(&svc_config.exec).exists() {
+                log::info!(
+                    "Service {} skipped: {} is not installed",
+                    svc_config.name,
+                    svc_config.exec
+                );
+                unavailable.push(svc_config.name.clone());
+                pending.remove(index);
+                progressed = true;
+                continue;
+            }
             match Service::start(svc_config) {
                 Ok(svc) => {
                     log::info!("Started service: {}", svc_config.name);
@@ -896,8 +973,22 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
                         return Err(e)
                             .context(format!("Critical service {} failed", svc_config.name));
                     }
+                    unavailable.push(svc_config.name.clone());
                 }
             }
+            pending.remove(index);
+            progressed = true;
+        }
+
+        if !progressed {
+            for svc in pending.drain(..) {
+                log::error!(
+                    "Service {} not started: unresolved dependencies {:?}",
+                    svc.name,
+                    svc.after
+                );
+            }
+            break;
         }
     }
 
@@ -924,6 +1015,9 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
             stop_args: Vec::new(),
             stop_timeout: 5,
             runtime_dirs: Vec::new(),
+            after: Vec::new(),
+            ready_path: None,
+            ready_timeout: 5,
         };
 
         // Try agetty first, fall back to direct shell
@@ -942,6 +1036,9 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
                 stop_args: Vec::new(),
                 stop_timeout: 5,
                 runtime_dirs: Vec::new(),
+                after: Vec::new(),
+                ready_path: None,
+                ready_timeout: 5,
             };
             Service::start(&shell_config)
         });
@@ -953,6 +1050,17 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
     }
 
     Ok(services)
+}
+
+fn wait_for_ready_path(path: &str, timeout: u32) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(timeout as u64);
+    while Instant::now() < deadline {
+        if Path::new(path).exists() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Path::new(path).exists()
 }
 
 fn print_welcome() {

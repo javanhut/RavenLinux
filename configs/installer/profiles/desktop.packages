@@ -1,0 +1,12 @@
+# Common laptop/desktop runtime additions. RavenGUI itself ships in the image.
+linux-firmware
+sof-firmware
+alsa-ucm-conf
+pipewire
+wireplumber
+bluez
+bluez-utils
+mesa-utils
+vulkan-tools
+vulkan-radeon
+vulkan-intel

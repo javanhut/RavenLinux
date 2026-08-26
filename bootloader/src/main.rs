@@ -16,13 +16,16 @@ use uefi::proto::console::text::{Color, Key, ScanCode};
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::media::file::{File, FileAttribute, FileMode};
 use uefi::proto::media::fs::SimpleFileSystem;
+use uefi::table::runtime::{VariableAttributes, VariableVendor};
 use uefi::CString16;
 
 mod config;
 mod linux;
 mod menu;
 
-use config::{BootConfig, BootEntry, EntryType, CONFIG_PATHS, KNOWN_BOOTLOADERS, MAX_SUBMENU_DEPTH};
+use config::{
+    BootConfig, BootEntry, EntryType, CONFIG_PATHS, KNOWN_BOOTLOADERS, MAX_SUBMENU_DEPTH,
+};
 use linux::{boot_efi_stub, chainload_efi, KernelError};
 
 /// Menu navigation state
@@ -228,11 +231,19 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
             }
             MenuAction::Reboot => {
                 let runtime_services = system_table.runtime_services();
-                runtime_services.reset(uefi::table::runtime::ResetType::COLD, Status::SUCCESS, None);
+                runtime_services.reset(
+                    uefi::table::runtime::ResetType::COLD,
+                    Status::SUCCESS,
+                    None,
+                );
             }
             MenuAction::Shutdown => {
                 let runtime_services = system_table.runtime_services();
-                runtime_services.reset(uefi::table::runtime::ResetType::SHUTDOWN, Status::SUCCESS, None);
+                runtime_services.reset(
+                    uefi::table::runtime::ResetType::SHUTDOWN,
+                    Status::SUCCESS,
+                    None,
+                );
             }
             MenuAction::UefiShell => {
                 // Try to launch UEFI shell
@@ -247,6 +258,37 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                     let _ = writeln!(stdout, "Press any key to return to menu...");
                     wait_for_key(system_table.boot_services());
                 }
+            }
+            MenuAction::FirmwareSetup => {
+                let attrs = VariableAttributes::NON_VOLATILE
+                    | VariableAttributes::BOOTSERVICE_ACCESS
+                    | VariableAttributes::RUNTIME_ACCESS;
+                let request = 1u64.to_le_bytes();
+                let result = system_table.runtime_services().set_variable(
+                    cstr16!("OsIndications"),
+                    &VariableVendor::GLOBAL_VARIABLE,
+                    attrs,
+                    &request,
+                );
+                if result.is_ok() {
+                    system_table.runtime_services().reset(
+                        uefi::table::runtime::ResetType::COLD,
+                        Status::SUCCESS,
+                        None,
+                    );
+                }
+
+                {
+                    let stdout = system_table.stdout();
+                    let _ = stdout.set_color(Color::Red, Color::Black);
+                    let _ = writeln!(
+                        stdout,
+                        "\nThis firmware does not support rebooting into its settings."
+                    );
+                    let _ = writeln!(stdout, "Use the machine's setup key during reboot instead.");
+                    let _ = writeln!(stdout, "Press any key to return to the menu...");
+                }
+                wait_for_key(system_table.boot_services());
             }
             MenuAction::Continue => {
                 // Navigation action, continue loop
@@ -267,11 +309,15 @@ enum MenuAction {
     Reboot,
     Shutdown,
     UefiShell,
+    FirmwareSetup,
     Continue,
 }
 
 /// Try to launch UEFI shell from common locations
-fn launch_uefi_shell(boot_services: &BootServices, image_handle: Handle) -> Result<(), KernelError> {
+fn launch_uefi_shell(
+    boot_services: &BootServices,
+    image_handle: Handle,
+) -> Result<(), KernelError> {
     // Common UEFI shell locations
     let shell_paths = [
         "\\EFI\\BOOT\\Shell.efi",
@@ -301,16 +347,23 @@ fn print_banner(stdout: &mut uefi::proto::console::text::Output) {
     let _ = writeln!(stdout, r"    ██║  ██║██║  ██║ ╚████╔╝ ███████╗██║ ╚████║");
     let _ = writeln!(stdout, r"    ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═══╝");
     let _ = stdout.set_color(Color::Cyan, Color::Black);
-    let _ = writeln!(stdout, r"    ╔══════════════════════════════════════════════════════╗");
-    let _ = writeln!(stdout, r"    ║              UEFI MENU SELECT v{}                 ║", VERSION);
-    let _ = writeln!(stdout, r"    ╚══════════════════════════════════════════════════════╝");
+    let _ = writeln!(
+        stdout,
+        r"    ╔══════════════════════════════════════════════════════╗"
+    );
+    let _ = writeln!(
+        stdout,
+        r"    ║              UEFI MENU SELECT v{}                 ║",
+        VERSION
+    );
+    let _ = writeln!(
+        stdout,
+        r"    ╚══════════════════════════════════════════════════════╝"
+    );
     let _ = writeln!(stdout, "");
 }
 
-fn display_menu_with_nav(
-    system_table: &mut SystemTable<Boot>,
-    nav: &mut MenuNav,
-) -> MenuAction {
+fn display_menu_with_nav(system_table: &mut SystemTable<Boot>, nav: &mut MenuNav) -> MenuAction {
     let mut timeout = nav.config.timeout;
     let mut countdown_active = nav.depth == 0; // Only countdown on root menu
 
@@ -353,15 +406,25 @@ fn display_menu_with_nav(
 
             let _ = stdout.set_color(Color::DarkGray, Color::Black);
             let _ = writeln!(stdout, "");
-            let _ = writeln!(stdout, "    ──────────────────────────────────────────────────────");
+            let _ = writeln!(
+                stdout,
+                "    ──────────────────────────────────────────────────────"
+            );
 
             if countdown_active && timeout > 0 {
                 let _ = stdout.set_color(Color::Yellow, Color::Black);
-                let _ = writeln!(stdout, "    Auto-boot in {} seconds...  Press any key to stop", timeout);
+                let _ = writeln!(
+                    stdout,
+                    "    Auto-boot in {} seconds...  Press any key to stop",
+                    timeout
+                );
             } else {
                 let _ = stdout.set_color(Color::LightGray, Color::Black);
                 if nav.depth > 0 {
-                    let _ = writeln!(stdout, "    [↑/↓] Select   [Enter] Select   [Esc/Backspace] Back");
+                    let _ = writeln!(
+                        stdout,
+                        "    [↑/↓] Select   [Enter] Select   [Esc/Backspace] Back"
+                    );
                 } else {
                     let _ = writeln!(stdout, "    [↑/↓] Select   [Enter] Boot/Enter   [Esc] Exit");
                 }
@@ -434,6 +497,7 @@ fn handle_entry_selection(nav: &mut MenuNav, entry: BootEntry) -> MenuAction {
         EntryType::Reboot => MenuAction::Reboot,
         EntryType::Shutdown => MenuAction::Shutdown,
         EntryType::UefiShell => MenuAction::UefiShell,
+        EntryType::FirmwareSetup => MenuAction::FirmwareSetup,
         _ => MenuAction::Boot(entry),
     }
 }
@@ -554,9 +618,7 @@ fn read_file_from_root(
 
     // Get file size
     let mut info_buf = [0u8; 256];
-    let info: &uefi::proto::media::file::FileInfo = file
-        .get_info(&mut info_buf)
-        .map_err(|_| ())?;
+    let info: &uefi::proto::media::file::FileInfo = file.get_info(&mut info_buf).map_err(|_| ())?;
 
     let file_size = info.file_size() as usize;
 
@@ -630,9 +692,11 @@ fn boot_entry(
             Err(KernelError::NotImplemented)
         }
         // These entry types are handled by the menu system, not boot_entry
-        EntryType::Submenu | EntryType::Back | EntryType::Reboot |
-        EntryType::Shutdown | EntryType::UefiShell => {
-            Err(KernelError::NotImplemented)
-        }
+        EntryType::Submenu
+        | EntryType::Back
+        | EntryType::Reboot
+        | EntryType::Shutdown
+        | EntryType::UefiShell
+        | EntryType::FirmwareSetup => Err(KernelError::NotImplemented),
     }
 }

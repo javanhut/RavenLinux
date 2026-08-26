@@ -872,7 +872,7 @@ else
 step "Searching for boot device"
 
 BOOT_DEVICE=""
-ISO_LABEL="RAVEN_LIVE"
+ISO_LABEL="RAVENLINUX"
 
 # Device globs for the fallback scans below. /dev/mapper and /dev/dm-* are
 # here for Ventoy and friends: those boot the ISO as a *file* on a USB stick,

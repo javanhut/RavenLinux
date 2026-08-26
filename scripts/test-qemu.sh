@@ -87,7 +87,7 @@ if [[ -z "${ISO}" ]]; then
 fi
 
 [[ -n "${ISO}" && -f "${ISO}" ]] || {
-    log_error "No ISO found. Build one with 'make build' (or pass --iso PATH)."
+    log_error "No ISO found. Build one with 'imlazy build' (or pass --iso PATH)."
     exit 1
 }
 

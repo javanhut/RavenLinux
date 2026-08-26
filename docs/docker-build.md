@@ -15,16 +15,16 @@ The simplest entry point is the `Makefile` at the repo root, which works the
 same on macOS, Windows, and Linux:
 
 ```bash
-make image      # build just the toolchain image
-make build      # build everything; the ISO lands in ./build/ on your host
-make iso        # (re)generate the ISO from existing build output
-make shell      # interactive shell in the build environment
-make help       # list every target
+imlazy image      # build just the toolchain image
+imlazy build      # build everything; the ISO lands in ./build/ on your host
+imlazy iso        # (re)generate the ISO from existing build output
+imlazy shell      # interactive shell in the build environment
+imlazy list       # list every target
 ```
 
-Overrides: `make build JOBS=8`, `make build ARCH=x86_64`,
-`make build ENGINE=podman`, `make image IMAGE=raven:dev`, `make rebuild`
-(clean rebuild), `make clean` / `make distclean`.
+Overrides: `imlazy build jobs=8`, `imlazy build arch=x86_64`,
+`imlazy build engine=podman`, `imlazy image image=raven:dev`, `imlazy rebuild`
+(clean rebuild), `imlazy clean` / `imlazy distclean`.
 
 The Makefile is a thin wrapper around `scripts/docker-build.sh`, which you can
 call directly for the same result:
@@ -164,7 +164,7 @@ automatically — no extra flags needed:
 |---------|-------------|
 | `neither 'docker' nor 'podman' found` | Install Docker Desktop or Podman, or set `RAVEN_ENGINE`. |
 | `no image found in image index for architecture "arm64"` | The Arch base image is x86_64-only. The `Dockerfile` pins `--platform=linux/amd64`, so use the current Dockerfile / `make` / helper. If building by hand, add `--platform linux/amd64` to your `docker build`. |
-| `error restricting syscalls via seccomp: 22` / `switching to sandbox user 'alpm' failed` | pacman's download sandbox can't apply its seccomp filter under qemu emulation (arm64 host building the amd64 image). The `Dockerfile` disables it via `DisableSandboxSyscalls`; make sure you're on the current Dockerfile and re-run `make image`. |
+| `error restricting syscalls via seccomp: 22` / `switching to sandbox user 'alpm' failed` | pacman's download sandbox can't apply its seccomp filter under qemu emulation (arm64 host building the amd64 image). The `Dockerfile` disables it via `DisableSandboxSyscalls`; make sure you're on the current Dockerfile and re-run `imlazy image`. |
 | `mount: permission denied` / `chroot: ... Operation not permitted` | The container is not privileged. Use the helper script, or add `--privileged` to your `docker run`. |
 | `no space left on device` | The Docker/Podman VM ran out of disk. Increase the VM disk size (Docker Desktop → Settings → Resources) or prune images. |
 | Build artifacts owned by `root` on the host | Expected: the privileged container runs as root. Re-run a build (the build script fixes ownership), or `sudo chown -R "$USER" build`. |

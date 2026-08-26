@@ -155,7 +155,7 @@ DEPENDENCIES=(
 # red for tools its build does not use.
 # Format matches DEPENDENCIES: cmd:arch:debian:fedora:suse:void:alpine:description
 OPTIONAL_DEPENDENCIES=(
-    "qemu-system-x86_64:qemu-base:qemu-system-x86:qemu-system-x86:qemu-x86:qemu:qemu-system-x86_64:Boot the built ISO (make qemu)"
+    "qemu-system-x86_64:qemu-base:qemu-system-x86:qemu-system-x86:qemu-x86:qemu:qemu-system-x86_64:Boot the built ISO (imlazy qemu)"
     # Only needed for "raven-install --efi-nvram". The installer's default path
     # writes the fallback bootloader at \EFI\BOOT\BOOTX64.EFI, which boots
     # without touching NVRAM at all.
@@ -167,7 +167,7 @@ OPTIONAL_DEPENDENCIES=(
 )
 
 # Optional package groups with no command of their own to probe. A QEMU built
-# without a UI backend still provides qemu-system-x86_64, so `make qemu-desktop`
+# without a UI backend still provides qemu-system-x86_64, so `imlazy qemu-desktop`
 # -- and therefore any test of the Huginn session -- fails at run time with only
 # a "no graphical display backend" message to go on.
 OPTIONAL_PACKAGES_ARCH="qemu-ui-gtk qemu-ui-opengl edk2-ovmf"
@@ -596,7 +596,7 @@ check_optional_dependencies() {
 
     # The display backend has no command of its own: a headless QEMU still
     # ships qemu-system-x86_64, so this is the only place it can be surfaced
-    # before `make qemu-desktop` fails at run time.
+    # before `imlazy qemu-desktop` fails at run time.
     local optional_pkgs=""
     case "$distro" in
         arch)   optional_pkgs="$OPTIONAL_PACKAGES_ARCH" ;;
@@ -609,7 +609,7 @@ check_optional_dependencies() {
 
     if [[ -n "$optional_pkgs" ]]; then
         echo ""
-        echo -e "  For ${BOLD}make qemu-desktop${NC} (the Huginn Wayland session), QEMU also needs a"
+        echo -e "  For ${BOLD}imlazy qemu-desktop${NC} (the Huginn Wayland session), QEMU also needs a"
         echo -e "  display backend and UEFI firmware, which most distributions package apart:"
         echo -e "      ${CYAN}${optional_pkgs}${NC}"
     fi

@@ -9,7 +9,7 @@
 # Skips itself when the host has no freetype-py, the same way stage4 does: the
 # build is fail-soft about the console font and the tests should be too.
 #
-#   ./scripts/test-console-font.sh          # or: make test
+#   ./scripts/test-console-font.sh          # or: imlazy test
 
 set -uo pipefail
 

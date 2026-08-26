@@ -1,0 +1,16 @@
+# Desktop profile plus a hosted build environment.
+linux-firmware
+sof-firmware
+alsa-ucm-conf
+pipewire
+wireplumber
+bluez
+bluez-utils
+mesa-utils
+vulkan-tools
+vulkan-radeon
+vulkan-intel
+base-devel
+git
+rustup
+go

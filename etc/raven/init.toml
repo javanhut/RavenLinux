@@ -113,6 +113,9 @@ args = ["--system", "--nofork", "--nopidfile"]
 # /run is a fresh tmpfs each boot and dbus-daemon does not mkdir its own
 # socket directory -- without this it dies binding /run/dbus/system_bus_socket.
 runtime_dirs = ["/run/dbus"]
+after = ["udev"]
+ready_path = "/run/dbus/system_bus_socket"
+ready_timeout = 5
 restart = true
 enabled = true
 critical = false
@@ -141,6 +144,7 @@ name = "cawd"
 description = "CAW wireless daemon"
 exec = "/usr/bin/cawd"
 args = []
+after = ["udev"]
 restart = true
 enabled = true
 critical = false
@@ -177,6 +181,7 @@ name = "network"
 description = "Network management"
 exec = "/bin/raven-dhcp"
 args = ["--all", "-q"]
+after = ["udev"]
 restart = false
 enabled = true
 critical = false

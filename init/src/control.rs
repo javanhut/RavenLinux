@@ -351,6 +351,56 @@ fn start_service(
     services: &mut HashMap<String, Service>,
     config: &InitConfig,
 ) -> String {
+    let Some(service_config) = config.services.iter().find(|c| c.name == name).cloned() else {
+        return format!("error: no such service '{}'\n", name);
+    };
+
+    // Starting a unit manually must honor the same direct dependencies as
+    // boot. Previously `raven-rc start polkitd` could report success while
+    // D-Bus was stopped, leaving the new process to fail immediately.
+    for dependency in &service_config.after {
+        let running = services
+            .get_mut(dependency)
+            .map(|svc| {
+                svc.poll_exit();
+                svc.is_running()
+            })
+            .unwrap_or(false);
+        if !running {
+            let reply = start_service_raw(dependency, services, config);
+            if reply.starts_with("error:") {
+                return format!(
+                    "error: cannot start {}: dependency {}: {}",
+                    name, dependency, reply
+                );
+            }
+        }
+
+        if let Some(dep_cfg) = config.services.iter().find(|c| &c.name == dependency) {
+            if let Some(path) = dep_cfg.ready_path.as_deref() {
+                let deadline =
+                    std::time::Instant::now() + Duration::from_secs(dep_cfg.ready_timeout as u64);
+                while std::time::Instant::now() < deadline && !std::path::Path::new(path).exists() {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                if !std::path::Path::new(path).exists() {
+                    return format!(
+                        "error: cannot start {}: dependency {} was not ready at {}\n",
+                        name, dependency, path
+                    );
+                }
+            }
+        }
+    }
+
+    start_service_raw(name, services, config)
+}
+
+fn start_service_raw(
+    name: &str,
+    services: &mut HashMap<String, Service>,
+    config: &InitConfig,
+) -> String {
     if let Some(svc) = services.get_mut(name) {
         // Reap first: without this a start issued inside the reaper's 100ms
         // window sees a corpse as a running service and declines to act.

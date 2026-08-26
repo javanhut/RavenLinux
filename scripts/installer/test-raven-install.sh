@@ -12,7 +12,7 @@
 # need a real block device, and a test that fabricates one is testing losetup.
 # Use 'raven-install --dry-run' on the live image for those.
 #
-#   ./scripts/installer/test-raven-install.sh        # or: make test
+#   ./scripts/installer/test-raven-install.sh        # or: imlazy test
 
 set -uo pipefail
 

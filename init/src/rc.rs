@@ -27,10 +27,13 @@ use std::time::Duration;
 /// Where raven-init listens. Must match control::SOCKET_PATH.
 const SOCKET_PATH: &str = "/run/raven-init.sock";
 
-/// Bound on how long we wait for init. Short: raven-rc is interactive, and an
-/// init too busy to answer in a second is a fact worth reporting rather than
-/// hiding behind a hang.
-const TIMEOUT: Duration = Duration::from_secs(1);
+/// Connection and write operations should fail quickly when PID 1 is absent.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// A restart may spend up to five seconds waiting for the old process to exit,
+/// then verify the replacement. The former one-second read timeout made a
+/// successful slow restart look like raven-rc could not execute the command.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -114,8 +117,7 @@ fn ask(request: &str) -> Result<String, String> {
         let diagnosis = match e.kind() {
             ErrorKind::NotFound => format!(
                 "there is no socket at {}, so raven-init is not running.\n\
-                 PID 1 is '{}'. On the live ISO that is the live-init script,\n\
-                 not raven-init, and service commands are not available.",
+                 PID 1 is '{}', not raven-init, so service commands are not available.",
                 SOCKET_PATH,
                 pid1_name()
             ),
@@ -136,8 +138,8 @@ fn ask(request: &str) -> Result<String, String> {
         format!("raven-rc: {}", diagnosis)
     })?;
 
-    stream.set_read_timeout(Some(TIMEOUT)).ok();
-    stream.set_write_timeout(Some(TIMEOUT)).ok();
+    stream.set_read_timeout(Some(RESPONSE_TIMEOUT)).ok();
+    stream.set_write_timeout(Some(CONNECT_TIMEOUT)).ok();
 
     writeln!(stream, "{}", request).map_err(|e| format!("cannot send to raven-init: {}", e))?;
     stream.flush().ok();
@@ -212,9 +214,8 @@ fn send_command(cmd: &str) {
     let cmd_path = "/run/raven-init.cmd";
 
     // The command file is only meaningful if raven-init is the thing reading
-    // it. On the live ISO PID 1 is a shell script, and writing here *succeeds*
-    // while nothing ever acts on it -- a silent no-op is the worst outcome for
-    // a shutdown command, so go straight to the syscall instead.
+    // it. Writing while another PID 1 is active succeeds but nobody acts on
+    // it, so go straight to the syscall instead.
     if !init_is_raven() {
         eprintln!("raven-init is not PID 1; asking the kernel directly.");
         direct_reboot(cmd);
