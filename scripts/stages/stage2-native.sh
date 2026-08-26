@@ -50,6 +50,15 @@ if [[ -f "${PROJECT_ROOT}/scripts/lib/usrmerge.sh" ]]; then
     source "${PROJECT_ROOT}/scripts/lib/usrmerge.sh"
 fi
 
+# Presence, modes and accounts -- the half usrmerge.sh does not cover. An
+# ABSENT path is not a merge error and not a package conflict, so a rootfs
+# can pass check-layout.sh while missing /var/empty entirely (sshd then
+# refuses to start). See scripts/lib/skeleton.sh.
+if [[ -f "${PROJECT_ROOT}/scripts/lib/skeleton.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${PROJECT_ROOT}/scripts/lib/skeleton.sh"
+fi
+
 if [[ -f "${PROJECT_ROOT}/scripts/lib/logging.sh" ]]; then
     source "${PROJECT_ROOT}/scripts/lib/logging.sh"
 else
@@ -2765,6 +2774,18 @@ EOF
 	    elif [[ -f "${PROJECT_ROOT}/init/config/init.toml" ]]; then
 	        cp "${PROJECT_ROOT}/init/config/init.toml" "${SYSROOT_DIR}/etc/raven/init.toml"
 	    fi
+
+	    # Service drop-ins: raven-init reads /etc/raven/init.d/*.toml alongside
+	    # init.toml, so daemons installed later (`rvn install openssh`) get a
+	    # service definition by copying a template -- no editing init.toml. The
+	    # templates ship inert under /usr/share/raven/services; init.d starts
+	    # empty because the base image runs nothing it does not ship.
+	    mkdir -p "${SYSROOT_DIR}/etc/raven/init.d"
+	    if [[ -d "${PROJECT_ROOT}/configs/raven/services" ]]; then
+	        mkdir -p "${SYSROOT_DIR}/usr/share/raven/services"
+	        cp "${PROJECT_ROOT}/configs/raven/services/"*.toml \
+	            "${SYSROOT_DIR}/usr/share/raven/services/" 2>/dev/null || true
+	    fi
     if [[ ! -f "${SYSROOT_DIR}/etc/raven/init.toml" ]]; then
         cat > "${SYSROOT_DIR}/etc/raven/init.toml" << 'EOF'
 # RavenLinux Init Configuration
@@ -2847,13 +2868,21 @@ EOF
     # are open to everyone, but connect, disconnect and shutdown check the
     # peer's credentials. Upstream ships this as a sysusers.d fragment, which
     # nothing here reads, so the group is declared with the rest of them.
+    #
+    # The numbers are Arch's, not ours to choose. A tar payload records
+    # ownership NUMERICALLY, and Arch's `filesystem` ships /srv/ftp as gid 11
+    # and /var/games as gid 50 -- so while audio sat at 11 and video at 12,
+    # every `rvn install` that touched those paths produced files owned by the
+    # wrong group entirely. audio/video/input are 92/91/97 for that reason.
+    # skeleton.sh carries the full table and will renumber anything that drifts
+    # back, but the file should be written correctly here in the first place.
     cat > "${SYSROOT_DIR}/etc/group" << 'EOF'
 root:x:0:
 wheel:x:10:raven
 sudo:x:27:raven
-audio:x:11:raven
-video:x:12:raven
-input:x:13:raven
+audio:x:92:raven
+video:x:91:raven
+input:x:97:raven
 tty:x:5:raven
 disk:x:6:
 lp:x:7:
@@ -3664,7 +3693,14 @@ main() {
     else
         log_fatal "scripts/lib/usrmerge.sh is missing; cannot create a usr-merged sysroot"
     fi
-    mkdir -p "${SYSROOT_DIR}"/{etc,home,root}
+    # stage2 wiped the sysroot, so the skeleton goes with it -- same reasoning
+    # as the merge above. `imlazy stage2` never runs stage1, so without this the
+    # whole flow ships a tree with no /var/empty, no /etc/mtab and a 0755 /root.
+    if declare -F raven_skeleton_root >/dev/null 2>&1; then
+        raven_skeleton_root "${SYSROOT_DIR}" || log_fatal "rootfs skeleton failed"
+    else
+        log_fatal "scripts/lib/skeleton.sh is missing; cannot create a complete rootfs"
+    fi
 
     copy_shells
     copy_system_utils

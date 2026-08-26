@@ -1,0 +1,13 @@
+# OpenSSH authentication agent, managed by raven-init.
+#
+# Lands in /etc/raven/init.d automatically when `rvn install openssh` brings
+# in /usr/bin/ssh-agent. Then: `raven-rc start ssh-agent`.
+
+[[services]]
+name = "ssh-agent"
+description = "SSH authentication agent"
+exec = "/usr/bin/ssh-agent"
+args = ["-D"]
+restart = false
+enabled = false
+critical = false

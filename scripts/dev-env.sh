@@ -27,6 +27,15 @@ if [[ -f "${SCRIPT_DIR}/lib/usrmerge.sh" ]]; then
     source "${SCRIPT_DIR}/lib/usrmerge.sh"
 fi
 
+# Presence, modes and accounts -- the half usrmerge.sh does not cover. An
+# ABSENT path is not a merge error and not a package conflict, so a rootfs
+# can pass check-layout.sh while missing /var/empty entirely (sshd then
+# refuses to start). See scripts/lib/skeleton.sh.
+if [[ -f "${SCRIPT_DIR}/lib/skeleton.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${SCRIPT_DIR}/lib/skeleton.sh"
+fi
+
 if [[ -f "${SCRIPT_DIR}/lib/logging.sh" ]]; then
     source "${SCRIPT_DIR}/lib/logging.sh"
 else
@@ -121,8 +130,16 @@ setup_dev_env() {
         else
             log_error "scripts/lib/usrmerge.sh is missing; the dev sysroot will be split-usr"
         fi
-        mkdir -p "${sysroot}"/{boot,dev,etc,home,mnt,opt,proc,root,run,sys,tmp,var}
-        mkdir -p "${sysroot}"/var/{cache,lib,log,tmp}
+        # Presence, modes and accounts. Replaces the ad-hoc `mkdir -p {a,b,c}` lists
+        # that used to live here: those created a dozen directories with whatever
+        # umask happened to be set and no ownership at all, so /root came out 0755
+        # and /var/spool/mail lost its sticky bit. skeleton.sh carries Arch's modes
+        # and is idempotent, so it is also safe to call again later.
+        if declare -F raven_skeleton_root >/dev/null 2>&1; then
+            raven_skeleton_root "${sysroot}" || log_fatal "rootfs skeleton failed"
+        else
+            log_error "scripts/lib/skeleton.sh is missing; the dev sysroot will be incomplete"
+        fi
 
         # Copy os-release
         cp "${RAVEN_ROOT}/etc/os-release" "${sysroot}/etc/"

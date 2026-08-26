@@ -428,6 +428,7 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
             enabled: true,
             critical: false,
             environment: HashMap::new(),
+            pre_exec: Vec::new(),
             tty: None,
             runtime_dirs: Vec::new(),
             after: vec!["udev".to_string()],
@@ -462,6 +463,7 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
                 enabled: true,
                 critical: false,
                 environment: env,
+                pre_exec: Vec::new(),
                 tty: None,
                 runtime_dirs: Vec::new(),
                 after: vec!["udev".to_string(), "seatd".to_string()],
@@ -485,6 +487,7 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
                 enabled: true,
                 critical: false,
                 environment: compositor_env,
+                pre_exec: Vec::new(),
                 tty: None,
                 runtime_dirs: Vec::new(),
                 after: vec!["udev".to_string(), "seatd".to_string()],
@@ -867,6 +870,7 @@ fn load_config() -> Result<InitConfig> {
                     log::info!("Loaded configuration from {}", path);
                     // Remembered so enable/disable know what to rewrite.
                     config.source_path = Some(std::path::PathBuf::from(path));
+                    load_dropin_services(&mut config);
                     return Ok(config);
                 }
             }
@@ -874,7 +878,68 @@ fn load_config() -> Result<InitConfig> {
     }
 
     log::info!("Using default configuration");
-    Ok(InitConfig::default())
+    let mut config = InitConfig::default();
+    load_dropin_services(&mut config);
+    Ok(config)
+}
+
+/// Folds /etc/raven/init.d/*.toml into the service list.
+///
+/// The base image ships only what Raven itself provides; daemons arrive later
+/// through `rvn install`, and a freshly installed daemon needs a service
+/// definition without anyone hand-editing init.toml. Each drop-in is a file of
+/// `[[services]]` blocks in exactly init.toml's schema, so a definition can be
+/// moved between the two verbatim.
+///
+/// init.toml wins a name collision: the operator's main config outranks a file
+/// a package (or a copy-paste) dropped in. Files are read in sorted order so
+/// the outcome does not depend on directory enumeration.
+fn load_dropin_services(config: &mut InitConfig) {
+    let dir = std::env::var_os("RAVEN_INIT_DROPIN_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/etc/raven/init.d"));
+
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
+
+    let mut paths: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "toml"))
+        .collect();
+    paths.sort();
+
+    for path in paths {
+        let Ok(content) = fs::read_to_string(&path) else {
+            log::warn!("Cannot read drop-in {}", path.display());
+            continue;
+        };
+        // Parsed as a full InitConfig so the schema is identical, but only the
+        // services are taken -- a drop-in must not be able to change the
+        // hostname or shutdown timeout as a side effect.
+        let parsed: InitConfig = match toml::from_str(&content) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                // A daemon's definition being broken must not take the boot
+                // with it; the service just does not exist until it is fixed.
+                log::warn!("Ignoring drop-in {}: {}", path.display(), e);
+                continue;
+            }
+        };
+        for svc in parsed.services {
+            if config.services.iter().any(|s| s.name == svc.name) {
+                log::warn!(
+                    "Drop-in {} redefines '{}'; keeping the init.toml definition",
+                    path.display(),
+                    svc.name
+                );
+                continue;
+            }
+            log::info!("Service '{}' defined by drop-in {}", svc.name, path.display());
+            config.services.push(svc);
+        }
+    }
 }
 
 fn setup_signal_handlers() -> Result<()> {
@@ -943,11 +1008,11 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
                 continue;
             }
 
-            // A binary that is not installed is not a failure. Half of this
-            // list is software the owner may add later -- init.toml ships an
-            // sshd entry precisely so that `rvn install openssh` makes the
-            // next boot start it -- and an ERROR on the console for every
-            // absent optional daemon buries the login prompt under noise.
+            // A binary that is not installed is not a failure. A service can
+            // be defined before its daemon exists -- a drop-in copied into
+            // /etc/raven/init.d ahead of `rvn install`, or an entry for
+            // software the owner removed -- and an ERROR on the console for
+            // every absent daemon buries the login prompt under noise.
             // Skipped, not registered: `raven-rc start` falls back to the
             // config for services outside the running set, so the day the
             // binary appears it can be started by hand or by the next boot.
@@ -1010,6 +1075,7 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
             enabled: true,
             critical: false,
             environment: HashMap::new(),
+            pre_exec: Vec::new(),
             tty: Some("/dev/tty1".to_string()),
             stop_exec: None,
             stop_args: Vec::new(),
@@ -1031,6 +1097,7 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
                 enabled: true,
                 critical: false,
                 environment: HashMap::new(),
+            pre_exec: Vec::new(),
                 tty: Some("/dev/tty1".to_string()),
                 stop_exec: None,
                 stop_args: Vec::new(),

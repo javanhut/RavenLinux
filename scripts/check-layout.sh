@@ -24,6 +24,9 @@
 #   5. nothing installed as a real file inside a merged-away directory
 #   6. the paths Arch's `filesystem` package ships as symlinks match what this
 #      rootfs has, so `rvn install filesystem` would not conflict
+#   7. every directory, symlink and account in scripts/lib/skeleton.sh exists
+#      with the right mode -- the one class of failure checks 1-6 cannot see,
+#      because an ABSENT path is neither a merge error nor a package conflict
 #
 # Usage: ./scripts/check-layout.sh [OPTIONS] [ROOTFS]
 #
@@ -40,6 +43,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${RAVEN_ROOT:-$(dirname "$SCRIPT_DIR")}"
+
+if [[ -f "${PROJECT_ROOT}/scripts/lib/skeleton.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${PROJECT_ROOT}/scripts/lib/skeleton.sh"
+fi
 
 if [[ -f "${PROJECT_ROOT}/scripts/lib/logging.sh" ]]; then
     # shellcheck disable=SC1091
@@ -133,7 +141,7 @@ section() {
 }
 
 show_help() {
-    sed -n '2,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # =============================================================================
@@ -513,6 +521,41 @@ check_filesystem_pkg_compat() {
     return 0
 }
 
+check_skeleton() {
+    section "Skeleton completeness (directories, modes, accounts)"
+
+    if ! declare -F raven_skeleton_verify >/dev/null 2>&1; then
+        check_fail "scripts/lib/skeleton.sh is not loaded; cannot check completeness"
+        return 0
+    fi
+
+    # raven_skeleton_verify prints one line per failure on stdout and returns
+    # non-zero if there was any. Reported as a single check with the detail
+    # underneath, rather than ~200 individual PASS lines for a correct tree.
+    local out rc=0
+    out="$(raven_skeleton_verify "${ROOTFS:-/}" --quiet)" || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        check_pass "every skeleton path, mode and account is present"
+        return 0
+    fi
+
+    local n
+    n="$(printf '%s\n' "$out" | grep -c .)"
+    check_fail "${n} skeleton problem(s): missing paths, wrong modes or missing accounts"
+    local line i=0
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        i=$((i + 1))
+        if [[ $i -gt 15 ]]; then
+            echo -e "         ${RED}... and $((n - 15)) more${NC}"
+            break
+        fi
+        echo -e "         ${RED}${line# }${NC}"
+    done <<< "$out"
+    return 0
+}
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -576,6 +619,7 @@ main() {
     check_no_dangling
     check_merged_away_dirs
     check_filesystem_pkg_compat
+    check_skeleton
 
     section "Summary"
 
@@ -598,6 +642,8 @@ main() {
     echo ""
     log_info "Fix the rootfs so /bin /sbin /lib /lib64 are symlinks into /usr"
     log_info "(and /usr/sbin -> bin, /usr/lib64 -> lib) before installing packages into it."
+    log_info "For missing paths, wrong modes or missing accounts, run raven_skeleton_root"
+    log_info "from scripts/lib/skeleton.sh -- it creates what is absent and fixes drifted modes."
     return 1
 }
 

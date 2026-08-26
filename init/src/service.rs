@@ -158,6 +158,29 @@ impl Service {
             bail!("{problem}");
         }
 
+        // Setup the daemon expects someone else to have done -- generating
+        // host keys, say. Run to completion first, and a failure is the
+        // service's failure: starting sshd with no keys just moves the error
+        // into a crash loop.
+        if let Some((program, args)) = self.config.pre_exec.split_first() {
+            let status = Command::new(program)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(match self.open_log() {
+                    Some(f) => Stdio::from(f),
+                    None => Stdio::null(),
+                })
+                .stderr(match self.open_log() {
+                    Some(f) => Stdio::from(f),
+                    None => Stdio::null(),
+                })
+                .status()
+                .with_context(|| format!("pre_exec: cannot run {}", program))?;
+            if !status.success() {
+                bail!("pre_exec {} exited with {}", program, status);
+            }
+        }
+
         // A daemon that binds a socket under /run cannot mkdir its own parent
         // there after a boot -- /run is a fresh tmpfs every time. dbus is the
         // canonical case; see ServiceConfig::runtime_dirs.

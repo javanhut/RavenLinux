@@ -28,8 +28,9 @@ files = [
     { src = "target/release/visudo", dest = "/usr/bin/visudo", mode = 755 }
 ]
 
-symlinks = [
-    { target = "/usr/bin/sudo", link = "/bin/sudo" },
-    { target = "/usr/bin/su", link = "/bin/su" },
-    { target = "/usr/bin/visudo", link = "/bin/visudo" }
-]
+# No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS
+# /usr/bin: a link at /bin/<name> whose target is /usr/bin/<name> names the
+# same path on both sides, and creating it replaces the real binary with a
+# symlink to itself. Anything installed to /usr/bin is already reachable at
+# /bin/<name> through the merge link -- see scripts/lib/usrmerge.sh.
+symlinks = []

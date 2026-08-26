@@ -51,6 +51,7 @@ impl Default for InitConfig {
                     enabled: true,
                     critical: false,
                     environment: HashMap::new(),
+            pre_exec: Vec::new(),
                     tty: Some("/dev/tty1".to_string()),
                     stop_exec: None,
                     stop_args: Vec::new(),
@@ -165,6 +166,14 @@ pub struct ServiceConfig {
     /// Environment variables
     #[serde(default)]
     pub environment: HashMap<String, String>,
+
+    /// A command run to completion before each start, for setup the daemon
+    /// will not do itself -- sshd's `ssh-keygen -A` generating missing host
+    /// keys is the motivating case. First element is the program, the rest
+    /// its arguments. It must be idempotent: it runs on every start,
+    /// including supervisor restarts.
+    #[serde(default)]
+    pub pre_exec: Vec<String>,
 
     /// TTY device for this service (e.g., "/dev/tty1")
     /// If set, the service will be spawned with proper session and job control

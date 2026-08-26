@@ -265,6 +265,49 @@ stage_gui_libraries() {
     log_info "  ${copied} library(ies) staged, ${present} already present"
 }
 
+# =============================================================================
+# XWayland
+# =============================================================================
+# The X server that lets X11-only applications run under a Wayland compositor.
+# Huginn implements the window-manager half (smithay's XwmHandler); this stages
+# the server binary it drives.
+#
+# Both halves are required and neither is useful alone. Without the binary the
+# compositor logs "XWayland unavailable" once at startup and runs Wayland-only;
+# without the compositor support the binary is never executed at all. That is
+# why this lives in the GUI stage next to the compositor rather than with the
+# general packages: they ship or fail together.
+#
+# stage2 already stages the two things XWayland needs beyond its libraries --
+# /usr/bin/xkbcomp, which it forks to compile keymaps, and /usr/share/X11/xkb,
+# the data xkbcomp reads. See the comment at stage2-native.sh:334.
+stage_xwayland() {
+    local src
+    src="$(command -v Xwayland 2>/dev/null)"
+
+    if [[ -z "${src}" ]]; then
+        log_warn "  Xwayland not found on the build host; X11 apps will not run"
+        log_warn "  install it with: pacman -S --needed xorg-xwayland"
+        return 0
+    fi
+
+    install -m 0755 "${src}" "${SYSROOT_DIR}/usr/bin/Xwayland"
+    log_success "  Xwayland staged ($(du -h "${src}" | cut -f1))"
+
+    # Its shared libraries, through the same resolver the compositor's use --
+    # which skips anything stage2/stage3 already placed, so this adds only the
+    # X-specific ones (libxcvt, libxshmfence, libei and friends).
+    stage_gui_libraries "${src}"
+
+    # Belt and braces: xkbcomp is stage2's job, but a GUI-only rebuild
+    # (`imlazy gui` against an older sysroot) would not have run it, and the
+    # failure mode is a keyboard that does nothing in every X11 window.
+    if [[ ! -x "${SYSROOT_DIR}/usr/bin/xkbcomp" && -x /usr/bin/xkbcomp ]]; then
+        install -m 0755 /usr/bin/xkbcomp "${SYSROOT_DIR}/usr/bin/xkbcomp"
+        log_info "    + xkbcomp (keymap compiler for Xwayland)"
+    fi
+}
+
 # libinput classifies devices from data files, and libwacom from its own
 # database. Without them a touchpad is a generic pointer and a tablet is
 # nothing at all -- the compositor runs, the hardware just behaves oddly.
@@ -353,6 +396,38 @@ LAUNCHER
 
     chmod 0755 "${dest}"
     log_success "  raven-wayland-session installed"
+}
+
+# =============================================================================
+# Session entry
+# =============================================================================
+# stage2 creates /usr/share/wayland-sessions but nothing ever wrote into it, so
+# the directory looked wired up and enumerated zero sessions. Raven boots the
+# compositor from the kernel cmdline (raven.graphics=wayland), not from a
+# display manager, so nothing reads this today -- but a greeter added later
+# reads exactly this directory, and an empty one is indistinguishable from a
+# system with no graphical session at all.
+#
+# Exec is the launcher, not `huginn` directly: the launcher is what waits for a
+# real DRM node instead of grabbing simpledrm, and a greeter that ran the
+# compositor straight would hit the exact race install_session_launcher exists
+# to avoid.
+install_session_entry() {
+    local dir="${SYSROOT_DIR}/usr/share/wayland-sessions"
+
+    mkdir -p "${dir}"
+    cat > "${dir}/huginn.desktop" << 'ENTRY'
+[Desktop Entry]
+Name=Raven Desktop (Huginn)
+Comment=Wayland compositor and desktop shell
+Exec=/usr/bin/raven-wayland-session
+TryExec=/usr/bin/huginn
+Type=Application
+DesktopNames=Huginn;Raven
+Keywords=wayland;compositor;desktop;
+ENTRY
+    chmod 0644 "${dir}/huginn.desktop"
+    log_success "  huginn.desktop installed"
 }
 
 # =============================================================================
@@ -488,8 +563,12 @@ main() {
     stage_gui_libraries "${built_paths[@]}"
     stage_gui_data
 
+    log_step "Staging XWayland..."
+    stage_xwayland
+
     log_step "Installing the session launcher..."
     install_session_launcher
+    install_session_entry
 
     print_gui_summary
 

@@ -186,25 +186,11 @@ restart = false
 enabled = true
 critical = false
 
-# SSH daemon
-[[services]]
-name = "sshd"
-description = "OpenSSH server daemon"
-exec = "/usr/bin/sshd"
-args = ["-D"]
-restart = true
-enabled = true
-critical = false
-
-# SSH agent (user session, disabled by default)
-[[services]]
-name = "ssh-agent"
-description = "SSH authentication agent"
-exec = "/usr/bin/ssh-agent"
-args = ["-D"]
-restart = false
-enabled = false
-critical = false
+# No ssh services here: OpenSSH is not part of the base image.
+# `rvn install openssh` installs the daemon, creates any accounts it declares,
+# seeds its default config, and drops its service definition into
+# /etc/raven/init.d -- raven-init reads that directory alongside this file.
+# After that: `raven-rc start sshd`, and `raven-rc enable sshd` for boot.
 
 
 # =============================================================================

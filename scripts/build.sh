@@ -69,6 +69,15 @@ if [[ -f "${SCRIPT_DIR}/lib/usrmerge.sh" ]]; then
     source "${SCRIPT_DIR}/lib/usrmerge.sh"
 fi
 
+# Presence, modes and accounts -- the half usrmerge.sh does not cover. An
+# ABSENT path is not a merge error and not a package conflict, so a rootfs
+# can pass check-layout.sh while missing /var/empty entirely (sshd then
+# refuses to start). See scripts/lib/skeleton.sh.
+if [[ -f "${SCRIPT_DIR}/lib/skeleton.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${SCRIPT_DIR}/lib/skeleton.sh"
+fi
+
 
 # =============================================================================
 # Functions
@@ -217,8 +226,16 @@ setup_directories() {
         else
             log_fatal "scripts/lib/usrmerge.sh is missing; cannot create a usr-merged sysroot"
         fi
-        mkdir -p "${SYSROOT_DIR}"/{boot,dev,etc,home,mnt,opt,proc,root,run,sys,tmp,var}
-        mkdir -p "${SYSROOT_DIR}"/var/{cache,lib,log,tmp}
+        # Presence, modes and accounts. Replaces the ad-hoc `mkdir -p {a,b,c}` lists
+        # that used to live here: those created a dozen directories with whatever
+        # umask happened to be set and no ownership at all, so /root came out 0755
+        # and /var/spool/mail lost its sticky bit. skeleton.sh carries Arch's modes
+        # and is idempotent, so it is also safe to call again later.
+        if declare -F raven_skeleton_root >/dev/null 2>&1; then
+            raven_skeleton_root "${SYSROOT_DIR}" || log_fatal "rootfs skeleton failed"
+        else
+            log_fatal "scripts/lib/skeleton.sh is missing; cannot create a complete rootfs"
+        fi
     fi
 
     log_success "Build directories created"

@@ -37,6 +37,7 @@ fn sleeper(name: &str) -> ServiceConfig {
         enabled: true,
         critical: false,
         environment: HashMap::new(),
+        pre_exec: Vec::new(),
         tty: None,
         runtime_dirs: Vec::new(),
         after: Vec::new(),
@@ -830,6 +831,7 @@ fn runtime_dirs_are_created_and_output_goes_to_the_log() {
         enabled: true,
         critical: false,
         environment: HashMap::new(),
+        pre_exec: Vec::new(),
         tty: None,
         runtime_dirs: vec![rundir.display().to_string()],
         after: Vec::new(),
@@ -947,4 +949,74 @@ fn starting_a_non_executable_binary_says_so() {
     assert!(reply.contains("0644"), "the mode belongs in the message: {reply}");
 
     let _ = std::fs::remove_file(&path);
+}
+
+/// The base image ships no ssh, so its services arrive as drop-ins. A service
+/// defined by /etc/raven/init.d/*.toml must be startable and, critically,
+/// enable/disable must rewrite the drop-in that defines it -- not fail because
+/// init.toml has never heard of it.
+#[test]
+fn a_dropin_defined_service_can_be_disabled_and_enabled() {
+    let dir = std::env::temp_dir().join("raven-init-dropin-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+
+    // The main config defines nothing.
+    let main = dir.join("init.toml");
+    std::fs::write(&main, "[system]\nhostname = \"t\"\n[[services]]\nname = \"other\"\nexec = \"/bin/true\"\n").unwrap();
+
+    let dropin = dir.join("sshd.toml");
+    std::fs::write(
+        &dropin,
+        "[[services]]\nname = \"sshd\"\ndescription = \"d\"\nexec = \"/bin/sleep\"\nargs = [\"300\"]\nenabled = true\n",
+    )
+    .unwrap();
+
+    // What load_config would produce: main config plus the folded-in drop-in.
+    let mut svc_cfg = sleeper("sshd");
+    svc_cfg.exec = "/bin/sleep".to_string();
+    let mut cfg = config_with(vec![svc_cfg]);
+    cfg.source_path = Some(main.clone());
+
+    let mut services = HashMap::new();
+
+    std::env::set_var("RAVEN_INIT_DROPIN_DIR", &dir);
+    let (reply, _) = control::dispatch("disable sshd", &mut services, &mut cfg);
+    std::env::remove_var("RAVEN_INIT_DROPIN_DIR");
+
+    assert!(reply.starts_with("Disabled sshd"), "{reply}");
+    // The flag landed in the file that defines the service...
+    let rewritten = std::fs::read_to_string(&dropin).unwrap();
+    assert!(rewritten.contains("enabled = false"), "{rewritten}");
+    // ...and init.toml was not grown a phantom entry.
+    let main_after = std::fs::read_to_string(&main).unwrap();
+    assert!(!main_after.contains("sshd"), "{main_after}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// pre_exec runs to completion before the daemon starts, and its failure is
+/// the service's failure -- sshd with no host keys must fail at start with
+/// the keygen's error, not enter a crash loop.
+#[test]
+fn pre_exec_runs_first_and_its_failure_stops_the_start() {
+    let marker = std::env::temp_dir().join("raven-init-pre-exec-marker");
+    let _ = std::fs::remove_file(&marker);
+
+    let mut ok = sleeper("with-setup");
+    ok.pre_exec = vec!["/bin/touch".to_string(), marker.display().to_string()];
+    let svc = Service::start(&ok).expect("starts");
+    assert!(marker.exists(), "pre_exec must have run before the daemon");
+    let mut svc = svc;
+    svc.kill();
+    let _ = std::fs::remove_file(&marker);
+
+    let mut broken = sleeper("with-broken-setup");
+    broken.pre_exec = vec!["/bin/false".to_string()];
+    let err = match Service::start(&broken) {
+        Ok(_) => panic!("a failed pre_exec must fail the start"),
+        Err(e) => e,
+    };
+    let msg = format!("{err:#}");
+    assert!(msg.contains("pre_exec"), "the error names the phase: {msg}");
 }

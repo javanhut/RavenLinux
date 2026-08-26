@@ -5,11 +5,13 @@
 # Builds the packages that sit on top of the stage 2 sysroot but are not part
 # of the cross-built base itself:
 #
-#   - core libraries the shells and OpenSSH link against (zlib, ncurses,
-#     readline, attr, acl)
+#   - core libraries the shells link against (zlib, ncurses, readline,
+#     attr, acl)
 #   - the shells (bash, fish) and their configuration
-#   - OpenSSH client + server
 #   - RavenBoot, the UEFI bootloader (bootloader/)
+#
+# OpenSSH is deliberately absent: network daemons are installed on demand
+# with `rvn install openssh`, not baked into the image.
 #   - the runtime libraries and terminfo entries a console system needs
 #
 # Anything beyond that -- editors, language toolchains, a desktop -- is
@@ -429,107 +431,15 @@ build_core_deps() {
 # =============================================================================
 # SSH
 # =============================================================================
-build_ssh() {
-    log_step "Building SSH support..."
-
-    mkdir -p "${SYSROOT_DIR}/etc/ssh"
-    mkdir -p "${SYSROOT_DIR}/var/lib/sshd"
-    chmod 700 "${SYSROOT_DIR}/var/lib/sshd"
-
-    # Build OpenSSH if not present
-    if [[ ! -f "${SYSROOT_DIR}/usr/bin/ssh" ]]; then
-        build_openssh
-    fi
-
-    # Copy SSH configs
-    local ssh_config_dir="${PROJECT_ROOT}/configs/ssh"
-    if [[ -d "${ssh_config_dir}" ]]; then
-        if [[ -f "${ssh_config_dir}/sshd_config" ]]; then
-            cp "${ssh_config_dir}/sshd_config" "${SYSROOT_DIR}/etc/ssh/"
-            log_info "Installed sshd_config"
-        fi
-        if [[ -f "${ssh_config_dir}/ssh_config" ]]; then
-            cp "${ssh_config_dir}/ssh_config" "${SYSROOT_DIR}/etc/ssh/"
-            log_info "Installed ssh_config"
-        fi
-    fi
-
-    log_success "SSH support built and configured"
-}
-
-# Build OpenSSH from source or use system binaries
-build_openssh() {
-    log_info "Building OpenSSH..."
-
-    local ssh_ver="9.6p1"
-    local cache_dir="${BUILD_DIR}/sources"
-    mkdir -p "${cache_dir}"
-
-    # Check for system SSH first
-    if command -v ssh &>/dev/null && command -v sshd &>/dev/null; then
-        log_info "Using host OpenSSH"
-        mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/usr/lib/ssh"
-
-        # Copy SSH binaries
-        for bin in ssh scp sftp ssh-keygen ssh-keyscan ssh-add ssh-agent; do
-            if [[ -x "/usr/bin/${bin}" ]]; then
-                cp "/usr/bin/${bin}" "${SYSROOT_DIR}/usr/bin/"
-                log_info "  Copied ${bin}"
-            fi
-        done
-
-        # Copy sshd
-        if [[ -x "/usr/sbin/sshd" ]]; then
-            cp "/usr/sbin/sshd" "${SYSROOT_DIR}/usr/bin/"
-        elif [[ -x "/usr/bin/sshd" ]]; then
-            cp "/usr/bin/sshd" "${SYSROOT_DIR}/usr/bin/"
-        fi
-
-        # Copy helper programs
-        for helper in sftp-server ssh-keysign; do
-            for path in /usr/lib/ssh /usr/libexec/openssh /usr/lib/openssh; do
-                if [[ -x "${path}/${helper}" ]]; then
-                    mkdir -p "${SYSROOT_DIR}/usr/lib/ssh"
-                    cp "${path}/${helper}" "${SYSROOT_DIR}/usr/lib/ssh/"
-                    break
-                fi
-            done
-        done
-
-        log_success "OpenSSH binaries installed"
-        return 0
-    fi
-
-    # Download and build from source
-    local ssh_tarball="openssh-${ssh_ver}.tar.gz"
-    local ssh_url="https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/${ssh_tarball}"
-
-    if [[ ! -f "${cache_dir}/${ssh_tarball}" ]]; then
-        log_info "Downloading OpenSSH ${ssh_ver}..."
-        if curl -fsSL -o "${cache_dir}/${ssh_tarball}" "${ssh_url}"; then
-            log_info "Downloaded OpenSSH"
-        else
-            log_warn "Failed to download OpenSSH"
-            return 0
-        fi
-    fi
-
-    # Extract and build
-    local ssh_src="${cache_dir}/openssh-${ssh_ver}"
-    if [[ ! -d "${ssh_src}" ]]; then
-        tar -xzf "${cache_dir}/${ssh_tarball}" -C "${cache_dir}"
-    fi
-
-    cd "${ssh_src}"
-    if ./configure --prefix=/usr --sysconfdir=/etc/ssh --with-privsep-path=/var/lib/sshd && \
-       make -j$(nproc) && \
-       make DESTDIR="${SYSROOT_DIR}" install; then
-        log_success "OpenSSH ${ssh_ver} built and installed"
-    else
-        log_warn "OpenSSH build failed - will be available via rvn install openssh"
-    fi
-    cd "${PROJECT_ROOT}"
-}
+# OpenSSH is deliberately NOT part of the base image.
+# =============================================================================
+# The base system is core utilities, drivers, and software built for Raven;
+# network daemons are installed on demand (`rvn install openssh`). The only
+# trace left in the image is the inert service template under
+# /usr/share/raven/services (from configs/raven/services), whose comments walk
+# through the install: package, privsep account, drop-in, start. This section
+# used to build OpenSSH into every image -- ripped out on request, 2026-08-26.
+# =============================================================================
 
 # =============================================================================
 # Build RavenBoot (UEFI bootloader)
@@ -1089,15 +999,6 @@ print_summary() {
         fi
     done
 
-    echo ""
-    echo "Networking:"
-    for tool in ssh scp sshd sftp; do
-        if [[ -f "${SYSROOT_DIR}/usr/bin/${tool}" ]]; then
-            echo "  [OK] ${tool}"
-        else
-            echo "  [--] ${tool}"
-        fi
-    done
 
     echo ""
     echo "Bootloader:"
@@ -1109,7 +1010,6 @@ print_summary() {
 
     echo ""
     echo "Configuration:"
-    [[ -f "${SYSROOT_DIR}/etc/ssh/sshd_config" ]] && echo "  [OK] SSH config"
     [[ -f "${SYSROOT_DIR}/etc/shells" ]]          && echo "  [OK] /etc/shells"
     [[ -f "${SYSROOT_DIR}/etc/bashrc" ]]          && echo "  [OK] bashrc"
     [[ -f "${SYSROOT_DIR}/etc/fish/config.fish" ]] && echo "  [OK] fish config"
@@ -1142,7 +1042,6 @@ main() {
     build_shells
 
     # OpenSSH client + server
-    build_ssh
 
     # RavenBoot UEFI bootloader -> packages/boot/raven-boot.efi (used by stage4)
     build_bootloader

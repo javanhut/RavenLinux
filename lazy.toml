@@ -47,7 +47,7 @@ desc = "Populate the native runtime sysroot"
 run = ["{{run}} {{flags}} stage2"]
 
 [commands.stage3]
-desc = "Build base libraries, shells, OpenSSH, and RavenBoot"
+desc = "Build base libraries, shells, and RavenBoot"
 run = ["{{run}} {{flags}} stage3"]
 
 [commands.raven]
@@ -68,8 +68,9 @@ desc = "Rebuild only the early userspace image"
 run = ["{{run}} {{flags}} initramfs"]
 
 [commands.test]
-desc = "Run init, installer, and console-font tests"
+desc = "Run manifest, init, installer, and console-font tests"
 run = [
+  "./scripts/check-manifests.sh",
   "cargo test --manifest-path init/Cargo.toml",
   "./scripts/installer/test-raven-install.sh",
   "./scripts/test-console-font.sh",
@@ -94,6 +95,18 @@ run = ["./scripts/test-qemu.sh --console --timeout 180"]
 [commands.shell]
 desc = "Open a shell in the build environment"
 run = ["{{run}} shell"]
+
+[commands.manifests]
+desc = "Check package manifests for self-referential usr-merge symlinks"
+run = ["./scripts/check-manifests.sh"]
+
+[commands.layout]
+desc = "Check the sysroot layout: usr-merge, then completeness"
+run = ["./scripts/check-layout.sh"]
+
+[commands.skeleton]
+desc = "Create missing rootfs directories, symlinks and accounts in the sysroot"
+run = ["./scripts/apply-skeleton.sh"]
 
 [commands.clean]
 desc = "Remove build output"

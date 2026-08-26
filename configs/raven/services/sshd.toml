@@ -1,0 +1,22 @@
+# OpenSSH server, managed by raven-init.
+#
+# The base image ships no ssh. `rvn install openssh` puts this definition into
+# /etc/raven/init.d automatically once /usr/bin/sshd exists; after that:
+#
+#   raven-rc start sshd      # run it now
+#   raven-rc enable sshd     # start it at every boot
+#
+# Installing a daemon is not a decision to run it, so this ships disabled.
+# pre_exec generates any missing host keys before each start (ssh-keygen -A
+# is a no-op when they exist). Privilege separation uses the `nobody`
+# account, which the base system provides.
+
+[[services]]
+name = "sshd"
+description = "OpenSSH server daemon"
+exec = "/usr/bin/sshd"
+args = ["-D"]
+pre_exec = ["/usr/bin/ssh-keygen", "-A"]
+restart = true
+enabled = false
+critical = false

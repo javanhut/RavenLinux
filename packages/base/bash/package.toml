@@ -33,8 +33,12 @@ build = ["readline", "ncurses"]
 files = [
     { src = "bash", dest = "/usr/bin/bash", mode = 755 }
 ]
+# No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS
+# /usr/bin: a link at /bin/<name> whose target is /usr/bin/<name> names the
+# same path on both sides, and creating it replaces the real binary with a
+# symlink to itself. Anything installed to /usr/bin is already reachable at
+# /bin/<name> through the merge link -- see scripts/lib/usrmerge.sh.
 symlinks = [
-    { target = "/usr/bin/bash", link = "/bin/bash" },
     { target = "/usr/bin/bash", link = "/usr/bin/sh" },
     { target = "/usr/bin/bash", link = "/bin/sh" }
 ]

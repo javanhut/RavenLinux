@@ -51,6 +51,15 @@ if [[ -f "${PROJECT_ROOT}/scripts/lib/usrmerge.sh" ]]; then
     source "${PROJECT_ROOT}/scripts/lib/usrmerge.sh"
 fi
 
+# Presence, modes and accounts -- the half usrmerge.sh does not cover. An
+# ABSENT path is not a merge error and not a package conflict, so a rootfs
+# can pass check-layout.sh while missing /var/empty entirely (sshd then
+# refuses to start). See scripts/lib/skeleton.sh.
+if [[ -f "${PROJECT_ROOT}/scripts/lib/skeleton.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${PROJECT_ROOT}/scripts/lib/skeleton.sh"
+fi
+
 if [[ -f "${PROJECT_ROOT}/scripts/lib/logging.sh" ]]; then
     source "${PROJECT_ROOT}/scripts/lib/logging.sh"
 else
@@ -377,6 +386,19 @@ create_squashfs() {
 
     # Clean up to reduce size
     cleanup_sysroot
+
+    # cleanup_sysroot just deleted /usr/share/man and /usr/include, both of
+    # which Arch's `filesystem` package ships -- and install_packages_to_sysroot
+    # ran before it with a `mkdir -p` loop over host library paths. Re-applying
+    # the skeleton here, as the last writer before the squashfs is sealed, is
+    # what makes the shipped tree match the table rather than match whatever
+    # the previous two functions happened to leave behind. Idempotent by
+    # design; on an already-correct tree it logs nothing.
+    if declare -F raven_skeleton_root >/dev/null 2>&1; then
+        raven_skeleton_root "${SYSROOT_DIR}" || log_fatal "rootfs skeleton failed"
+    else
+        log_warn "scripts/lib/skeleton.sh not loaded; the image may be missing directories"
+    fi
 
     # The real last gate. It used to run before create_squashfs, but both
     # install_packages_to_sysroot and cleanup_sysroot mutate the tree after
@@ -956,14 +978,30 @@ check_usrmerge_layout() {
         return 0
     fi
 
+    local rc=0
+
     if raven_usrmerge_verify "${SYSROOT_DIR}"; then
         log_success "  /bin /sbin /lib /lib64 -> usr, no symlink loops"
-        return 0
+    else
+        log_error "The sysroot is not usr-merged. Arch packages cannot be installed on it,"
+        log_error "and a symlink loop under /usr/bin can leave the image with no shell."
+        rc=1
     fi
 
-    log_error "The sysroot is not usr-merged. Arch packages cannot be installed on it,"
-    log_error "and a symlink loop under /usr/bin can leave the image with no shell."
-    return 1
+    # Separate question, separate check: the merge can be flawless while the
+    # tree is missing /var/empty, /etc/mtab or half of /var. An absent path is
+    # not a merge error and not a package conflict, so nothing above sees it.
+    if declare -F raven_skeleton_verify >/dev/null 2>&1; then
+        if raven_skeleton_verify "${SYSROOT_DIR}" --quiet; then
+            log_success "  all skeleton directories, symlinks and accounts present"
+        else
+            log_error "The sysroot is incomplete. The failures above are directories,"
+            log_error "symlinks or accounts the running system needs but does not have."
+            rc=1
+        fi
+    fi
+
+    return $rc
 }
 
 # =============================================================================

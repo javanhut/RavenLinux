@@ -137,9 +137,9 @@ EOF
     cat > "$t/etc/group" <<'EOF'
 root:x:0:
 wheel:x:10:raven
-audio:x:11:raven
-video:x:12:raven
-input:x:13:raven
+audio:x:92:raven
+video:x:91:raven
+input:x:97:raven
 users:x:100:raven
 raven:x:1000:
 nobody:x:65534:
@@ -219,8 +219,14 @@ lacks   "placeholder gone from group"     'raven'   "$TARGET/etc/group"
 absent  "placeholder home removed"        "$TARGET/home/raven"
 
 matches "added to wheel"                  '^wheel:x:10:javan$' "$TARGET/etc/group"
-matches "added to audio"                  '^audio:x:11:javan$' "$TARGET/etc/group"
-matches "added to video"                  '^video:x:12:javan$' "$TARGET/etc/group"
+# The gids are pinned deliberately. They are Arch's canonical numbers, and a
+# tar payload records ownership NUMERICALLY -- Arch's `filesystem` ships
+# /srv/ftp as gid 11, so when audio sat at 11 an `rvn install` produced an FTP
+# root owned by the audio group. Pinning them here is what stops that drifting
+# back. See scripts/lib/skeleton.sh for the full table.
+matches "added to audio"                  '^audio:x:92:javan$' "$TARGET/etc/group"
+matches "added to video"                  '^video:x:91:javan$' "$TARGET/etc/group"
+matches "added to input"                  '^input:x:97:javan$' "$TARGET/etc/group"
 matches "sudoers.d grants wheel"          '^%wheel ALL=\(ALL:ALL\) ALL$' "$TARGET/etc/sudoers.d/10-wheel"
 matches "sudoers reads sudoers.d"         '@includedir /etc/sudoers\.d' "$TARGET/etc/sudoers"
 

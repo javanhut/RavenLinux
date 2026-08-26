@@ -37,9 +37,12 @@ files = [
     { src = "fish_indent", dest = "/usr/bin/fish_indent", mode = 755 },
     { src = "fish_key_reader", dest = "/usr/bin/fish_key_reader", mode = 755 }
 ]
-symlinks = [
-    { target = "/usr/bin/fish", link = "/bin/fish" }
-]
+# No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS
+# /usr/bin: a link at /bin/<name> whose target is /usr/bin/<name> names the
+# same path on both sides, and creating it replaces the real binary with a
+# symlink to itself. Anything installed to /usr/bin is already reachable at
+# /bin/<name> through the merge link -- see scripts/lib/usrmerge.sh.
+symlinks = []
 directories = [
     "/usr/share/fish",
     "/usr/share/fish/completions",

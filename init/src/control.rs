@@ -419,6 +419,22 @@ fn start_service_raw(
     // it on request is exactly what `enabled = false` should permit -- it means
     // "not automatically", not "never".
     let Some(cfg) = config.services.iter().find(|c| c.name == name) else {
+        // The base image defines no services for software it does not ship,
+        // but it does carry templates for the daemons people install first.
+        // "No such service" with the fix in hand beats making them hunt.
+        // rvn copies the template in automatically when it installs the
+        // matching binary, so landing here usually means the software is not
+        // installed yet -- or was put on disk by something other than rvn.
+        let template = format!("/usr/share/raven/services/{}.toml", name);
+        if std::path::Path::new(&template).exists() {
+            return format!(
+                "error: no such service '{}'\n\
+                 Its software is not installed. `rvn install` sets the service\n\
+                 up with it; installed some other way, copy the definition:\n\
+                 \x20 cp {} /etc/raven/init.d/\n",
+                name, template
+            );
+        }
         return format!("error: no such service '{}'\n", name);
     };
 
@@ -536,7 +552,7 @@ fn set_enabled(name: &str, enabled: bool, config: &mut InitConfig) -> String {
 
     let past = if enabled { "Enabled" } else { "Disabled" };
 
-    match persist_enabled(&path, name, enabled) {
+    match persist_enabled_wherever_defined(&path, name, enabled) {
         Ok(()) => {
             let note = if was == enabled {
                 format!(" (was already {}d)", verb)
@@ -555,6 +571,56 @@ fn set_enabled(name: &str, enabled: bool, config: &mut InitConfig) -> String {
             format!("error: cannot {} {}: {:#}\n", verb, name, e)
         }
     }
+}
+
+/// Rewrite a service's `enabled` key in whichever file defines it.
+///
+/// init.toml is tried first; a service it does not name was folded in from a
+/// drop-in under /etc/raven/init.d, so the rewrite goes to the drop-in that
+/// defines it. Writing the flag into init.toml instead would work once and
+/// then leave two files disagreeing about the same service.
+fn persist_enabled_wherever_defined(
+    main: &std::path::Path,
+    name: &str,
+    enabled: bool,
+) -> std::io::Result<()> {
+    match persist_enabled(main, name, enabled) {
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        other => return other,
+    }
+
+    let dir = std::env::var_os("RAVEN_INIT_DROPIN_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/etc/raven/init.d"));
+
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|ext| ext == "toml"))
+                .collect()
+        })
+        .unwrap_or_default();
+    paths.sort();
+
+    for path in paths {
+        match persist_enabled(&path, name, enabled) {
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(e) if e.kind() == ErrorKind::InvalidData => continue,
+            other => return other,
+        }
+    }
+
+    Err(std::io::Error::new(
+        ErrorKind::NotFound,
+        format!(
+            "'{}' is not defined in {} or any drop-in under {}",
+            name,
+            main.display(),
+            dir.display()
+        ),
+    ))
 }
 
 /// Rewrite one service's `enabled` key in the config file.
