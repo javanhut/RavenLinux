@@ -2519,6 +2519,37 @@ EOF
 options rtw88_pci disable_aspm=1
 EOF
 
+    # Host side of the same link. rtw88_pci.disable_aspm only stops the chip
+    # from requesting L1; the root port still parks the link in L1 on its own
+    # (CONFIG_PCIEASPM_DEFAULT keeps whatever the BIOS programmed). On the ASUS
+    # ROG test laptop the RTL8821CE powers on once at probe, and every power-on
+    # after its first power-off then fails "power ready" (poll offset=0x6) --
+    # with the chip-side knob already off. "performance" disables ASPM on every
+    # link, the runtime equivalent of pcie_aspm=off on the command line.
+    # Applied by raven-init before the card is probed (pcie_aspm is built in).
+    cat > "${SYSROOT_DIR}/etc/modprobe.d/pcie-aspm.conf" << 'EOF'
+# RavenLinux: PCIe ASPM policy
+# Realtek RTL8821CE fails to power on again behind a link the host holds in L1.
+# pcie_aspm is built in; raven-init applies this line at boot (modprobe never sees it).
+options pcie_aspm policy=performance
+EOF
+
+    # asus-wmi / asus-nb-wmi were not in the kernel config of the last build
+    # on which the ASUS ROG laptop's RTL8821CE worked (June 2026); they are
+    # modules now, and udev loads them between the card's probe and its first
+    # `port up`. On ASUS boards the WLAN rfkill they register drives the card's
+    # power through the EC (WMI DEVS 0x00010011), and registering it writes
+    # that state -- so they are the one new thing touching the card's power in
+    # exactly the window where every later power-on starts failing. Kept out
+    # until proven innocent; the cost is ASUS hotkeys/fan-curve WMI, nothing
+    # the console system uses. If they turn out to be it, `options asus_nb_wmi
+    # wapf=4` (WLAN under OS control) is the gentler form to try next.
+    cat > "${SYSROOT_DIR}/etc/modprobe.d/asus-wmi.conf" << 'EOF'
+# RavenLinux: keep ASUS WMI off the wifi card's power (see stage2-native.sh)
+blacklist asus_nb_wmi
+blacklist asus_wmi
+EOF
+
     # rvn package manager config
     mkdir -p "${SYSROOT_DIR}/etc/rvn"
     cat > "${SYSROOT_DIR}/etc/rvn/config.toml" << 'EOF'
