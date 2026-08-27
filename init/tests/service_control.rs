@@ -18,6 +18,10 @@ mod config;
 mod user;
 #[path = "../src/service.rs"]
 mod service;
+// reload re-runs the boot-time transforms, so control.rs names `crate::overrides`
+// as well. It in turn reaches for `crate::config` and `crate::user`, both above.
+#[path = "../src/overrides.rs"]
+mod overrides;
 // control.rs refers to its siblings as `crate::config` / `crate::service`; in a
 // test binary the crate root is this file, so those paths resolve here.
 use config as _config_for_control;
@@ -1055,10 +1059,23 @@ impl Dropins {
     /// `key` must be unique per test: these are real directories, and two tests
     /// sharing one path delete each other's files. Naming them by entry count
     /// was the first version of this and produced exactly that collision.
+    ///
+    /// The empty command line is the point rather than a placeholder. Reload
+    /// re-runs the boot-time transforms, and those read /proc/cmdline -- so
+    /// without pinning it these tests would synthesize a seat daemon and a
+    /// session on a machine booted with `raven.graphics=wayland` and not on
+    /// one booted without, and every count and every "nothing changed" below
+    /// would depend on how the build host happened to start.
     fn new(key: &str, entries: &[(&str, &str)]) -> Self {
+        Self::with_cmdline(key, entries, "")
+    }
+
+    /// The same, for the tests that are about what the command line does.
+    fn with_cmdline(key: &str, entries: &[(&str, &str)], cmdline: &str) -> Self {
         let guard = DROPIN_ENV.lock().unwrap_or_else(|e| e.into_inner());
         let dir = dropin_dir(key, entries);
         std::env::set_var("RAVEN_INIT_DROPIN_DIR", &dir);
+        std::env::set_var("RAVEN_INIT_CMDLINE", cmdline);
         Self { dir, _guard: guard }
     }
 }
@@ -1066,6 +1083,7 @@ impl Dropins {
 impl Drop for Dropins {
     fn drop(&mut self) {
         std::env::remove_var("RAVEN_INIT_DROPIN_DIR");
+        std::env::remove_var("RAVEN_INIT_CMDLINE");
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -1116,6 +1134,67 @@ fn reload_picks_up_a_service_installed_after_boot() {
         "definition should be live after reload"
     );
 
+}
+
+#[test]
+fn reload_keeps_services_that_no_file_defines() {
+    // The bug: `seatd`, `ravend` and `wayland-session` are synthesized from the
+    // kernel command line and the installed binaries, so no file names them.
+    // Reload re-read the files only, found no incoming definition, and took
+    // that for "its file is gone" -- dropping a stopped one outright. The
+    // machine then had no way back to a login screen short of a reboot, and
+    // `raven-rc start ravend` answered "no such service" while ravend sat
+    // installed in /usr/bin.
+    //
+    // seatd is the one to assert on: it is synthesized whenever the command
+    // line asks for Wayland, whether or not the binary is installed, so this
+    // does not depend on what the build host has in /usr/bin.
+    let _dropins = Dropins::with_cmdline("synthesized", &[], "raven.graphics=wayland");
+
+    // Boot: the transforms put it in the live configuration.
+    let mut services: HashMap<String, Service> = HashMap::new();
+    let mut cfg = config_with(Vec::new());
+    overrides::apply_kernel_cmdline_overrides(&mut cfg).expect("overrides at boot");
+    assert!(
+        cfg.services.iter().any(|s| s.name == "seatd"),
+        "precondition: raven.graphics=wayland should synthesize seatd"
+    );
+
+    // The reload that used to delete it. Nothing is running, which is the case
+    // that lost the definition rather than merely mislabelling it.
+    let (reply, _) = control::dispatch("reload", &mut services, &mut cfg);
+    assert!(
+        cfg.services.iter().any(|s| s.name == "seatd"),
+        "reload dropped a synthesized service: {reply}"
+    );
+
+    // The symptom an operator would have hit.
+    let (status, _) = control::dispatch("status seatd", &mut services, &mut cfg);
+    assert!(
+        !status.contains("no such service"),
+        "seatd should still be nameable after a reload: {status}"
+    );
+}
+
+#[test]
+fn reload_synthesizes_nothing_without_wayland_on_the_command_line() {
+    // The other half: these transforms are conditional, and a reload must not
+    // invent a seat daemon on a machine that never asked for a graphical
+    // session. Guards against "fix the drop" turning into "start it anyway".
+    let _dropins = Dropins::with_cmdline("no-wayland", &[], "root=UUID=whatever rw quiet");
+
+    let mut services: HashMap<String, Service> = HashMap::new();
+    let mut cfg = config_with(Vec::new());
+
+    let (reply, _) = control::dispatch("reload", &mut services, &mut cfg);
+    assert!(
+        !cfg.services.iter().any(|s| s.name == "seatd"),
+        "no Wayland asked for, so no seatd should appear: {reply}"
+    );
+    assert!(
+        !cfg.services.iter().any(|s| s.name == "wayland-session"),
+        "no Wayland asked for, so no session should appear: {reply}"
+    );
 }
 
 #[test]

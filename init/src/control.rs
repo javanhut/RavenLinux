@@ -580,7 +580,7 @@ fn restart_service(
 /// "what is configured", and the one that only runs on reload is the one that
 /// would rot unnoticed.
 fn reload_config(services: &mut HashMap<String, Service>, config: &mut InitConfig) -> String {
-    let fresh = match crate::config::load() {
+    let mut fresh = match crate::config::load() {
         Ok(fresh) => fresh,
         Err(e) => {
             // The live configuration is untouched -- nothing has been merged
@@ -592,6 +592,30 @@ fn reload_config(services: &mut HashMap<String, Service>, config: &mut InitConfi
             );
         }
     };
+
+    // The other half of the boot path. Without it a reload sees only what is
+    // written in a file, and everything synthesized from the kernel command
+    // line and the installed binaries -- seatd, and whichever of `ravend` and
+    // `wayland-session` this machine has -- has no incoming definition to be
+    // matched against. The retain pass below then reads that absence as "its
+    // file is gone": a running one was demoted to "removed but still running",
+    // and a stopped one was dropped outright, so `raven-rc start ravend`
+    // answered "no such service" until the next reboot.
+    //
+    // Running it here also makes reload the way a newly installed login screen
+    // is picked up, which is the same promise reload already makes for a
+    // drop-in: install RavenLogin, reload, and `ravend` is reported as added.
+    //
+    // Still before any mutation of `config`, so a failure leaves the running
+    // configuration exactly as it was.
+    if let Err(e) = crate::overrides::apply_kernel_cmdline_overrides(&mut fresh) {
+        return format!(
+            "error: could not reload configuration: {e}\n\
+             the running configuration is unchanged\n"
+        );
+    }
+    crate::overrides::fixup_getty_login_programs(&mut fresh);
+    let fresh = fresh;
 
     let running = |name: &str| {
         services
