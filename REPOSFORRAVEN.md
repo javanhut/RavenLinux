@@ -286,14 +286,17 @@ application resolved to nothing.
 
 | Status | Binary | Repo |
 |--------|--------|------|
-| not wired | `ravend`, `raven-greeter` | [javanhut/RavenLogin](https://github.com/javanhut/RavenLogin) |
+| **wired** | `ravend`, `raven-greeter` | [javanhut/RavenLogin](https://github.com/javanhut/RavenLogin) |
 
-The login screen, and the daemon behind it. Not built by any stage yet.
+The login screen, and the daemon behind it. Built by `stage_login()` in
+`stage-gui.sh`.
 
-Today `raven-init` resolves `raven.user=<name>`, or failing that the lowest-uid
-regular account, and starts the session as them with no password prompt anywhere
+`raven-init` used to resolve `raven.user=<name>`, or failing that the lowest-uid
+regular account, and start the session as them with no password prompt anywhere
 in the path — right for an image you are bringing up, wrong for a machine you
-use. RavenLogin is that prompt.
+use. RavenLogin is that prompt, and it is now what an image with
+`raven.graphics=wayland` boots to. The autologin session is what is left when
+`ravend` is not installed.
 
 The split is the design: `ravend` runs as root and reads `/etc/shadow`;
 `raven-greeter` runs as its own `raven-greeter` account, draws, and can ask one
@@ -302,14 +305,31 @@ Drawing a login screen means parsing fonts, rasterizing glyphs and decoding
 images — near enough a list of everything that has ever been remotely
 exploitable in a login screen — and the password hashes are not in that process.
 
-Wiring it will need four things that do not exist yet, which is why it is listed
-rather than built:
+Wiring it needed four things, and this is where each of them ended up:
 
-- a stage, or a section of `stage-gui.sh`, that builds both binaries;
-- a `raven-greeter` account and group, created in stage2 alongside `caw`'s;
-- an `init.toml` service for `ravend` that starts *before* the session, and a
-  `raven-init` that hands the session off to it rather than starting
-  `/bin/raven-wayland-session` itself;
-- a decision about what happens when `ravend` fails to start. Falling through to
-  the current passwordless session would make the login screen advisory, and a
-  password prompt that can be skipped by breaking it is not one.
+- **a stage that builds both binaries.** `stage_login()` in `stage-gui.sh`,
+  after the session launcher, on the pattern the terminal and the file manager
+  already use: its own repository, its own cargo invocation, every failure path
+  a warning. `LOGIN_SKIP=1` leaves it out.
+- **a `raven-greeter` account and group.** Created by `stage_login()` rather
+  than in stage2 alongside `caw`'s. stage2's account table is Arch's canonical
+  numbering, copied because `rvn` extracts tar payloads that record ownership
+  numerically; `raven-greeter` is ours and not Arch's, and putting our own id
+  in that table would blur what the table is for. It takes uid 972, or the next
+  free id below it, and joins video, render, input and seat.
+- **an `init.toml` service for `ravend`, and an init that hands off to it.**
+  Neither is written to `init.toml`. `apply_kernel_cmdline_overrides()` looks
+  for the `ravend` binary and, finding it, ensures that service *instead of*
+  `wayland-session` and returns — so installing the binary is the whole of
+  turning the login screen on, and no file on the image records the choice.
+  `wait_for_seat()` counts it too: the greeter's compositor needs a seat before
+  anybody has logged in.
+- **what happens when `ravend` fails to start.** It restarts, and nothing falls
+  through to the passwordless session — that path is not reached at all on an
+  image that has `ravend`. It is not `critical`, so a boot is not panicked over
+  it, and the console gettys are still there to fix a machine whose greeter
+  will not come up.
+
+What is still by hand is a wallpaper. `stage_login()` creates
+`/usr/share/wallpaper` and `/usr/share/wallpaper/set` empty; drop an image in as
+`set/wallpaper.<ext>` and both huginn and the greeter draw it.

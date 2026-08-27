@@ -599,6 +599,68 @@ fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<()> {
         .map(|p| vec![p])
         .unwrap_or_default();
 
+    // A login screen, if this image has one.
+    //
+    // ravend draws the greeter, checks the password and starts the session
+    // itself -- the same job the service below does, minus the "auto". Only
+    // one of the two can hold the GPU and the seat, so finding ravend replaces
+    // that service rather than adding to it.
+    //
+    // Deciding it here, on whether the binary is installed, is what
+    // RavenLogin's README asks for and is the difference between a login
+    // screen you get by installing a package and one you get by editing
+    // init.toml and disabling a getty by hand. Removing ravend falls back to
+    // the autologin session with no edit anywhere and nothing on the kernel
+    // cmdline either way.
+    if let Some(ravend_exec) = find_program("ravend") {
+        log::info!("Found ravend; the graphical session starts behind a login screen");
+
+        let mut env = HashMap::new();
+        env.insert("LIBSEAT_BACKEND".to_string(), "seatd".to_string());
+
+        ensure_service(
+            &mut config.services,
+            ServiceConfig {
+                name: "ravend".to_string(),
+                description: "Raven login daemon".to_string(),
+                exec: ravend_exec,
+                args: Vec::new(),
+                // Restarted, and with no fallback to the passwordless session
+                // anywhere below: a login daemon that fails leaves a machine
+                // that keeps trying to ask for a password, not one that gives
+                // up and lets whoever is standing there in. A prompt that can
+                // be skipped by breaking it is not a prompt.
+                restart: true,
+                enabled: true,
+                // Not critical, which here means init does not panic the boot
+                // over it. The console gettys are still running and are the
+                // way in to fix a machine whose greeter will not start.
+                critical: false,
+                environment: env,
+                // The same coldplug wait the session needs, for the same
+                // reason: the greeter's compositor is a compositor, and one
+                // that starts before the real DRM driver takes simpledrm and
+                // dies when the kernel revokes it.
+                pre_exec: udev_settle,
+                tty: None,
+                // Root, and no session account: it reads /etc/shadow, and it
+                // drops privilege itself once it knows whose session it is
+                // starting. Handing it an account here would defeat the point.
+                user: None,
+                runtime_dirs: Vec::new(),
+                after: vec!["udev".to_string(), "seatd".to_string()],
+                ready_path: None,
+                ready_timeout: 5,
+                stop_exec: None,
+                stop_args: Vec::new(),
+                // Longer than the session's: SIGTERM has to reach the greeter,
+                // its compositor, and whatever session is running behind them.
+                stop_timeout: 10,
+            },
+        );
+        return Ok(());
+    }
+
     let session_path = find_program("raven-wayland-session");
     if let Some(ref session_exec) = session_path {
         let mut env = compositor_env;
@@ -1290,8 +1352,12 @@ fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -
 /// Bounded: a seat that never appears is a warning, not a hang. Anything that
 /// wanted one will fail and say so, which is more use than a stalled boot.
 fn wait_for_seat(services: &HashMap<String, Service>) {
-    let needs_seat =
-        services.contains_key("wayland-session") || services.contains_key("raven-compositor");
+    // ravend counts: it starts a compositor of its own for the greeter, before
+    // anybody has logged in, and that compositor needs the seat just as much
+    // as a session's does.
+    let needs_seat = services.contains_key("wayland-session")
+        || services.contains_key("raven-compositor")
+        || services.contains_key("ravend");
     if !needs_seat || !services.contains_key("seatd") {
         return;
     }

@@ -112,6 +112,26 @@ FILEMANAGER_URL="https://github.com/javanhut/${FILEMANAGER_REPO}.git"
 FILEMANAGER_BIN="ravenfilemanager"
 FILEMANAGER_APPID="com.ravenfilemanager.Raven"
 
+# The login screen. A fourth repository, and the last thing between the boot and
+# somebody's session: ravend reads /etc/shadow, draws a password prompt through
+# a greeter it starts as an unprivileged account, and starts the session itself.
+#
+# Failure here is a warning and not a failed stage, but it is not the same kind
+# of optional as the file manager: an image without it boots to the autologin
+# session raven-init has always had, which is a working desktop with no password
+# on it. init decides between the two by looking for the binary, so not building
+# this is exactly what "no login screen" means. See stage_login().
+LOGIN_REPO="RavenLogin"
+LOGIN_URL="https://github.com/javanhut/${LOGIN_REPO}.git"
+# The account its greeter runs as. Nothing else on the machine runs as this.
+LOGIN_GREETER_USER="raven-greeter"
+LOGIN_GREETER_HOME="/var/lib/raven-greeter"
+# A fixed id, so an image built twice has the same numbers in it and a
+# filesystem moved between builds does not change owner. 972 is below the 1000
+# regular-account floor and outside the block Arch's sysusers hands out. If
+# something already holds it the next free id down is used instead.
+LOGIN_GREETER_UID="${LOGIN_GREETER_UID:-972}"
+
 # Huginn links glibc, unlike everything in the Raven layer. The host target is
 # the right one: the sysroot carries the host's glibc and its dynamic linker,
 # which is how the Xorg and Mesa binaries stage2 copies already work.
@@ -860,6 +880,163 @@ stage_filemanager() {
 # inability to run them. They are reached by typing their names, which is what
 # they were designed for. A launcher listing things that appear to do nothing
 # when clicked is worse than a shorter launcher.
+# =============================================================================
+# The login screen
+# =============================================================================
+# RavenLogin: `ravend`, which runs as root and reads /etc/shadow, and
+# `raven-greeter`, which draws and can ask ravend exactly one question over a
+# Unix socket. The split is the point of that repository -- the process that
+# parses fonts and decodes images is not the process that can read password
+# hashes -- and this stage keeps it by creating the unprivileged account the
+# greeter needs before installing anything.
+#
+# Nothing here edits init.toml or the kernel cmdline. raven-init looks for
+# `ravend` on the image and starts it in place of the autologin session when it
+# finds one, so installing the binary is the whole of turning the login screen
+# on, and LOGIN_SKIP=1 is the whole of leaving it off.
+stage_login() {
+    if [[ "${LOGIN_SKIP:-0}" == "1" ]]; then
+        log_warn "  LOGIN_SKIP=1: the image will autologin with no password prompt"
+        return 0
+    fi
+
+    local dest="${GUI_SRC_DIR}/${LOGIN_REPO}"
+    if ! fetch_repo "${LOGIN_REPO}" "${LOGIN_URL}" "${dest}" \
+            "${LOGIN_REF:-}" "${LOGIN_OFFLINE:-${GUI_OFFLINE:-0}}"; then
+        log_warn "  RavenLogin source unavailable; the image will autologin"
+        return 0
+    fi
+
+    log_info "  building RavenLogin for ${GUI_TARGET}..."
+    local -a cargo_args=(build --release --target "${GUI_TARGET}" -p ravend -p raven-greeter)
+    [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
+    if ! ( cd "${dest}" && cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}" ); then
+        log_warn "  RavenLogin build failed; the image will autologin"
+        return 0
+    fi
+
+    # Both or neither. ravend without a greeter is a daemon that starts a
+    # compositor and then cannot draw a prompt in it, which presents as a
+    # machine that boots to a blank screen -- strictly worse than the autologin
+    # session it would have replaced.
+    local built="${dest}/target/${GUI_TARGET}/release"
+    local binary
+    for binary in ravend raven-greeter; do
+        if [[ ! -x "${built}/${binary}" ]]; then
+            log_warn "  ${binary} was not produced by the build; the image will autologin"
+            return 0
+        fi
+    done
+
+    login_greeter_account || {
+        log_warn "  cannot create the greeter's account; not installing the login screen"
+        return 0
+    }
+
+    for binary in ravend raven-greeter; do
+        install -m 0755 "${built}/${binary}" "${SYSROOT_DIR}/usr/bin/${binary}"
+        log_success "  ${binary} installed ($(du -h "${built}/${binary}" | cut -f1))"
+    done
+
+    # Never overwritten: every value in it is a default ravend already carries,
+    # so a file that is already there is one somebody edited on purpose.
+    if [[ -f "${SYSROOT_DIR}/etc/raven/login.toml" ]]; then
+        log_info "  /etc/raven/login.toml exists; leaving it alone"
+    elif [[ -f "${dest}/config/login.toml" ]]; then
+        install -Dm 0644 "${dest}/config/login.toml" "${SYSROOT_DIR}/etc/raven/login.toml"
+        log_info "  + /etc/raven/login.toml"
+    fi
+
+    # Only the greeter needs its libraries resolved; ravend links nothing but
+    # libc, which is the property the whole repository is arranged around.
+    stage_gui_libraries "${built}/raven-greeter"
+    install_wallpaper_dirs
+}
+
+# The account the greeter runs as.
+#
+# Written into the sysroot's own files rather than with useradd, which would
+# create the account on the build host. A system account: nologin shell, locked
+# password, and membership of the groups that let its compositor work at all --
+# video and render for the GPU, input for the keyboard, seat for seatd. A
+# greeter missing `video` starts, draws nothing, and looks like a driver bug.
+login_greeter_account() {
+    local passwd="${SYSROOT_DIR}/etc/passwd"
+    local group="${SYSROOT_DIR}/etc/group"
+    local shadow="${SYSROOT_DIR}/etc/shadow"
+    [[ -f "${passwd}" && -f "${group}" ]] || { log_warn "  no /etc/passwd in the sysroot"; return 1; }
+
+    if grep -q "^${LOGIN_GREETER_USER}:" "${passwd}"; then
+        log_info "  account ${LOGIN_GREETER_USER} already in the sysroot"
+    else
+        # The configured id unless somebody holds it, then the next free one
+        # down. Searching downwards stays inside the system range whatever
+        # happens; searching up would eventually collide with a real user.
+        local uid="${LOGIN_GREETER_UID}"
+        while awk -F: -v id="${uid}" '$3 == id { found = 1 } END { exit !found }' "${passwd}"; do
+            uid=$(( uid - 1 ))
+            if (( uid < 900 )); then
+                log_warn "  no free system uid below ${LOGIN_GREETER_UID}"
+                return 1
+            fi
+        done
+        [[ "${uid}" == "${LOGIN_GREETER_UID}" ]] \
+            || log_info "  uid ${LOGIN_GREETER_UID} is taken; using ${uid}"
+
+        printf '%s:x:%s:\n' "${LOGIN_GREETER_USER}" "${uid}" >> "${group}"
+        printf '%s:x:%s:%s:Raven login screen:%s:/usr/bin/nologin\n' \
+            "${LOGIN_GREETER_USER}" "${uid}" "${uid}" "${LOGIN_GREETER_HOME}" >> "${passwd}"
+        # '!' and not '': an empty field is a password of no characters, and
+        # RavenLogin's own policy calls that an account that can be logged in
+        # to. Locked is what is meant.
+        [[ -f "${shadow}" ]] && printf '%s:!:19000:0:99999:7:::\n' "${LOGIN_GREETER_USER}" >> "${shadow}"
+        log_info "  + ${LOGIN_GREETER_USER} (uid ${uid}, nologin, locked)"
+    fi
+
+    local g
+    for g in video render input seat; do
+        if ! grep -q "^${g}:" "${group}"; then
+            log_warn "  group '${g}' is not in the sysroot; the greeter may not reach the"
+            log_warn "  GPU, the keyboard or the seat. Check this first if it draws nothing."
+            continue
+        fi
+        # Append to the member list, and only once: this stage runs again on
+        # every rebuild into the same sysroot.
+        awk -F: -v user="${LOGIN_GREETER_USER}" -v want="${g}" '
+            BEGIN { OFS = ":" }
+            $1 == want {
+                n = split($4, members, ",")
+                for (i = 1; i <= n; i++) if (members[i] == user) { print; next }
+                $4 = ($4 == "" ? user : $4 "," user)
+            }
+            { print }
+        ' "${group}" > "${group}.new" && mv "${group}.new" "${group}"
+    done
+    log_info "  ${LOGIN_GREETER_USER} is in video, render, input, seat (where they exist)"
+
+    install -d -m 0755 "${SYSROOT_DIR}${LOGIN_GREETER_HOME}"
+    return 0
+}
+
+# The machine's wallpaper library, and the one entry that says which image is
+# on.
+#
+# Both are created empty and nothing is shipped into them: an image with no
+# wallpaper draws the compositor's flat background and the greeter's backdrop,
+# which is a desktop, and a photograph committed to a distribution repository
+# is a licence question nobody asked for.
+#
+# The directories exist anyway because both readers are compiled to look here:
+# huginn draws /usr/share/wallpaper/set/wallpaper.<ext> behind the desktop and
+# raven-greeter draws the same file behind the login prompt, which is what
+# makes the two look like one machine. A directory that is already there is
+# also the difference between "drop a file in" and "work out where it goes".
+install_wallpaper_dirs() {
+    install -d -m 0755 "${SYSROOT_DIR}/usr/share/wallpaper"
+    install -d -m 0755 "${SYSROOT_DIR}/usr/share/wallpaper/set"
+    log_info "  + /usr/share/wallpaper and set/ (empty; drop an image in to use one)"
+}
+
 install_desktop_entries() {
     local dir="${SYSROOT_DIR}/usr/share/applications"
     mkdir -p "${dir}"
@@ -1232,6 +1409,18 @@ print_gui_summary() {
     done
 
     echo ""
+    if [[ -x "${SYSROOT_DIR}/usr/bin/ravend" ]]; then
+        echo "Login:"
+        printf "  [OK] %-14s %-6s %s\n" "ravend" \
+            "$(du -h "${SYSROOT_DIR}/usr/bin/ravend" | cut -f1)" \
+            "boots to a password prompt; raven-init starts this, not the session"
+    else
+        echo "Login:"
+        printf "  [--] %-14s %-6s %s\n" "ravend" "" \
+            "no login screen: this image autologins with no password"
+    fi
+
+    echo ""
     echo "Session:"
     if [[ -x "${SYSROOT_DIR}/usr/bin/raven-wayland-session" ]]; then
         echo "  [OK] raven-wayland-session (boot with raven.graphics=wayland)"
@@ -1427,6 +1616,14 @@ main() {
     log_step "Installing the session launcher..."
     install_session_launcher
     install_session_entry
+
+    # Last, and after the session launcher on purpose: ravend starts that
+    # launcher once somebody has authenticated, so installing the login screen
+    # before the thing it hands over to would leave a window -- however
+    # theoretical in a build script -- where the image has a password prompt
+    # and nothing behind it.
+    log_step "Staging the login screen..."
+    stage_login
 
     print_gui_summary
 

@@ -1,0 +1,84 @@
+# The login screen, and the daemon behind it.
+#
+# Before this, raven-init read the lowest-uid regular account out of /etc/passwd
+# and started its session with no password prompt anywhere in the path. That is
+# right for an image you are bringing up and wrong for a machine somebody uses.
+#
+# Installing this is what turns the prompt on: init looks for `ravend` when the
+# cmdline says raven.graphics=wayland and starts it instead of the autologin
+# session, so there is no init.toml edit and no kernel argument that decides it.
+# See apply_kernel_cmdline_overrides() in init/src/main.rs.
+[package]
+name = "ravenlogin"
+version = "0.0.1"
+description = "RavenLogin - the login daemon and the login screen"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/javanhut/RavenLogin"
+repository = "https://github.com/javanhut/RavenLogin"
+maintainers = ["RavenLinux Team"]
+categories = ["gui", "wayland", "login"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/RavenLogin.git"
+# Deliberately unpinned, unlike ravengui above it. Nothing has been tagged in
+# that repository yet, and a hash invented here would name a commit that is not
+# the one the GUI stage builds -- which is worse than saying "HEAD" out loud.
+# Pin it at the first release.
+
+[build]
+system = "cargo"
+# NOT the musl target, for the reason ravengui's manifest gives at length: the
+# greeter is a Wayland client and its compositor is huginn, so this half of the
+# image links the same glibc graphics stack. ravend itself would build against
+# musl happily -- it draws nothing and links nothing -- but the two ship
+# together and a workspace builds against one target at a time.
+target = "x86_64-unknown-linux-gnu"
+build_flags = ["--release", "--locked", "-p", "ravend", "-p", "raven-greeter"]
+
+[dependencies]
+# ravend links nothing beyond libc: no GPU, no fonts, no image decoding, no
+# Wayland client library at all. That is the point of the split and it is why
+# this list is so much shorter than ravengui's -- everything graphical here
+# belongs to the compositor ravend starts, which is huginn, which brings its
+# own dependencies with it.
+#
+# huginn is a hard runtime requirement all the same: `compositor = "huginn"` is
+# the default in login.toml, and a login daemon with no compositor to host the
+# greeter in cannot draw a password prompt.
+#
+# seatd for the same reason it is ravengui's: the greeter's compositor takes
+# DRM master through libseat before anybody has logged in.
+runtime = ["ravengui", "seatd"]
+build = ["rust", "cargo", "pkg-config"]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-gnu/release/ravend",        dest = "/usr/bin/ravend",             mode = 755 },
+    { src = "target/x86_64-unknown-linux-gnu/release/raven-greeter", dest = "/usr/bin/raven-greeter",      mode = 755 },
+    # Every value in it is a default ravend already has compiled in, so this is
+    # a reference for the keys that exist rather than a file the machine needs.
+    # A file that is present and does not parse is a hard error -- ravend
+    # refuses to start rather than ignoring a policy somebody wrote down.
+    { src = "config/login.toml",                                     dest = "/etc/raven/login.toml",       mode = 644 },
+]
+
+# No /bin aliases: this root is usr-merged, so /bin IS /usr/bin and a link at
+# /bin/<name> pointing to /usr/bin/<name> replaces the binary with a symlink to
+# itself. See scripts/lib/usrmerge.sh.
+symlinks = []
+
+# What this manifest does NOT describe, because it is not a file:
+#
+#   - the `raven-greeter` account, a system user with a nologin shell, no
+#     password, and membership of video, render, input and seat. Its compositor
+#     opens the GPU and reads the keyboard as that account and nothing else on
+#     the machine runs as it.
+#   - /usr/share/wallpaper and /usr/share/wallpaper/set, the machine's
+#     wallpaper library and the one entry that says which image is on. Both the
+#     greeter and huginn read the second by a compiled-in path, which is what
+#     makes the login screen and the session behind it show the same picture.
+#
+# Both are created by stage_login() in scripts/stages/stage-gui.sh, which is
+# also what builds this. See scripts/install.sh in the RavenLogin repository
+# for the same two steps done to a machine that is already running.
