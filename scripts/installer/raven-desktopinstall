@@ -1,0 +1,653 @@
+#!/bin/sh
+# =============================================================================
+# raven-desktopinstall -- put the desktop back the way it was
+# =============================================================================
+#
+# Installs, with rvn, the packages a RavenLinux desktop needs to be the machine
+# it was before it was rebuilt, and then regenerates the four toolkit caches
+# that no package manager will regenerate for you.
+#
+# WHY THIS EXISTS SEPARATELY FROM raven-postinstall
+#
+# raven-postinstall applies a profile: it reads one .packages file and hands
+# the whole list to a single `rvn install`. That is the right shape for
+# choosing a system at install time and the wrong shape for restoring one,
+# for three reasons this script answers:
+#
+#   - One list, one command. A single unresolvable name -- a package renamed
+#     upstream, a provider that moved -- fails the entire install and nothing
+#     is installed at all. Here each set is installed on its own, so a set that
+#     cannot resolve costs you that set and is named in the summary.
+#   - It installs packages and stops. That is not enough to have a working
+#     desktop: a GTK application with every one of its libraries present and no
+#     compiled GSettings schema aborts on startup, and the tool that compiles
+#     it is not run by anything on this image. See "The caches" below.
+#   - It is not idempotent in any useful sense. Re-running it re-asks rvn about
+#     packages that are already there. This filters against `rvn list` first,
+#     so a second run over a restored system does nothing and says so.
+#
+# WHY THE SETS ARE WHAT THEY ARE
+#
+# Each one is a thing that breaks together. `session` is what the compositor
+# links; `toolkit` is what a GTK application needs, including the parts no
+# linker will ever mention; `media` is decoding; `fonts` is everything the
+# shell draws with. Losing a whole set produces a symptom you can describe --
+# "no pointer", "no images", "every label is monospace" -- which is the only
+# way a summary at the end of a package install is worth reading.
+#
+# THE CACHES
+#
+# The reason this script does not end after rvn does. Four caches are derived
+# state that packaging hooks normally rebuild and RavenLinux has no hooks:
+#
+#   gschemas.compiled   GSettings reads only the compiled cache, never the XML.
+#                       Without it every g_settings_new() is a *fatal* GLib
+#                       error naming a schema, so a GTK application installs
+#                       perfectly and then dies the moment you launch it.
+#   mime.cache          Without it g_file_info_get_content_type() answers
+#                       application/octet-stream for everything: a file manager
+#                       with one icon and no working "Open With".
+#   mimeinfo.cache      What resolves inode/directory to the file manager. Its
+#                       absence is why "Open Containing Folder" does nothing.
+#   icon-theme.cache    A miss here is slow, not broken -- the theme is still
+#                       read from the directory. Rebuilt anyway because it is
+#                       cheap and because a *stale* one hides new icons.
+#
+# Every one of them is missing on a freshly staged image, because the ISO
+# stages these trees as plain files copied off a build host.
+#
+#   raven-desktopinstall                 # everything but devel and extras
+#   raven-desktopinstall --list          # what would be installed, by set
+#   raven-desktopinstall -n toolkit      # dry run, one set
+#   raven-desktopinstall -y session fonts
+#   raven-desktopinstall --caches-only   # skip rvn, rebuild the caches
+#
+set -eu
+
+PROGRAM="raven-desktopinstall"
+
+assume_yes=0
+dry_run=0
+list_only=0
+caches_only=0
+skip_caches=0
+repo_only=0
+
+if [ -t 1 ]; then
+    GREEN=$(printf '\033[1;32m'); YELLOW=$(printf '\033[1;33m')
+    RED=$(printf '\033[1;31m');   WHITE=$(printf '\033[1;37m')
+    NC=$(printf '\033[0m')
+else
+    GREEN=""; YELLOW=""; RED=""; WHITE=""; NC=""
+fi
+
+info()  { echo "  $*"; }
+warn()  { echo "${YELLOW}  ! $*${NC}" >&2; }
+err()   { echo "${RED}  x $*${NC}" >&2; }
+ok()    { echo "${GREEN}  + $*${NC}"; }
+step()  { echo; echo "${WHITE}$*${NC}"; }
+
+# =============================================================================
+# The sets
+# =============================================================================
+# One function per set, emitting one package name per line. Comments are
+# stripped by set_packages() below, so they can be written where they apply
+# rather than collected somewhere else and left to rot.
+#
+# A name appearing in two sets is not a mistake and costs nothing: the whole
+# list is filtered against what is already installed before anything runs, and
+# rvn is idempotent besides.
+
+# The graphics stack huginn, muninn-lock and raven-terminal link against.
+#
+# The ISO stages these as bare .so files copied off the build host -- stage2's
+# copy_libraries() and stage-gui.sh's stage_gui_libraries() -- which is what
+# makes the live image work and also why `rvn owns` reports no package owns any
+# of them. Installing them by name puts the same files under package
+# management, so they can be updated and repaired like anything else.
+#
+# libseat and libudev are deliberately not named: neither is a package. The
+# library ships inside seatd, and libudev comes from systemd-libs.
+set_session() {
+    cat <<'EOF'
+mesa
+libdrm
+libinput
+libxkbcommon
+wayland
+seatd
+xorg-xwayland
+libglvnd
+vulkan-icd-loader
+libgudev
+mtdev
+libevdev
+libwacom
+EOF
+}
+
+# What GTK4 and libadwaita need to start at all.
+#
+# glib2, shared-mime-info, desktop-file-utils and gtk-update-icon-cache are
+# here as much for their *tools* as their libraries: they own
+# glib-compile-schemas, update-mime-database, update-desktop-database and
+# gtk4-update-icon-cache respectively, which are the four programs the cache
+# pass at the end of this script runs. Without them installed the packages go
+# in and the caches stay stale, which is the failure this script exists to
+# prevent.
+#
+# gsettings-desktop-schemas is not optional either: libadwaita reads
+# org.gnome.desktop.interface to decide light or dark, and with the schema
+# absent AdwStyleManager resolves to light and warns -- an application that
+# ignores the system theme, which reads as an application bug.
+set_toolkit() {
+    cat <<'EOF'
+gtk4
+libadwaita
+glib2
+gsettings-desktop-schemas
+gsettings-system-schemas
+shared-mime-info
+desktop-file-utils
+gtk-update-icon-cache
+gdk-pixbuf2
+librsvg
+pango
+cairo
+harfbuzz
+graphene
+dconf
+at-spi2-core
+libepoxy
+appstream
+tinysparql
+EOF
+}
+
+# Image and video decoding.
+#
+# bubblewrap is the one to know about. Since gdk-pixbuf 2.44 the image loaders
+# moved out of process into glycin, which runs every decoder inside a bwrap
+# sandbox and *refuses to decode at all* when bwrap is missing. So bubblewrap
+# is a runtime dependency of drawing a PNG -- a sentence nobody expects to be
+# true, and a failure that looks like a broken application rather than a
+# missing package.
+set_media() {
+    cat <<'EOF'
+glycin
+bubblewrap
+gstreamer
+gst-plugins-base-libs
+gst-plugins-bad-libs
+libjpeg-turbo
+libpng
+libtiff
+libwebp
+libjxl
+dav1d
+libva
+lcms2
+EOF
+}
+
+# Everything the shell and its applications draw with.
+#
+# adwaita-cursors is what /usr/share/icons/default inherits from; without it
+# huginn draws no pointer at all over its own dock, launcher and background,
+# while clients that set their own cursor still show one -- which is what makes
+# it read as a rendering bug rather than a missing package.
+#
+# The fonts are two halves. noto-fonts is the proportional face: without a
+# proportional family every label the shell draws falls back to monospace, and
+# anything outside Latin/Greek/Cyrillic draws blank boxes. adwaita-fonts is
+# what GTK4 asks for by name.
+set_fonts() {
+    cat <<'EOF'
+adwaita-cursors
+adwaita-icon-theme
+adwaita-fonts
+hicolor-icon-theme
+default-cursors
+noto-fonts
+fontconfig
+freetype2
+EOF
+}
+
+# The session bus and the portals.
+#
+# xdg-desktop-portal-gtk is what answers a file-chooser or "open with" request
+# from a sandboxed or portal-using client. Nothing on the image fails without
+# it; a dialog just never appears, which is the quietest failure in this file.
+set_portals() {
+    cat <<'EOF'
+dbus
+dbus-broker
+dbus-broker-units
+xdg-desktop-portal
+xdg-desktop-portal-gtk
+glib-networking
+libsecret
+EOF
+}
+
+# Audio. pipewire alone is a library and a daemon with no session manager, and
+# a pipewire without wireplumber routes nothing -- devices appear and no stream
+# ever reaches them.
+set_audio() {
+    cat <<'EOF'
+pipewire
+wireplumber
+alsa-lib
+alsa-ucm-conf
+alsa-topology-conf
+EOF
+}
+
+# Hardware. Not a desktop dependency as such -- but a machine whose GPU
+# firmware is absent falls back to software rendering, and huginn drawing its
+# shell through llvmpipe is indistinguishable from huginn being slow.
+set_firmware() {
+    cat <<'EOF'
+linux-firmware
+sof-firmware
+EOF
+}
+
+# The build host, so an installed machine can rebuild what it is running.
+# Not in the default set: it is large, and a desktop does not need it.
+set_devel() {
+    cat <<'EOF'
+base-devel
+git
+rustup
+go
+pkgconf
+wayland-protocols
+gdb
+EOF
+}
+
+# Things that are on this machine because someone wanted them there, not
+# because the desktop needs them. Never in the default set, and read the
+# warning in install_set() about the AUR before adding to it.
+set_extras() {
+    cat <<'EOF'
+brave-bin
+EOF
+}
+
+DEFAULT_SETS="session toolkit media fonts portals audio firmware"
+ALL_SETS="${DEFAULT_SETS} devel extras"
+
+# =============================================================================
+# Plumbing
+# =============================================================================
+
+set_packages() {
+    "set_$1" | sed 's/#.*//' | awk 'NF { print $1 }'
+}
+
+set_exists() {
+    for s in ${ALL_SETS}; do
+        [ "$s" = "$1" ] && return 0
+    done
+    return 1
+}
+
+# Names of every installed package, one per line.
+#
+# `rvn list` prints "repo/name version (dependency)", and the repo prefix is
+# not stable -- it is "repo/" on an image whose pacman.conf names its database
+# that way and "extra/" on one that does not -- so it is stripped rather than
+# matched.
+installed_packages() {
+    rvn list 2>/dev/null | sed 's|^[^ /]*/||; s| .*||' | awk 'NF'
+}
+
+INSTALLED_CACHE=""
+is_installed() {
+    printf '%s\n' "${INSTALLED_CACHE}" | grep -qx -- "$1"
+}
+
+# =============================================================================
+# Installing
+# =============================================================================
+# One rvn call per set rather than one for everything.
+#
+# It costs a few extra database reads and buys the property that makes this
+# script usable on a system that is already broken: a set whose name list has
+# gone stale -- an upstream rename, a package folded into another -- fails on
+# its own and is reported by name, instead of taking the other six with it. The
+# one time you run this is the one time you cannot afford "nothing installed,
+# here is a message about a package you have never heard of".
+install_set() {
+    name="$1"
+    wanted=""
+    skipped=0
+
+    for pkg in $(set_packages "${name}"); do
+        if is_installed "${pkg}"; then
+            skipped=$((skipped + 1))
+        else
+            wanted="${wanted} ${pkg}"
+        fi
+    done
+
+    if [ -z "${wanted}" ]; then
+        info "${name}: nothing to do (${skipped} already installed)"
+        return 0
+    fi
+
+    # Said before the install rather than after it fails. makepkg refuses to
+    # run as root, and this script requires root -- so an AUR package in a set
+    # is a build that cannot happen here, no matter how the flags are set.
+    if [ "${name}" = "extras" ] && [ "${repo_only}" -eq 0 ]; then
+        warn "extras may contain AUR packages; makepkg will not run as root."
+        warn "Install those as your own user, or pass --repo-only to skip them."
+    fi
+
+    info "${name}:${wanted}"
+    [ "${skipped}" -gt 0 ] && info "  (${skipped} already installed)"
+
+    if [ "${dry_run}" -eq 1 ]; then
+        return 0
+    fi
+
+    set -- install
+    [ "${assume_yes}" -eq 1 ] && set -- "$@" -y
+    [ "${repo_only}" -eq 1 ] && set -- --repo-only "$@"
+
+    # shellcheck disable=SC2086 -- the package list intentionally becomes argv
+    if rvn "$@" ${wanted}; then
+        ok "${name} installed"
+        return 0
+    fi
+
+    err "${name} failed; continuing with the remaining sets"
+    return 1
+}
+
+# =============================================================================
+# The caches
+# =============================================================================
+# Run after every set, because each of these reads a directory that any set may
+# have written into, and running them once at the end is both correct and
+# cheaper than running them per package.
+#
+# Every one is best-effort. A cache that cannot be rebuilt because its tool is
+# absent is worth a warning and not worth an exit: the packages are installed
+# either way, and the person reading the warning can install the tool and
+# re-run with --caches-only.
+refresh_caches() {
+    step "Rebuilding toolkit caches"
+
+    # First, and the only one whose absence is fatal to a running application
+    # rather than merely degrading. GSettings never reads the XML.
+    if [ -d /usr/share/glib-2.0/schemas ]; then
+        if command -v glib-compile-schemas >/dev/null 2>&1; then
+            if glib-compile-schemas /usr/share/glib-2.0/schemas 2>/dev/null; then
+                ok "gschemas.compiled ($(find /usr/share/glib-2.0/schemas -name '*.gschema.xml' 2>/dev/null | wc -l) schemas)"
+            else
+                err "glib-compile-schemas failed: GTK applications will abort on startup"
+            fi
+        else
+            err "glib-compile-schemas missing (from glib2): GTK applications will abort on startup"
+        fi
+    fi
+
+    if [ -d /usr/share/mime ]; then
+        if command -v update-mime-database >/dev/null 2>&1; then
+            update-mime-database /usr/share/mime 2>/dev/null \
+                && ok "mime.cache" \
+                || warn "update-mime-database failed: every file will look like application/octet-stream"
+        else
+            warn "update-mime-database missing (from shared-mime-info)"
+        fi
+    fi
+
+    # Both trees, because the image installs its own entries under /usr/share
+    # and anything built from source lands in /usr/local/share -- and
+    # raven-wayland-session puts both on XDG_DATA_DIRS, so the launcher reads
+    # both and only one of them ever gets a cache written by hand.
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        for d in /usr/share/applications /usr/local/share/applications; do
+            [ -d "$d" ] || continue
+            update-desktop-database -q "$d" 2>/dev/null \
+                && ok "mimeinfo.cache ($d)" \
+                || warn "update-desktop-database failed for $d"
+        done
+    else
+        warn "update-desktop-database missing (from desktop-file-utils)"
+    fi
+
+    if command -v gtk4-update-icon-cache >/dev/null 2>&1; then
+        for theme in hicolor Adwaita; do
+            [ -d "/usr/share/icons/${theme}" ] || continue
+            gtk4-update-icon-cache -q -t -f "/usr/share/icons/${theme}" 2>/dev/null \
+                && ok "icon-theme.cache (${theme})" \
+                || warn "gtk4-update-icon-cache failed for ${theme}"
+        done
+    else
+        warn "gtk4-update-icon-cache missing (from gtk-update-icon-cache)"
+    fi
+
+    # Only where the 2.42-era loader directory still exists. gdk-pixbuf 2.44
+    # moved decoding to glycin and ships no loaders at all, and querying an
+    # absent directory writes an empty cache over a working setup.
+    if [ -d /usr/lib/gdk-pixbuf-2.0/2.10.0/loaders ] \
+       && command -v gdk-pixbuf-query-loaders >/dev/null 2>&1; then
+        gdk-pixbuf-query-loaders --update-cache 2>/dev/null \
+            && ok "gdk-pixbuf loaders.cache" \
+            || warn "gdk-pixbuf-query-loaders failed"
+    fi
+
+    if command -v fc-cache >/dev/null 2>&1; then
+        fc-cache -f >/dev/null 2>&1 \
+            && ok "font cache" \
+            || warn "fc-cache failed: newly installed fonts will not be found"
+    fi
+}
+
+# =============================================================================
+# What it did
+# =============================================================================
+# Named by symptom, not by package. "no pointer over the shell" is something
+# you can match against what you are looking at; "adwaita-cursors absent" is
+# something you have to already know to act on.
+print_summary() {
+    step "Desktop"
+
+    if [ -f /usr/share/glib-2.0/schemas/gschemas.compiled ]; then
+        echo "  [OK] GSettings schemas   compiled"
+    else
+        echo "  [!!] GSettings schemas   MISSING - every GTK application aborts on startup"
+    fi
+
+    if [ -f /usr/share/mime/mime.cache ]; then
+        echo "  [OK] MIME database       built"
+    else
+        echo "  [!!] MIME database       MISSING - no file type is recognised"
+    fi
+
+    if [ -x /usr/bin/bwrap ] || command -v bwrap >/dev/null 2>&1; then
+        echo "  [OK] image decoding      glycin + bwrap"
+    else
+        echo "  [!!] image decoding      no bwrap - GTK will display no images"
+    fi
+
+    if [ -d /usr/share/icons/Adwaita/cursors ]; then
+        echo "  [OK] cursor theme        Adwaita"
+    else
+        echo "  [!!] cursor theme        MISSING - no pointer over the shell"
+    fi
+
+    entries=0
+    for d in /usr/share/applications /usr/local/share/applications; do
+        [ -d "$d" ] || continue
+        n=$(find "$d" -name '*.desktop' 2>/dev/null | wc -l)
+        entries=$((entries + n))
+    done
+    if [ "${entries}" -gt 0 ]; then
+        echo "  [OK] application menu    ${entries} entry(ies)"
+    else
+        echo "  [!!] application menu    EMPTY - the launcher will enumerate nothing"
+    fi
+
+    if command -v ravenfilemanager >/dev/null 2>&1; then
+        echo "  [OK] file manager        $(command -v ravenfilemanager)"
+    else
+        echo "  [--] file manager        not installed"
+    fi
+
+    if command -v raven-terminal >/dev/null 2>&1; then
+        echo "  [OK] terminal            $(command -v raven-terminal)"
+    else
+        echo "  [!!] terminal            MISSING - the dock can launch nothing"
+    fi
+
+    if [ -n "${FAILED_SETS}" ]; then
+        echo
+        echo "${RED}Sets that failed:${NC}${FAILED_SETS}"
+        echo "  Re-run just those once the cause is fixed:"
+        echo "    ${PROGRAM}${FAILED_SETS}"
+    fi
+    echo
+}
+
+usage() {
+    cat <<EOF
+Usage: ${PROGRAM} [options] [set...]
+
+Installs the packages a RavenLinux desktop needs and rebuilds the toolkit
+caches that nothing else on this image rebuilds.
+
+Sets:
+  session     the graphics stack huginn and raven-terminal link against
+  toolkit     GTK4/libadwaita and the runtime data a GTK application needs
+  media       image and video decoding (glycin, bwrap, GStreamer, codecs)
+  fonts       icon themes, cursors and the faces the shell draws with
+  portals     the session bus and the XDG desktop portals
+  audio       pipewire and wireplumber
+  firmware    GPU and audio firmware
+  devel       toolchain: base-devel, git, rustup, go   (not in the default)
+  extras      applications, not desktop dependencies   (not in the default)
+
+With no set named: ${DEFAULT_SETS}
+
+Options:
+  -y, --yes         do not prompt, here or in rvn
+  -n, --dry-run     print what would be installed and change nothing
+      --list        list every set's packages and exit
+      --caches-only rebuild the toolkit caches and install nothing
+      --no-caches   install packages and leave the caches alone
+      --repo-only   official repositories only; never touch the AUR
+  -h, --help        this
+EOF
+}
+
+# =============================================================================
+# Arguments
+# =============================================================================
+
+SETS=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -y|--yes)      assume_yes=1; shift ;;
+        -n|--dry-run)  dry_run=1; shift ;;
+        --list)        list_only=1; shift ;;
+        --caches-only) caches_only=1; shift ;;
+        --no-caches)   skip_caches=1; shift ;;
+        --repo-only)   repo_only=1; shift ;;
+        -h|--help)     usage; exit 0 ;;
+        -*)            echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+        *)
+            if set_exists "$1"; then
+                SETS="${SETS} $1"
+            else
+                echo "Unknown set: $1" >&2
+                echo "Known sets: ${ALL_SETS}" >&2
+                exit 2
+            fi
+            shift
+            ;;
+    esac
+done
+
+[ -n "${SETS}" ] || SETS="${DEFAULT_SETS}"
+
+if [ "${list_only}" -eq 1 ]; then
+    for s in ${SETS}; do
+        echo "${WHITE}${s}${NC}"
+        set_packages "${s}" | sed 's/^/  /'
+    done
+    exit 0
+fi
+
+# =============================================================================
+# Main
+# =============================================================================
+
+echo
+echo "=========================================="
+echo "  RavenLinux desktop restore"
+echo "=========================================="
+
+FAILED_SETS=""
+
+if [ "${caches_only}" -eq 1 ]; then
+    [ "$(id -u)" -eq 0 ] || { err "the caches live under /usr; run as root."; exit 1; }
+    refresh_caches
+    print_summary
+    exit 0
+fi
+
+command -v rvn >/dev/null 2>&1 || {
+    err "rvn is not installed; there is no package manager to install with."
+    exit 1
+}
+
+# Checked before the package list is read rather than after, so the failure
+# arrives before a minute of database reads rather than after it. --dry-run is
+# exempt: printing what would happen needs no privilege, and being able to
+# check the plan as a normal user is most of what a dry run is for.
+if [ "${dry_run}" -eq 0 ] && [ "$(id -u)" -ne 0 ]; then
+    err "rvn installs into /usr; run this as root."
+    exit 1
+fi
+
+step "Reading installed packages"
+INSTALLED_CACHE="$(installed_packages)"
+info "$(printf '%s\n' "${INSTALLED_CACHE}" | awk 'NF' | wc -l) package(s) installed"
+
+step "Sets:${SETS}"
+
+if [ "${dry_run}" -eq 0 ] && [ "${assume_yes}" -ne 1 ]; then
+    printf "Install these now? [y/N] "
+    read -r answer
+    case "${answer}" in
+        [Yy]*) ;;
+        *) echo "No changes made."; exit 0 ;;
+    esac
+fi
+
+for s in ${SETS}; do
+    install_set "${s}" || FAILED_SETS="${FAILED_SETS} ${s}"
+done
+
+if [ "${dry_run}" -eq 1 ]; then
+    echo
+    info "dry run: nothing was installed and no cache was rebuilt"
+    exit 0
+fi
+
+if [ "${skip_caches}" -eq 0 ]; then
+    refresh_caches
+else
+    warn "--no-caches: the toolkit caches were not rebuilt."
+    warn "GTK applications will abort on startup until you run --caches-only."
+fi
+
+print_summary
+
+[ -z "${FAILED_SETS}" ]

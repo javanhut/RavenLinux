@@ -48,3 +48,22 @@ go
 # XML the wayland-scanner build step reads, needed by nothing at runtime.
 pkgconf
 wayland-protocols
+
+# The toolkit, for RavenFileManager. Kept in step with desktop.packages by
+# hand, as everything above the build section is -- raven-postinstall reads
+# exactly one .packages file and cannot include another. See desktop.packages
+# for why glib2, gsettings-desktop-schemas, shared-mime-info and bubblewrap are
+# named when no linker will ever mention them.
+gtk4
+libadwaita
+glib2
+gsettings-desktop-schemas
+gsettings-system-schemas
+shared-mime-info
+desktop-file-utils
+gtk-update-icon-cache
+gdk-pixbuf2
+librsvg
+glycin
+bubblewrap
+dconf

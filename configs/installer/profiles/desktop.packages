@@ -37,3 +37,46 @@ libxkbcommon
 wayland
 seatd
 xorg-xwayland
+
+# The toolkit, for RavenFileManager.
+#
+# The image ships it -- stage-gui.sh builds it from javanhut/RavenFileManager
+# alongside huginn and the terminal -- and, like the graphics stack above, it
+# arrives as unowned files copied off a build host. It links a hundred and
+# thirty-four shared libraries against huginn's seventeen, so the great
+# majority of these come in as dependencies of gtk4 and libadwaita; they are
+# named anyway, because a package that is installed as a dependency is one an
+# unrelated removal can take with it.
+#
+# Four are here for reasons no linker reports:
+#
+#   glib2                      owns glib-compile-schemas. GSettings reads only
+#                              the compiled gschemas.compiled, never the XML,
+#                              and without it every GTK application aborts at
+#                              startup on a schema lookup.
+#   gsettings-desktop-schemas  libadwaita reads org.gnome.desktop.interface to
+#                              choose light or dark; absent, it stays light.
+#   shared-mime-info           without mime.cache every file reads as
+#                              application/octet-stream.
+#   bubblewrap                 since gdk-pixbuf 2.44 the image loaders live in
+#                              glycin, which decodes inside a bwrap sandbox and
+#                              refuses to decode without one. No bwrap, no
+#                              images anywhere in the toolkit.
+#
+# Installing these is necessary and not sufficient: the caches above are
+# derived state and nothing here rebuilds them. `raven-desktopinstall` is the
+# script that installs this set *and* rebuilds them, and is the better command
+# to reach for on an already-installed machine.
+gtk4
+libadwaita
+glib2
+gsettings-desktop-schemas
+gsettings-system-schemas
+shared-mime-info
+desktop-file-utils
+gtk-update-icon-cache
+gdk-pixbuf2
+librsvg
+glycin
+bubblewrap
+dconf

@@ -221,3 +221,95 @@ dependency now runs the other way too: the same stage builds both, because
 huginn names `raven-terminal` in two compiled-in places and a desktop that
 cannot open a terminal cannot start anything at all. Neither ships usefully
 without the other.
+
+## File Manager
+
+| Status | Binary | Repo |
+|--------|--------|------|
+| **wired** | `ravenfilemanager` | [javanhut/RavenFileManager](https://github.com/javanhut/RavenFileManager) |
+
+Built by `scripts/stages/stage-gui.sh`, from its own repository, alongside
+huginn and RavenTerminal. `imlazy gui` builds it; `FILEMANAGER_SKIP=1` leaves it
+out.
+
+It is the first thing on this image that is an *application*. huginn and
+`raven-terminal` are the desktop — without either there is nothing to log into,
+or nothing to launch — so their failures fail the stage. An image without a file
+manager is a working desktop missing a program, so every failure path in
+`stage_filemanager()` warns and returns 0.
+
+It is also the first GTK client, and that is the part worth knowing about.
+
+**A hundred and thirty-four shared libraries.** huginn links seventeen and that
+was enough to keep it out of the Raven layer, whose invariant is a static binary
+that adds nothing to the sysroot's link graph. This links GTK4, libadwaita,
+pango, cairo, harfbuzz, GStreamer, appstream, krb5 and gnutls, and the desktop
+stack behind them. `stage_gui_libraries()` resolves the set with `ldd` like
+everything else here, so no list of them is written down anywhere.
+
+**And four things `ldd` cannot see.** This is why `stage_gtk_runtime()` exists.
+The sysroot had a complete graphics stack and none of the *data* a toolkit reads
+at run time, and each piece fails quietly and separately:
+
+| Missing | Symptom |
+|---|---|
+| `gschemas.compiled` | **the application aborts on startup.** GSettings reads only the compiled cache, never the XML, so `g_settings_new()` is a fatal GLib error naming a schema |
+| `gsettings-desktop-schemas` | libadwaita cannot read `org.gnome.desktop.interface`, silently stays light, and looks like an app that ignores the system theme |
+| `/usr/share/mime/mime.cache` | every file is `application/octet-stream`: one icon, no "Open With" |
+| `bwrap` | **no images anywhere in the toolkit.** Since gdk-pixbuf 2.44 the loaders moved out of process into glycin, which decodes inside a bubblewrap sandbox and refuses to decode without one |
+
+The caches are regenerated against the sysroot rather than copied — a cache
+built on the host encodes host paths — and all three tools take the directory to
+work on as an argument, so the stage needs no chroot to run them.
+
+On an installed system the same set is `raven-desktopinstall`'s `toolkit` set,
+and rebuilding those caches is the reason that script does not stop when `rvn`
+does.
+
+`huginn` pins it. `dock::PINNED` names `com.ravenfilemanager.Raven` — by
+*desktop file stem*, which is why it appears there under a reverse-DNS name and
+`raven-terminal` does not: GTK requires an application's entry to be named for
+its application id. A pinned name matching no entry is skipped rather than drawn
+dead, so `FILEMANAGER_SKIP=1` yields a one-icon dock rather than an icon that
+launches nothing.
+
+`install_desktop_entries()` writes its entry outside the `raven-terminal` guard,
+unlike crow's: it opens its own window and does not need a terminal to exist.
+The entry adds the `StartupWMClass` upstream's `data/*.desktop` omits — the
+match works without it, because the file stem and the app_id happen to agree,
+but `dock::owns` checks `StartupWMClass` first and a coincidence of two names is
+not something to rely on. It also claims `inode/directory` in a `mimeapps.list`;
+nothing on the image claimed it before, so "Open Containing Folder" from any
+application resolved to nothing.
+
+## Login
+
+| Status | Binary | Repo |
+|--------|--------|------|
+| not wired | `ravend`, `raven-greeter` | [javanhut/RavenLogin](https://github.com/javanhut/RavenLogin) |
+
+The login screen, and the daemon behind it. Not built by any stage yet.
+
+Today `raven-init` resolves `raven.user=<name>`, or failing that the lowest-uid
+regular account, and starts the session as them with no password prompt anywhere
+in the path — right for an image you are bringing up, wrong for a machine you
+use. RavenLogin is that prompt.
+
+The split is the design: `ravend` runs as root and reads `/etc/shadow`;
+`raven-greeter` runs as its own `raven-greeter` account, draws, and can ask one
+question over a `0600` Unix socket that `ravend` checks `SO_PEERCRED` on anyway.
+Drawing a login screen means parsing fonts, rasterizing glyphs and decoding
+images — near enough a list of everything that has ever been remotely
+exploitable in a login screen — and the password hashes are not in that process.
+
+Wiring it will need four things that do not exist yet, which is why it is listed
+rather than built:
+
+- a stage, or a section of `stage-gui.sh`, that builds both binaries;
+- a `raven-greeter` account and group, created in stage2 alongside `caw`'s;
+- an `init.toml` service for `ravend` that starts *before* the session, and a
+  `raven-init` that hands the session off to it rather than starting
+  `/bin/raven-wayland-session` itself;
+- a decision about what happens when `ravend` fails to start. Falling through to
+  the current passwordless session would make the login screen advisory, and a
+  password prompt that can be skipped by breaking it is not one.

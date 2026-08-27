@@ -960,6 +960,7 @@ install_installer() {
 
     local src="${PROJECT_ROOT}/scripts/installer/raven-install"
     local post="${PROJECT_ROOT}/scripts/installer/raven-postinstall"
+    local desktop="${PROJECT_ROOT}/scripts/installer/raven-desktopinstall"
     local profiles="${PROJECT_ROOT}/configs/installer/profiles"
 
     if [[ ! -f "${src}" ]]; then
@@ -980,6 +981,22 @@ install_installer() {
     if [[ -f "${post}" ]]; then
         cp "${post}" "${SYSROOT_DIR}/usr/bin/raven-postinstall"
         chmod 0755 "${SYSROOT_DIR}/usr/bin/raven-postinstall"
+    fi
+
+    # raven-desktopinstall goes in for the same reason raven-install does: the
+    # copy on the live image and the copy on every system installed from it are
+    # the same file. It is the one of the three that is worth running on a
+    # machine that has been up for months -- the toolkit caches it rebuilds are
+    # derived state, and nothing on this image rebuilds them on a package
+    # upgrade, so "GTK application suddenly aborts on startup" is a thing that
+    # can happen to a working system and this is the answer to it.
+    if [[ -f "${desktop}" ]]; then
+        cp "${desktop}" "${SYSROOT_DIR}/usr/bin/raven-desktopinstall"
+        chmod 0755 "${SYSROOT_DIR}/usr/bin/raven-desktopinstall"
+        log_info "  raven-desktopinstall installed"
+    else
+        log_warn "  scripts/installer/raven-desktopinstall not found; a rebuilt"
+        log_warn "  desktop will have no way to restore its package set"
     fi
     if [[ -d "${profiles}" ]]; then
         mkdir -p "${SYSROOT_DIR}/etc/raven/install-profiles"

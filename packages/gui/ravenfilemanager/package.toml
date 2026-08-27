@@ -1,0 +1,97 @@
+[package]
+name = "ravenfilemanager"
+version = "0.1.0"
+description = "RavenFileManager - the desktop's file manager"
+license = "GPL-3.0-or-later"
+homepage = "https://github.com/javanhut/RavenFileManager"
+repository = "https://github.com/javanhut/RavenFileManager"
+maintainers = ["RavenLinux Team"]
+categories = ["gui", "wayland", "application"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/RavenFileManager.git"
+commit = "b338fb90ae364068007573c119d10ec65c23a391"
+
+[build]
+system = "cargo"
+# The same glibc target as ravengui, and for a stronger version of the same
+# reason. huginn links seventeen shared libraries; this links a hundred and
+# thirty-four -- GTK4, libadwaita, pango, cairo, harfbuzz, GStreamer, appstream,
+# krb5, gnutls and the desktop stack behind them. There is no musl build of
+# this to be had, and nothing about it belongs in packages/raven.
+target = "x86_64-unknown-linux-gnu"
+build_flags = ["--release", "--locked"]
+
+[dependencies]
+# As with ravengui, the shared-library list is resolved with ldd at build time
+# rather than written out here -- see stage_gui_libraries() in
+# scripts/stages/stage-gui.sh. What is listed is what a *package manager* would
+# have to install on a system that did not get those files staged off a build
+# host, which is what configs/installer/profiles/desktop.packages exists for;
+# keep the two in step.
+#
+# Four of these are runtime dependencies that no linker will ever tell you
+# about, and each fails silently and differently:
+#
+#   glib2                  ships glib-compile-schemas, and without a compiled
+#                          gschemas.compiled every GTK application aborts at
+#                          startup on a schema lookup.
+#   gsettings-desktop-schemas
+#                          libadwaita reads org.gnome.desktop.interface to pick
+#                          light or dark; absent, it silently stays light.
+#   shared-mime-info       without mime.cache every file is
+#                          application/octet-stream: one icon, no "Open With".
+#   bubblewrap             glycin decodes images in a bwrap sandbox and refuses
+#                          to decode without one, so no bwrap means no images.
+#
+# glycin is listed explicitly rather than left to gtk4's dependency graph
+# because the loaders are separate executables in /usr/lib/glycin-loaders and
+# are what actually decode the formats -- gtk4 pulls libglycin, not the loaders.
+runtime = [
+    "gtk4", "libadwaita", "glib2", "gsettings-desktop-schemas",
+    "shared-mime-info", "desktop-file-utils", "glycin", "bubblewrap",
+    "librsvg", "gdk-pixbuf2", "hicolor-icon-theme", "adwaita-icon-theme",
+    "gstreamer", "gst-plugins-base-libs", "appstream", "dconf",
+]
+build = ["rust", "cargo", "pkg-config", "gtk4", "libadwaita", "glib2"]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-gnu/release/ravenfilemanager", dest = "/usr/bin/ravenfilemanager", mode = 755 },
+    { src = "data/icons/hicolor/scalable/apps/com.ravenfilemanager.Raven.svg", dest = "/usr/share/icons/hicolor/scalable/apps/com.ravenfilemanager.Raven.svg", mode = 644 },
+    { src = "data/com.ravenfilemanager.Raven.metainfo.xml", dest = "/usr/share/metainfo/com.ravenfilemanager.Raven.metainfo.xml", mode = 644 },
+    { src = "config/default.toml",     dest = "/usr/share/ravenfilemanager/config/default.toml",     mode = 644 },
+    { src = "config/keybindings.toml", dest = "/usr/share/ravenfilemanager/config/keybindings.toml", mode = 644 },
+    { src = "config/actions.toml",     dest = "/usr/share/ravenfilemanager/config/actions.toml",     mode = 644 }
+]
+
+# The three config/*.toml are reference, not configuration, and the difference
+# is worth stating because the path looks load-bearing. AppConfig::config_dir()
+# in raven-core resolves $XDG_CONFIG_HOME/raven or ~/.config/raven with no
+# system fallback beneath it, and reads `config.toml` there -- not
+# `default.toml`. Nothing on a running system opens these. They ship for the
+# reason upstream's `make install` ships them: they are the documented default
+# set, and the answer to "what goes in ~/.config/raven/config.toml".
+#
+# data/resources/style.css is deliberately absent. raven-ui include_str!s it at
+# build time, so the stylesheet is inside the binary; a copy on disk would be a
+# second one that can disagree with what is actually drawn.
+
+# PREFIX=/usr, not the Makefile's /usr/local default. Its `make install` is
+# right for a development machine and wrong for the image: /usr/local there is
+# an empty tree nothing owns. The stage does not call `make install` either --
+# it would run update-desktop-database and gtk-update-icon-cache against the
+# build host's own live tree.
+#
+# The upstream data/com.ravenfilemanager.Raven.desktop is deliberately not in
+# this list. install_desktop_entries() in scripts/stages/stage-gui.sh writes
+# every application entry on this image so that what the launcher shows is
+# decided in one place, and the entry it writes adds the StartupWMClass
+# upstream omits.
+
+# No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS
+# /usr/bin: a link at /bin/<name> whose target is /usr/bin/<name> names the
+# same path on both sides, and creating it replaces the real binary with a
+# symlink to itself. See scripts/lib/usrmerge.sh.
+symlinks = []

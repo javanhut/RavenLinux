@@ -276,6 +276,34 @@ or `sudo raven-postinstall --profile developer`. Profiles are editable package
 lists in `/etc/raven/install-profiles`, following archinstall's separation of
 disk installation from a reusable system profile.
 
+For a desktop, `sudo raven-desktopinstall` is the better command. It installs
+the same packages in named sets — `session`, `toolkit`, `media`, `fonts`,
+`portals`, `audio`, `firmware` — one `rvn` call each rather than one call for
+everything, so a set whose names have gone stale upstream costs you that set
+and is reported by name instead of failing the whole install.
+
+More importantly, it does the half that installing packages does not cover.
+Four toolkit caches are derived state that no package on this image rebuilds:
+
+| Cache | What its absence looks like |
+|---|---|
+| `gschemas.compiled` | **every GTK application aborts on startup** — GSettings reads only the compiled cache, never the XML |
+| `mime.cache` | every file reads as `application/octet-stream`: one icon, no "Open With" |
+| `mimeinfo.cache` | "Open Containing Folder" resolves to nothing |
+| `icon-theme.cache` | stale icons, or slow theme lookups |
+
+They are missing on a freshly staged image, because the ISO stages those trees
+as plain files copied off a build host — and they go stale again on a package
+upgrade, so this is worth running on a machine that has been up for months and
+not only after an install.
+
+```
+raven-desktopinstall                 # every set but devel and extras
+raven-desktopinstall --list          # what each set contains
+raven-desktopinstall -n toolkit      # dry run, one set, no root needed
+raven-desktopinstall --caches-only   # rebuild the caches, install nothing
+```
+
 | Partition | Size | Filesystem | Mount |
 |-----------|------|------------|-------|
 | 1 | 512M | FAT32 | `/boot/efi` |

@@ -5,8 +5,15 @@
 # Builds the desktop: RavenGUI's Huginn, the Wayland compositor, and
 # muninn-lock, the session lock screen -- plus RavenTerminal, from its own
 # repository, because huginn names `raven-terminal` in two compiled-in places
-# and a desktop that cannot open a terminal cannot start anything at all.
-# See REPOSFORRAVEN.md for what each of them is.
+# and a desktop that cannot open a terminal cannot start anything at all, and
+# RavenFileManager, from a third. See REPOSFORRAVEN.md for what each of them is.
+#
+# The three are not equal. huginn and raven-terminal are the desktop: without
+# either there is nothing to log into or nothing to launch, so their failure
+# paths mark the whole stage failed. RavenFileManager is an application, and
+# an image without it is a working desktop missing a program -- so every one of
+# its failure paths warns and returns 0. It is also the only GTK client here,
+# which is why stage_gtk_runtime() exists at all.
 #
 # THERE IS NO SEPARATE SHELL PROCESS
 #
@@ -61,6 +68,9 @@
 #   TERMINAL_SKIP=1            skip RavenTerminal; the desktop ships unusable
 #   TERMINAL_OFFLINE=1         as GUI_OFFLINE, for the terminal alone
 #   TERMINAL_REF=<git-ref>     build a particular RavenTerminal ref
+#   FILEMANAGER_SKIP=1         skip RavenFileManager; the desktop keeps working
+#   FILEMANAGER_OFFLINE=1      as GUI_OFFLINE, for the file manager alone
+#   FILEMANAGER_REF=<git-ref>  build a particular RavenFileManager ref
 # =============================================================================
 
 set -euo pipefail
@@ -89,6 +99,18 @@ GUI_URL="https://github.com/javanhut/${GUI_REPO}.git"
 # without, and it shares no code with the compositor.
 TERMINAL_REPO="RavenTerminal"
 TERMINAL_URL="https://github.com/javanhut/${TERMINAL_REPO}.git"
+
+# The file manager. A third repository, and the first application on this image
+# that is neither the compositor nor something the compositor cannot start
+# without: the desktop is complete without it, which is why every failure path
+# below warns and returns rather than failing the stage.
+#
+# Its application id is also its .desktop stem, its icon name and its D-Bus
+# name, so it is written once here and used for all four.
+FILEMANAGER_REPO="RavenFileManager"
+FILEMANAGER_URL="https://github.com/javanhut/${FILEMANAGER_REPO}.git"
+FILEMANAGER_BIN="ravenfilemanager"
+FILEMANAGER_APPID="com.ravenfilemanager.Raven"
 
 # Huginn links glibc, unlike everything in the Raven layer. The host target is
 # the right one: the sysroot carries the host's glibc and its dynamic linker,
@@ -512,6 +534,297 @@ stage_terminal() {
 }
 
 # =============================================================================
+# The GTK runtime
+# =============================================================================
+# Everything a GTK4/libadwaita application needs that is not a shared library,
+# and therefore everything `ldd` cannot find for us.
+#
+# This exists because RavenFileManager is the first GTK application on the
+# image. huginn needed none of it -- it draws with smithay and Mesa directly --
+# so the sysroot has a complete graphics stack and none of the *data* a toolkit
+# reads at run time. Each item below fails quietly and separately, which is the
+# whole problem with them:
+#
+#   - No `gschemas.compiled` and every `g_settings_new()` is a fatal GLib
+#     error: "Settings schema 'org.gtk.gtk4.Settings.FileChooser' is not
+#     installed". The XML alone does nothing -- GSettings reads only the
+#     compiled cache -- and the build host has the same gap today, which is why
+#     `gsettings list-schemas` on a running Raven desktop prints "No schemas
+#     installed".
+#   - No `/usr/share/mime/mime.cache` and `g_file_info_get_content_type()`
+#     answers application/octet-stream for every file. A file manager that
+#     cannot tell a directory from a JPEG still runs; it just has one icon and
+#     no "Open With".
+#   - No glycin loaders and GTK4 decodes no images at all. Since gdk-pixbuf
+#     2.44 the loaders moved out of process into glycin, which sandboxes each
+#     decoder with bubblewrap -- so `bwrap` is a runtime dependency of drawing
+#     a PNG, which is not a sentence anyone expects to be true.
+#   - No GIO modules and TLS is unavailable to anything using GIO streams.
+#
+# Everything here is copied from the build host, like stage2's libraries, and
+# the caches are regenerated against the sysroot rather than copied: a cache
+# built on the host encodes host paths, and the three tools all take the
+# directory to work on as an argument, so no chroot is needed.
+stage_gtk_runtime() {
+    local staged=0
+
+    # GSettings schemas. gsettings-desktop-schemas is in here too and is not
+    # optional: libadwaita's AdwStyleManager reads org.gnome.desktop.interface
+    # to decide light or dark, and resolves to light with a warning when the
+    # schema is absent -- an application that ignores the system theme looks
+    # like an application bug.
+    local schemas="/usr/share/glib-2.0/schemas"
+    if [[ -d "${schemas}" ]]; then
+        mkdir -p "${SYSROOT_DIR}${schemas}"
+        cp -a "${schemas}/." "${SYSROOT_DIR}${schemas}/" 2>/dev/null || true
+        if command -v glib-compile-schemas &>/dev/null; then
+            if glib-compile-schemas "${SYSROOT_DIR}${schemas}" 2>/dev/null; then
+                log_info "  compiled GSettings schemas ($(find "${SYSROOT_DIR}${schemas}" -name '*.gschema.xml' | wc -l) schema(s))"
+                staged=$((staged + 1))
+            else
+                log_warn "  glib-compile-schemas failed; GTK applications will abort on startup"
+            fi
+        else
+            log_warn "  glib-compile-schemas not on the build host: the schemas are"
+            log_warn "  staged but not compiled, which is the same as not staged"
+            log_warn "  install it with: pacman -S --needed glib2-devel"
+        fi
+    else
+        log_warn "  no GSettings schemas on the build host; GTK applications will abort"
+    fi
+
+    # The MIME database. Copied and rebuilt rather than copied with its cache,
+    # because mime.cache is a memory-mapped binary whose layout is tied to the
+    # tool that wrote it.
+    if [[ -d /usr/share/mime ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/share/mime"
+        cp -a /usr/share/mime/. "${SYSROOT_DIR}/usr/share/mime/" 2>/dev/null || true
+        if command -v update-mime-database &>/dev/null; then
+            update-mime-database "${SYSROOT_DIR}/usr/share/mime" 2>/dev/null || true
+            log_info "  staged the MIME database"
+            staged=$((staged + 1))
+        fi
+    fi
+
+    # Image decoding. glycin-loaders are separate executables the toolkit
+    # spawns, so they carry their own link graph -- resolved through the same
+    # ldd path as everything else rather than assumed to be a subset of the
+    # application's.
+    if [[ -d /usr/lib/glycin-loaders ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/lib/glycin-loaders"
+        cp -a /usr/lib/glycin-loaders/. "${SYSROOT_DIR}/usr/lib/glycin-loaders/" 2>/dev/null || true
+
+        local -a loaders=()
+        while IFS= read -r loader; do
+            loaders+=("${loader}")
+        done < <(find /usr/lib/glycin-loaders -type f -perm -u+x 2>/dev/null)
+        (( ${#loaders[@]} > 0 )) && stage_gui_libraries "${loaders[@]}"
+
+        # The sandbox. glycin refuses to decode outside one, so a missing bwrap
+        # is a toolkit that draws no images rather than a toolkit that draws
+        # them unsandboxed.
+        local bwrap
+        bwrap="$(command -v bwrap 2>/dev/null || true)"
+        if [[ -n "${bwrap}" ]]; then
+            # 0755, and deliberately not setuid. bubblewrap has two build
+            # modes: setuid-root for kernels without unprivileged user
+            # namespaces, and unprivileged for kernels with them. The host's is
+            # 0755, so it is the unprivileged build -- and installing that one
+            # 4755 would not make it work on a kernel that needs the other, it
+            # would only add a setuid-root binary to the image for no reason.
+            # RavenLinux's kernel enables user namespaces; if that ever changes
+            # this is the line that has to change with it.
+            install -m 0755 "${bwrap}" "${SYSROOT_DIR}/usr/bin/bwrap"
+            stage_gui_libraries "${bwrap}"
+            log_info "  staged glycin loaders and bwrap"
+            staged=$((staged + 1))
+        else
+            log_warn "  bwrap not on the build host: glycin sandboxes every decode and"
+            log_warn "  refuses to run without it, so GTK will display no images"
+            log_warn "  install it with: pacman -S --needed bubblewrap"
+        fi
+    fi
+
+    # gdk-pixbuf's own loaders, for the gdk-pixbuf 2.42-era layout. Absent on a
+    # host with gdk-pixbuf 2.44+, where the loaders moved to glycin above --
+    # hence the guard rather than a warning. The cache is regenerated with the
+    # sysroot prefix stripped, because it stores absolute module paths and the
+    # ones the host tool writes would name the build machine.
+    local pixbuf="/usr/lib/gdk-pixbuf-2.0/2.10.0"
+    if [[ -d "${pixbuf}/loaders" ]]; then
+        mkdir -p "${SYSROOT_DIR}${pixbuf}"
+        cp -a "${pixbuf}/." "${SYSROOT_DIR}${pixbuf}/" 2>/dev/null || true
+        if command -v gdk-pixbuf-query-loaders &>/dev/null; then
+            GDK_PIXBUF_MODULEDIR="${SYSROOT_DIR}${pixbuf}/loaders" \
+                gdk-pixbuf-query-loaders 2>/dev/null \
+                | sed "s|${SYSROOT_DIR}||g" \
+                > "${SYSROOT_DIR}${pixbuf}/loaders.cache" || true
+            log_info "  staged gdk-pixbuf loaders"
+            staged=$((staged + 1))
+        fi
+    fi
+
+    # GIO modules: the TLS backend, the proxy resolvers, and the dconf GSettings
+    # backend. Nothing here is fatal on its own -- GSettings falls back to the
+    # in-memory backend when dconf is unreachable, which means settings apply
+    # for the life of the process and are forgotten on exit.
+    if [[ -d /usr/lib/gio/modules ]]; then
+        mkdir -p "${SYSROOT_DIR}/usr/lib/gio/modules"
+        cp -a /usr/lib/gio/modules/. "${SYSROOT_DIR}/usr/lib/gio/modules/" 2>/dev/null || true
+        local -a giomods=()
+        while IFS= read -r m; do giomods+=("${m}"); done \
+            < <(find /usr/lib/gio/modules -name '*.so' 2>/dev/null)
+        (( ${#giomods[@]} > 0 )) && stage_gui_libraries "${giomods[@]}"
+        log_info "  staged GIO modules"
+        staged=$((staged + 1))
+    fi
+
+    log_info "  ${staged} GTK runtime component(s) staged"
+}
+
+# =============================================================================
+# RavenFileManager
+# =============================================================================
+# The desktop's file manager: a GTK4/libadwaita application from its own
+# repository, built here for the same reason the terminal is -- it is a Wayland
+# client of the compositor this stage produces, and it links a graphics stack
+# that only exists from this stage onward.
+#
+# WHY IT IS NOT IN THE RAVEN LAYER, AND NOT LIKE THE OTHER TWO EITHER
+#
+# The Raven layer's invariant is a static binary that adds nothing to the
+# sysroot's link graph. huginn broke that with seventeen shared libraries and
+# got this stage. RavenFileManager links **a hundred and thirty-four**: GTK4,
+# libadwaita, pango, cairo, harfbuzz, GStreamer, appstream, krb5, gnutls and
+# the rest of the desktop stack behind them.
+#
+# That number is the reason every failure path here returns 0. huginn and
+# raven-terminal are the desktop -- without either there is nothing to log into
+# and nothing to launch. The file manager is an application: an image that
+# builds without it is a working desktop that is missing a program, and that is
+# not worth failing an ISO over.
+#
+# WHY PREFIX=/usr AND NOT ITS MAKEFILE'S DEFAULT
+#
+# Its Makefile installs to /usr/local, which is where it currently sits on a
+# development machine and is correct there. The image is not that: /usr/local
+# on the ISO is an empty tree the package manager does not own, and although
+# raven-wayland-session exports XDG_DATA_DIRS=/usr/local/share:/usr/share -- so
+# the launcher would find the entry either way -- the binary and its data belong
+# with everything else the build produced. `make install` is not used at all:
+# it would run update-desktop-database and gtk-update-icon-cache against the
+# build host's live tree, and the file list is short enough to state.
+#
+# Environment:
+#   FILEMANAGER_SKIP=1      skip it; the desktop is complete without it
+#   FILEMANAGER_OFFLINE=1   never touch the network; use the existing clone
+#   FILEMANAGER_REF=<ref>   build a particular ref instead of the default
+stage_filemanager() {
+    if [[ "${FILEMANAGER_SKIP:-0}" == "1" ]]; then
+        log_info "  FILEMANAGER_SKIP=1: no file manager on the image"
+        return 0
+    fi
+
+    command -v cargo &>/dev/null || {
+        log_warn "  cargo not found; RavenFileManager will not be built"
+        return 0
+    }
+
+    # Probed rather than discovered in the middle of a link, for the same
+    # reason the terminal's are: gtk4-rs reports a missing gtk4.pc as a
+    # system-deps panic in a build script, which names neither GTK nor the
+    # package to install.
+    local -a missing=()
+    local mod
+    for mod in gtk4 libadwaita-1 glib-2.0 gio-2.0; do
+        pkg-config --exists "${mod}" 2>/dev/null || missing+=("${mod}")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        log_warn "  missing build dependencies for the file manager: ${missing[*]}"
+        log_warn "  install them with: pacman -S --needed gtk4 libadwaita"
+        log_warn "  the desktop will ship without a file manager"
+        return 0
+    fi
+
+    local dest="${GUI_SRC_DIR}/${FILEMANAGER_REPO}"
+    if ! fetch_repo "${FILEMANAGER_REPO}" "${FILEMANAGER_URL}" "${dest}" \
+            "${FILEMANAGER_REF:-}" "${FILEMANAGER_OFFLINE:-${GUI_OFFLINE:-0}}"; then
+        log_warn "  RavenFileManager source unavailable; no file manager on the image"
+        return 0
+    fi
+
+    # The host target, like huginn and for the same reason: this links glibc,
+    # and the sysroot carries the host's glibc and dynamic linker. CGO_ENABLED
+    # is unset here rather than inherited -- the Raven stage exports 0 for its
+    # static Go builds and it means nothing to cargo, but leaving it exported
+    # into a build that shells out to a C compiler has bitten this stage once
+    # already.
+    log_info "  building RavenFileManager for ${GUI_TARGET}..."
+    local -a cargo_args=(build --release --target "${GUI_TARGET}")
+    [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
+    if ! (
+        cd "${dest}"
+        unset CGO_ENABLED
+        cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}"
+    ); then
+        log_warn "  RavenFileManager build failed; no file manager on the image"
+        return 0
+    fi
+
+    local out="${dest}/target/${GUI_TARGET}/release/${FILEMANAGER_BIN}"
+    if [[ ! -x "${out}" ]]; then
+        log_warn "  RavenFileManager produced no binary; no file manager on the image"
+        return 0
+    fi
+
+    install -Dm 0755 "${out}" "${SYSROOT_DIR}/usr/bin/${FILEMANAGER_BIN}"
+    log_success "  ${FILEMANAGER_BIN} installed ($(du -h "${out}" | cut -f1))"
+
+    stage_gui_libraries "${out}"
+
+    # Its data. The paths mirror `make install` with PREFIX=/usr; the desktop
+    # entry is deliberately not among them -- install_desktop_entries() writes
+    # every entry on this image, so that what the launcher shows is decided in
+    # one place.
+    local appdata="${SYSROOT_DIR}/usr/share"
+    install -Dm 0644 "${dest}/data/icons/hicolor/scalable/apps/${FILEMANAGER_APPID}.svg" \
+        "${appdata}/icons/hicolor/scalable/apps/${FILEMANAGER_APPID}.svg" 2>/dev/null \
+        && log_info "    + ${FILEMANAGER_APPID}.svg (hicolor/scalable)" \
+        || log_warn "    no icon in the checkout; the dock entry will draw blank"
+
+    install -Dm 0644 "${dest}/data/${FILEMANAGER_APPID}.metainfo.xml" \
+        "${appdata}/metainfo/${FILEMANAGER_APPID}.metainfo.xml" 2>/dev/null || true
+
+    # Its default config, shipped as reference and not as configuration.
+    #
+    # Worth being exact about, because the path looks load-bearing and is not.
+    # `AppConfig::config_dir()` in raven-core resolves $XDG_CONFIG_HOME/raven,
+    # or ~/.config/raven, and there is no system fallback below it -- and what
+    # it reads there is `config.toml`, not `default.toml`. So nothing on a
+    # running system ever opens this file. It is here for the same reason
+    # upstream's `make install` places it: it is the documented default set,
+    # and the answer to "what can I put in ~/.config/raven/config.toml".
+    #
+    # data/resources/style.css is deliberately not among them: raven-ui
+    # include_str!s it at ../../../data/resources/style.css, so the stylesheet
+    # is compiled into the binary and a copy on disk would be a second one that
+    # can disagree with what is actually being drawn.
+    local f
+    for f in default keybindings actions; do
+        install -Dm 0644 "${dest}/config/${f}.toml" \
+            "${appdata}/${FILEMANAGER_BIN}/config/${f}.toml" 2>/dev/null || true
+    done
+    log_info "    + default config under /usr/share/${FILEMANAGER_BIN}/config (reference)"
+
+    # Only now, and only on the success path: none of it is worth carrying on
+    # an image with nothing that reads it, and it is not a small amount --
+    # against an otherwise empty sysroot the schemas, the MIME database, the
+    # glycin loaders and their libraries come to a little over 100MB.
+    log_step "Staging the GTK runtime..."
+    stage_gtk_runtime
+}
+
+# =============================================================================
 # The application menu
 # =============================================================================
 # `launcher::scan_applications()` reads $XDG_DATA_DIRS/applications, and
@@ -602,8 +915,62 @@ ENTRY
             log_info "    + crow.desktop"
         fi
     else
-        log_warn "  no terminal built; writing no application entries"
-        log_warn "  (the terminal is the only thing that can be launched into a window)"
+        log_warn "  no terminal built; no entry for it or for crow"
+        log_warn "  (both are terminal programs and neither can be launched without it)"
+    fi
+
+    # Outside that branch on purpose. The file manager is a Wayland client that
+    # opens its own window, so unlike crow it does not need the terminal to
+    # exist -- an image built with TERMINAL_SKIP=1 still gets a launcher with
+    # something in it.
+    #
+    # Written here rather than installed from the repository's own
+    # data/*.desktop, even though that file exists and is nearly identical, so
+    # that every entry on this image is decided in one place. The one
+    # difference that matters is StartupWMClass: upstream omits it, and the
+    # dock then has to fall back to matching the file stem against the app_id.
+    # That happens to work -- GTK4 sets the app_id from the application id, and
+    # the .desktop is named for it -- but it works by coincidence of two names
+    # agreeing, and dock::owns checks StartupWMClass first when it is present.
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${FILEMANAGER_BIN}" ]]; then
+        cat > "${dir}/${FILEMANAGER_APPID}.desktop" << ENTRY
+[Desktop Entry]
+Type=Application
+Name=Files
+GenericName=File Manager
+Comment=Browse and manage files
+Exec=${FILEMANAGER_BIN} %U
+Icon=${FILEMANAGER_APPID}
+Categories=System;FileTools;FileManager;GTK;
+Keywords=files;folders;explorer;browser;manager;
+MimeType=inode/directory;
+StartupWMClass=${FILEMANAGER_APPID}
+StartupNotify=true
+Terminal=false
+ENTRY
+        chmod 0644 "${dir}/${FILEMANAGER_APPID}.desktop"
+        written=$((written + 1))
+        log_info "    + ${FILEMANAGER_APPID}.desktop"
+
+        # What opens a directory. Nothing on the image claimed inode/directory
+        # before, so "Open Containing Folder" from any application resolved to
+        # nothing at all.
+        cat > "${dir}/mimeapps.list" << DEFAULTS
+[Default Applications]
+inode/directory=${FILEMANAGER_APPID}.desktop
+DEFAULTS
+        chmod 0644 "${dir}/mimeapps.list"
+        log_info "    + mimeapps.list (inode/directory)"
+    fi
+
+    # The launcher reads this directory; update-desktop-database is what makes
+    # the *MIME* half of it work, and nothing else on the image writes it.
+    if (( written > 0 )) && command -v update-desktop-database &>/dev/null; then
+        update-desktop-database -q "${dir}" 2>/dev/null || true
+    fi
+
+    if (( written == 0 )); then
+        log_warn "  no application entries written: the launcher will enumerate nothing"
     fi
 
     log_info "  ${written} application entry(ies) installed"
@@ -858,6 +1225,29 @@ print_gui_summary() {
         echo "  [!!] terminal            MISSING - nothing can be launched at all"
     fi
 
+    # [--] rather than [!!]: the desktop is complete without a file manager,
+    # which is exactly why its absence needs saying out loud -- nothing else in
+    # this build fails when it is not there.
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${FILEMANAGER_BIN}" ]]; then
+        echo "  [OK] file manager        /usr/bin/${FILEMANAGER_BIN}"
+
+        # Checked separately from the binary, because this is the failure that
+        # produces a program which installs cleanly and then dies on launch
+        # with a GLib error naming a schema rather than a missing file.
+        if [[ -f "${SYSROOT_DIR}/usr/share/glib-2.0/schemas/gschemas.compiled" ]]; then
+            echo "  [OK] GSettings schemas   gschemas.compiled"
+        else
+            echo "  [!!] GSettings schemas   MISSING - every GTK application aborts on startup"
+        fi
+        if [[ -x "${SYSROOT_DIR}/usr/bin/bwrap" ]]; then
+            echo "  [OK] image decoding      glycin + bwrap"
+        else
+            echo "  [--] image decoding      no bwrap - GTK will display no images"
+        fi
+    else
+        echo "  [--] file manager        not built"
+    fi
+
     local entries=0
     if [[ -d "${SYSROOT_DIR}/usr/share/applications" ]]; then
         entries="$(find "${SYSROOT_DIR}/usr/share/applications" -name '*.desktop' 2>/dev/null | wc -l)"
@@ -996,6 +1386,11 @@ main() {
     # a binary for, so a terminal staged after it would not be described.
     log_step "Staging the terminal..."
     stage_terminal
+
+    # Same ordering rule, same reason: install_desktop_entries writes only what
+    # it can see a binary for.
+    log_step "Staging the file manager..."
+    stage_filemanager
 
     log_step "Installing application entries..."
     install_desktop_entries
