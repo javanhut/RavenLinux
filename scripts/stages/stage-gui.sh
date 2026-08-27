@@ -1119,6 +1119,35 @@ while [ $i -lt 50 ]; do
     sleep 0.1
 done
 
+# A session bus, because nothing else starts one. /etc/raven/init.toml has the
+# system bus and stops there, so DBUS_SESSION_BUS_ADDRESS arrives unset and
+# every GTK, Qt and Chromium client falls back to libdbus autolaunch -- which
+# wants X11, and fails with "Could not parse server address: Unknown address
+# type". The log noise is the least of it: a browser that cannot reach a Secret
+# Service keeps its saved passwords in plaintext, no XDG portal is reachable,
+# and nothing can read the battery.
+#
+# Backgrounded rather than wrapping the compositor in dbus-run-session, which
+# would read better and be wrong: that wrapper waits on its child instead of
+# execing it and does not forward signals, so with raven-init signalling the
+# one pid it tracks the wrapper would die and leave the compositor orphaned,
+# still holding DRM master. Backgrounding keeps the exec below, and with it the
+# compositor as the process init supervises.
+#
+# The socket is the well-known $XDG_RUNTIME_DIR/bus, so a client that probes
+# the path rather than reading the variable finds the same bus. /run is a fresh
+# tmpfs each boot, so a stale socket can only be this boot's earlier session --
+# it is cleared only when nothing answers on it, never while a bus is live.
+if command -v dbus-daemon >/dev/null 2>&1; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+    if ! dbus-send --session --dest=org.freedesktop.DBus --type=method_call \
+            --print-reply / org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+        rm -f "${XDG_RUNTIME_DIR}/bus"
+        dbus-daemon --session --address="${DBUS_SESSION_BUS_ADDRESS}" \
+            --nofork --nopidfile --syslog-only &
+    fi
+fi
+
 # exec, not background-and-wait: with no second process to supervise there is
 # nothing for this script to do afterwards, and execing puts the compositor
 # directly under init -- so its exit status is the session's, and a signal from
