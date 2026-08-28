@@ -53,9 +53,50 @@ And a graphical layer, built separately because it cannot be static:
 | `huginn` | [RavenGUI](https://github.com/javanhut/RavenGUI)'s Wayland compositor, which also draws the desktop — dock, launcher, notifications |
 | `muninn-lock` | the session lock screen, a separate process so a compositor bug cannot unlock the screen |
 | `raven-terminal` | [RavenTerminal](https://github.com/javanhut/RavenTerminal), the terminal the desktop opens — on the dock and on `Super`+`Shift`+`T` |
+| `ravenfilemanager` | [RavenFileManager](https://github.com/javanhut/RavenFileManager), the file manager — the other icon on the dock, and the image's only GTK client |
+| `ravencanvasd`, `ravencanvas` | [RavenCanvas](https://github.com/javanhut/RavenCanvas), the wallpaper — a layer-shell client, started by the session script before the compositor it draws behind |
+| `ravend`, `raven-greeter` | [RavenLogin](https://github.com/javanhut/RavenLogin), the login screen — and the root daemon behind it, which is not the process that draws |
 
 Boot the `Raven Desktop (Huginn)` entry, or add `raven.graphics=wayland` to the
-kernel cmdline, and raven-init starts the session instead of a getty.
+kernel cmdline, and raven-init starts the session instead of a getty — or, if
+`ravend` is on the image, the password prompt in front of it.
+
+Only the first three are load-bearing. Without huginn there is nothing to log
+into, and without `raven-terminal` nothing to launch — huginn names it in two
+compiled-in places — so both failing fails the stage. The rest are things a
+desktop can be missing: `FILEMANAGER_SKIP=1`, `CANVAS_SKIP=1` and `LOGIN_SKIP=1`
+each produce an image that still boots to a working session.
+
+RavenCanvas is the one of those that is a separate process by choice rather than
+necessity. huginn draws its own dock, launcher and notifications inside its
+render loop, because anything that must feel instant and must never fail does
+not get to be a process that can die — and a wallpaper is exactly the case that
+rule is not about, since huginn paints its own background underneath and the
+worst its death can do is leave a plain desktop.
+
+RavenFileManager is the first thing on the image that is simply an application,
+and the only GTK client on it. That is most of what makes it interesting to
+build: it links a hundred and thirty-four shared libraries against huginn's
+seventeen, and four of the things it needs are ones `ldd` cannot see — a
+compiled `gschemas.compiled`, without which every GTK application aborts at
+startup on a schema lookup; `gsettings-desktop-schemas`, without which
+libadwaita silently stays light; `mime.cache`, without which every file is
+`application/octet-stream`; and `bwrap`, without which the toolkit displays no
+images at all, because gdk-pixbuf's loaders moved into glycin and it decodes
+inside a sandbox or not at all. The stage rebuilds those caches against the
+sysroot rather than copying the build host's, which encode host paths.
+
+RavenLogin is the password prompt, and the split between its two binaries is the
+point of it. `ravend` runs as root and reads `/etc/shadow`; `raven-greeter` runs
+as its own unprivileged account, draws, and can ask `ravend` exactly one question
+over a `0600` socket that `ravend` checks `SO_PEERCRED` on anyway. Drawing a
+login screen means parsing fonts, rasterizing glyphs and decoding images — close
+enough to a list of everything that has ever been remotely exploitable in a
+login screen — and the password hashes are not in that process. Nothing on the
+image records the choice to use it: `raven-init` looks for the `ravend` binary
+and starts it in place of the autologin session when it finds one, so installing
+it is the whole of turning the prompt on and `LOGIN_SKIP=1` is the whole of
+leaving it off.
 
 RavenTerminal is built by the same stage as the compositor, from its own
 repository, with the **Wayland** GLFW backend rather than X11 — its Makefile
@@ -142,7 +183,7 @@ qemu-user — use Docker Desktop or colima with Rosetta, or build on x86_64.
 | `stage2` | `scripts/stages/stage2-native.sh` | Native rebuild of the sysroot: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | `stage3` | `scripts/stages/stage3-packages.sh` | Base packages: core libraries (zlib, ncurses, readline, attr, acl), shells, OpenSSH, RavenBoot |
 | `raven` | `scripts/stages/stage-raven.sh` | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw |
-| `gui` | `scripts/stages/stage-gui.sh` | The desktop: huginn, muninn-lock, raven-terminal, the application menu, and the shared libraries, icon themes and cursor theme they need |
+| `gui` | `scripts/stages/stage-gui.sh` | The desktop: huginn, muninn-lock, raven-terminal, ravenfilemanager, ravencanvasd, ravend, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
 | `stage4` | `scripts/stages/stage4-iso.sh` | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
 
 The Raven layer is unnumbered on purpose. Stages 0–4 build a base system that
@@ -183,13 +224,31 @@ GUI_REF=v0.1.0 imlazy gui                   # pin RavenGUI to a git ref
 GUI_OFFLINE=1 imlazy gui                    # reuse the existing clones
 TERMINAL_SKIP=1 imlazy gui                  # compositor only, no terminal
 TERMINAL_REF=v0.2.0 imlazy gui              # pin RavenTerminal to a git ref
+FILEMANAGER_SKIP=1 imlazy gui               # no file manager; the desktop works
+LOGIN_SKIP=1 imlazy gui                     # no password prompt; autologin
+CANVAS_SKIP=1 imlazy gui                    # no wallpaper daemon; flat background
+CANVAS_REF=v0.1.0 imlazy gui                # pin RavenCanvas to a git ref
 ```
 
-The stage ends with a **Desktop:** summary reporting the terminal, the
-application menu, the cursor theme, the icon theme and the fonts. Each of those
-was missing at once at one point, none of them failed the build, and the result
-was a green ISO whose desktop booted to a dock with a dead icon, an empty
-launcher, no mouse pointer and a single monospace font.
+Each of those four also takes an `_OFFLINE=1`, which reuses that component's
+existing clone without falling back to the network.
+
+The stage ends with a **Desktop:** summary reporting the terminal, the file
+manager, the wallpaper, the application menu, the cursor theme, the icon theme
+and the fonts. Each of those was missing at once at one point, none of them
+failed the build, and the result was a green ISO whose desktop booted to a dock
+with nothing on it but the launcher, a launcher enumerating nothing, no mouse
+pointer and a single monospace font.
+
+A fresh image ships an empty `/usr/share/wallpaper/set`, so the desktop draws
+RavenCanvas's built-in gradient until somebody sets a picture — which the
+summary says out loud, because a gradient otherwise looks like a wallpaper that
+failed:
+
+```bash
+sudo raven-set-wallpaper /path/to/image   # the machine: desktop and login screen
+ravencanvas set scene aurora --persist    # this user only
+```
 
 Artifacts land in `./build/`:
 

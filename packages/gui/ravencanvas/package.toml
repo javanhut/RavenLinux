@@ -1,0 +1,127 @@
+# The wallpaper daemon, and the two programs that tell it what to draw.
+#
+# `ravencanvasd` is an ordinary unprivileged Wayland client: it puts one
+# wlr-layer-shell surface on the background layer of each output and draws a
+# picture on it. It is a separate process rather than part of huginn because a
+# wallpaper is precisely the thing that is *allowed* to fail -- the file may be
+# missing, corrupt, or on a disk that is not mounted yet -- and huginn paints
+# its own background under everything, so the worst its death can do is leave a
+# plain desktop. RavenGUI's docs/protocols.md says so outright: "Panels, the
+# dock and the wallpaper are wlr-layer-shell surfaces. Do not duplicate those
+# here."
+#
+# Nothing here decides what the wallpaper is. The image ships an empty
+# /usr/share/wallpaper/set and a canvas.toml with its [background] commented
+# out, so a fresh machine draws the daemon's built-in gradient until somebody
+# runs raven-set-wallpaper.
+[package]
+name = "ravencanvas"
+version = "0.0.1"
+description = "RavenCanvas - the wallpaper daemon and its CLI"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/javanhut/RavenCanvas"
+repository = "https://github.com/javanhut/RavenCanvas"
+maintainers = ["RavenLinux Team"]
+categories = ["gui", "wayland", "desktop"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/RavenCanvas.git"
+# Unpinned, like ravenlogin above it and for the same reason: nothing has been
+# tagged in that repository yet, and a hash invented here would name a commit
+# that is not the one the GUI stage builds. Pin it at the first release.
+
+[build]
+system = "cargo"
+# The host glibc target, like everything else stage-gui.sh builds -- and this
+# is the one component in that stage for which that is a choice rather than a
+# constraint.
+#
+# It would build against musl and belong in packages/raven by the letter of
+# that layer's invariant: both binaries link libc, libm and libgcc_s and
+# nothing else. Its Wayland client is wayland-rs's pure-Rust backend, so there
+# is no libwayland-client in the link graph at all, and --as-needed drops the
+# libxkbcommon that a client which never touches the keyboard never calls into.
+#
+# It is built here anyway because linkage is not the only thing a stage owns.
+# Everything this daemon needs from the image is written by stage-gui.sh and by
+# nothing else: /usr/share/wallpaper/set, which is also what the greeter reads,
+# and /usr/bin/raven-wayland-session, which is where a session client gets
+# started from. The Raven layer runs first, so a wallpaper staged there would
+# be wired into a launcher this stage then overwrites whole.
+target = "x86_64-unknown-linux-gnu"
+build_flags = ["--release", "--locked", "-p", "ravencanvasd", "-p", "ravencanvas"]
+
+[dependencies]
+# Shorter than any other manifest under packages/gui, and that is the fact
+# worth recording rather than an omission. The daemon decodes PNG and JPEG with
+# two narrow Rust decoders instead of a system image library, speaks the
+# Wayland protocol in Rust rather than through libwayland, and watches its
+# config with inotify -- so `ldd` on it reports libc, libm and libgcc_s, and
+# stage_gui_libraries() finds nothing new to stage.
+#
+# huginn is the hard runtime requirement, and it is a real one: this is a
+# layer-shell client, so with no compositor to bind wlr-layer-shell there is no
+# surface to draw on and connect() gives up after ten seconds. It is not a
+# build dependency -- the protocol bindings are generated from XML that
+# smithay-client-toolkit vendors.
+#
+# bash for raven-set-wallpaper, which is a shell script and the only part of
+# this package that is not a static-linked Rust binary.
+runtime = ["ravengui", "bash"]
+build = ["rust", "cargo"]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-gnu/release/ravencanvasd", dest = "/usr/bin/ravencanvasd", mode = 755 },
+    { src = "target/x86_64-unknown-linux-gnu/release/ravencanvas",  dest = "/usr/bin/ravencanvas",  mode = 755 },
+    # Renamed on the way in, as upstream's own installer renames it. This is
+    # the name canvas.toml, the RavenCanvas README and RavenLogin's
+    # documentation all use; a `set-wallpaper.sh` in /usr/bin says nothing
+    # about whose wallpaper it sets.
+    { src = "scripts/set-wallpaper.sh", dest = "/usr/bin/raven-set-wallpaper", mode = 755 },
+    # Reference, not configuration: every value in it is a default the daemon
+    # already carries, so a machine without this file behaves identically.
+    #
+    # What it ships with is load-bearing all the same. Its [background] is
+    # commented out, and uncommenting it overrides the machine's wallpaper for
+    # every user -- which is exactly the contract with the login screen that
+    # /usr/share/wallpaper/set exists to keep. Unlike ravend's login.toml, a
+    # file here that does not parse is not fatal: a wallpaper is not a policy,
+    # the daemon reloads on every edit, and the moment you are most likely to
+    # have a broken file is halfway through editing one. It warns and leaves
+    # what is on screen.
+    { src = "config/canvas.toml", dest = "/etc/raven/canvas.toml", mode = 644 },
+]
+
+# No /bin aliases: this root is usr-merged, so /bin IS /usr/bin and a link at
+# /bin/<name> pointing to /usr/bin/<name> replaces the binary with a symlink to
+# itself. See scripts/lib/usrmerge.sh.
+symlinks = []
+
+# What this manifest does NOT describe, because none of it is a file this
+# package owns:
+#
+#   - /usr/share/wallpaper and /usr/share/wallpaper/set. The machine's
+#     wallpaper library and the one entry that says which picture is on. Shared
+#     with ravenlogin, whose manifest says the same thing: either package can
+#     be installed without the other, so the directories belong to neither and
+#     install_wallpaper_dirs() in scripts/stages/stage-gui.sh creates them for
+#     both. Nothing is shipped into them -- an empty library is a working image
+#     that draws the built-in gradient, and a photograph committed to a
+#     distribution repository is a licence question nobody asked for.
+#
+#   - the four lines in /usr/bin/raven-wayland-session that start the daemon.
+#     That script is written whole by install_session_launcher(), which carries
+#     the block guarded on `command -v ravencanvasd` -- so installing this
+#     package is the whole of turning the wallpaper on, and there is no edit to
+#     undo when it is removed. It is backgrounded before that script's final
+#     exec: the daemon is a client of the compositor the script is about to
+#     become, so there is no line after the exec on which to start it, and
+#     connect() retries for ten seconds to make starting first safe.
+#
+#   - anything in /etc/raven/init.toml. Every other daemon on this image is a
+#     service there; this one is not, and cannot be. Init's services run as
+#     root before anybody has logged in, and this is an unprivileged client
+#     that has to run as the session's own user and share its runtime
+#     directory.

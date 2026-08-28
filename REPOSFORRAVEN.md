@@ -135,8 +135,17 @@ server it was waiting for.
 
 It is not optional there. Huginn names `raven-terminal` in two compiled-in
 places — `theme::TERMINAL`, what `Super`+`Shift`+`T` spawns, and `dock::PINNED`,
-the one application on the dock — so a desktop without it boots to a dock
-holding a dead icon and can start no process at all.
+which it shares with the file manager below — so a desktop without it can start
+no process at all.
+
+It does *not* boot to a dock holding a dead icon, which this section claimed for
+a while and `dock::items` has never done. A pinned name matching no `.desktop`
+entry is skipped rather than drawn: the loop pushes an item only where
+`position` finds an entry, for both pinned names alike. So `TERMINAL_SKIP=1`
+yields a dock with the launcher and the file manager on it, exactly as
+`FILEMANAGER_SKIP=1` yields one with the launcher and the terminal — and the
+failure is silent at the dock and total everywhere else, which is the argument
+for the stage summary saying so rather than the dock showing it.
 
 Two details of how the stage builds it are load-bearing:
 
@@ -330,6 +339,101 @@ Wiring it needed four things, and this is where each of them ended up:
   it, and the console gettys are still there to fix a machine whose greeter
   will not come up.
 
-What is still by hand is a wallpaper. `stage_login()` creates
-`/usr/share/wallpaper` and `/usr/share/wallpaper/set` empty; drop an image in as
-`set/wallpaper.<ext>` and both huginn and the greeter draw it.
+`stage_login()` creates `/usr/share/wallpaper` and `/usr/share/wallpaper/set`
+empty. Drop an image in as `set/wallpaper.<ext>` and both huginn and the greeter
+draw it — or install RavenCanvas below, which is what makes that a command
+rather than a file operation.
+
+## Wallpaper
+
+| Status | Binary | Repo |
+|--------|--------|------|
+| **wired** | `ravencanvasd`, `ravencanvas` | [javanhut/RavenCanvas](https://github.com/javanhut/RavenCanvas) |
+
+Built by `stage_canvas()` in `stage-gui.sh`, from its own repository, alongside
+huginn, the terminal, the file manager and the login screen. `imlazy gui` builds
+it; `CANVAS_SKIP=1` leaves it out, and an image without it shows huginn's own
+flat background.
+
+`ravencanvasd` is an ordinary unprivileged Wayland client that puts one
+`wlr-layer-shell` surface on the background layer of each output and draws a
+picture on it. `ravencanvas` is the CLI that reconfigures it over a control
+socket without a restart; `raven-set-wallpaper` — upstream's
+`scripts/set-wallpaper.sh`, renamed on the way in as its own installer renames
+it — sets the *machine's* wallpaper, which is a different thing and the more
+useful of the two.
+
+Four modes: a flat colour, one PNG or JPEG fitted five ways, every image in a
+watched directory in turn with a crossfade, or one of four computed scenes with
+no file on disk at all.
+
+**It is a separate process on purpose, and it is the one component of this
+desktop that is.** huginn draws its dock, launcher, overview and notifications
+inside its own render loop, because the design rule is that anything which must
+feel instant and must never fail does not get to be a process that can miss a
+frame or die. A wallpaper is exactly the case that rule is not about — the file
+may be missing, corrupt, or on a disk that is not mounted yet — and huginn
+already paints its own background under everything, so the worst this process's
+death can do is leave a plain desktop. RavenGUI's `docs/protocols.md` says so
+directly: *"Panels, the dock and the wallpaper are wlr-layer-shell surfaces. Do
+not duplicate those here."*
+
+Three things about how the stage builds and wires it are worth knowing.
+
+**It is not in the Raven layer, and it would qualify.** Every component under
+`packages/raven/` is a static binary that adds nothing to the sysroot's runtime
+link graph, and this meets that: `ldd` on either binary reports libc, libm and
+libgcc_s and no more. Its Wayland client is wayland-rs's pure-Rust backend, so
+there is no libwayland-client in the link graph at all, and `--as-needed` drops
+the libxkbcommon a client that never touches the keyboard never calls into. It
+is built here anyway because linkage is not the only thing a stage owns.
+Everything this daemon needs from the image is written by `stage-gui.sh` and by
+nothing else — `/usr/share/wallpaper/set`, which is also what the greeter reads,
+and `raven-wayland-session`, which is where a session client gets started from.
+The Raven stage runs first, so a wallpaper staged there would be wired into a
+launcher this stage then overwrites whole.
+
+**It is started from the session script, not from `init.toml`.** Every other
+daemon on this image is a service there; this one cannot be. Init's services run
+as root before anybody has logged in, and this is an unprivileged client that
+has to run as the session's own user and share its runtime directory.
+`install_session_launcher()` backgrounds it immediately before that script's
+final `exec` — the same shape the session bus above it uses, for a stronger
+version of the same reason: the daemon is a client of the compositor the script
+is about to *become*, so there is no line after the `exec` on which to start it.
+`connect()` retries for ten seconds, and finds the socket by searching
+`$XDG_RUNTIME_DIR` rather than reading a `$WAYLAND_DISPLAY` that nothing has set
+yet — the compositor binds the first free number, so a stale lock from a
+previous session puts it on `wayland-1`. The line is guarded with `command -v`,
+so `CANVAS_SKIP=1` needs no second version of the launcher.
+
+**The shipped `/etc/raven/canvas.toml` has its `[background]` commented out, and
+that is load-bearing.** With no `[background]` anywhere the daemon draws
+`/usr/share/wallpaper/set/wallpaper.<ext>` — the same file the greeter draws the
+login screen on, which is what makes the two show one picture. Writing a
+`[background]` into that file overrides the machine's wallpaper for every user
+and breaks the contract; `~/.config/raven/canvas.toml` overrides it for one
+user, which is what `ravencanvas set --persist` writes and is the supported way
+to differ. So:
+
+```bash
+sudo raven-set-wallpaper /path/to/image   # the machine: desktop and login screen
+ravencanvas set scene aurora --persist    # this user only
+raven-set-wallpaper status                # what is set, and what overrides it
+```
+
+The daemon watches `set/`, so the desktop changes within a moment and there is
+nothing to restart; the greeter and huginn read the file once, at their own
+start, so the login screen follows at the next one.
+
+Nothing is shipped into the library. An empty `set/` is a working image that
+draws the built-in gradient, and a photograph committed to a distribution
+repository is a licence question nobody asked for — which the GUI stage's
+**Desktop:** summary now says out loud, because a desktop showing that gradient
+otherwise looks like a wallpaper that failed.
+
+Costs nothing when it is not doing anything, and that is a design property
+rather than a hope. A still wallpaper is drawn once and then blocks on its four
+descriptors with no timer armed; an animated one stops on its own when it cannot
+be seen, because a compositor sends no frame callback for a surface it is not
+going to draw and nothing here renders until the previous callback arrives.

@@ -12,7 +12,8 @@ Raven layer — the shell, package managers, version control, editor, task runne
 and language RavenLinux provides for itself rather than inheriting.
 
 Above that sits the graphical layer: the Huginn compositor, which draws the
-desktop itself, and RavenTerminal, the terminal it opens.
+desktop itself, the terminal and file manager it opens, the wallpaper behind
+them, and the login screen in front of the lot.
 
 What is still intentionally left out: hosted Rust/Go toolchains.
 
@@ -64,11 +65,47 @@ line:
 | `huginn` | RavenGUI | Rust | Wayland compositor (Smithay, udev/DRM backend) |
 | `muninn-lock` | RavenGUI | Rust | Session lock screen |
 | `raven-terminal` | RavenTerminal | Go + cgo | Terminal emulator (OpenGL 4.1 via GLFW, Wayland backend) |
+| `ravenfilemanager` | RavenFileManager | Rust | File manager (GTK4, libadwaita) — the image's only GTK client |
+| `ravencanvasd`, `ravencanvas` | RavenCanvas | Rust | The wallpaper: a wlr-layer-shell client, and its control CLI |
+| `ravend`, `raven-greeter` | RavenLogin | Rust | The login daemon, which reads `/etc/shadow`, and the login screen, which does not |
 
-These link glibc and seventeen shared libraries — libdrm, libgbm, libinput,
-libseat, libudev and the chain behind them — with Mesa's EGL/GLES drivers
-dlopened at run time. The stage resolves that closure with `ldd` against the
-binaries it just built and stages whatever stage2 did not already provide.
+What they drag in spans two orders of magnitude, and the stage has a written
+list of none of it. `huginn` links seventeen shared libraries — libdrm, libgbm,
+libinput, libseat, libudev and the chain behind them — with Mesa's EGL/GLES
+drivers dlopened at run time. `ravenfilemanager` links a hundred and thirty-four:
+GTK4, libadwaita, pango, cairo, harfbuzz, GStreamer, appstream, krb5, gnutls and
+the desktop stack behind them. `ravend` and both RavenCanvas binaries link libc
+and next to nothing else. `stage_gui_libraries()` resolves the closure with `ldd`
+against the binaries it has just built and stages whatever stage2 did not already
+provide — because a list written here would be right on the day it was written
+and silently wrong the first time a dependency changed. libinput alone reaches
+libwacom, which reaches lua.
+
+`ldd` is necessary and not sufficient, which is why `stage_gtk_runtime()` exists.
+A toolkit reads *data* at run time that no linker mentions: the compiled
+GSettings schema cache, without which every GTK application aborts at startup;
+`gsettings-desktop-schemas`, without which libadwaita cannot tell light from
+dark; `mime.cache`, without which every file is `application/octet-stream`; and
+`bwrap`, without which glycin decodes no images and the toolkit displays none.
+Each fails quietly and separately. The caches are regenerated against the sysroot
+rather than copied, since one built on the host encodes host paths.
+
+RavenCanvas is the one in that table that could have been built anywhere. Both
+its binaries link libc, libm and libgcc_s and nothing else — its Wayland client
+is wayland-rs's pure-Rust backend rather than libwayland — so it satisfies the
+Raven layer's invariant outright. (`ravend` links no more than that either, but
+it ships with a greeter that draws, and a workspace builds against one target at
+a time.) It is built here regardless, because everything it needs from the image
+— `/usr/share/wallpaper/set` and the session launcher that starts it — is
+written by this stage and by no other, and the Raven layer runs first.
+
+Only RavenGUI's two binaries and `raven-terminal` can fail the stage — the first
+because there is then nothing to log into, the last because huginn names it in
+two compiled-in places and a desktop that cannot open a terminal can start no
+process at all. The other three are things a desktop can be missing rather than
+parts of one, so every failure path in `stage_filemanager()`, `stage_canvas()`
+and `stage_login()` warns and returns 0, and `FILEMANAGER_SKIP`, `CANVAS_SKIP`
+and `LOGIN_SKIP` leave each of them out on purpose.
 
 RavenTerminal is deliberately not part of the *Raven* layer, for the same reason
 huginn is not: it is a GPU-accelerated terminal binding OpenGL and GLFW through
@@ -230,7 +267,7 @@ working shell; the Raven layer takes that over once `ravenshell` is installed.
 | **Stage 2** | Rebuild the sysroot natively: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | **Stage 3** | Base packages: core libraries, shells, OpenSSH, RavenBoot |
 | **Raven** | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw |
-| **GUI** | The desktop: huginn, muninn-lock, raven-terminal, the application menu, and the shared libraries, icon themes and cursor theme they need |
+| **GUI** | The desktop: huginn, muninn-lock, raven-terminal, ravenfilemanager, ravencanvasd, ravend, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
 | **Stage 4** | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
 
 The Raven layer carries no stage number. Stages 0–4 are the base system and
@@ -302,8 +339,9 @@ Sets:
 - `packages/core/` — musl, linux, openssl, openssh, libssh, sudo-rs, uutils-coreutils
 - `packages/base/` — bash, fish
 - `packages/raven/` — ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw
-- `packages/gui/` — ravengui: huginn, muninn-lock. raven-terminal is built by
-  the same stage from its own repository and has no manifest here yet
+- `packages/gui/` — ravengui (huginn, muninn-lock), ravenfilemanager,
+  ravenlogin, ravencanvas. raven-terminal is built by the same stage from its
+  own repository and has no manifest here yet
 
 ## Extending the System
 
