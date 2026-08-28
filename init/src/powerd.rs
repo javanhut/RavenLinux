@@ -340,6 +340,20 @@ fn perform(action: PowerAction) -> bool {
     log::info!("Asking init to {}", request);
 
     match ask_init(request) {
+        Ok(reply) if reply_is_error(&reply) => {
+            // An init too old to know the verb answers "error: unknown
+            // command 'suspend'". It is reachable, so this is not the socket
+            // failing -- but the machine is no more asleep than if it were,
+            // and falling through to the same recovery is what makes an
+            // upgraded raven-powerd work against an init that has not been
+            // restarted yet.
+            log::error!("raven-init refused: {}", reply.trim());
+            if action == PowerAction::Suspend {
+                log::warn!("Suspending directly; sleep hooks will not run");
+                return suspend_directly();
+            }
+            false
+        }
         Ok(reply) => {
             log::info!("init: {}", reply.trim());
             true
@@ -358,6 +372,16 @@ fn perform(action: PowerAction) -> bool {
             false
         }
     }
+}
+
+/// Did init refuse?
+///
+/// The control protocol is text for people, so this is a prefix check rather
+/// than a status code. Every refusal `control.rs` produces begins with
+/// `error:`, and every success begins with a verb in the present participle
+/// -- "Suspending", "Powering off".
+fn reply_is_error(reply: &str) -> bool {
+    reply.trim_start().starts_with("error")
 }
 
 /// Send one request to init and return its reply.
@@ -781,6 +805,14 @@ mod tests {
         assert_eq!(config.buttons.sleep, PowerAction::Suspend);
         assert_eq!(config.lid.close, PowerAction::Suspend);
         assert!(config.manage_wakeup);
+    }
+
+    #[test]
+    fn a_refusal_is_told_apart_from_an_acknowledgement() {
+        // What control.rs actually sends back, both ways.
+        assert!(reply_is_error("error: unknown command 'suspend'\n"));
+        assert!(!reply_is_error("Suspending\n"));
+        assert!(!reply_is_error("Powering off\n"));
     }
 
     #[test]
