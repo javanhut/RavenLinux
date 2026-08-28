@@ -1377,8 +1377,9 @@ stage_gui_data() {
 # raven-init starts this when the kernel cmdline says raven.graphics=wayland;
 # until now it did not exist and init fell through to a /bin/raven-compositor
 # that nothing builds. It sets the session environment up and hands over to the
-# compositor -- there is no shell client to start afterwards, and nothing to
-# wait for a socket for, because the compositor draws the shell itself.
+# compositor. The compositor draws the shell itself; what a session starts
+# besides it is the wallpaper daemon and whatever is in session.d, both
+# backgrounded ahead of the exec because nothing runs after it.
 install_session_launcher() {
     local dest="${SYSROOT_DIR}/usr/bin/raven-wayland-session"
 
@@ -1521,6 +1522,56 @@ fi
 if command -v ravencanvasd >/dev/null 2>&1; then
     ravencanvasd &
 fi
+
+# Per-user session programs -- the nearest thing this system has to a user
+# service manager. raven-init's services run as root, once per boot, before
+# any login, with no compositor and no per-user runtime directory; a status
+# bar, a notification daemon or a clipboard manager is none of those things.
+# It belongs to a session: started as its user, after its compositor, and
+# gone when it ends. The wallpaper daemon above is one such program with a
+# hand-written line; this is the general form, so the next one is a file
+# rather than an edit to this script.
+#
+#     /etc/raven/session.d/            every user on the machine
+#     ~/.config/raven/session.d/       this user. A file of the same name
+#                                      overrides the machine-wide one, and a
+#                                      non-executable one masks it.
+#
+# Each executable is started once the compositor has bound its socket, with
+# WAYLAND_DISPLAY set to it, in name order -- a numeric prefix is the
+# convention. setsid puts each in its own session and process group, so one
+# that hangs, exits or is killed touches neither the others nor the
+# compositor; stdio goes to /dev/null so a chatty one cannot block on a pipe
+# nobody reads. A program that needs the socket before this finds it can
+# still wait on its own, as ravencanvasd does.
+#
+# The wait is a background subshell for the same reason ravencanvasd is
+# backgrounded: the exec below is the end of this script, and there is no
+# line after it. Fifteen seconds is generous -- huginn binds its socket well
+# inside one -- and on a compositor that never comes up the subshell exits
+# quietly, because by then the session has failed for a louder reason.
+# >>> session.d >>>
+(
+    i=0
+    while [ $i -lt 150 ]; do
+        for s in "${XDG_RUNTIME_DIR}"/wayland-*; do
+            case "$s" in *.lock) continue ;; esac
+            [ -S "$s" ] && { WAYLAND_DISPLAY="$(basename "$s")"; export WAYLAND_DISPLAY; break 2; }
+        done
+        i=$((i + 1))
+        sleep 0.1
+    done
+    [ -n "${WAYLAND_DISPLAY:-}" ] || exit 0
+    user_d="${XDG_CONFIG_HOME:-$HOME/.config}/raven/session.d"
+    for f in /etc/raven/session.d/* "$user_d"/*; do
+        [ -e "$f" ] || continue
+        name="$(basename "$f")"
+        case "$f" in /etc/raven/session.d/*) [ -e "$user_d/$name" ] && continue ;; esac
+        [ -x "$f" ] || continue
+        setsid "$f" </dev/null >/dev/null 2>&1 &
+    done
+) &
+# <<< session.d <<<
 
 # exec, not background-and-wait: with no second process to supervise there is
 # nothing for this script to do afterwards, and execing puts the compositor
