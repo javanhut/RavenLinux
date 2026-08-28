@@ -1,0 +1,42 @@
+# RavenLinux power policy
+# /etc/raven/power.toml
+#
+# What the power button, the sleep button and the lid do. Read by raven-powerd
+# at start; edit and `raven-rc restart powerd` to apply.
+#
+# Every setting takes one of four values:
+#
+#   suspend    sleep to RAM. The machine wakes on the power button or the lid.
+#   poweroff   orderly shutdown, then power off.
+#   reboot     orderly shutdown, then reboot.
+#   ignore     do nothing at all.
+#
+# There is nothing here about waking. Waking happens in firmware, before any of
+# this is running: raven-powerd arms the power button, the sleep button and the
+# lid as ACPI wakeup sources when it starts, and after that pressing the power
+# button or opening the lid brings the machine back with no policy involved.
+
+[buttons]
+# The power button. Sleep rather than power off, because on a laptop that
+# button is a "put this down for an hour" button far more often than a "shut
+# this down" one -- and holding it for four seconds still cuts the power in
+# firmware, which is the escape hatch that makes this the safe default.
+power = "suspend"
+
+# The dedicated sleep button, where there is one: the moon key on a laptop's
+# function row, or ACPI's PNP0C0E.
+sleep = "suspend"
+
+[lid]
+# Closing the lid. Set this to "ignore" for a machine that lives shut on a
+# desk with an external monitor.
+close = "suspend"
+
+# Arm the buttons and the lid as ACPI wakeup sources at start.
+#
+# Leave this on unless you are managing /proc/acpi/wakeup by hand: a lid that
+# sleeps the machine and cannot wake it is worse than one that does nothing.
+# Keyboards are never armed, even though a laptop keyboard claims to have a
+# power key -- an i8042 armed to wake is a classic cause of a machine that
+# resumes one second after it suspends.
+manage_wakeup = true

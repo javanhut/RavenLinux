@@ -2302,6 +2302,15 @@ EOF
 	        cp "${PROJECT_ROOT}/init/config/init.toml" "${SYSROOT_DIR}/etc/raven/init.toml"
 	    fi
 
+	    # /etc/raven/power.toml (what the power button and the lid do).
+	    # Absent is fine -- raven-powerd falls back to the same defaults this
+	    # file writes down -- but shipping it is what makes the settings
+	    # discoverable instead of documented only in the source.
+	    if [[ -f "${PROJECT_ROOT}/etc/raven/power.toml" ]]; then
+	        cp "${PROJECT_ROOT}/etc/raven/power.toml" "${SYSROOT_DIR}/etc/raven/power.toml"
+	        chmod 0644 "${SYSROOT_DIR}/etc/raven/power.toml" 2>/dev/null || true
+	    fi
+
 	    # Service drop-ins: raven-init reads /etc/raven/init.d/*.toml alongside
 	    # init.toml, so daemons installed later (`rvn install openssh`) get a
 	    # service definition by copying a template -- no editing init.toml. The

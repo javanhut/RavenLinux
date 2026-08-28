@@ -163,6 +163,30 @@ stop_exec = "/usr/bin/caw"
 stop_args = ["shutdown"]
 stop_timeout = 5
 
+# Power button, sleep button and lid.
+#
+# The kernel turns all three into evdev events and stops there: it will not
+# suspend on a lid close on its own, and nothing else in the base image is
+# listening. raven-powerd reads them and asks init, over the same control
+# socket `raven-rc suspend` uses, to do the one privileged thing involved --
+# the write to /sys/power/state.
+#
+# after = udev because the devices it watches are /dev/input nodes udev
+# creates. It rescans every ten seconds anyway, so a race here would cost a
+# few seconds of a dead lid rather than a dead lid.
+#
+# Policy is /etc/raven/power.toml. With no such file the defaults are: power
+# button suspends, sleep button suspends, closing the lid suspends.
+[[services]]
+name = "powerd"
+description = "Power button, sleep button and lid switch"
+exec = "/usr/bin/raven-powerd"
+args = []
+after = ["udev"]
+restart = true
+enabled = true
+critical = false
+
 # Network manager (when available)
 #
 # Still handles wired interfaces at boot. cawd runs DHCP itself on the links it

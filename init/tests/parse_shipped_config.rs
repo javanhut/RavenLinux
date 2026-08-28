@@ -22,6 +22,17 @@ fn shipped_configs_parse() {
         assert_eq!(cawd.stop_timeout, 5);
         assert!(cawd.enabled);
 
+        // The lid daemon. Shipped enabled: a laptop whose lid does nothing is
+        // the thing this service exists to stop being true.
+        let powerd = cfg
+            .services
+            .iter()
+            .find(|s| s.name == "powerd")
+            .expect("powerd present");
+        assert_eq!(powerd.exec, "/usr/bin/raven-powerd");
+        assert!(powerd.enabled);
+        assert!(powerd.restart, "a dead powerd is a dead lid");
+
         // A service with no stop fields must still parse, and default sanely.
         let getty = cfg
             .services

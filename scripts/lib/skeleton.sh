@@ -281,10 +281,14 @@ RAVEN_SKELETON_DIRS_ETC=(
 # the directory control.rs tells the user to copy a service template into.
 # /etc/raven/shutdown.d is its shutdown-hook counterpart (main.rs:1363).
 # Both were absent, so both instructions pointed at nothing.
+# /etc/raven/sleep.d is the same idea either side of a suspend (power.rs): the
+# scripts in it run with "pre" before the machine sleeps and "post" after it
+# wakes, which is where a driver that cannot survive S3 gets reloaded.
 RAVEN_SKELETON_DIRS_RAVEN=(
     "etc/raven:755"
     "etc/raven/init.d:755"
     "etc/raven/shutdown.d:755"
+    "etc/raven/sleep.d:755"
     "usr/share/raven:755"
     "usr/share/raven/services:755"
     "var/log/raven:755"       # created at boot by main.rs:94; shipped for parity

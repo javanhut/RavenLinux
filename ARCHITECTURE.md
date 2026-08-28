@@ -129,6 +129,30 @@ filesystems, and hands off to `raven-rc` for service supervision.
 | `init/src/config.rs` | `init.toml` parsing |
 | `init/src/service.rs` | Service definition and lifecycle |
 | `init/src/rc.rs` | Service manager (`raven-rc`) |
+| `init/src/power.rs` | Suspend to RAM, and the `/run/raven-power/state` marker |
+| `init/src/powerd.rs` | `raven-powerd`: the power button, the sleep button and the lid |
+
+#### Sleep
+
+There is no logind here, so the split is drawn by hand. `raven-powerd` decides
+*whether* to sleep -- it reads the evdev nodes for the power button, the sleep
+button and the lid, and looks up what they mean in `/etc/raven/power.toml` --
+and PID 1 does the sleeping, because the write to `/sys/power/state` is
+privileged, must not race another one, and does not return until the machine is
+awake. The daemon asks over the same control socket `raven-rc` uses, so
+`raven-rc suspend` and closing the lid take the identical path.
+
+Waking is nobody's code: the power button and the lid are ACPI wakeup sources,
+and `raven-powerd` arms them at start so that a machine which sleeps can also
+be woken. Keyboards are deliberately not armed -- a laptop keyboard claims to
+have a power key, and an armed i8042 is a classic cause of a machine that
+resumes a second after it suspends.
+
+Either side of the sleep, init writes one word to `/run/raven-power/state` and
+runs `/etc/raven/sleep.d/*` with `pre` or `post`. The marker is what tells
+Huginn to re-take the display and repaint: it held DRM master straight through
+the suspend, and without logind's `PrepareForSleep` a file in a tmpfs is the
+signal.
 
 ### Bootloader (`bootloader/`)
 

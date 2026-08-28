@@ -56,6 +56,15 @@ pub enum Action {
     Poweroff,
     /// Begin an orderly shutdown and reboot.
     Reboot,
+    /// Suspend to RAM, and carry on once the machine is awake again.
+    ///
+    /// Unlike the two above this is not a shutdown: the main loop performs it
+    /// inline and then keeps supervising the same services it had before. The
+    /// reply is written and the connection closed *before* it happens, because
+    /// a client blocked on a socket read for the length of a suspend would look
+    /// like a hang and, worse, would still be waiting on a machine that may
+    /// never come back.
+    Suspend,
 }
 
 /// Create the control socket at [`SOCKET_PATH`], replacing any stale one.
@@ -180,13 +189,17 @@ pub fn dispatch(
 
         "poweroff" | "halt" => ("Powering off\n".to_string(), Action::Poweroff),
         "reboot" => ("Rebooting\n".to_string(), Action::Reboot),
+        // `sleep` as well, because half the world's laptops call it that and
+        // an operator guessing wrong at three in the morning should still get
+        // the machine to sleep.
+        "suspend" | "sleep" => ("Suspending\n".to_string(), Action::Suspend),
 
         "" => ("error: empty request\n".to_string(), Action::None),
         other => (
             format!(
                 "error: unknown command '{}'\n\
                  commands: list, status [NAME], start NAME, stop NAME, restart NAME, \
-                 enable NAME, disable NAME, reload, poweroff, reboot, halt\n",
+                 enable NAME, disable NAME, reload, suspend, poweroff, reboot, halt\n",
                 other
             ),
             Action::None,

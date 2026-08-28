@@ -48,3 +48,11 @@ path = "src/main.rs"
 [[bin]]
 name = "raven-rc"
 path = "src/rc.rs"
+
+# The power-button, sleep-button and lid daemon. In this crate rather than one
+# of its own because it is the other half of init's suspend: init owns the
+# write to /sys/power/state, this owns deciding when to ask for it, and the two
+# share the control socket's protocol.
+[[bin]]
+name = "raven-powerd"
+path = "src/powerd.rs"

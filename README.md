@@ -22,6 +22,8 @@ What's here:
 
 - **musl libc** base, cross-built from source with a purpose-built toolchain
 - **Custom init** (`raven-init`) and service manager (`raven-rc`), written in Rust
+- **Power handling** (`raven-powerd`): the power button, the sleep button and
+  the lid suspend the machine, and the buttons wake it again
 - **Custom bootloader** (RavenBoot), a UEFI loader written in Rust, with GRUB as
   the BIOS fallback
 - **uutils coreutils** (Rust) for the core userland
@@ -474,7 +476,7 @@ docker run --rm -it --platform linux/amd64 ravenlinux
 │   ├── installer/            # raven-install, the disk installer and wizard
 │   ├── make-console-font.py  # rasterises the shipped TTF into a PSF console font
 │   └── stages/               # the five build stages, plus stage-raven.sh
-├── init/                     # raven-init and raven-rc (Rust)
+├── init/                     # raven-init, raven-rc and raven-powerd (Rust)
 ├── bootloader/               # RavenBoot, the UEFI bootloader (Rust)
 ├── packages/
 │   ├── core/                 # musl, linux, openssl, openssh, sudo-rs, uutils

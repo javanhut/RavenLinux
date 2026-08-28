@@ -9,6 +9,7 @@
 //!   enable NAME      - Start this service at boot (persists to init.toml)
 //!   disable NAME     - Do not start it at boot (persists to init.toml)
 //!   reload           - Re-read init.toml and /etc/raven/init.d without a reboot
+//!   suspend          - Suspend the machine to RAM
 //!   poweroff         - Shut down the system
 //!   reboot           - Reboot the system
 //!   halt             - Halt the system
@@ -123,6 +124,7 @@ fn main() {
     match command {
         "poweroff" | "halt" => do_poweroff(),
         "reboot" => do_reboot(),
+        "suspend" | "sleep" => do_suspend(),
         "help" | "--help" | "-h" => {
             print_usage(program);
             process::exit(0);
@@ -235,6 +237,7 @@ fn print_usage(program: &str) {
     }
     eprintln!();
     eprintln!("System:");
+    eprintln!("  suspend          - Suspend to RAM (also: sleep)");
     eprintln!("  poweroff         - Power off the system");
     eprintln!("  reboot           - Reboot the system");
     eprintln!("  halt             - Halt the system");
@@ -251,6 +254,62 @@ fn do_poweroff() {
 fn do_reboot() {
     println!("Initiating system reboot...");
     send_command("reboot");
+}
+
+/// Ask init to sleep, and say so if it could not.
+///
+/// Deliberately not routed through [`send_command`]: that one falls back to
+/// `/run/raven-init.cmd` and then to `reboot(2)`, and a fallback chain that
+/// ends in "power off the machine instead" is not one a suspend should be on.
+/// The fallback here is to perform the same write init would have performed,
+/// which is the right answer when raven-init is not PID 1 -- in a container,
+/// on a rescue system, or under another init entirely.
+fn do_suspend() {
+    match ask("suspend") {
+        Ok(reply) => {
+            print!("{}", reply);
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            eprintln!("Suspending directly instead.");
+            direct_suspend();
+        }
+    }
+}
+
+/// Write the sleep state ourselves. Needs root, and blocks until we resume.
+fn direct_suspend() {
+    const STATE_PATH: &str = "/sys/power/state";
+
+    let offered = match fs::read_to_string(STATE_PATH) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("raven-rc: cannot read {}: {}", STATE_PATH, e);
+            eprintln!("  This kernel has no suspend support.");
+            process::exit(1);
+        }
+    };
+
+    // Same order as init's: suspend-to-RAM, then the software-only fallback.
+    let Some(state) = ["mem", "freeze"]
+        .into_iter()
+        .find(|s| offered.split_whitespace().any(|o| o == *s))
+    else {
+        eprintln!(
+            "raven-rc: {} offers '{}'; none of it is a sleep state we use.",
+            STATE_PATH,
+            offered.trim()
+        );
+        process::exit(1);
+    };
+
+    if let Err(e) = fs::write(STATE_PATH, state) {
+        eprintln!("raven-rc: could not suspend: {}", e);
+        if e.kind() == ErrorKind::PermissionDenied {
+            eprintln!("  {} is root-only; try again with sudo.", STATE_PATH);
+        }
+        process::exit(1);
+    }
 }
 
 fn send_command(cmd: &str) {

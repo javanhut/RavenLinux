@@ -277,6 +277,30 @@ fn shutdown_verbs_return_actions_not_replies_alone() {
     );
 }
 
+/// Suspend is not a shutdown, and the difference is the whole reason it has
+/// its own action: init performs it inline and goes back to supervising the
+/// same services, rather than tearing the system down.
+#[test]
+fn suspend_is_an_action_of_its_own() {
+    let mut services = HashMap::new();
+    let mut cfg = config_with(vec![]);
+
+    assert_eq!(
+        control::dispatch("suspend", &mut services, &mut cfg).1,
+        control::Action::Suspend
+    );
+    // The spelling half the world's laptops use.
+    assert_eq!(
+        control::dispatch("sleep", &mut services, &mut cfg).1,
+        control::Action::Suspend
+    );
+    // And it is not confused with either shutdown verb.
+    assert_ne!(
+        control::dispatch("suspend", &mut services, &mut cfg).1,
+        control::Action::Poweroff
+    );
+}
+
 #[test]
 fn bad_requests_are_reported_not_guessed_at() {
     let mut cfg = config_with(vec![sleeper("real")]);

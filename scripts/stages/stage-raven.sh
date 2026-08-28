@@ -450,6 +450,10 @@ component_selected() {
 #
 # raven-rc dispatches on argv[0], so poweroff/reboot/halt/shutdown are symlinks
 # to it rather than four separate binaries.
+#
+# raven-powerd comes out of the same crate: it is what makes the power button
+# and the lid mean anything, and it asks init for the suspend over raven-rc's
+# control socket rather than writing /sys/power/state itself.
 build_raven_init() {
     local src="${PROJECT_ROOT}/init"
 
@@ -463,9 +467,9 @@ build_raven_init() {
     local outdir="${RAVEN_STAGE_DIR}"
     mkdir -p "${outdir}"
 
-    if ! build_rust_component "${src}" "raven-init,raven-rc" "." "${outdir}"; then
+    if ! build_rust_component "${src}" "raven-init,raven-rc,raven-powerd" "." "${outdir}"; then
         log_warn "  raven-init: build failed, skipping"
-        RAVEN_FAILED+=(raven-init raven-rc)
+        RAVEN_FAILED+=(raven-init raven-rc raven-powerd)
         return 0
     fi
 
@@ -475,14 +479,19 @@ build_raven_init() {
     mkdir -p "${SYSROOT_DIR}/usr/bin"
     install -m 0755 "${outdir}/raven-init" "${SYSROOT_DIR}/usr/bin/raven-init"
     install -m 0755 "${outdir}/raven-rc"   "${SYSROOT_DIR}/usr/bin/raven-rc"
+    # The lid and power-button daemon. init.toml starts it as the `powerd`
+    # service; it is a third binary out of the same crate because it is the
+    # other half of init's suspend.
+    install -m 0755 "${outdir}/raven-powerd" "${SYSROOT_DIR}/usr/bin/raven-powerd"
 
     # stage4 owns the poweroff/reboot/halt/shutdown names and installs a
     # dispatcher that uses raven-rc when raven-init is PID 1, with an emergency
     # kernel fallback for rescue environments.
 
-    RAVEN_BUILT+=(raven-init raven-rc)
+    RAVEN_BUILT+=(raven-init raven-rc raven-powerd)
     log_success "  raven-init installed ($(du -h "${outdir}/raven-init" | cut -f1))"
     log_success "  raven-rc installed ($(du -h "${outdir}/raven-rc" | cut -f1))"
+    log_success "  raven-powerd installed ($(du -h "${outdir}/raven-powerd" | cut -f1))"
 }
 
 build_all_components() {

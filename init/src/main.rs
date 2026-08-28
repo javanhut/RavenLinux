@@ -24,6 +24,7 @@ use nix::unistd::Pid;
 mod config;
 mod control;
 mod overrides;
+mod power;
 mod service;
 mod user;
 
@@ -968,6 +969,9 @@ fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -
         }
     };
 
+    // The sleep marker, before anything can watch it. See power.rs.
+    power::publish_at_boot();
+
     log::info!("Entering main loop");
 
     loop {
@@ -997,6 +1001,16 @@ fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -
                 control::Action::Reboot => {
                     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
                     REBOOT_REQUESTED.store(true, Ordering::SeqCst);
+                }
+                // Inline, and the main loop stops here until the machine is
+                // awake again. That is the correct behaviour rather than a
+                // compromise: every service is frozen alongside us, so there
+                // is nothing to supervise while we are asleep, and a suspend
+                // that failed is one this loop should log and carry on from.
+                control::Action::Suspend => {
+                    if let Err(e) = power::suspend() {
+                        log::error!("Suspend failed: {:#}", e);
+                    }
                 }
             }
         }
@@ -1101,6 +1115,16 @@ fn check_command_file() -> Result<()> {
                 "reboot" => {
                     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
                     REBOOT_REQUESTED.store(true, Ordering::SeqCst);
+                }
+                "suspend" | "sleep" => {
+                    // Removed below before we sleep, not after: the file is
+                    // gone by the time the machine stops, so a resume cannot
+                    // read the same word again and suspend straight back.
+                    fs::remove_file(cmd_path).ok();
+                    if let Err(e) = power::suspend() {
+                        log::error!("Suspend failed: {:#}", e);
+                    }
+                    return Ok(());
                 }
                 _ => {
                     log::warn!("Unknown command: {}", cmd);

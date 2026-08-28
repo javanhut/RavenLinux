@@ -1066,7 +1066,7 @@ check_sysroot_layers() {
     local -a raven_missing=() gui_missing=()
     local b
 
-    for b in ravenshell rvn caw cawd crow ivaldi oxigen poxy raven-init raven-rc; do
+    for b in ravenshell rvn caw cawd crow ivaldi oxigen poxy raven-init raven-rc raven-powerd; do
         find "${SYSROOT_DIR}" -name "${b}" -type f -print -quit 2>/dev/null | grep -q . \
             || raven_missing+=("${b}")
     done
