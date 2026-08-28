@@ -1,0 +1,33 @@
+[package]
+name = "roostbar"
+version = "0.1.0"
+description = "RoostBar - the layer-shell status bar for RavenLinux"
+# Upstream has not declared a license yet; do not invent one in package data.
+license = "Unspecified"
+homepage = "https://github.com/javanhut/RoostBar"
+repository = "https://github.com/javanhut/RoostBar"
+maintainers = ["RavenLinux Team"]
+categories = ["gui", "wayland", "desktop"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/RoostBar.git"
+
+[build]
+system = "cargo"
+target = "x86_64-unknown-linux-gnu"
+build_flags = ["--release", "--locked"]
+
+[dependencies]
+runtime = [
+    "ravengui", "alsa-lib", "pipewire", "pipewire-audio", "pipewire-pulse",
+    "wireplumber", "bluez", "caw",
+]
+build = ["rust", "cargo", "pkg-config", "alsa-lib"]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-gnu/release/roostbar", dest = "/usr/bin/roostbar", mode = 755 },
+    { src = "config.example.toml", dest = "/usr/share/doc/roostbar/config.example.toml", mode = 644 },
+]
+symlinks = []

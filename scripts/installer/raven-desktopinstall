@@ -239,10 +239,20 @@ set_audio() {
     cat <<'EOF'
 pipewire
 pipewire-audio
+pipewire-pulse
 wireplumber
 alsa-lib
 alsa-ucm-conf
 alsa-topology-conf
+EOF
+}
+
+# RoostBar talks to BlueZ over the system bus. Keeping this separate from audio
+# makes it possible to restore one stack without reinstalling the other.
+set_bluetooth() {
+    cat <<'EOF'
+bluez
+bluez-utils
 EOF
 }
 
@@ -279,7 +289,7 @@ brave-bin
 EOF
 }
 
-DEFAULT_SETS="session toolkit media fonts portals audio firmware"
+DEFAULT_SETS="session toolkit media fonts portals audio bluetooth firmware"
 ALL_SETS="${DEFAULT_SETS} devel extras"
 
 # =============================================================================
@@ -531,6 +541,7 @@ Sets:
   fonts       icon themes, cursors and the faces the shell draws with
   portals     the session bus and the XDG desktop portals
   audio       pipewire audio support and wireplumber
+  bluetooth   BlueZ daemon and controls used by RoostBar
   firmware    GPU and audio firmware
   devel       toolchain: base-devel, git, rustup, go   (not in the default)
   extras      applications, not desktop dependencies   (not in the default)

@@ -1,0 +1,12 @@
+# BlueZ for RoostBar's Bluetooth module. raven-init reads an enabled copy from
+# /etc/raven/init.d; the package integration copies this template there when
+# BlueZ is installed.
+[[services]]
+name = "bluetoothd"
+description = "Bluetooth service"
+exec = "/usr/lib/bluetooth/bluetoothd"
+args = []
+after = ["dbus"]
+restart = true
+enabled = true
+critical = false

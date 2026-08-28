@@ -1,0 +1,4 @@
+#!/bin/sh
+# Machine-wide RoostBar autostart. A per-user file with this same name masks or
+# replaces it through raven-wayland-session's session.d precedence rules.
+exec /usr/bin/roostbar

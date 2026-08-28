@@ -8,6 +8,7 @@ sof-firmware
 alsa-ucm-conf
 pipewire
 pipewire-audio
+pipewire-pulse
 wireplumber
 bluez
 bluez-utils

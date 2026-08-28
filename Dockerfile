@@ -107,7 +107,7 @@ RUN pacman -Syu --noconfirm --needed \
         #
         # These are also the libraries stage-gui.sh copies into the sysroot, so
         # this list is what the shipped system ends up carrying.
-        libdrm libinput mesa libxkbcommon wayland \
+        libdrm libinput mesa libxkbcommon wayland alsa-lib \
         # libinput classifies devices through libwacom, which pulls in lua.
         # Named explicitly because the closure is not obvious from the above.
         libwacom libevdev mtdev \

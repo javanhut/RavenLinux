@@ -57,6 +57,7 @@ And a graphical layer, built separately because it cannot be static:
 | `raven-terminal` | [RavenTerminal](https://github.com/javanhut/RavenTerminal), the terminal the desktop opens — on the dock and on `Super`+`Shift`+`T` |
 | `ravenfilemanager` | [RavenFileManager](https://github.com/javanhut/RavenFileManager), the file manager — the other icon on the dock, and the image's only GTK client |
 | `ravencanvasd`, `ravencanvas` | [RavenCanvas](https://github.com/javanhut/RavenCanvas), the wallpaper — a layer-shell client, started by the session script before the compositor it draws behind |
+| `roostbar` | [RoostBar](https://github.com/javanhut/RoostBar), the layer-shell status bar — date, Wi-Fi, Bluetooth, volume, battery and clock |
 | `ravend`, `raven-greeter` | [RavenLogin](https://github.com/javanhut/RavenLogin), the login screen — and the root daemon behind it, which is not the process that draws |
 
 Boot the `Raven Desktop (Huginn)` entry, or add `raven.graphics=wayland` to the
@@ -185,7 +186,7 @@ qemu-user — use Docker Desktop or colima with Rosetta, or build on x86_64.
 | `stage2` | `scripts/stages/stage2-native.sh` | Native rebuild of the sysroot: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | `stage3` | `scripts/stages/stage3-packages.sh` | Base packages: core libraries (zlib, ncurses, readline, attr, acl), shells, OpenSSH, RavenBoot |
 | `raven` | `scripts/stages/stage-raven.sh` | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw |
-| `gui` | `scripts/stages/stage-gui.sh` | The desktop: huginn, raven-terminal, ravenfilemanager, ravencanvasd, ravend, raven-lock, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
+| `gui` | `scripts/stages/stage-gui.sh` | The desktop: huginn, raven-terminal, ravenfilemanager, ravencanvasd, roostbar, ravend, raven-lock, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
 | `stage4` | `scripts/stages/stage4-iso.sh` | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
 
 The Raven layer is unnumbered on purpose. Stages 0–4 build a base system that
@@ -231,6 +232,8 @@ FILEMANAGER_SKIP=1 imlazy gui               # no file manager; the desktop works
 LOGIN_SKIP=1 imlazy gui                     # no password prompt; autologin
 CANVAS_SKIP=1 imlazy gui                    # no wallpaper daemon; flat background
 CANVAS_REF=v0.1.0 imlazy gui                # pin RavenCanvas to a git ref
+ROOSTBAR_SKIP=1 imlazy gui                  # no status bar
+ROOSTBAR_REF=v0.1.0 imlazy gui              # pin RoostBar to a git ref
 ```
 
 Each of those four also takes an `_OFFLINE=1`, which reuses that component's

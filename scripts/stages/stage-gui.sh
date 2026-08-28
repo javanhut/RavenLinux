@@ -87,6 +87,9 @@
 #                              flat background instead of a wallpaper
 #   CANVAS_OFFLINE=1           as GUI_OFFLINE, for the wallpaper daemon alone
 #   CANVAS_REF=<git-ref>       build a particular RavenCanvas ref
+#   ROOSTBAR_SKIP=1            skip the status bar
+#   ROOSTBAR_OFFLINE=1         reuse an existing RoostBar clone
+#   ROOSTBAR_REF=<git-ref>     build a particular RoostBar ref
 # =============================================================================
 
 set -euo pipefail
@@ -173,6 +176,13 @@ LOGIN_GREETER_UID="${LOGIN_GREETER_UID:-972}"
 # returns 0.
 CANVAS_REPO="RavenCanvas"
 CANVAS_URL="https://github.com/javanhut/${CANVAS_REPO}.git"
+
+# RoostBar is a layer-shell status bar started through the machine-wide
+# session.d mechanism. It is kept separate from huginn so a failed optional
+# module can never take down the compositor.
+ROOSTBAR_REPO="RoostBar"
+ROOSTBAR_URL="https://github.com/javanhut/${ROOSTBAR_REPO}.git"
+ROOSTBAR_BIN="roostbar"
 
 # Huginn links glibc, unlike everything in the Raven layer. The host target is
 # the right one: the sysroot carries the host's glibc and its dynamic linker,
@@ -1186,6 +1196,57 @@ stage_canvas() {
     install_wallpaper_dirs
 }
 
+# =============================================================================
+# RoostBar
+# =============================================================================
+stage_roostbar() {
+    if [[ "${ROOSTBAR_SKIP:-0}" == "1" ]]; then
+        log_info "  ROOSTBAR_SKIP=1: no status bar on the image"
+        return 0
+    fi
+
+    command -v cargo &>/dev/null || {
+        log_warn "  cargo not found; RoostBar will not be built"
+        return 0
+    }
+    if ! pkg-config --exists alsa 2>/dev/null; then
+        log_warn "  alsa-lib development files missing; RoostBar will not be built"
+        log_warn "  install them with: pacman -S --needed alsa-lib"
+        return 0
+    fi
+
+    local dest="${GUI_SRC_DIR}/${ROOSTBAR_REPO}"
+    if ! fetch_repo "${ROOSTBAR_REPO}" "${ROOSTBAR_URL}" "${dest}" \
+            "${ROOSTBAR_REF:-}" "${ROOSTBAR_OFFLINE:-${GUI_OFFLINE:-0}}"; then
+        log_warn "  RoostBar source unavailable; no status bar on the image"
+        return 0
+    fi
+
+    log_info "  building RoostBar for ${GUI_TARGET}..."
+    local -a cargo_args=(build --release --target "${GUI_TARGET}")
+    [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
+    if ! ( cd "${dest}" && cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}" ); then
+        log_warn "  RoostBar build failed; no status bar on the image"
+        return 0
+    fi
+
+    local out="${dest}/target/${GUI_TARGET}/release/${ROOSTBAR_BIN}"
+    if [[ ! -x "${out}" ]]; then
+        log_warn "  RoostBar produced no binary; no status bar on the image"
+        return 0
+    fi
+
+    install -Dm 0755 "${out}" "${SYSROOT_DIR}/usr/bin/${ROOSTBAR_BIN}"
+    install -Dm 0755 "${PROJECT_ROOT}/configs/raven/session.d/50-roostbar" \
+        "${SYSROOT_DIR}/etc/raven/session.d/50-roostbar"
+    if [[ -f "${dest}/config.example.toml" ]]; then
+        install -Dm 0644 "${dest}/config.example.toml" \
+            "${SYSROOT_DIR}/usr/share/doc/roostbar/config.example.toml"
+    fi
+    stage_gui_libraries "${out}"
+    log_success "  ${ROOSTBAR_BIN} installed and enabled for every graphical session"
+}
+
 # The machine's wallpaper library, and the one entry that says which image is
 # on.
 #
@@ -1804,6 +1865,13 @@ print_gui_summary() {
         echo "  [--] wallpaper           not built - huginn's flat background"
     fi
 
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${ROOSTBAR_BIN}" \
+            && -x "${SYSROOT_DIR}/etc/raven/session.d/50-roostbar" ]]; then
+        echo "  [OK] status bar          /usr/bin/${ROOSTBAR_BIN} (session.d enabled)"
+    else
+        echo "  [--] status bar          not built"
+    fi
+
     local entries=0
     if [[ -d "${SYSROOT_DIR}/usr/share/applications" ]]; then
         entries="$(find "${SYSROOT_DIR}/usr/share/applications" -name '*.desktop' 2>/dev/null | wc -l)"
@@ -1973,6 +2041,9 @@ main() {
     # boot, not here -- and this one keeps the two next to each other.
     log_step "Staging the wallpaper daemon..."
     stage_canvas
+
+    log_step "Staging the status bar..."
+    stage_roostbar
 
     # Last, and after the session launcher on purpose: ravend starts that
     # launcher once somebody has authenticated, so installing the login screen

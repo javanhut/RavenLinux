@@ -67,6 +67,7 @@ line:
 | `raven-terminal` | RavenTerminal | Go + cgo | Terminal emulator (OpenGL 4.1 via GLFW, Wayland backend) |
 | `ravenfilemanager` | RavenFileManager | Rust | File manager (GTK4, libadwaita) — the image's only GTK client |
 | `ravencanvasd`, `ravencanvas` | RavenCanvas | Rust | The wallpaper: a wlr-layer-shell client, and its control CLI |
+| `roostbar` | RoostBar | Rust | Layer-shell status bar, started through the global session.d drop-in |
 | `ravend`, `raven-greeter` | RavenLogin | Rust | The login daemon, which reads `/etc/shadow`, and the login screen, which does not |
 
 What they drag in spans two orders of magnitude, and the stage has a written
@@ -323,7 +324,7 @@ working shell; the Raven layer takes that over once `ravenshell` is installed.
 | **Stage 2** | Rebuild the sysroot natively: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | **Stage 3** | Base packages: core libraries, shells, OpenSSH, RavenBoot |
 | **Raven** | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw |
-| **GUI** | The desktop: huginn, raven-terminal, ravenfilemanager, ravencanvasd, ravend, raven-lock, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
+| **GUI** | The desktop: huginn, raven-terminal, ravenfilemanager, ravencanvasd, roostbar, ravend, raven-lock, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
 | **Stage 4** | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
 
 The Raven layer carries no stage number. Stages 0–4 are the base system and

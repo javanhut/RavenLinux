@@ -126,6 +126,7 @@ rather than a row in the component table.
 | Status | Binary | Repo |
 |--------|--------|------|
 | **wired** | `raven-terminal` | [javanhut/RavenTerminal](https://github.com/javanhut/RavenTerminal) |
+| **wired** | `roostbar` | [javanhut/RoostBar](https://github.com/javanhut/RoostBar) |
 
 RavenTerminal is GPU-accelerated and links OpenGL and GLFW through cgo, so it
 needs a display server and a graphics stack. The console base has none of that,

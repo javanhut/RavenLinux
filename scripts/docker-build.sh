@@ -174,6 +174,9 @@ BUILD_ENV_VARS=(
     RAVEN_SYSTEM_LANG
     RAVEN_WAYLAND_COMPOSITOR
     GUI_SESSION_ONLY
+    ROOSTBAR_SKIP
+    ROOSTBAR_OFFLINE
+    ROOSTBAR_REF
 )
 for env_name in "${BUILD_ENV_VARS[@]}"; do
     if [[ -v "$env_name" ]]; then
