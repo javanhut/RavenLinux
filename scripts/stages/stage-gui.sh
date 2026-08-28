@@ -69,6 +69,8 @@
 #
 # Environment:
 #   GUI_SKIP=1                 skip this stage entirely
+#   GUI_SESSION_ONLY=1         update only the session launcher and entry;
+#                              do not fetch or compile any GUI component
 #   GUI_OFFLINE=1              never touch the network; use the existing clones
 #   GUI_REF=<git-ref>          build a particular RavenGUI ref
 #   GUI_TARGET=<rust-target>   override the host target (rarely wanted)
@@ -1873,6 +1875,18 @@ main() {
         log_error "Sysroot not found at ${SYSROOT_DIR}"
         log_error "Run stage2 and stage3 first."
         return 1
+    fi
+
+    # Shell/session changes should not rebuild a Rust compositor. This path is
+    # intentionally before the target and toolchain checks: all it needs is an
+    # existing sysroot, and `imlazy session` is meant to take seconds.
+    if [[ "${GUI_SESSION_ONLY:-0}" == "1" ]]; then
+        log_step "Updating graphical session wiring..."
+        install_session_launcher
+        install_session_entry
+        log_success "Graphical session wiring updated; no GUI binaries rebuilt"
+        echo ""
+        return 0
     fi
 
     if [[ -z "${GUI_TARGET}" ]]; then

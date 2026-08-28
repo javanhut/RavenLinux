@@ -58,6 +58,10 @@ run = ["{{run}} {{flags}} raven"]
 desc = "Build Huginn and the Raven graphical session"
 run = ["{{run}} {{flags}} gui"]
 
+[commands.session]
+desc = "Update only the Raven graphical session wiring"
+run = ["GUI_SESSION_ONLY=1 {{run}} {{flags}} gui"]
+
 [commands.iso]
 desc = "Regenerate the ISO from the existing sysroot"
 run = ["{{run}} {{flags}} stage4"]

@@ -546,8 +546,15 @@ main() {
     # Rust; every other path compiles Rust (sudo-rs, uutils) and would crash
     # without this.
     case "$stage" in
-        all|stage1|stage2|stage3|raven|gui)
+        all|stage1|stage2|stage3|raven)
             check_rust_toolchain
+            ;;
+        gui)
+            # Session wiring is generated shell and desktop-entry data. The
+            # short update path deliberately does not compile Huginn.
+            if [[ "${GUI_SESSION_ONLY:-0}" != "1" ]]; then
+                check_rust_toolchain
+            fi
             ;;
     esac
 

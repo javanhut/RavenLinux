@@ -221,6 +221,7 @@ rather than leaving to be discovered at boot:
 
 ```bash
 ./scripts/build.sh gui                    # huginn, raven-terminal, raven-lock
+imlazy session                            # session scripts only; no compilation
 GUI_SKIP=1 imlazy build                     # console-only ISO
 GUI_REF=v0.1.0 imlazy gui                   # pin RavenGUI to a git ref
 GUI_OFFLINE=1 imlazy gui                    # reuse the existing clones
