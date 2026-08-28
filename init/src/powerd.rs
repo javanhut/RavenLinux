@@ -21,6 +21,20 @@
 //! The mechanism stays in init: this daemon decides, then asks over
 //! `/run/raven-init.sock`, exactly as `raven-rc suspend` does.
 //!
+//! # The desktop's socket
+//!
+//! Buttons and the lid are not the only way a person asks a laptop to sleep;
+//! a quick-settings panel wants a "Suspend" row too, and the session it runs
+//! in is an unprivileged user with no business talking to PID 1. So this
+//! daemon listens a second time, on `/run/raven-power/ctl`, for the desktop.
+//! That socket is group `video` and mode 0660 -- `video` because the session
+//! already holds it for the DRM device, so it names exactly "whoever owns the
+//! screen" without inventing a group -- and it takes one word, `suspend`,
+//! `poweroff` or `reboot`, which then goes down the same [`perform`] path as
+//! a lid close. Init's own socket stays root-only: what the desktop gets is a
+//! verb into the daemon that already decides these things, never a channel
+//! into PID 1.
+//!
 //! # Wake
 //!
 //! Waking is not this daemon's job and cannot be: nothing in userspace runs
@@ -32,8 +46,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{ErrorKind, Read, Write};
-use std::os::unix::net::UnixStream;
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -44,6 +59,25 @@ use serde::Deserialize;
 
 /// Where raven-init listens. Must match control::SOCKET_PATH.
 const SOCKET_PATH: &str = "/run/raven-init.sock";
+
+/// Where the desktop asks us. Under the directory init already publishes the
+/// sleep marker in (see `power::RUN_DIR`), so a session that watches one can
+/// find the other without a second path to know.
+const CTL_SOCKET_PATH: &str = "/run/raven-power/ctl";
+
+/// The group that may write to [`CTL_SOCKET_PATH`]. The same group the session
+/// needs for the DRM device, so owning the screen and being allowed to put it
+/// to sleep are one fact, not two.
+const CTL_GROUP: &str = "video";
+
+/// Longest request we will read from the desktop. The longest valid one is
+/// eight bytes plus a newline; the cap is for a client that never stops.
+const CTL_MAX_REQUEST: u64 = 256;
+
+/// How long one desktop client may take to say its word. The panel writes the
+/// line in the same call that connects, so this is only ever hit by something
+/// that connected and then stalled.
+const CTL_CLIENT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Policy, if anyone wrote any down.
 const CONFIG_PATH: &str = "/etc/raven/power.toml";
@@ -130,6 +164,35 @@ impl PowerAction {
             PowerAction::Poweroff => Some("poweroff"),
             PowerAction::Reboot => Some("reboot"),
             PowerAction::Ignore => None,
+        }
+    }
+
+    /// What init says back once it has agreed. Kept in step with the replies
+    /// `control.rs` produces, so a client of the desktop socket reads the same
+    /// words a client of init's would.
+    fn acknowledgement(self) -> &'static str {
+        match self {
+            PowerAction::Suspend => "Suspending\n",
+            PowerAction::Poweroff => "Powering off\n",
+            PowerAction::Reboot => "Rebooting\n",
+            PowerAction::Ignore => "Ignored\n",
+        }
+    }
+
+    /// One line from the desktop socket, or `None` if it is not one of the
+    /// three words.
+    ///
+    /// Stricter than init's parser on purpose: there is no `sleep` alias and
+    /// no `halt`, because the only client is a panel with three fixed rows,
+    /// and every spelling accepted here is one more the panel could send by
+    /// mistake. `Ignore` is not a request either -- it is a thing a config
+    /// says, not a thing a person asks for.
+    fn parse_request(line: &str) -> Option<Self> {
+        match line.trim() {
+            "suspend" => Some(PowerAction::Suspend),
+            "poweroff" => Some(PowerAction::Poweroff),
+            "reboot" => Some(PowerAction::Reboot),
+            _ => None,
         }
     }
 }
@@ -231,12 +294,16 @@ impl Config {
 // What the reader threads report
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum Signal {
     PowerPressed,
     SleepPressed,
     /// `true` when the lid just closed.
     Lid(bool),
+    /// The desktop asked, over [`CTL_SOCKET_PATH`]. The stream comes with it
+    /// because the reply is the main loop's to write: only it knows whether
+    /// the cooldown applies, and only it performs the action.
+    Request(PowerAction, UnixStream),
 }
 
 fn main() {
@@ -271,12 +338,21 @@ fn main() {
         );
     }
 
+    listen_for_desktop(&tx);
+
     let mut lid_closed = false;
     let mut last_action: Option<Instant> = None;
     let mut last_scan = Instant::now();
 
     loop {
         match rx.recv_timeout(RESCAN_INTERVAL) {
+            Ok(Signal::Request(action, stream)) => {
+                log::info!(
+                    "Desktop asked to {}",
+                    action.request().unwrap_or("do nothing")
+                );
+                serve_request(action, stream, &mut last_action);
+            }
             Ok(signal) => {
                 let action = match signal {
                     Signal::PowerPressed => {
@@ -301,6 +377,8 @@ fn main() {
                         log::info!("Lid opened");
                         None
                     }
+                    // Taken by the arm above; here only so the match is total.
+                    Signal::Request(..) => None,
                 };
 
                 if let Some(action) = action {
@@ -427,6 +505,207 @@ fn suspend_directly() -> bool {
             false
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The desktop's socket
+// ---------------------------------------------------------------------------
+
+/// Bind [`CTL_SOCKET_PATH`] and leave a thread accepting on it.
+///
+/// A thread rather than a non-blocking accept from the main loop, because the
+/// main loop is not a poll over file descriptors: it blocks in `recv_timeout`
+/// on the channel the device threads feed, for up to [`RESCAN_INTERVAL`] at
+/// a time. A socket checked only when that returns would answer a panel ten
+/// seconds late. So the socket is one more feeder of the same channel, and the
+/// accept thread does exactly what a device thread does -- block, decode, send
+/// -- with the connection riding along in the [`Signal`] so the main loop can
+/// answer it. Policy stays where it was: the cooldown and [`perform`] run on
+/// the main thread for a desktop request as they do for a lid close.
+///
+/// Failing to bind is logged and not fatal: the buttons and the lid still work
+/// on a machine whose quick settings cannot sleep it, and that is better than
+/// the other way round.
+fn listen_for_desktop(tx: &Sender<Signal>) {
+    let listener = match bind_ctl_socket(CTL_SOCKET_PATH) {
+        Ok(listener) => listener,
+        Err(e) => {
+            log::warn!("Not listening on {}: {}", CTL_SOCKET_PATH, e);
+            return;
+        }
+    };
+
+    let tx = tx.clone();
+    thread::Builder::new()
+        .name("powerd-ctl".to_string())
+        .stack_size(64 * 1024)
+        .spawn(move || {
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(stream) => accept_desktop_client(stream, &tx),
+                    Err(e) => log::warn!("{}: accept failed: {}", CTL_SOCKET_PATH, e),
+                }
+            }
+        })
+        .ok();
+}
+
+/// Create the socket file with the ownership the module docs describe.
+///
+/// Group first, mode second: between `bind` and `set_permissions` the file
+/// carries the umask's mode, which is at most 0755 and admits nobody to
+/// write. Tightening to 0660 after the chown means there is no moment at
+/// which the socket is writable by a group it is not yet owned by.
+fn bind_ctl_socket(path: &str) -> std::io::Result<UnixListener> {
+    // Normally made by init when it publishes the marker at boot, but this
+    // daemon is a service and need not start second. The same 0755 init uses,
+    // so whichever of the two gets there first leaves the same directory.
+    if let Some(dir) = Path::new(path).parent() {
+        if !dir.is_dir() {
+            fs::create_dir_all(dir)?;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).ok();
+        }
+    }
+
+    if Path::new(path).exists() {
+        // Left by a previous run of this daemon; nothing else owns the path.
+        fs::remove_file(path)?;
+    }
+
+    let listener = UnixListener::bind(path)?;
+
+    match group_id(CTL_GROUP) {
+        Some(gid) => {
+            nix::unistd::chown(path, None, Some(nix::unistd::Gid::from_raw(gid)))
+                .map_err(std::io::Error::from)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o660))?;
+            log::info!(
+                "Desktop control socket listening on {} (group {})",
+                path,
+                CTL_GROUP
+            );
+        }
+        None => {
+            // No such group means no session that could use it. Root-only
+            // then, which is the same as not listening but leaves the reason
+            // in the log.
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+            log::warn!(
+                "No group '{}' in /etc/group; {} is root-only",
+                CTL_GROUP,
+                path
+            );
+        }
+    }
+
+    Ok(listener)
+}
+
+/// The gid of a group, from `/etc/group`.
+fn group_id(name: &str) -> Option<u32> {
+    let text = fs::read_to_string("/etc/group").ok()?;
+    parse_group_id(&text, name)
+}
+
+/// One `/etc/group` line is `name:passwd:gid:members`. Same hand parser init
+/// uses for the same reason: this crate links no libc name-service code, and
+/// a static binary must not start depending on nss modules to find a gid.
+fn parse_group_id(group: &str, name: &str) -> Option<u32> {
+    group.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        if fields.next()? != name {
+            return None;
+        }
+        fields.next()?;
+        fields.next()?.trim().parse().ok()
+    })
+}
+
+/// Read one desktop client's line and either answer it here or hand it on.
+///
+/// Only a request that is not a request is answered from this thread: an
+/// unknown word never reaches the main loop, so nothing about it can be
+/// mistaken for a button. A real one is passed along with its stream, and the
+/// main loop writes the reply.
+fn accept_desktop_client(stream: UnixStream, tx: &Sender<Signal>) {
+    stream.set_read_timeout(Some(CTL_CLIENT_TIMEOUT)).ok();
+    stream.set_write_timeout(Some(CTL_CLIENT_TIMEOUT)).ok();
+
+    let mut line = String::new();
+    let Ok(reader) = stream.try_clone() else {
+        return;
+    };
+    // Capped before it is parsed, so a client that streams forever costs a
+    // timeout and a bounded buffer, not the daemon's memory.
+    if let Err(e) = BufReader::new(reader)
+        .take(CTL_MAX_REQUEST)
+        .read_line(&mut line)
+    {
+        log::warn!("{}: could not read request: {}", CTL_SOCKET_PATH, e);
+        return;
+    }
+
+    match PowerAction::parse_request(&line) {
+        Some(action) => {
+            // If the main loop is gone the client sees a close with no reply,
+            // which is the honest answer.
+            let _ = tx.send(Signal::Request(action, stream));
+        }
+        None => {
+            log::warn!(
+                "{}: unknown command {:?}",
+                CTL_SOCKET_PATH,
+                line.trim()
+            );
+            reply(stream, "error: unknown command\n");
+        }
+    }
+}
+
+/// Carry out a desktop request and answer it, from the main loop.
+///
+/// The order differs by verb, and the difference is the point. For a suspend
+/// the reply is written and the stream closed *before* [`perform`], for the
+/// reason init's control socket gives: a client blocked on a read for the
+/// length of a sleep looks like a hang and, if the machine never resumes, is
+/// one. A power off or a reboot is answered afterwards, because init can still
+/// refuse and the panel should hear that rather than a "Powering off" that was
+/// a guess.
+fn serve_request(action: PowerAction, stream: UnixStream, last_action: &mut Option<Instant>) {
+    if let Some(at) = *last_action {
+        if at.elapsed() < COOLDOWN {
+            // The same window that keeps the wake press from re-suspending
+            // the machine. The desktop cannot be told apart from it here, and
+            // a person pressing twice inside five seconds can press again.
+            log::debug!("Refused: within {:?} of the last action", COOLDOWN);
+            reply(stream, "error: too soon after the last action\n");
+            return;
+        }
+    }
+
+    if action == PowerAction::Suspend {
+        reply(stream, action.acknowledgement());
+        if perform(action) {
+            *last_action = Some(Instant::now());
+        }
+        return;
+    }
+
+    if perform(action) {
+        *last_action = Some(Instant::now());
+        reply(stream, action.acknowledgement());
+    } else {
+        reply(stream, "error: init did not agree; see the raven-powerd log\n");
+    }
+}
+
+/// Write one line and close. A client that went away is not an error worth
+/// more than a debug line; the action was theirs to ask for, not to wait on.
+fn reply(mut stream: UnixStream, text: &str) {
+    if let Err(e) = stream.write_all(text.as_bytes()).and_then(|()| stream.flush()) {
+        log::debug!("{}: reply not delivered: {}", CTL_SOCKET_PATH, e);
+    }
+    // Dropping `stream` closes it, which is what ends the reply.
 }
 
 // ---------------------------------------------------------------------------
@@ -821,5 +1100,70 @@ mod tests {
         assert_eq!(PowerAction::Poweroff.request(), Some("poweroff"));
         assert_eq!(PowerAction::Reboot.request(), Some("reboot"));
         assert_eq!(PowerAction::Ignore.request(), None);
+    }
+
+    // The desktop socket takes exactly the three words below, and what it
+    // reads is a line, so the newline the client sends must not count.
+
+    #[test]
+    fn the_three_verbs_parse_to_their_actions() {
+        assert_eq!(
+            PowerAction::parse_request("suspend\n"),
+            Some(PowerAction::Suspend)
+        );
+        assert_eq!(
+            PowerAction::parse_request("poweroff\n"),
+            Some(PowerAction::Poweroff)
+        );
+        assert_eq!(
+            PowerAction::parse_request("reboot\n"),
+            Some(PowerAction::Reboot)
+        );
+    }
+
+    #[test]
+    fn trailing_whitespace_is_not_part_of_the_verb() {
+        assert_eq!(
+            PowerAction::parse_request("suspend \r\n"),
+            Some(PowerAction::Suspend)
+        );
+        assert_eq!(
+            PowerAction::parse_request("reboot"),
+            Some(PowerAction::Reboot)
+        );
+    }
+
+    #[test]
+    fn an_unknown_word_is_not_a_request() {
+        assert_eq!(PowerAction::parse_request("halt\n"), None);
+        assert_eq!(PowerAction::parse_request("sleep\n"), None);
+        assert_eq!(PowerAction::parse_request("ignore\n"), None);
+        assert_eq!(PowerAction::parse_request("suspend now\n"), None);
+        assert_eq!(PowerAction::parse_request("\n"), None);
+        assert_eq!(PowerAction::parse_request(""), None);
+    }
+
+    /// A request's word and its acknowledgement are the pair init uses, so a
+    /// client reading the desktop socket sees what a client of init's would.
+    #[test]
+    fn a_request_is_acknowledged_in_init_words() {
+        for (word, ack) in [
+            ("suspend", "Suspending\n"),
+            ("poweroff", "Powering off\n"),
+            ("reboot", "Rebooting\n"),
+        ] {
+            let action = PowerAction::parse_request(word).unwrap();
+            assert_eq!(action.request(), Some(word));
+            assert_eq!(action.acknowledgement(), ack);
+            assert!(!reply_is_error(ack));
+        }
+    }
+
+    #[test]
+    fn a_group_is_found_by_name_and_only_by_name() {
+        let group = "root:x:0:\nvideo:x:91:javan\nvideoish:x:92:\n";
+        assert_eq!(parse_group_id(group, "video"), Some(91));
+        assert_eq!(parse_group_id(group, "root"), Some(0));
+        assert_eq!(parse_group_id(group, "input"), None);
     }
 }

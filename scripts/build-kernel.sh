@@ -355,6 +355,14 @@ generate_config() {
     $config_script --enable DRM_I915        # Intel
     $config_script --enable DRM_AMDGPU      # AMD
     $config_script --enable DRM_NOUVEAU     # NVIDIA (open source)
+
+    # Compressed firmware loading. linux-firmware ships GPU firmware as
+    # .zst/.xz (e.g. nvidia/tu116/gr/*.bin.zst); without this the kernel
+    # cannot find it, nouveau reports "gr: firmware unavailable" and
+    # Turing+ cards get no acceleration at all.
+    $config_script --enable FW_LOADER_COMPRESS
+    $config_script --enable FW_LOADER_COMPRESS_XZ
+    $config_script --enable FW_LOADER_COMPRESS_ZSTD
     $config_script --enable DRM_SIMPLEDRM   # Simple framebuffer
 
     # EFI/System framebuffer drivers (CRITICAL for real hardware boot)

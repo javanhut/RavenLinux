@@ -130,7 +130,7 @@ filesystems, and hands off to `raven-rc` for service supervision.
 | `init/src/service.rs` | Service definition and lifecycle |
 | `init/src/rc.rs` | Service manager (`raven-rc`) |
 | `init/src/power.rs` | Suspend to RAM, and the `/run/raven-power/state` marker |
-| `init/src/powerd.rs` | `raven-powerd`: the power button, the sleep button and the lid |
+| `init/src/powerd.rs` | `raven-powerd`: the power button, the sleep button, the lid, and the `/run/raven-power/ctl` socket |
 
 #### Sleep
 
@@ -141,6 +141,21 @@ and PID 1 does the sleeping, because the write to `/sys/power/state` is
 privileged, must not race another one, and does not return until the machine is
 awake. The daemon asks over the same control socket `raven-rc` uses, so
 `raven-rc suspend` and closing the lid take the identical path.
+
+The desktop is the third thing that asks, and it asks the daemon, not init.
+`raven-powerd` listens on `/run/raven-power/ctl`, group `video` and mode 0660,
+for one of `suspend`, `poweroff` or `reboot`, and routes the word through the
+same code a lid close takes -- cooldown, then the request to init, with the
+same fallbacks when init is old or absent. That socket is the desktop's logind
+stand-in: it is what Huginn's quick settings write to. It does not contradict
+the rule, stated where Huginn watches the sleep marker, that an unprivileged
+session gets no socket into PID 1. Init's own socket stays 0600 and root-only;
+what the session holds is a socket into the daemon that is already the policy
+gatekeeper and already the only thing that asks init to sleep, and what it can
+say to it is one of three verbs. The desktop gets a verb, never PID 1. `video`
+because the session already holds that group for the DRM device, so the right
+to sleep the machine follows the right to draw on it without a group invented
+for the purpose.
 
 Waking is nobody's code: the power button and the lid are ACPI wakeup sources,
 and `raven-powerd` arms them at start so that a machine which sleeps can also
