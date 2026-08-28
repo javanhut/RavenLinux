@@ -11,7 +11,13 @@ categories = ["gui", "wayland"]
 [source]
 type = "git"
 url = "https://github.com/javanhut/RavenGUI.git"
-commit = "69a741434e0da1c4960a2018dafd11eede059897"
+# Deliberately unpinned, like ravenlogin and ravencanvas below. The reason here
+# is not "nothing has been tagged yet" but that the pin named a commit nothing
+# built: the GUI stage fetches this repository itself (fetch_repo in
+# scripts/stages/stage-gui.sh, with no ref) and hard-resets to the default
+# branch, so every image carries HEAD while this file claimed 69a7414. A hash
+# that disagrees with what ships is worse than no hash -- it reads like a
+# guarantee. Pin it at the first release, and pin the GUI stage with it.
 
 [build]
 system = "cargo"

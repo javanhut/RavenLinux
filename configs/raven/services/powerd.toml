@@ -1,0 +1,34 @@
+# raven-powerd -- the power button, the sleep button and the lid switch.
+#
+# On any image built from this tree you do not need this file: /etc/raven/
+# init.toml defines this service itself and raven-init starts it at boot. It is
+# shipped for the other case -- an already-installed machine that predates
+# raven-powerd, where the init.toml on disk is the one the old image wrote and
+# nothing will add the service to it.
+#
+# raven-init reads /etc/raven/init.d/*.toml alongside init.toml, so copying this
+# there is how the daemon starts without a reboot and without hand-editing a
+# file the next upgrade may replace:
+#
+#   cp /usr/share/raven/services/powerd.toml /etc/raven/init.d/
+#   raven-rc reload
+#   raven-rc start powerd
+#
+# Leaving it there afterwards is safe. When an init.toml that defines powerd
+# does arrive, init keeps its own definition and logs that this drop-in was
+# ignored -- it cannot end up defined twice.
+#
+# Ships enabled, unlike seatd.toml: a lid that does nothing is the state this
+# exists to end, and there is no boot on which you would want it off. What the
+# buttons and the lid actually do is /etc/raven/power.toml's business, and
+# "ignore" there is how you turn the behaviour off without stopping the daemon.
+
+[[services]]
+name = "powerd"
+description = "Power button, sleep button and lid switch"
+exec = "/usr/bin/raven-powerd"
+args = []
+after = ["udev"]
+restart = true
+enabled = true
+critical = false
