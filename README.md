@@ -53,7 +53,7 @@ And a graphical layer, built separately because it cannot be static:
 | Tool | What it is |
 |------|------------|
 | `huginn` | [RavenGUI](https://github.com/javanhut/RavenGUI)'s Wayland compositor, which also draws the desktop — dock, launcher, notifications |
-| `muninn-lock` | the session lock screen, a separate process so a compositor bug cannot unlock the screen |
+| `raven-lock` | the session lock screen — from RavenLogin, and the same screen as the login prompt; on `Super`+`L`, after ten idle minutes, and on resume from suspend |
 | `raven-terminal` | [RavenTerminal](https://github.com/javanhut/RavenTerminal), the terminal the desktop opens — on the dock and on `Super`+`Shift`+`T` |
 | `ravenfilemanager` | [RavenFileManager](https://github.com/javanhut/RavenFileManager), the file manager — the other icon on the dock, and the image's only GTK client |
 | `ravencanvasd`, `ravencanvas` | [RavenCanvas](https://github.com/javanhut/RavenCanvas), the wallpaper — a layer-shell client, started by the session script before the compositor it draws behind |
@@ -185,7 +185,7 @@ qemu-user — use Docker Desktop or colima with Rosetta, or build on x86_64.
 | `stage2` | `scripts/stages/stage2-native.sh` | Native rebuild of the sysroot: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | `stage3` | `scripts/stages/stage3-packages.sh` | Base packages: core libraries (zlib, ncurses, readline, attr, acl), shells, OpenSSH, RavenBoot |
 | `raven` | `scripts/stages/stage-raven.sh` | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw |
-| `gui` | `scripts/stages/stage-gui.sh` | The desktop: huginn, muninn-lock, raven-terminal, ravenfilemanager, ravencanvasd, ravend, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
+| `gui` | `scripts/stages/stage-gui.sh` | The desktop: huginn, raven-terminal, ravenfilemanager, ravencanvasd, ravend, raven-lock, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
 | `stage4` | `scripts/stages/stage4-iso.sh` | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
 
 The Raven layer is unnumbered on purpose. Stages 0–4 build a base system that
@@ -220,7 +220,7 @@ desktop — one that cannot launch anything, which the stage summary says outrig
 rather than leaving to be discovered at boot:
 
 ```bash
-./scripts/build.sh gui                    # huginn, muninn-lock, raven-terminal
+./scripts/build.sh gui                    # huginn, raven-terminal, raven-lock
 GUI_SKIP=1 imlazy build                     # console-only ISO
 GUI_REF=v0.1.0 imlazy gui                   # pin RavenGUI to a git ref
 GUI_OFFLINE=1 imlazy gui                    # reuse the existing clones
@@ -482,7 +482,7 @@ docker run --rm -it --platform linux/amd64 ravenlinux
 │   ├── core/                 # musl, linux, openssl, openssh, sudo-rs, uutils
 │   ├── base/                 # bash, fish
 │   ├── raven/                # ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw
-│   └── gui/                  # ravengui: huginn, muninn, muninn-lock
+│   └── gui/                  # ravengui: huginn; ravenlogin: ravend, greeter, lock
 ├── configs/                  # shell, SSH, kernel, fontconfig configuration
 ├── etc/                      # files installed into the rootfs /etc
 ├── fonts/                    # JetBrains Mono Nerd Font (console and desktop)

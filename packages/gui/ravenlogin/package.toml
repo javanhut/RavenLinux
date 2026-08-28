@@ -11,7 +11,7 @@
 [package]
 name = "ravenlogin"
 version = "0.0.1"
-description = "RavenLogin - the login daemon and the login screen"
+description = "RavenLogin - the login daemon, the login screen and the lock screen"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/javanhut/RavenLogin"
 repository = "https://github.com/javanhut/RavenLogin"
@@ -34,7 +34,10 @@ system = "cargo"
 # musl happily -- it draws nothing and links nothing -- but the two ship
 # together and a workspace builds against one target at a time.
 target = "x86_64-unknown-linux-gnu"
-build_flags = ["--release", "--locked", "-p", "ravend", "-p", "raven-greeter"]
+build_flags = [
+    "--release", "--locked",
+    "-p", "ravend", "-p", "raven-greeter", "-p", "raven-lock",
+]
 
 [dependencies]
 # ravend links nothing beyond libc: no GPU, no fonts, no image decoding, no
@@ -56,6 +59,10 @@ build = ["rust", "cargo", "pkg-config"]
 files = [
     { src = "target/x86_64-unknown-linux-gnu/release/ravend",        dest = "/usr/bin/ravend",             mode = 755 },
     { src = "target/x86_64-unknown-linux-gnu/release/raven-greeter", dest = "/usr/bin/raven-greeter",      mode = 755 },
+    # The lock screen. Named by huginn (theme::LOCK_SCREEN) with no override,
+    # so this path is the contract: the compositor blanks the session on resume
+    # and starts this, and if it is not here it un-blanks and logs why.
+    { src = "target/x86_64-unknown-linux-gnu/release/raven-lock",    dest = "/usr/bin/raven-lock",         mode = 755 },
     # Every value in it is a default ravend already has compiled in, so this is
     # a reference for the keys that exist rather than a file the machine needs.
     # A file that is present and does not parse is a hard error -- ravend

@@ -2,8 +2,8 @@
 # =============================================================================
 # RavenLinux GUI Stage: Compositor and Desktop Shell
 # =============================================================================
-# Builds the desktop: RavenGUI's Huginn, the Wayland compositor, and
-# muninn-lock, the session lock screen -- plus RavenTerminal, from its own
+# Builds the desktop: RavenGUI's Huginn, the Wayland compositor and the shell it
+# draws, plus RavenTerminal, from its own
 # repository, because huginn names `raven-terminal` in two compiled-in places
 # and a desktop that cannot open a terminal cannot start anything at all, and
 # RavenFileManager, from a third. See REPOSFORRAVEN.md for what each of them is.
@@ -24,10 +24,12 @@
 #
 # The dock, launcher, overview and notifications are drawn by the compositor
 # itself, inside its render loop, so nothing that must feel instant can miss a
-# frame or die on its own. muninn-lock is the one exception, and it has an
-# independent reason: ext-session-lock-v1 keeps the screen locked when the
-# locking client dies, which is worth nothing if that client shares an address
-# space with the rest of the shell.
+# frame or die on its own. The lock screen is the one thing that goes the other
+# way, for the opposite reason: ext-session-lock-v1 keeps the screen locked when
+# the locking client dies, which is worth nothing if that client shares an
+# address space with the rest of the shell. It is `raven-lock`, and it comes
+# from RavenLogin rather than from here -- it is the login screen's twin, drawn
+# by the same code and checking passwords against the same daemon.
 #
 # Like the Raven stage this is unnumbered, and for the same reason: stages 0-4
 # build a console system that has to stand on its own. It runs after raven and
@@ -178,7 +180,6 @@ GUI_TARGET="${GUI_TARGET:-$(rustc -vV 2>/dev/null | awk '/^host:/{print $2}')}"
 # key|package|binary|description
 GUI_COMPONENTS=(
     "huginn-comp|huginn-comp|huginn|Huginn - Wayland compositor, and the shell it draws"
-    "muninn-lock|muninn-lock|muninn-lock|Muninn Lock - session lock screen"
 )
 
 # Every binary this stage ships, derived from the table above rather than
@@ -465,7 +466,7 @@ stage_xwayland() {
 #
 # Nothing built it. RavenTerminal was listed in REPOSFORRAVEN.md as "not wired"
 # and in ARCHITECTURE.md as waiting on a display server that did not exist, and
-# this stage built only huginn and muninn-lock -- so the desktop shipped with a
+# this stage built only the compositor -- so the desktop shipped with a
 # launcher enumerating an empty /usr/share/applications, a dock that drew
 # nothing but its own launcher button, and no terminal anywhere on the image. A
 # running desktop could start no process at all.
@@ -953,20 +954,26 @@ stage_login() {
     fi
 
     log_info "  building RavenLogin for ${GUI_TARGET}..."
-    local -a cargo_args=(build --release --target "${GUI_TARGET}" -p ravend -p raven-greeter)
+    local -a cargo_args=(
+        build --release --target "${GUI_TARGET}"
+        -p ravend -p raven-greeter -p raven-lock
+    )
     [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
     if ! ( cd "${dest}" && cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}" ); then
         log_warn "  RavenLogin build failed; the image will autologin"
         return 0
     fi
 
-    # Both or neither. ravend without a greeter is a daemon that starts a
+    # All or none. ravend without a greeter is a daemon that starts a
     # compositor and then cannot draw a prompt in it, which presents as a
     # machine that boots to a blank screen -- strictly worse than the autologin
-    # session it would have replaced.
+    # session it would have replaced. raven-lock is in the same list for a
+    # narrower reason: huginn blanks the session on resume and then starts it,
+    # and a missing lock screen turns that into ten seconds of black display
+    # before the compositor gives up and un-blanks.
     local built="${dest}/target/${GUI_TARGET}/release"
     local binary
-    for binary in ravend raven-greeter; do
+    for binary in ravend raven-greeter raven-lock; do
         if [[ ! -x "${built}/${binary}" ]]; then
             log_warn "  ${binary} was not produced by the build; the image will autologin"
             return 0
@@ -978,7 +985,7 @@ stage_login() {
         return 0
     }
 
-    for binary in ravend raven-greeter; do
+    for binary in ravend raven-greeter raven-lock; do
         install -m 0755 "${built}/${binary}" "${SYSROOT_DIR}/usr/bin/${binary}"
         log_success "  ${binary} installed ($(du -h "${built}/${binary}" | cut -f1))"
     done
@@ -992,9 +999,11 @@ stage_login() {
         log_info "  + /etc/raven/login.toml"
     fi
 
-    # Only the greeter needs its libraries resolved; ravend links nothing but
-    # libc, which is the property the whole repository is arranged around.
+    # The two drawing clients need their libraries resolved; ravend links
+    # nothing but libc, which is the property the whole repository is arranged
+    # around.
     stage_gui_libraries "${built}/raven-greeter"
+    stage_gui_libraries "${built}/raven-lock"
     install_wallpaper_dirs
 }
 
@@ -1566,7 +1575,7 @@ ENTRY
 # /usr/bin only -- /bin is a symlink onto it. The old
 # `ln -sf ../usr/bin/${binary} ${SYSROOT}/bin/${binary}` unlinked the binary it
 # had just installed and left a dangling link in its place, which for this
-# stage meant huginn and muninn-lock silently missing from the ISO.
+# stage meant huginn silently missing from the ISO.
 install_gui_binary() {
     local binary="$1" src="$2"
 

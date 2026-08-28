@@ -1071,7 +1071,7 @@ check_sysroot_layers() {
             || raven_missing+=("${b}")
     done
 
-    for b in huginn muninn-lock raven-wayland-session; do
+    for b in huginn raven-lock raven-wayland-session; do
         find "${SYSROOT_DIR}" -name "${b}" -type f -print -quit 2>/dev/null | grep -q . \
             || gui_missing+=("${b}")
     done

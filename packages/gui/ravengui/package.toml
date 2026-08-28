@@ -21,7 +21,7 @@ system = "cargo"
 # The sysroot carries the host's glibc and dynamic linker already, which is how
 # the Xorg and Mesa binaries stage2 copies work.
 target = "x86_64-unknown-linux-gnu"
-build_flags = ["--release", "--locked", "-p", "huginn-comp", "-p", "muninn-lock"]
+build_flags = ["--release", "--locked", "-p", "huginn-comp"]
 
 [dependencies]
 # Build dependencies are the development side of what it links. The runtime
@@ -55,7 +55,6 @@ build = ["rust", "cargo", "pkg-config", "libdrm", "libinput", "libudev", "mesa"]
 [install]
 files = [
     { src = "target/x86_64-unknown-linux-gnu/release/huginn",      dest = "/usr/bin/huginn",      mode = 755 },
-    { src = "target/x86_64-unknown-linux-gnu/release/muninn-lock", dest = "/usr/bin/muninn-lock", mode = 755 }
 ]
 
 # No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS

@@ -63,7 +63,7 @@ line:
 | Binary | Source | Language | Role |
 |--------|--------|----------|------|
 | `huginn` | RavenGUI | Rust | Wayland compositor (Smithay, udev/DRM backend) |
-| `muninn-lock` | RavenGUI | Rust | Session lock screen |
+| `raven-lock` | RavenLogin | Rust | Session lock screen: the login screen's twin, on `ext-session-lock-v1` |
 | `raven-terminal` | RavenTerminal | Go + cgo | Terminal emulator (OpenGL 4.1 via GLFW, Wayland backend) |
 | `ravenfilemanager` | RavenFileManager | Rust | File manager (GTK4, libadwaita) — the image's only GTK client |
 | `ravencanvasd`, `ravencanvas` | RavenCanvas | Rust | The wallpaper: a wlr-layer-shell client, and its control CLI |
@@ -153,6 +153,23 @@ runs `/etc/raven/sleep.d/*` with `pre` or `post`. The marker is what tells
 Huginn to re-take the display and repaint: it held DRM master straight through
 the suspend, and without logind's `PrepareForSleep` a file in a tmpfs is the
 signal.
+
+#### Locking on resume
+
+The same marker is what locks the machine. Huginn blanks the session *first* and
+starts `raven-lock` second, then re-takes the display -- so the first frame
+composited after a resume is the lock screen and never the desktop. Doing it the
+other way round would show the session for as long as a process takes to exec
+and connect, which on a laptop is exactly the moment somebody has just opened
+the lid.
+
+The blank going up before any client exists is the reason huginn arms a ten
+second timer alongside it: if `raven-lock` never claims the session, the blank
+comes back down. A machine whose lock screen is missing should show its desktop,
+not a black display with no way past it.
+
+There is no setting for this. A laptop that sleeps on a lid close and wakes
+showing the desktop has a lock screen in name only.
 
 ### Bootloader (`bootloader/`)
 
@@ -291,7 +308,7 @@ working shell; the Raven layer takes that over once `ravenshell` is installed.
 | **Stage 2** | Rebuild the sysroot natively: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | **Stage 3** | Base packages: core libraries, shells, OpenSSH, RavenBoot |
 | **Raven** | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw |
-| **GUI** | The desktop: huginn, muninn-lock, raven-terminal, ravenfilemanager, ravencanvasd, ravend, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
+| **GUI** | The desktop: huginn, raven-terminal, ravenfilemanager, ravencanvasd, ravend, raven-lock, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
 | **Stage 4** | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
 
 The Raven layer carries no stage number. Stages 0–4 are the base system and
@@ -363,7 +380,7 @@ Sets:
 - `packages/core/` — musl, linux, openssl, openssh, libssh, sudo-rs, uutils-coreutils
 - `packages/base/` — bash, fish
 - `packages/raven/` — ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw
-- `packages/gui/` — ravengui (huginn, muninn-lock), ravenfilemanager,
+- `packages/gui/` — ravengui (huginn), ravenfilemanager,
   ravenlogin, ravencanvas. raven-terminal is built by the same stage from its
   own repository and has no manifest here yet
 

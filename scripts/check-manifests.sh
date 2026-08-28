@@ -10,7 +10,7 @@
 # On a usr-merged root /bin IS /usr/bin, so that link path and that target name
 # the same file. Creating it replaces the real binary with a symlink to itself
 # -- the failure scripts/lib/usrmerge.sh documents, and which cost the ISO its
-# copies of huginn and muninn-lock once already.
+# copies of huginn once already.
 #
 # The reason this needs a checker rather than a code review is that it does not
 # fail loudly. `ln -sf` exits 0. The package installs, `rvn` reports success,

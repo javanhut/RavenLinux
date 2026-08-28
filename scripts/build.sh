@@ -25,7 +25,7 @@
 #   stage2   Native rebuild of entire system
 #   stage3   Build base packages (core libraries, shells, OpenSSH)
 #   raven    Build the Raven self-hosted toolchain (shell, rvn, ivaldi, ...)
-#   gui      Build the compositor and lock screen (huginn, muninn-lock)
+#   gui      Build the desktop (huginn, raven-terminal, ravend, raven-lock)
 #   stage4   Generate bootable ISO image
 
 set -euo pipefail
@@ -383,7 +383,7 @@ build_raven() {
     fi
 }
 
-# GUI stage: the compositor and desktop shell (huginn, muninn, muninn-lock).
+# GUI stage: the compositor and the desktop around it (huginn, and the clients).
 # Runs after raven and before stage4. Separate from the Raven stage because
 # huginn links seventeen shared libraries and the Raven layer's defining
 # property is that it links none -- see the header of stage-gui.sh.
@@ -445,7 +445,7 @@ Stages:
     stage3      Build base packages (core libraries, shells, OpenSSH)
     raven       Build the Raven self-hosted toolchain (ravenshell, rvn, poxy,
                 ivaldi, crow, imlazy, oxigen) into the sysroot
-    gui         Build the compositor and lock screen (huginn, muninn-lock).
+    gui         Build the desktop (huginn, raven-terminal, ravend, raven-lock).
                 Runs after raven, before stage4.
     stage4      Generate bootable ISO image
     initramfs   Rebuild only the initramfs (stage1 does this too; this is the

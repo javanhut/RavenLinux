@@ -169,7 +169,7 @@ nothing from `/usr/share/fonts` either.
 
 | Status | Binary | Repo |
 |--------|--------|------|
-| **wired** | `huginn`, `muninn-lock` | [javanhut/RavenGUI](https://github.com/javanhut/RavenGUI) |
+| **wired** | `huginn` | [javanhut/RavenGUI](https://github.com/javanhut/RavenGUI) |
 
 Built by `scripts/stages/stage-gui.sh` — **its own stage**, not the Raven
 layer. Build it with `imlazy gui`; it runs between `raven` and `stage4`.
@@ -177,10 +177,12 @@ layer. Build it with `imlazy gui`; it runs between `raven` and `stage4`.
 `huginn` is a Wayland compositor on Smithay, and it draws the desktop itself —
 dock, launcher, overview, notifications — inside its own render loop rather than
 hosting a shell client. Anything that must feel instant and must never fail does
-not get to be a separate process that can miss a frame or die. `muninn-lock` is
-the one exception, and it has an independent reason: `ext-session-lock-v1` only
-guarantees a locked screen if a bug elsewhere cannot take the locker down with
-it, which requires it not to share an address space with the rest of the shell.
+not get to be a separate process that can miss a frame or die. The lock screen
+is the one thing that goes the other way, and for the opposite reason:
+`ext-session-lock-v1` only guarantees a locked screen if a bug elsewhere cannot
+take the locker down with it, which requires it not to share an address space
+with the rest of the shell. It is `raven-lock`, and it ships with RavenLogin
+rather than here — it is the login screen's twin, drawn by the same code.
 
 It gets its own stage because it cannot satisfy the Raven layer's one
 invariant. Every component under `packages/raven/` is a static binary that adds
