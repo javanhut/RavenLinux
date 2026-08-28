@@ -1497,6 +1497,66 @@ if command -v dbus-daemon >/dev/null 2>&1; then
     fi
 fi
 
+# PipeWire is a per-user service, just like the session bus above. Its Arch
+# packages ship systemd user units, but Raven does not run systemd (or another
+# user service manager), so installing the binaries alone leaves no media
+# server for applications or for huginn's `wpctl` volume control to reach.
+# WirePlumber must start after PipeWire: it discovers the ALSA devices, chooses
+# the default sink and applies the routing policy.
+#
+# Keep pid files in the per-user runtime directory so an init-driven restart of
+# the compositor reuses the audio session instead of starting a second policy
+# manager. PipeWire is also probed directly because somebody may have started
+# it by hand without Raven's pid file.
+audio_runtime="${XDG_RUNTIME_DIR}/raven-audio"
+mkdir -p "${audio_runtime}"
+
+pid_is_alive() {
+    [ -r "$1" ] || return 1
+    IFS= read -r audio_pid < "$1" || return 1
+    case "${audio_pid}" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "${audio_pid}" 2>/dev/null
+}
+
+if command -v pipewire >/dev/null 2>&1; then
+    if ! command -v pw-cli >/dev/null 2>&1 || ! pw-cli info 0 >/dev/null 2>&1; then
+        if ! pid_is_alive "${audio_runtime}/pipewire.pid"; then
+            pipewire </dev/null &
+            echo $! > "${audio_runtime}/pipewire.pid"
+        fi
+    fi
+
+    # Do not start the policy manager before the media server has bound its
+    # socket. Usually this is one pass; the bound keeps a failed daemon from
+    # delaying the desktop indefinitely.
+    i=0
+    while [ $i -lt 50 ] && [ ! -S "${XDG_RUNTIME_DIR}/pipewire-0" ]; do
+        i=$((i + 1))
+        sleep 0.1
+    done
+
+    if [ -S "${XDG_RUNTIME_DIR}/pipewire-0" ] \
+            && command -v wireplumber >/dev/null 2>&1 \
+            && ! pid_is_alive "${audio_runtime}/wireplumber.pid"; then
+        wireplumber </dev/null &
+        echo $! > "${audio_runtime}/wireplumber.pid"
+    fi
+
+    # Huginn detects its mixer once, during construction. Wait until
+    # WirePlumber has selected a real output so that a normal startup cannot
+    # permanently turn its volume slider into the disconnected in-memory stub.
+    if command -v wpctl >/dev/null 2>&1; then
+        i=0
+        while [ $i -lt 50 ] \
+                && ! wpctl get-volume '@DEFAULT_AUDIO_SINK@' >/dev/null 2>&1; do
+            i=$((i + 1))
+            sleep 0.1
+        done
+    fi
+fi
+
 # The wallpaper. Backgrounded ahead of the exec below, exactly like the session
 # bus above it and for a stronger version of the same reason: ravencanvasd is a
 # layer-shell client of the compositor this script is about to *become*, so

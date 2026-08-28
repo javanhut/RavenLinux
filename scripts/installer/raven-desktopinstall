@@ -231,12 +231,14 @@ libsecret
 EOF
 }
 
-# Audio. pipewire alone is a library and a daemon with no session manager, and
-# a pipewire without wireplumber routes nothing -- devices appear and no stream
-# ever reaches them.
+# Audio. Arch splits the device-facing SPA modules and configuration into
+# pipewire-audio; plain pipewire supplies the media server but cannot expose an
+# ALSA sink by itself. A PipeWire without WirePlumber has no session policy and
+# routes nothing -- devices appear and no stream ever reaches them.
 set_audio() {
     cat <<'EOF'
 pipewire
+pipewire-audio
 wireplumber
 alsa-lib
 alsa-ucm-conf
@@ -528,7 +530,7 @@ Sets:
   media       image and video decoding (glycin, bwrap, GStreamer, codecs)
   fonts       icon themes, cursors and the faces the shell draws with
   portals     the session bus and the XDG desktop portals
-  audio       pipewire and wireplumber
+  audio       pipewire audio support and wireplumber
   firmware    GPU and audio firmware
   devel       toolchain: base-devel, git, rustup, go   (not in the default)
   extras      applications, not desktop dependencies   (not in the default)

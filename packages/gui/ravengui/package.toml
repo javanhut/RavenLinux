@@ -54,7 +54,7 @@ build_flags = ["--release", "--locked", "-p", "huginn-comp"]
 runtime = [
     "mesa", "libdrm", "libinput", "libseat", "libudev", "libxkbcommon", "seatd",
     "xorg-xwayland", "adwaita-cursors", "breeze-icons", "hicolor-icon-theme",
-    "ttf-dejavu", "noto-fonts-emoji",
+    "ttf-dejavu", "noto-fonts-emoji", "pipewire", "pipewire-audio", "wireplumber",
 ]
 build = ["rust", "cargo", "pkg-config", "libdrm", "libinput", "libudev", "mesa"]
 
