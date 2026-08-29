@@ -63,6 +63,22 @@ if [ ! -S /run/udev/control ]; then
     }
 fi
 
+# --daemon returning means the process was spawned, not that its control socket
+# is bound. Triggering in that gap loses the coldplug: udevadm fails to connect,
+# the errors below are deliberately non-fatal, and the compositor can then grab
+# simpledrm before the real GPU driver exists. This is especially visible after
+# a warm reboot. Wait a bounded five seconds for the readiness condition the
+# trigger commands actually need.
+i=0
+while [ ! -S /run/udev/control ] && [ "${i}" -lt 50 ]; do
+    i=$((i + 1))
+    sleep 0.1
+done
+if [ ! -S /run/udev/control ]; then
+    echo "raven-udev: udevd did not create /run/udev/control; hardware stays unbound" >&2
+    exit 0
+fi
+
 # Subsystems before devices: a device's module frequently needs its bus bound
 # first, and triggering in the other order makes that a race.
 "${UDEVADM}" trigger --type=subsystems --action=add 2>/dev/null || true

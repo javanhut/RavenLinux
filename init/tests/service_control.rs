@@ -153,6 +153,67 @@ fn stop_keeps_the_service_stopped() {
 }
 
 #[test]
+fn stop_reaches_children_in_the_service_process_group() {
+    // ravend is shaped like this shell: the supervised PID owns long-lived
+    // children (the compositor, greeter and session). Killing only the leader
+    // leaves those children holding DRM master across shutdown.
+    let child_file =
+        std::env::temp_dir().join(format!("raven-init-service-child-{}", std::process::id()));
+    std::fs::remove_file(&child_file).ok();
+
+    let mut cfg_svc = sleeper("process-tree");
+    cfg_svc.exec = "/bin/sh".to_string();
+    cfg_svc.args = vec![
+        "-c".to_string(),
+        format!(
+            "trap 'exit 0' TERM; /bin/sleep 300 & child=$!; printf '%s\\n' \"$child\" > {}; wait \"$child\"",
+            child_file.display()
+        ),
+    ];
+
+    let mut services = HashMap::new();
+    let svc = Service::start(&cfg_svc).expect("starts");
+    let leader = svc.pid().expect("leader pid").as_raw();
+    services.insert("process-tree".to_string(), svc);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let child = loop {
+        if let Ok(text) = std::fs::read_to_string(&child_file) {
+            if let Ok(pid) = text.trim().parse::<i32>() {
+                break pid;
+            }
+        }
+        assert!(Instant::now() < deadline, "child pid was never published");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+
+    assert_eq!(
+        nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(leader)))
+            .expect("leader process group")
+            .as_raw(),
+        leader,
+        "a supervised service must lead its own process group"
+    );
+    assert_eq!(
+        nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(child)))
+            .expect("child process group")
+            .as_raw(),
+        leader,
+        "service children must inherit the supervised group"
+    );
+
+    let mut cfg = config_with(vec![cfg_svc]);
+    let (reply, _) = control::dispatch("stop process-tree", &mut services, &mut cfg);
+    assert!(reply.contains("Stopping"), "{reply}");
+    assert!(
+        wait_gone(child, Duration::from_secs(5)),
+        "stopping the service must also stop its child"
+    );
+
+    std::fs::remove_file(child_file).ok();
+}
+
+#[test]
 fn restart_actually_brings_the_service_back() {
     // Regression: stop_by_request only *sends* SIGTERM, so is_running() was
     // still true when start_by_request ran. It returned early, the process then

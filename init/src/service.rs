@@ -2,6 +2,7 @@
 
 use std::ffi::CString;
 use std::os::unix::io::RawFd;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -75,8 +76,6 @@ pub fn restart_delay(attempt: u32) -> Duration {
 /// other order silently leaves the process over-privileged -- `setuid` first
 /// is the well-known way to end up still in root's groups.
 fn apply_credentials(cmd: &mut Command, account: &crate::user::Account) {
-    use std::os::unix::process::CommandExt;
-
     let uid = unistd::Uid::from_raw(account.uid);
     let gid = unistd::Gid::from_raw(account.gid);
     let groups: Vec<unistd::Gid> = account
@@ -390,6 +389,18 @@ impl Service {
 
         // Standard service spawning (no TTY)
         let mut cmd = Command::new(&self.config.exec);
+
+        // Give every service a process group of its own. Daemons such as
+        // ravend supervise a compositor, a greeter and eventually a complete
+        // desktop session beneath one PID. Signalling only that PID leaves
+        // those children alive -- and, for a compositor, still holding DRM
+        // master and the seat -- while init proceeds with shutdown.
+        //
+        // `process_group(0)` asks the child to make its pid its pgid between
+        // fork and exec. It must happen before the privilege drop registered
+        // below, and lets stop/kill address the complete service with a
+        // negative pid without ever signalling init's own process group.
+        cmd.process_group(0);
 
         // Add arguments
         cmd.args(&self.config.args);
@@ -788,8 +799,12 @@ impl Service {
     /// [`Service::stop_by_request`] for an operator-initiated stop.
     pub fn stop(&mut self) {
         if let Some(pid) = self.pid {
-            log::debug!("Sending SIGTERM to {} (PID {})", self.config.name, pid);
-            let _ = signal::kill(pid, Signal::SIGTERM);
+            log::debug!(
+                "Sending SIGTERM to {} (process group {})",
+                self.config.name,
+                pid
+            );
+            signal_service_group(pid, Signal::SIGTERM);
         }
     }
 
@@ -866,7 +881,7 @@ impl Service {
                             self.config.name,
                             timeout
                         );
-                        let _ = signal::kill(pid, Signal::SIGKILL);
+                        signal_service_group(pid, Signal::SIGKILL);
                         let _ = waitpid(pid, None);
                         self.state = ServiceState::Stopped;
                         self.pid = None;
@@ -941,11 +956,30 @@ impl Service {
     /// Kill the service (SIGKILL)
     pub fn kill(&mut self) {
         if let Some(pid) = self.pid {
-            log::debug!("Sending SIGKILL to {} (PID {})", self.config.name, pid);
-            let _ = signal::kill(pid, Signal::SIGKILL);
+            log::debug!(
+                "Sending SIGKILL to {} (process group {})",
+                self.config.name,
+                pid
+            );
+            signal_service_group(pid, Signal::SIGKILL);
         }
         self.state = ServiceState::Stopped;
         self.pid = None;
         self.child = None;
     }
+}
+
+/// Signal a service and every child that stayed in its process group.
+///
+/// Fresh services always have `pgid == pid`, but a service adopted across an
+/// init re-exec may have been started by an older raven-init that did not make
+/// a group. Verify before using a negative pid so upgrading PID 1 can never
+/// accidentally signal its own process group. Falling back to the leader PID
+/// preserves the old behaviour for such an adopted service.
+fn signal_service_group(pid: Pid, signal_to_send: Signal) {
+    let target = match unistd::getpgid(Some(pid)) {
+        Ok(pgid) if pgid == pid => Pid::from_raw(-pid.as_raw()),
+        _ => pid,
+    };
+    let _ = signal::kill(target, signal_to_send);
 }
