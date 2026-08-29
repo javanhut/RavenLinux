@@ -65,6 +65,13 @@ pub enum Action {
     /// like a hang and, worse, would still be waiting on a machine that may
     /// never come back.
     Suspend,
+    /// Replace PID 1 with the raven-init binary on disk, keeping every
+    /// service running. See `crate::reexec`.
+    ///
+    /// Like `Suspend`, the reply goes out before anything happens: the exec
+    /// closes the control socket, and a client still waiting on it would see
+    /// a hang where the operation had actually succeeded.
+    Reexec,
 }
 
 /// Create the control socket at [`SOCKET_PATH`], replacing any stale one.
@@ -194,12 +201,24 @@ pub fn dispatch(
         // the machine to sleep.
         "suspend" | "sleep" => ("Suspending\n".to_string(), Action::Suspend),
 
+        // Checked here, while there is still a client to tell. Once the main
+        // loop acts on it the only place a failure can be reported is the
+        // log, and "raven-rc reexec said OK and nothing happened" is exactly
+        // the report an operator cannot act on.
+        "reexec" => match crate::reexec::target() {
+            Ok(path) => (
+                format!("Re-executing {}\n", path.display()),
+                Action::Reexec,
+            ),
+            Err(e) => (format!("error: cannot re-exec: {:#}\n", e), Action::None),
+        },
+
         "" => ("error: empty request\n".to_string(), Action::None),
         other => (
             format!(
                 "error: unknown command '{}'\n\
                  commands: list, status [NAME], start NAME, stop NAME, restart NAME, \
-                 enable NAME, disable NAME, reload, suspend, poweroff, reboot, halt\n",
+                 enable NAME, disable NAME, reload, reexec, suspend, poweroff, reboot, halt\n",
                 other
             ),
             Action::None,
@@ -368,7 +387,7 @@ fn status_one(name: &str, services: &HashMap<String, Service>, config: &InitConf
     out
 }
 
-fn start_service(
+pub(crate) fn start_service(
     name: &str,
     services: &mut HashMap<String, Service>,
     config: &InitConfig,

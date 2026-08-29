@@ -25,6 +25,7 @@ mod config;
 mod control;
 mod overrides;
 mod power;
+mod reexec;
 mod service;
 mod user;
 
@@ -34,6 +35,8 @@ use service::{Service, ServiceState};
 /// Global flag for shutdown request
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 static REBOOT_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Set by `raven-rc reexec`; the main loop returns `LoopExit::Reexec`.
+static REEXEC_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
     // Refuse to be a second supervisor before doing anything at all -- not
@@ -298,7 +301,171 @@ fn ensure_supervisor_role() -> Result<()> {
     );
 }
 
+/// Why the main loop returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopExit {
+    /// Poweroff or reboot: stop everything and leave.
+    Shutdown,
+    /// Replace this supervisor with the one on disk; touch no service.
+    Reexec,
+}
+
 fn run_init() -> Result<()> {
+    // A re-executed init inherits a booted system: mounts, hostname, the
+    // loopback, every service. Phases 1 through 2b are about the machine, not
+    // about this process, and running them again is at best a no-op and at
+    // worst (fstab, cgroups) a second mount on top of the first.
+    let handoff = reexec::take();
+    if let Some(ref h) = handoff {
+        log::info!(
+            "Re-executed as PID {}: adopting {} services, skipping early boot",
+            std::process::id(),
+            h.services.len()
+        );
+    }
+
+    if handoff.is_none() {
+        early_boot()?;
+    }
+
+    // Phase 3: Load configuration
+    log::info!("Phase 3: Loading configuration");
+    let mut config = config::load()?;
+    overrides::apply_kernel_cmdline_overrides(&mut config)?;
+    overrides::fixup_getty_login_programs(&mut config);
+
+    // Phase 4: Setup signal handlers
+    log::info!("Phase 4: Setting up signal handlers");
+    setup_signal_handlers()?;
+
+    // Phase 5: Start services
+    let mut services = match handoff {
+        Some(h) => adopt_services(&config, h),
+        None => {
+            log::info!("Phase 5: Starting services");
+            let services = start_services(&config)?;
+
+            // seatd and the compositor are started back to back, and the
+            // compositor connects to /run/seatd.sock the moment it starts.
+            // seatd has not created it yet, so the first attempt always fails
+            // -- and the restart backoff would then delay the compositor for
+            // no better reason than that race.
+            //
+            // A real dependency system would express this properly; until
+            // there is one, waiting for the socket is the honest version of
+            // what "after seatd" means.
+            wait_for_seat(&services);
+
+            // Display welcome message
+            print_welcome();
+            services
+        }
+    };
+
+    // Phase 6: Main loop - reap zombies and handle signals
+    log::info!("Phase 6: Entering main loop");
+    loop {
+        match main_loop(&mut services, &mut config)? {
+            LoopExit::Shutdown => break,
+            LoopExit::Reexec => {
+                let snapshot =
+                    reexec::Handoff::new(services.values().map(Service::snapshot).collect());
+                // Only returns on failure, and on failure nothing has
+                // happened: same image, same services, carry on.
+                let Err(e) = reexec::handoff(&snapshot);
+                log::error!("Re-exec failed: {:#}", e);
+                log::error!("  Still running the previous raven-init; services untouched");
+                REEXEC_REQUESTED.store(false, Ordering::SeqCst);
+            }
+        }
+    }
+
+    // Phase 7: Shutdown
+    log::info!("Phase 7: Shutting down");
+    shutdown_services(&mut services)?;
+
+    // Leave no socket behind. A stale one makes the next raven-rc fail with
+    // ECONNREFUSED rather than "not running", which reads like a broken
+    // service manager instead of an absent one.
+    fs::remove_file(control::SOCKET_PATH).ok();
+
+    // Determine shutdown mode
+    if REBOOT_REQUESTED.load(Ordering::SeqCst) {
+        log::info!("Rebooting system...");
+        quiesce_filesystems();
+        let _ = reboot(RebootMode::RB_AUTOBOOT);
+    } else {
+        log::info!("Powering off system...");
+        quiesce_filesystems();
+        let _ = reboot(RebootMode::RB_POWER_OFF);
+    }
+
+    Ok(())
+}
+
+/// Take over the services a previous raven-init handed us, then start
+/// whatever the configuration wants that is not already running.
+///
+/// The fresh config wins for definitions: a service found in both is adopted
+/// under the new definition, so `restart` after a re-exec behaves as it would
+/// after `reload`. A service the previous image knew and the config no longer
+/// lists keeps its old definition, for the reason `reload` keeps orphans.
+fn adopt_services(config: &InitConfig, handoff: reexec::Handoff) -> HashMap<String, Service> {
+    let mut services: HashMap<String, Service> = HashMap::new();
+
+    for snapshot in handoff.services {
+        let name = snapshot.config.name.clone();
+        let definition = config
+            .services
+            .iter()
+            .find(|c| c.name == name)
+            .cloned()
+            .unwrap_or_else(|| {
+                log::warn!(
+                    "Service {} is running but no longer configured; keeping it as-is",
+                    name
+                );
+                snapshot.config.clone()
+            });
+        let pid = snapshot.pid;
+        let svc = Service::adopt(snapshot, definition);
+        if svc.is_running() {
+            log::info!("Adopted {} (PID {})", name, pid.unwrap_or(0));
+        } else if pid.is_some() {
+            log::warn!("{} died during the hand-off; it will be restarted", name);
+        }
+        services.insert(name, svc);
+    }
+
+    // Anything enabled that the previous image was not running -- a service
+    // added to init.toml since boot, or one it failed to start. Goes through
+    // the operator's start path so `after` is honoured.
+    let wanted: Vec<String> = config
+        .services
+        .iter()
+        .filter(|c| c.enabled)
+        .filter(|c| {
+            services
+                .get(&c.name)
+                .map(|svc| !svc.is_running() && !svc.is_manually_stopped() && svc.state() == ServiceState::Stopped)
+                .unwrap_or(true)
+        })
+        .map(|c| c.name.clone())
+        .collect();
+    for name in wanted {
+        log::info!("Starting {} (not running before the re-exec)", name);
+        let reply = control::start_service(&name, &mut services, config);
+        if reply.starts_with("error:") {
+            log::error!("  {}", reply.trim_end());
+        }
+    }
+
+    services
+}
+
+/// Phases 1 through 2b: everything that makes a freshly booted kernel into a
+/// system. Runs once per boot, never on a re-exec.
+fn early_boot() -> Result<()> {
     // Phase 1: Early boot - mount essential filesystems
     log::info!("Phase 1: Mounting essential filesystems");
     mount_essential_filesystems()?;
@@ -345,56 +512,6 @@ fn run_init() -> Result<()> {
     // is ping.
     if let Err(e) = fs::write("/proc/sys/net/ipv4/ping_group_range", "0 2147483647") {
         log::warn!("Could not enable unprivileged ping: {}", e);
-    }
-
-    // Phase 3: Load configuration
-    log::info!("Phase 3: Loading configuration");
-    let mut config = config::load()?;
-    overrides::apply_kernel_cmdline_overrides(&mut config)?;
-    overrides::fixup_getty_login_programs(&mut config);
-
-    // Phase 4: Setup signal handlers
-    log::info!("Phase 4: Setting up signal handlers");
-    setup_signal_handlers()?;
-
-    // Phase 5: Start services
-    log::info!("Phase 5: Starting services");
-    let mut services = start_services(&config)?;
-
-    // seatd and the compositor are started back to back, and the compositor
-    // connects to /run/seatd.sock the moment it starts. seatd has not created
-    // it yet, so the first attempt always fails -- and the restart backoff
-    // would then delay the compositor for no better reason than that race.
-    //
-    // A real dependency system would express this properly; until there is one,
-    // waiting for the socket is the honest version of what "after seatd" means.
-    wait_for_seat(&services);
-
-    // Display welcome message
-    print_welcome();
-
-    // Phase 6: Main loop - reap zombies and handle signals
-    log::info!("Phase 6: Entering main loop");
-    main_loop(&mut services, &mut config)?;
-
-    // Phase 7: Shutdown
-    log::info!("Phase 7: Shutting down");
-    shutdown_services(&mut services)?;
-
-    // Leave no socket behind. A stale one makes the next raven-rc fail with
-    // ECONNREFUSED rather than "not running", which reads like a broken
-    // service manager instead of an absent one.
-    fs::remove_file(control::SOCKET_PATH).ok();
-
-    // Determine shutdown mode
-    if REBOOT_REQUESTED.load(Ordering::SeqCst) {
-        log::info!("Rebooting system...");
-        quiesce_filesystems();
-        let _ = reboot(RebootMode::RB_AUTOBOOT);
-    } else {
-        log::info!("Powering off system...");
-        quiesce_filesystems();
-        let _ = reboot(RebootMode::RB_POWER_OFF);
     }
 
     Ok(())
@@ -953,7 +1070,7 @@ fn print_welcome() {
     println!();
 }
 
-fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -> Result<()> {
+fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -> Result<LoopExit> {
     // The control socket is how raven-rc asks about services and starts or
     // stops them. A failure to bind it is not fatal: PID 1 supervising
     // services matters more than PID 1 being controllable, and the
@@ -976,7 +1093,11 @@ fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -
         // Check for shutdown request
         if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
             log::info!("Shutdown requested, exiting main loop");
-            break;
+            return Ok(LoopExit::Shutdown);
+        }
+        if REEXEC_REQUESTED.load(Ordering::SeqCst) {
+            log::info!("Re-exec requested, leaving main loop");
+            return Ok(LoopExit::Reexec);
         }
 
         // Reap any zombie processes
@@ -1010,6 +1131,12 @@ fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -
                         log::error!("Suspend failed: {:#}", e);
                     }
                 }
+                // Not inline: the listener has to be gone before the exec so
+                // the new image can bind the socket, and it is this
+                // function's local. Returning drops it.
+                control::Action::Reexec => {
+                    REEXEC_REQUESTED.store(true, Ordering::SeqCst);
+                }
             }
         }
 
@@ -1017,8 +1144,6 @@ fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -
         // which is worth having when the socket is what is broken.
         check_command_file()?;
     }
-
-    Ok(())
 }
 
 /// Wait briefly for seatd's socket, when something will need a seat.

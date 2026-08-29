@@ -62,6 +62,18 @@ run = ["{{run}} {{flags}} gui"]
 desc = "Update only the Raven graphical session wiring"
 run = ["GUI_SESSION_ONLY=1 {{run}} {{flags}} gui"]
 
+[commands.dev]
+desc = "Build the repo's own pieces natively and install them into this running Raven system"
+run = ["./scripts/dev-install.sh"]
+
+[commands.dev-diff]
+desc = "Show what 'dev' would change on this running Raven system, without writing"
+run = ["./scripts/dev-install.sh all --dry-run"]
+
+[commands.dev-all]
+desc = "dev plus /etc/raven configs (overwrites machine-local edits)"
+run = ["./scripts/dev-install.sh all --force-configs"]
+
 [commands.iso]
 desc = "Regenerate the ISO from the existing sysroot"
 run = ["{{run}} {{flags}} stage4"]

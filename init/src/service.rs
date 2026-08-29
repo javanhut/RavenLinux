@@ -12,6 +12,8 @@ use nix::sys::stat::Mode;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{self, dup2, execvp, fork, setsid, ForkResult, Pid};
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::ServiceConfig;
 
 // TIOCSCTTY ioctl to set controlling terminal
@@ -160,6 +162,32 @@ pub enum ServiceState {
     Failed,
 }
 
+/// What one service looks like to the raven-init that replaces this one.
+///
+/// A re-exec keeps every service process where it is; only the supervisor is
+/// swapped. This is the part of [`Service`] that survives the swap. Nothing
+/// here is an `Instant` or a `Child`: the first does not mean anything in
+/// another process and the second cannot be sent to one -- the new supervisor
+/// tracks the process by pid alone, which is all `waitpid(-1)` needs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServiceSnapshot {
+    /// The definition this process was started from. Kept even when the new
+    /// supervisor's config no longer lists it, for the same reason `reload`
+    /// keeps an orphaned definition: a process nobody can name is a process
+    /// nobody can stop.
+    pub config: ServiceConfig,
+    /// Live pid, or `None` for a service that is not running.
+    pub pid: Option<i32>,
+    /// Seconds the current run has been up, so a crash right after the swap
+    /// is still recognised as the end of a long stable run.
+    #[serde(default)]
+    pub uptime_secs: u64,
+    #[serde(default)]
+    pub restart_count: u32,
+    #[serde(default)]
+    pub manually_stopped: bool,
+}
+
 /// A managed service
 pub struct Service {
     /// Service configuration
@@ -220,6 +248,82 @@ impl Service {
 
         service.do_start()?;
         Ok(service)
+    }
+
+    /// The part of this service that a re-exec hands on.
+    pub fn snapshot(&self) -> ServiceSnapshot {
+        ServiceSnapshot {
+            config: self.config.clone(),
+            pid: if self.is_running() {
+                self.pid.map(|p| p.as_raw())
+            } else {
+                None
+            },
+            uptime_secs: self
+                .started_at
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0),
+            restart_count: self.restart_count,
+            manually_stopped: self.manually_stopped,
+        }
+    }
+
+    /// Take over a service the previous supervisor left running.
+    ///
+    /// Nothing is forked. If the snapshot names a pid and that process still
+    /// exists, the result is `Running` and owned by pid; the main loop's
+    /// `waitpid(-1)` reaps it exactly as it would a child this process forked,
+    /// because after the exec that is what it is -- the exec kept PID 1's
+    /// identity, and children are inherited with it. A pid that is gone (it
+    /// died in the hand-off window, and the kernel queued the SIGCHLD for us)
+    /// comes back `Exited`, which is what lets `check_services` restart it.
+    ///
+    /// `config` is the definition to use from here on: normally the freshly
+    /// loaded one, so a `restart` after the swap picks up an edited init.toml
+    /// the same way it would after `reload`.
+    pub fn adopt(snapshot: ServiceSnapshot, config: ServiceConfig) -> Self {
+        let now = Instant::now();
+        let alive = snapshot
+            .pid
+            .map(Pid::from_raw)
+            .filter(|pid| signal::kill(*pid, None).is_ok());
+
+        let started_at = now.checked_sub(Duration::from_secs(snapshot.uptime_secs));
+
+        match alive {
+            Some(pid) => Self {
+                config,
+                state: ServiceState::Running,
+                child: None,
+                pid: Some(pid),
+                exit_status: None,
+                exit_signal: None,
+                restart_count: snapshot.restart_count,
+                last_restart: None,
+                started_at,
+                exited_at: None,
+                retry_at: None,
+                manually_stopped: false,
+            },
+            None => Self {
+                config,
+                state: if snapshot.pid.is_some() {
+                    ServiceState::Exited
+                } else {
+                    ServiceState::Stopped
+                },
+                child: None,
+                pid: None,
+                exit_status: None,
+                exit_signal: None,
+                restart_count: snapshot.restart_count,
+                last_restart: None,
+                started_at,
+                exited_at: if snapshot.pid.is_some() { Some(now) } else { None },
+                retry_at: None,
+                manually_stopped: snapshot.manually_stopped,
+            },
+        }
     }
 
     /// Where service output goes. Overridable so tests need no /var/log.

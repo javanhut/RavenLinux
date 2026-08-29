@@ -177,6 +177,59 @@ Note that RavenLinux targets x86_64 only. On an arm64 host (e.g. Apple Silicon)
 the amd64 build image runs under emulation, and `rustc` crashes under
 qemu-user — use Docker Desktop or colima with Rosetta, or build on x86_64.
 
+## Developing from a Running System
+
+The container build above is for cutting a new ISO. It is the wrong tool while
+you are booted into RavenLinux and iterating on something in this repo: the
+host is glibc, `raven-init` is PID 1, and the pieces that live here -- the
+init crate, the installer, the service definitions -- build natively in seconds
+and can go straight into the machine you are sitting at.
+
+```bash
+imlazy dev        # build init/ natively, install what changed, restart services
+imlazy dev-diff   # dry run of every target: show the diffs, write nothing
+imlazy dev-all    # dev plus the /etc/raven configs (see below)
+```
+
+`scripts/dev-install.sh` is what these run. It refuses to run on anything that
+is not RavenLinux (`ID=raven` in `/etc/os-release`, or `raven-init` as PID 1),
+builds as your user, installs through `sudo`, and copies only files whose
+content differs from what is installed. Targets can be named directly:
+
+| Target | Repo source -> live destination |
+|---|---|
+| `init` | `cargo build --release` in `init/` -> `/usr/bin/raven-{init,rc,powerd}` |
+| `installer` | `scripts/installer/*` -> `/usr/bin`; `configs/installer/profiles` -> `/etc/raven/install-profiles` |
+| `tools` | `configs/raven-console-font`, `configs/raven-udev`, `etc/raven/raven-shell` -> `/usr/bin` |
+| `configs` | `etc/raven/*.toml`, `configs/raven/services`, `configs/raven/session.d` -> `/etc/raven/...` |
+
+```bash
+scripts/dev-install.sh                  # default: init installer tools
+scripts/dev-install.sh init             # just the init crate
+scripts/dev-install.sh all --dry-run    # everything, report only
+scripts/dev-install.sh --help
+```
+
+After installing it makes the change live: a new `raven-powerd` is restarted
+through `raven-rc`, changed configs get `raven-rc reload`, and a new
+`raven-init` is swapped in with `raven-rc reexec` -- PID 1 writes what it
+knows about its services to `/run/raven-init.reexec`, `execv`s the binary on
+disk, and the new image adopts the same processes by pid. Nothing is
+restarted; a `raven-rc` that connects during the swap gets ECONNREFUSED once
+and can retry. (`init/src/reexec.rs` has the details, including why it does
+not exec `/proc/self/exe`.) One thing it will not do for you:
+
+- **Configs under `/etc/raven` are diff-only by default.** An installed system
+  carries machine-local edits in `init.toml` (hostname, agetty arguments,
+  drop-ins moved to `init.d/`) that a blind copy would erase, so the `configs`
+  target prints the diff and leaves the file alone. Pass `--force-configs`
+  (or use `imlazy dev-all`) when you actually want the repo version.
+
+The destinations are the same paths the stage scripts write into the sysroot
+(`stage-raven.sh:build_raven_init`, `stage4-iso.sh:install_installer`,
+`stage2-native.sh`), so a feature tested this way needs no extra wiring: the
+next `imlazy build` ships it.
+
 ## Build Stages
 
 | Stage | Script | What it does |

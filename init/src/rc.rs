@@ -85,6 +85,11 @@ const SERVICE_VERBS: &[(&str, Arity, &str)] = &[
         Arity::None,
         "Re-read config; picks up newly installed services",
     ),
+    (
+        "reexec",
+        Arity::None,
+        "Swap PID 1 for the raven-init on disk; services keep running",
+    ),
 ];
 
 fn arity_of(verb: &str) -> Option<Arity> {
@@ -571,7 +576,7 @@ mod tests {
         for verb in ["start", "stop", "restart", "enable", "disable"] {
             assert_eq!(arity_of(verb), Some(Arity::Required), "{verb}");
         }
-        for verb in ["list", "reload"] {
+        for verb in ["list", "reload", "reexec"] {
             assert_eq!(arity_of(verb), Some(Arity::None), "{verb}");
         }
     }

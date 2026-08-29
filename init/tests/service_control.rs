@@ -26,6 +26,9 @@ mod overrides;
 // test binary the crate root is this file, so those paths resolve here.
 use config as _config_for_control;
 use service as _service_for_control;
+// The `reexec` verb checks its target through `crate::reexec` before replying.
+#[path = "../src/reexec.rs"]
+mod reexec;
 #[path = "../src/control.rs"]
 mod control;
 
@@ -1426,4 +1429,97 @@ fn a_service_without_a_user_still_starts() {
 
     // Leave nothing behind for the next test.
     let _ = control::dispatch("stop plain", &mut services, &mut cfg);
+}
+
+// ---------------------------------------------------------------------------
+// reexec
+// ---------------------------------------------------------------------------
+
+/// The verb answers with an action, like the other process-level verbs, and
+/// names the binary it is about to run so an operator can see it resolved to
+/// the right file. In a test the binary is this one: argv[0] is absolute.
+#[test]
+fn reexec_is_an_action_that_names_its_target() {
+    let mut services = HashMap::new();
+    let mut cfg = config_with(Vec::new());
+    let (reply, action) = control::dispatch("reexec", &mut services, &mut cfg);
+    assert_eq!(action, Action::Reexec, "{reply}");
+    assert!(reply.starts_with("Re-executing /"), "{reply}");
+}
+
+/// A target that does not exist is an error to the client, not a promise the
+/// main loop then fails to keep in the log.
+#[test]
+fn reexec_refuses_a_missing_binary() {
+    let mut services = HashMap::new();
+    let mut cfg = config_with(Vec::new());
+    std::env::set_var("RAVEN_INIT_EXE", "/nonexistent/raven-init");
+    let (reply, action) = control::dispatch("reexec", &mut services, &mut cfg);
+    std::env::remove_var("RAVEN_INIT_EXE");
+    assert_eq!(action, Action::None);
+    assert!(reply.starts_with("error: cannot re-exec"), "{reply}");
+}
+
+/// The property a re-exec exists for: the process started by one supervisor is
+/// the process the next one supervises. Snapshot, serialise, parse, adopt --
+/// the same pid comes back running, and stopping it through the adopted
+/// handle actually stops it.
+#[test]
+fn an_adopted_service_is_the_same_process() {
+    let cfg_svc = sleeper("survivor");
+    let original = Service::start(&cfg_svc).expect("start sleeper");
+    let pid = original.pid().expect("pid").as_raw();
+
+    let text = reexec::Handoff::new(vec![original.snapshot()])
+        .to_toml()
+        .unwrap();
+    // The old supervisor is gone from here on; only the text crosses over.
+    drop(original);
+
+    let handoff = reexec::Handoff::from_toml(&text).unwrap();
+    let snapshot = handoff.services.into_iter().next().unwrap();
+    assert_eq!(snapshot.pid, Some(pid));
+
+    let mut adopted = Service::adopt(snapshot, cfg_svc);
+    assert!(adopted.is_running());
+    assert_eq!(adopted.pid().map(|p| p.as_raw()), Some(pid));
+
+    adopted.stop_by_request();
+    assert!(wait_gone(pid, Duration::from_secs(5)), "SIGTERM through the adopted handle");
+}
+
+/// A pid that died in the hand-off window is reported as exited, which is the
+/// state the supervisor restarts from -- not as running, which it would never
+/// leave.
+#[test]
+fn a_dead_pid_is_adopted_as_exited() {
+    let cfg_svc = sleeper("casualty");
+    let mut svc = Service::start(&cfg_svc).expect("start sleeper");
+    let pid = svc.pid().expect("pid").as_raw();
+    let snapshot = svc.snapshot();
+    svc.kill();
+    assert!(wait_gone(pid, Duration::from_secs(5)));
+    // Reap it, so the pid is truly gone rather than a zombie kill(0) can see.
+    let _ = nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(pid), None);
+
+    let adopted = Service::adopt(snapshot, cfg_svc);
+    assert!(!adopted.is_running());
+    assert_eq!(adopted.state(), service::ServiceState::Exited);
+}
+
+/// "Stopped by request" survives the swap; otherwise a re-exec would be a
+/// way to bring back every service an operator deliberately took down.
+#[test]
+fn a_manually_stopped_service_stays_stopped_across_adoption() {
+    let cfg_svc = sleeper("parked");
+    let mut svc = Service::start(&cfg_svc).expect("start sleeper");
+    let pid = svc.pid().expect("pid").as_raw();
+    svc.stop_by_request();
+    assert!(wait_gone(pid, Duration::from_secs(5)));
+    svc.poll_exit();
+
+    let adopted = Service::adopt(svc.snapshot(), cfg_svc);
+    assert!(!adopted.is_running());
+    assert!(adopted.is_manually_stopped());
+    assert_eq!(adopted.state(), service::ServiceState::Stopped);
 }
