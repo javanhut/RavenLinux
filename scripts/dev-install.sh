@@ -87,14 +87,23 @@ fi
 
 # -----------------------------------------------------------------------------
 # Privilege: build as the user, install through sudo
+#
+# The normal invocation is deliberately *not* prefixed with sudo; install_file
+# elevates only the copies and service-control calls that need it. Be forgiving
+# when the whole script is run through sudo anyway: rustup selects toolchains
+# from the effective user's home, and root commonly has no default even though
+# the invoking account does. In that case, drop back to SUDO_USER for builds.
 # -----------------------------------------------------------------------------
 SUDO=()
+BUILD_AS=()
 if (( EUID != 0 )); then
     SUDO=(sudo)
     if (( DRY_RUN == 0 )) && ! sudo -n true 2>/dev/null; then
         log_info "sudo is needed to write into /usr/bin and /etc/raven"
         sudo -v
     fi
+elif [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    BUILD_AS=(sudo -H -u "${SUDO_USER}" --)
 fi
 
 # -----------------------------------------------------------------------------
@@ -143,7 +152,7 @@ install_config() {
 do_init() {
     log_section "init crate (raven-init, raven-rc, raven-powerd)"
     local src="${RAVEN_ROOT}/init"
-    ( cd "$src" && cargo build --release --locked ) || {
+    ( cd "$src" && "${BUILD_AS[@]}" cargo build --release --locked ) || {
         log_error "cargo build failed; nothing installed"
         return 1
     }
