@@ -165,19 +165,16 @@ fn publish(phase: &str) {
 
 fn publish_inner(phase: &str) -> Result<()> {
     if !Path::new(RUN_DIR).is_dir() {
-        fs::create_dir_all(RUN_DIR)
-            .with_context(|| format!("Cannot create {}", RUN_DIR))?;
+        fs::create_dir_all(RUN_DIR).with_context(|| format!("Cannot create {}", RUN_DIR))?;
         fs::set_permissions(RUN_DIR, fs::Permissions::from_mode(0o755)).ok();
     }
 
     // Written whole and replaced by rename, so a watcher that wakes on the
     // event never reads a half-written or empty file.
     let tmp = format!("{}.new", STATE_MARKER);
-    fs::write(&tmp, format!("{}\n", phase))
-        .with_context(|| format!("Cannot write {}", tmp))?;
+    fs::write(&tmp, format!("{}\n", phase)).with_context(|| format!("Cannot write {}", tmp))?;
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644)).ok();
-    fs::rename(&tmp, STATE_MARKER)
-        .with_context(|| format!("Cannot install {}", STATE_MARKER))?;
+    fs::rename(&tmp, STATE_MARKER).with_context(|| format!("Cannot install {}", STATE_MARKER))?;
 
     Ok(())
 }

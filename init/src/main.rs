@@ -288,8 +288,8 @@ fn ensure_supervisor_role() -> Result<()> {
          \n\
          Starting a second supervisor makes it fight the first for the control\n\
          socket and for every service in init.toml -- a daemon whose socket the\n\
-         running copy still holds will fail to start and be restarted until the\n\
-         restart budget is spent.\n\
+         running copy still holds will fail to start and be restarted, with a\n\
+         growing delay, for as long as both are running.\n\
          \n\
          To manage the running system, use raven-rc.\n\
          To test raven-init anyway, set RAVEN_INIT_ALLOW_NONPID1=1.",
@@ -363,8 +363,8 @@ fn run_init() -> Result<()> {
 
     // seatd and the compositor are started back to back, and the compositor
     // connects to /run/seatd.sock the moment it starts. seatd has not created
-    // it yet, so the first attempt always fails -- and the restart budget can
-    // be spent on that race before seatd is ever ready.
+    // it yet, so the first attempt always fails -- and the restart backoff
+    // would then delay the compositor for no better reason than that race.
     //
     // A real dependency system would express this properly; until there is one,
     // waiting for the socket is the honest version of what "after seatd" means.
@@ -742,8 +742,6 @@ fn set_system_clock() {
         .status();
 }
 
-
-
 fn setup_signal_handlers() -> Result<()> {
     // We need to handle these signals:
     // SIGCHLD - Child process terminated (reap zombies)
@@ -900,7 +898,7 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
                 enabled: true,
                 critical: false,
                 environment: HashMap::new(),
-            pre_exec: Vec::new(),
+                pre_exec: Vec::new(),
                 tty: Some("/dev/tty1".to_string()),
                 user: None,
                 stop_exec: None,
@@ -1242,9 +1240,27 @@ fn sync_filesystems() {
 /// hold no dirty data and vanish with the reboot), and remounting them
 /// read-only can fail in ways that are noise rather than signal.
 const VIRTUAL_FSTYPES: &[&str] = &[
-    "proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "ramfs", "cgroup", "cgroup2",
-    "securityfs", "debugfs", "tracefs", "configfs", "fusectl", "bpf", "nsfs",
-    "mqueue", "hugetlbfs", "pstore", "efivarfs", "autofs", "binfmt_misc",
+    "proc",
+    "sysfs",
+    "devtmpfs",
+    "devpts",
+    "tmpfs",
+    "ramfs",
+    "cgroup",
+    "cgroup2",
+    "securityfs",
+    "debugfs",
+    "tracefs",
+    "configfs",
+    "fusectl",
+    "bpf",
+    "nsfs",
+    "mqueue",
+    "hugetlbfs",
+    "pstore",
+    "efivarfs",
+    "autofs",
+    "binfmt_misc",
 ];
 
 /// One line of /proc/mounts: where it is mounted, and what kind it is.

@@ -23,8 +23,8 @@ fn shipped_service_templates_parse() {
         seen += 1;
 
         let text = std::fs::read_to_string(&path).expect("readable");
-        let cfg: config::InitConfig =
-            toml::from_str(&text).unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+        let cfg: config::InitConfig = toml::from_str(&text)
+            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
         assert!(
             !cfg.services.is_empty(),
             "{} defines no service at all",

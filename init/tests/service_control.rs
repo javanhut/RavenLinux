@@ -14,10 +14,10 @@ use std::time::{Duration, Instant};
 mod config;
 // service.rs resolves a `user =` account through `crate::user`, so that module
 // has to exist under this test binary's crate root too.
-#[path = "../src/user.rs"]
-mod user;
 #[path = "../src/service.rs"]
 mod service;
+#[path = "../src/user.rs"]
+mod user;
 // reload re-runs the boot-time transforms, so control.rs names `crate::overrides`
 // as well. It in turn reaches for `crate::config` and `crate::user`, both above.
 #[path = "../src/overrides.rs"]
@@ -476,9 +476,20 @@ fn a_crashed_service_is_restarted_but_a_stopped_one_is_not() {
     let svc = services.get_mut("crasher").unwrap();
     svc.poll_exit();
     assert_eq!(svc.state(), service::ServiceState::Signaled);
+    // Restarted, after the first backoff delay: the tick that sees the death
+    // schedules it, and the tick at which it is due says yes.
+    let now = Instant::now();
     assert!(
-        supervisor_would_restart(svc),
-        "a crashed service with restart = true must be restarted"
+        !svc.should_restart_at(now),
+        "the first tick after a crash schedules the restart rather than doing it"
+    );
+    let due = svc
+        .retry_at()
+        .expect("a crashed service with restart = true is scheduled");
+    assert_eq!(due - now, service::restart_delay(1));
+    assert!(
+        svc.should_restart_at(due),
+        "a crashed service with restart = true must be restarted once its delay is up"
     );
 
     // The operator path must still win over that.
@@ -775,13 +786,22 @@ fn no_temp_file_is_left_behind() {
 }
 
 #[test]
-fn a_crash_looping_service_is_given_up_on_once_not_every_tick() {
-    // Regression: should_restart() was a pure query that logged from inside
-    // itself and recorded nothing. A crash-looping service therefore printed
-    // "restarting too frequently, disabling restart" on every 100ms supervisor
-    // tick -- roughly ten lines a second, forever -- while never actually
-    // disabling anything: five seconds later it restarted and began again.
-    // The flood made the console unusable, which is how it surfaced.
+fn restart_delays_double_to_a_ceiling() {
+    use service::{restart_delay, RESTART_BACKOFF_MAX};
+    let secs: Vec<u64> = (1..=9).map(|n| restart_delay(n).as_secs()).collect();
+    assert_eq!(secs, vec![1, 2, 4, 8, 16, 32, 60, 60, 60]);
+    // However long a service has been looping, the wait stays at the ceiling
+    // and the arithmetic stays in range.
+    assert_eq!(restart_delay(u32::MAX), RESTART_BACKOFF_MAX);
+}
+
+#[test]
+fn a_crash_looping_service_is_backed_off_not_given_up_on() {
+    // The previous policy gave up after five deaths in a minute. For a login
+    // daemon that meant a machine with no login screen and nobody able to
+    // reach a shell to start it again. Now each death waits twice as long as
+    // the last, up to a minute, forever -- and the decision is still made and
+    // logged once per death, not on every 100ms supervisor tick.
     let mut cfg_svc = sleeper("flapper");
     cfg_svc.exec = "/bin/false".to_string(); // exits immediately, every time
     cfg_svc.args = vec![];
@@ -792,33 +812,43 @@ fn a_crash_looping_service_is_given_up_on_once_not_every_tick() {
         "flapper".to_string(),
         Service::start(&cfg_svc).expect("starts"),
     );
-
     let svc = services.get_mut("flapper").unwrap();
 
-    // Drive the supervisor by hand: let it die, decide, restart, repeat.
-    let mut restarts = 0;
-    for _ in 0..40 {
+    // Drive the supervisor with a clock of our own, so the schedule is
+    // checked exactly rather than waited out.
+    let mut now = Instant::now();
+    for attempt in 1..=10u32 {
         svc.wait_for_exit(Duration::from_secs(2));
-        if svc.should_restart() {
-            let _ = svc.restart();
-            restarts += 1;
-        } else {
-            break;
+        let expected = service::restart_delay(attempt);
+
+        // Not yet: the decision is made on the first tick, and it is a wait.
+        assert!(
+            !svc.should_restart_at(now),
+            "attempt {attempt}: must not restart on the tick the death was seen"
+        );
+        let due = svc.retry_at().expect("a restart is scheduled");
+        assert_eq!(due - now, expected, "attempt {attempt}");
+
+        // Every tick until then answers no, from the recorded decision.
+        let just_before = now + expected - Duration::from_millis(1);
+        for _ in 0..50 {
+            assert!(!svc.should_restart_at(just_before));
         }
+        assert_eq!(svc.retry_at(), Some(due), "the decision must not move");
+
+        now += expected;
+        assert!(svc.should_restart_at(now), "attempt {attempt}: due now");
+        assert_ne!(
+            svc.state(),
+            service::ServiceState::Failed,
+            "backing off is not giving up"
+        );
+        let _ = svc.restart();
+        assert_eq!(svc.restart_count(), attempt);
     }
 
-    assert!(
-        restarts <= 5,
-        "gave up after {restarts} restarts; the budget is 5"
-    );
-    assert!(!svc.should_restart(), "must stay given up");
-
-    // The decision must be stable and silent from here: a hundred more ticks
-    // must not change it, which is what stops the flood.
-    for _ in 0..100 {
-        assert!(!svc.should_restart());
-    }
-    assert_eq!(svc.state(), service::ServiceState::Failed);
+    // Let the last restart die before the operator steps in.
+    svc.wait_for_exit(Duration::from_secs(2));
 
     // An explicit start is the operator saying the cause is fixed. This one
     // is not -- /bin/false still exits at once -- and the reply must say so
@@ -830,9 +860,17 @@ fn a_crash_looping_service_is_given_up_on_once_not_every_tick() {
     );
     let svc = services.get_mut("flapper").unwrap();
     svc.wait_for_exit(Duration::from_secs(2));
-    assert!(
-        svc.should_restart(),
-        "an operator start must refill the restart budget"
+    assert_eq!(
+        svc.restart_count(),
+        0,
+        "an operator start resets the backoff"
+    );
+    let now = Instant::now();
+    assert!(!svc.should_restart_at(now));
+    assert_eq!(
+        svc.retry_at().map(|at| at - now),
+        Some(service::restart_delay(1)),
+        "after an operator start the schedule begins again from the shortest wait"
     );
 
     services.get_mut("flapper").unwrap().kill();
@@ -951,7 +989,10 @@ fn restarting_onto_a_deleted_binary_names_the_binary() {
 
     let (reply, _) = control::dispatch("stop vanishing", &mut services, &mut cfg);
     assert!(reply.contains("Stopping"), "{reply}");
-    assert!(wait_gone(pid, Duration::from_secs(5)), "process should exit");
+    assert!(
+        wait_gone(pid, Duration::from_secs(5)),
+        "process should exit"
+    );
 
     // The package is removed while the service is stopped.
     std::fs::remove_file(&path).expect("removes");
@@ -979,7 +1020,10 @@ fn starting_a_non_executable_binary_says_so() {
     let (reply, _) = control::dispatch("start chmodless", &mut services, &mut cfg);
 
     assert!(reply.contains("not executable"), "{reply}");
-    assert!(reply.contains("0644"), "the mode belongs in the message: {reply}");
+    assert!(
+        reply.contains("0644"),
+        "the mode belongs in the message: {reply}"
+    );
 
     let _ = std::fs::remove_file(&path);
 }
@@ -996,7 +1040,11 @@ fn a_dropin_defined_service_can_be_disabled_and_enabled() {
 
     // The main config defines nothing.
     let main = dir.join("init.toml");
-    std::fs::write(&main, "[system]\nhostname = \"t\"\n[[services]]\nname = \"other\"\nexec = \"/bin/true\"\n").unwrap();
+    std::fs::write(
+        &main,
+        "[system]\nhostname = \"t\"\n[[services]]\nname = \"other\"\nexec = \"/bin/true\"\n",
+    )
+    .unwrap();
 
     let dropin = dir.join("sshd.toml");
     std::fs::write(
@@ -1114,11 +1162,7 @@ impl Drop for Dropins {
 
 /// A drop-in directory holding one `[[services]]` file per entry.
 fn dropin_dir(key: &str, entries: &[(&str, &str)]) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "raven-reload-{}-{}",
-        std::process::id(),
-        key
-    ));
+    let dir = std::env::temp_dir().join(format!("raven-reload-{}-{}", std::process::id(), key));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create drop-in dir");
     for (name, body) in entries {
@@ -1150,14 +1194,16 @@ fn reload_picks_up_a_service_installed_after_boot() {
     let (reply, action) = control::dispatch("reload", &mut services, &mut cfg);
     assert!(matches!(action, Action::None));
     assert!(reply.contains("added"), "reload should report it: {reply}");
-    assert!(reply.contains("late-arrival"), "reload should name it: {reply}");
+    assert!(
+        reply.contains("late-arrival"),
+        "reload should name it: {reply}"
+    );
 
     // And it is now a real service.
     assert!(
         cfg.services.iter().any(|s| s.name == "late-arrival"),
         "definition should be live after reload"
     );
-
 }
 
 #[test]
@@ -1265,7 +1311,10 @@ fn reload_reports_a_changed_definition_as_pending_while_running() {
         reply.contains("changed while running"),
         "expected a pending report, got: {reply}"
     );
-    assert!(reply.contains("restart"), "should say how to apply: {reply}");
+    assert!(
+        reply.contains("restart"),
+        "should say how to apply: {reply}"
+    );
 
     services.get_mut("mutable").unwrap().stop();
 }
@@ -1293,7 +1342,6 @@ fn reload_keeps_a_removed_but_still_running_service_addressable() {
 
     let (stopped, _) = control::dispatch("stop orphan", &mut services, &mut cfg);
     assert!(!stopped.contains("no such service"), "{stopped}");
-
 }
 
 #[test]
@@ -1309,7 +1357,6 @@ fn reload_forgets_a_removed_service_that_was_not_running() {
         !cfg.services.iter().any(|s| s.name == "gone"),
         "a stopped service whose file is gone should be forgotten"
     );
-
 }
 
 /// An account that does not exist must fail the start, not fall back to root.

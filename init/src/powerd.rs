@@ -484,7 +484,10 @@ fn suspend_directly() -> bool {
     const STATE_PATH: &str = "/sys/power/state";
 
     let Ok(offered) = fs::read_to_string(STATE_PATH) else {
-        log::error!("Cannot read {}: no suspend support in this kernel", STATE_PATH);
+        log::error!(
+            "Cannot read {}: no suspend support in this kernel",
+            STATE_PATH
+        );
         return false;
     };
 
@@ -492,7 +495,11 @@ fn suspend_directly() -> bool {
         .into_iter()
         .find(|s| offered.split_whitespace().any(|o| o == *s))
     else {
-        log::error!("{} offers '{}', no state we use", STATE_PATH, offered.trim());
+        log::error!(
+            "{} offers '{}', no state we use",
+            STATE_PATH,
+            offered.trim()
+        );
         return false;
     };
 
@@ -652,11 +659,7 @@ fn accept_desktop_client(stream: UnixStream, tx: &Sender<Signal>) {
             let _ = tx.send(Signal::Request(action, stream));
         }
         None => {
-            log::warn!(
-                "{}: unknown command {:?}",
-                CTL_SOCKET_PATH,
-                line.trim()
-            );
+            log::warn!("{}: unknown command {:?}", CTL_SOCKET_PATH, line.trim());
             reply(stream, "error: unknown command\n");
         }
     }
@@ -695,14 +698,20 @@ fn serve_request(action: PowerAction, stream: UnixStream, last_action: &mut Opti
         *last_action = Some(Instant::now());
         reply(stream, action.acknowledgement());
     } else {
-        reply(stream, "error: init did not agree; see the raven-powerd log\n");
+        reply(
+            stream,
+            "error: init did not agree; see the raven-powerd log\n",
+        );
     }
 }
 
 /// Write one line and close. A client that went away is not an error worth
 /// more than a debug line; the action was theirs to ask for, not to wait on.
 fn reply(mut stream: UnixStream, text: &str) {
-    if let Err(e) = stream.write_all(text.as_bytes()).and_then(|()| stream.flush()) {
+    if let Err(e) = stream
+        .write_all(text.as_bytes())
+        .and_then(|()| stream.flush())
+    {
         log::debug!("{}: reply not delivered: {}", CTL_SOCKET_PATH, e);
     }
     // Dropping `stream` closes it, which is what ends the reply.
@@ -808,7 +817,9 @@ struct Interest {
 /// have not.
 fn device_interest(node: &Path) -> Option<Interest> {
     let name = node.file_name()?.to_str()?;
-    let caps = PathBuf::from("/sys/class/input").join(name).join("device/capabilities");
+    let caps = PathBuf::from("/sys/class/input")
+        .join(name)
+        .join("device/capabilities");
 
     let keys = fs::read_to_string(caps.join("key")).unwrap_or_default();
     let switches = fs::read_to_string(caps.join("sw")).unwrap_or_default();
@@ -1074,8 +1085,7 @@ mod tests {
     /// machine whose lid has stopped working.
     #[test]
     fn the_shipped_config_parses() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../etc/raven/power.toml");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../etc/raven/power.toml");
         let text = std::fs::read_to_string(&path).expect("etc/raven/power.toml is readable");
         let config: Config = toml::from_str(&text).expect("etc/raven/power.toml parses");
 

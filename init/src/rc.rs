@@ -58,12 +58,28 @@ enum Arity {
 /// if that ever stops being true.
 const SERVICE_VERBS: &[(&str, Arity, &str)] = &[
     ("list", Arity::None, "List every service and its state"),
-    ("status", Arity::Optional, "System status, or one service in detail"),
+    (
+        "status",
+        Arity::Optional,
+        "System status, or one service in detail",
+    ),
     ("start", Arity::Required, "Start a stopped service"),
-    ("stop", Arity::Required, "Stop a service, and keep it stopped"),
+    (
+        "stop",
+        Arity::Required,
+        "Stop a service, and keep it stopped",
+    ),
     ("restart", Arity::Required, "Stop then start a service"),
-    ("enable", Arity::Required, "Start at boot      (writes init.toml)"),
-    ("disable", Arity::Required, "Do not start at boot (writes init.toml)"),
+    (
+        "enable",
+        Arity::Required,
+        "Start at boot      (writes init.toml)",
+    ),
+    (
+        "disable",
+        Arity::Required,
+        "Do not start at boot (writes init.toml)",
+    ),
     (
         "reload",
         Arity::None,

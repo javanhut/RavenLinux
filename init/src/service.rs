@@ -17,12 +17,44 @@ use crate::config::ServiceConfig;
 // TIOCSCTTY ioctl to set controlling terminal
 nix::ioctl_write_int_bad!(tiocsctty, libc::TIOCSCTTY);
 
-/// Restarts allowed inside [`RESTART_WINDOW`] before a service is declared
-/// crash-looping rather than recovering.
-const MAX_RESTARTS: u32 = 5;
+/// The delay before the first restart of a service that has just died.
+///
+/// Doubles on every consecutive death up to [`RESTART_BACKOFF_MAX`], and is
+/// reset once a run lasts [`RESTART_STABLE_AFTER`]. The supervisor never gives
+/// up: a service that cannot start is retried once a minute, forever, with
+/// the reason in its log each time.
+///
+/// Giving up was the previous policy -- five deaths in a minute -- and it
+/// was the wrong one for the services that matter most. A login daemon whose
+/// greeter died in under a second hit the limit in five seconds, and from then
+/// on the machine had no login screen until somebody rebooted it: the person
+/// who could have run `raven-rc start ravend` had no way to reach a shell
+/// to type it in. A backoff turns the same crash loop into a service that is
+/// back the moment its cause is fixed, and costs one exec a minute while it
+/// is not.
+pub const RESTART_BACKOFF_BASE: Duration = Duration::from_secs(1);
 
-/// How long a service must survive for its restart budget to be refilled.
-const RESTART_WINDOW: Duration = Duration::from_secs(60);
+/// The longest the supervisor waits between restarts of a crash-looping
+/// service.
+pub const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(60);
+
+/// A run that lasts this long is a recovery, not a crash loop, and resets the
+/// backoff to [`RESTART_BACKOFF_BASE`] for whatever death comes next.
+pub const RESTART_STABLE_AFTER: Duration = Duration::from_secs(60);
+
+/// How long to wait before restart number `attempt` (counting from 1) of a
+/// service whose previous runs all died quickly.
+///
+/// 1s, 2s, 4s, 8s, 16s, 32s, then 60s for every attempt after.
+pub fn restart_delay(attempt: u32) -> Duration {
+    // Shift capped well below 32 so this cannot overflow however long a
+    // service has been looping; the min against MAX does the real limiting.
+    let doublings = attempt.saturating_sub(1).min(16);
+    RESTART_BACKOFF_BASE
+        .checked_mul(1u32 << doublings)
+        .unwrap_or(RESTART_BACKOFF_MAX)
+        .min(RESTART_BACKOFF_MAX)
+}
 
 /// Make `cmd` exec as `account`: supplementary groups, then gid, then uid.
 ///
@@ -99,7 +131,10 @@ fn exec_problem(exec: &str) -> Option<String> {
 
     let mode = meta.permissions().mode();
     if mode & 0o111 == 0 {
-        return Some(format!("{exec} is not executable (mode {:04o})", mode & 0o7777));
+        return Some(format!(
+            "{exec} is not executable (mode {:04o})",
+            mode & 0o7777
+        ));
     }
 
     None
@@ -116,7 +151,12 @@ pub enum ServiceState {
     Signaled,
     /// Service is stopped
     Stopped,
-    /// Service failed to start
+    /// Service failed to start.
+    ///
+    /// No longer produced by the supervisor -- a service that keeps dying is
+    /// backed off, not declared failed -- but kept so `raven-rc status` has a
+    /// word for it if a future start path needs one.
+    #[allow(dead_code)]
     Failed,
 }
 
@@ -138,16 +178,19 @@ pub struct Service {
     restart_count: u32,
     /// Last restart time
     last_restart: Option<Instant>,
-    /// Set once the restart budget is spent, so the give-up decision is made
-    /// and logged exactly once.
+    /// When the current run was started, for measuring how long it lasted.
+    started_at: Option<Instant>,
+    /// When the current run died, for the same measurement.
+    exited_at: Option<Instant>,
+    /// When the pending restart is due, once the backoff has been decided.
     ///
-    /// The supervisor asks `should_restart` on every 100ms tick. Without
-    /// somewhere to record the answer, a crash-looping service re-derived it
-    /// each time and logged from inside the query -- ten "disabling restart"
-    /// warnings a second, none of which disabled anything.
-    restart_disabled: bool,
-    /// When the current restart budget window opened.
-    window_start: Option<Instant>,
+    /// The supervisor asks `should_restart` on every 100ms tick. The decision
+    /// -- and its log line -- is made once, on the first tick after a death,
+    /// and recorded here; the ticks after that only compare against it.
+    /// Without somewhere to record the answer, a crash-looping service once
+    /// re-derived it each time and logged from inside the query, ten lines a
+    /// second, forever.
+    retry_at: Option<Instant>,
     /// Set when an operator stopped this service through raven-rc.
     ///
     /// Without this, `stop` is a no-op with extra steps: the supervisor sees an
@@ -169,8 +212,9 @@ impl Service {
             exit_signal: None,
             restart_count: 0,
             last_restart: None,
-            restart_disabled: false,
-            window_start: None,
+            started_at: None,
+            exited_at: None,
+            retry_at: None,
             manually_stopped: false,
         };
 
@@ -295,6 +339,8 @@ impl Service {
         self.child = Some(child);
         self.pid = Some(pid);
         self.state = ServiceState::Running;
+        self.started_at = Some(Instant::now());
+        self.exited_at = None;
         self.exit_status = None;
         self.exit_signal = None;
 
@@ -352,6 +398,8 @@ impl Service {
             Ok(ForkResult::Parent { child }) => {
                 // Parent process - just record the child PID
                 self.pid = Some(child);
+                self.started_at = Some(Instant::now());
+                self.exited_at = None;
                 self.child = None; // We don't have a Child handle when using fork directly
                 self.state = ServiceState::Running;
                 self.exit_status = None;
@@ -463,6 +511,12 @@ impl Service {
     /// second forever while disabling nothing. The flood also made the
     /// console unusable, which is how it was found.
     pub fn should_restart(&mut self) -> bool {
+        self.should_restart_at(Instant::now())
+    }
+
+    /// [`should_restart`](Self::should_restart) against a clock the caller
+    /// supplies, so the backoff schedule can be tested without waiting it out.
+    pub fn should_restart_at(&mut self, now: Instant) -> bool {
         if self.manually_stopped {
             return false;
         }
@@ -471,41 +525,54 @@ impl Service {
             return false;
         }
 
-        // Already given up. Silent: it was logged when the decision was made.
-        if self.restart_disabled {
-            return false;
-        }
-
-        // A service that stayed up for a whole window is recovering, not
-        // looping, so it gets its budget back.
-        if let Some(started) = self.window_start {
-            if started.elapsed() > RESTART_WINDOW {
-                self.window_start = None;
-                self.restart_count = 0;
+        let retry_at = match self.retry_at {
+            Some(at) => at,
+            None => {
+                // First tick after the death: decide the delay, say so once.
+                //
+                // A run that stayed up long enough was a recovery, so the
+                // death that ended it starts the schedule over rather than
+                // inheriting the last crash loop's minute-long waits.
+                if self.last_run_was_stable() {
+                    self.restart_count = 0;
+                }
+                let attempt = self.restart_count.saturating_add(1);
+                let delay = restart_delay(attempt);
+                let at = now + delay;
+                self.retry_at = Some(at);
+                log::warn!(
+                    "Service {} died; restarting in {}s (attempt {})",
+                    self.config.name,
+                    delay.as_secs(),
+                    attempt
+                );
+                at
             }
-        }
+        };
 
-        if self.restart_count >= MAX_RESTARTS {
-            self.restart_disabled = true;
-            self.state = ServiceState::Failed;
-            log::error!(
-                "Service {} failed {} times in under {}s; giving up. \
-                 Fix the cause and run `raven-rc start {}`.",
-                self.config.name,
-                self.restart_count,
-                RESTART_WINDOW.as_secs(),
-                self.config.name
-            );
-            return false;
-        }
+        now >= retry_at
+    }
 
-        true
+    /// Whether the run that just ended lasted [`RESTART_STABLE_AFTER`].
+    fn last_run_was_stable(&self) -> bool {
+        match (self.started_at, self.exited_at) {
+            (Some(started), Some(exited)) => {
+                exited.saturating_duration_since(started) >= RESTART_STABLE_AFTER
+            }
+            _ => false,
+        }
+    }
+
+    /// When the pending restart is due, while one is pending.
+    pub fn retry_at(&self) -> Option<Instant> {
+        self.retry_at
     }
 
     /// Mark service as exited
     pub fn mark_exited(&mut self, status: i32) {
         self.state = ServiceState::Exited;
         self.exit_status = Some(status);
+        self.exited_at = Some(Instant::now());
         self.pid = None;
         self.child = None;
 
@@ -516,6 +583,7 @@ impl Service {
     pub fn mark_signaled(&mut self, signal: Signal) {
         self.state = ServiceState::Signaled;
         self.exit_signal = Some(signal);
+        self.exited_at = Some(Instant::now());
         self.pid = None;
         self.child = None;
 
@@ -525,9 +593,9 @@ impl Service {
     /// Restart the service
     pub fn restart(&mut self) -> Result<()> {
         self.manually_stopped = false;
-        self.restart_count += 1;
+        self.restart_count = self.restart_count.saturating_add(1);
         self.last_restart = Some(Instant::now());
-        self.window_start.get_or_insert_with(Instant::now);
+        self.retry_at = None;
 
         log::info!(
             "Restarting service {} (attempt {})",
@@ -717,20 +785,20 @@ impl Service {
 
     /// Start a service that is not currently running.
     ///
-    /// Clears the operator-stopped flag and the restart budget, so a service
-    /// that previously tripped the restart rate limit gets a clean slate rather
-    /// than inheriting a refusal to run.
+    /// Clears the operator-stopped flag and the restart backoff, so a service
+    /// that has been crash-looping is tried again at once rather than at the
+    /// end of a minute-long wait.
     pub fn start_by_request(&mut self) -> Result<()> {
         if self.is_running() {
             return Ok(());
         }
 
         self.manually_stopped = false;
+        // An explicit start is the operator saying the cause is dealt with,
+        // so the backoff starts over from the shortest delay.
         self.restart_count = 0;
         self.last_restart = None;
-        // An explicit start is the operator saying the cause is dealt with.
-        self.restart_disabled = false;
-        self.window_start = None;
+        self.retry_at = None;
         self.state = ServiceState::Stopped;
 
         self.do_start()

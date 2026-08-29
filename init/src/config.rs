@@ -62,7 +62,7 @@ impl Default for InitConfig {
                     enabled: true,
                     critical: false,
                     environment: HashMap::new(),
-            pre_exec: Vec::new(),
+                    pre_exec: Vec::new(),
                     tty: Some("/dev/tty1".to_string()),
                     user: None,
                     stop_exec: None,
@@ -370,7 +370,11 @@ fn load_dropins(config: &mut InitConfig) {
                 );
                 continue;
             }
-            log::info!("Service '{}' defined by drop-in {}", svc.name, path.display());
+            log::info!(
+                "Service '{}' defined by drop-in {}",
+                svc.name,
+                path.display()
+            );
             config.services.push(svc);
         }
     }

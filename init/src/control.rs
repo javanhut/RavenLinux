@@ -354,6 +354,13 @@ fn status_one(name: &str, services: &HashMap<String, Service>, config: &InitConf
         }
     ));
 
+    if let Some(at) = svc.retry_at() {
+        if !svc.is_running() {
+            let wait = at.saturating_duration_since(std::time::Instant::now());
+            out.push_str(&format!("  next restart in {}s\n", wait.as_secs()));
+        }
+    }
+
     if let Some(cfg) = cfg {
         out.push_str(&format!("  exec         {}\n", cfg.exec));
     }
@@ -630,11 +637,7 @@ fn reload_config(services: &mut HashMap<String, Service>, config: &mut InitConfi
     crate::overrides::fixup_getty_login_programs(&mut fresh);
     let fresh = fresh;
 
-    let running = |name: &str| {
-        services
-            .get(name)
-            .is_some_and(|svc| svc.is_running())
-    };
+    let running = |name: &str| services.get(name).is_some_and(|svc| svc.is_running());
 
     let mut added: Vec<String> = Vec::new();
     let mut updated: Vec<String> = Vec::new();
@@ -705,7 +708,11 @@ fn reload_config(services: &mut HashMap<String, Service>, config: &mut InitConfi
 
     section("added", &added, "not started; `raven-rc start NAME`");
     section("updated", &updated, "");
-    section("changed while running", &pending, "`raven-rc restart NAME` to apply");
+    section(
+        "changed while running",
+        &pending,
+        "`raven-rc restart NAME` to apply",
+    );
     section("removed", &dropped, "");
     section(
         "removed but still running",
