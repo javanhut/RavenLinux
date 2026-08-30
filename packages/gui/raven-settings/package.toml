@@ -1,0 +1,50 @@
+[package]
+name = "raven-settings"
+version = "0.1.0"
+description = "Raven Settings - network, Bluetooth, sound, display, appearance, default apps and updates in one window"
+license = "GPL-3.0-or-later"
+homepage = "https://github.com/javanhut/RavenSettingsUI"
+repository = "https://github.com/javanhut/RavenSettingsUI"
+maintainers = ["RavenLinux Team"]
+categories = ["gui", "wayland", "application"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/RavenSettingsUI.git"
+
+[build]
+system = "cargo"
+# GTK4 + libadwaita, like ravenfilemanager, and for the same reason: there is
+# no musl build of that stack to be had.
+target = "x86_64-unknown-linux-gnu"
+build_flags = ["--release", "--locked"]
+
+[dependencies]
+# The GTK half mirrors ravenfilemanager's list -- the same toolkit, the same
+# four silent runtime needs (schemas, MIME database, icon themes, dconf). The
+# rest is what the pages drive: caw for Wi-Fi, bluez for pairing, wireplumber
+# for wpctl, rvn for updates, and ravengui for raven_shell_v1 (screens) and
+# raven-powerd (sleep/restart/power off). None is required to start; a page
+# whose backend is missing says so and offers the install line.
+runtime = [
+    "gtk4", "libadwaita", "glib2", "gsettings-desktop-schemas",
+    "shared-mime-info", "desktop-file-utils", "librsvg", "gdk-pixbuf2",
+    "hicolor-icon-theme", "adwaita-icon-theme", "dconf",
+    "ravengui", "caw", "bluez", "wireplumber", "rvn",
+]
+build = ["rust", "cargo", "pkg-config", "gtk4", "libadwaita", "glib2"]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-gnu/release/raven-settings", dest = "/usr/bin/raven-settings", mode = 755 },
+    { src = "data/icons/hicolor/scalable/apps/com.ravensettings.Raven.svg", dest = "/usr/share/icons/hicolor/scalable/apps/com.ravensettings.Raven.svg", mode = 644 },
+    { src = "data/com.ravensettings.Raven.metainfo.xml", dest = "/usr/share/metainfo/com.ravensettings.Raven.metainfo.xml", mode = 644 },
+    # Lets the session (group video) set backlight brightness without root.
+    { src = "data/90-backlight.rules", dest = "/etc/udev/rules.d/90-backlight.rules", mode = 644 },
+]
+
+# The upstream data/com.ravensettings.Raven.desktop is deliberately not in this
+# list: install_desktop_entries() in scripts/stages/stage-gui.sh writes every
+# application entry on this image so the launcher's contents are decided in one
+# place.
+symlinks = []

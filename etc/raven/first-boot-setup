@@ -107,7 +107,9 @@ case "$create_user" in
             # left only "Failed to create user", which is the message you least
             # want to debug on first boot.
             if useradd -m -s "$default_shell" "$new_username"; then
-                for grp in wheel audio video input render seat; do
+                # caw: state-changing requests to cawd (joining Wi-Fi from
+                # Raven Settings or `caw connect`) are limited to that group.
+                for grp in wheel audio video input render seat caw; do
                     getent group "$grp" >/dev/null 2>&1 || continue
                     usermod -aG "$grp" "$new_username" 2>/dev/null || true
                 done

@@ -81,6 +81,10 @@
 #   FILEMANAGER_OFFLINE=1      as GUI_OFFLINE, for the file manager alone
 #   FILEMANAGER_REF=<git-ref>  build a particular RavenFileManager ref
 #   LOGIN_SKIP=1               skip RavenLogin; the image autologins
+#   SETTINGS_SKIP=1            skip Raven Settings; the desktop keeps working
+#   SETTINGS_OFFLINE=1         as GUI_OFFLINE, for the settings app alone
+#   SETTINGS_REF=<git-ref>     build a particular RavenSettingsUI ref
+#
 #   LOGIN_OFFLINE=1            as GUI_OFFLINE, for the login screen alone
 #   LOGIN_REF=<git-ref>        build a particular RavenLogin ref
 #   CANVAS_SKIP=1              skip RavenCanvas; the desktop draws huginn's own
@@ -130,6 +134,14 @@ FILEMANAGER_REPO="RavenFileManager"
 FILEMANAGER_URL="https://github.com/javanhut/${FILEMANAGER_REPO}.git"
 FILEMANAGER_BIN="ravenfilemanager"
 FILEMANAGER_APPID="com.ravenfilemanager.Raven"
+
+# Raven Settings: the one window for network, Bluetooth, sound, screens,
+# appearance and updates. GTK4 like the file manager, so it rides on the same
+# staged toolkit; huginn opens it from quick settings and Super+Ctrl+P.
+SETTINGS_REPO="RavenSettingsUI"
+SETTINGS_URL="https://github.com/javanhut/${SETTINGS_REPO}.git"
+SETTINGS_BIN="raven-settings"
+SETTINGS_APPID="com.ravensettings.Raven"
 
 # The login screen. A fourth repository, and the last thing between the boot and
 # somebody's session: ravend reads /etc/shadow, draws a password prompt through
@@ -1271,6 +1283,85 @@ install_wallpaper_dirs() {
     log_info "  + /usr/share/wallpaper and set/ (empty; drop an image in to use one)"
 }
 
+# =============================================================================
+# Raven Settings
+# =============================================================================
+#
+# Environment:
+#   SETTINGS_SKIP=1      skip it; the desktop is complete without it
+#   SETTINGS_OFFLINE=1   never touch the network; use the existing clone
+#   SETTINGS_REF=<ref>   build a particular ref instead of the default
+stage_settings() {
+    if [[ "${SETTINGS_SKIP:-0}" == "1" ]]; then
+        log_info "  SETTINGS_SKIP=1: no settings app on the image"
+        return 0
+    fi
+
+    command -v cargo &>/dev/null || {
+        log_warn "  cargo not found; Raven Settings will not be built"
+        return 0
+    }
+
+    local -a missing=()
+    local mod
+    for mod in gtk4 libadwaita-1 glib-2.0 gio-2.0; do
+        pkg-config --exists "${mod}" 2>/dev/null || missing+=("${mod}")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        log_warn "  missing build dependencies for Raven Settings: ${missing[*]}"
+        log_warn "  install them with: pacman -S --needed gtk4 libadwaita"
+        log_warn "  the desktop will ship without a settings app"
+        return 0
+    fi
+
+    local dest="${GUI_SRC_DIR}/${SETTINGS_REPO}"
+    if ! fetch_repo "${SETTINGS_REPO}" "${SETTINGS_URL}" "${dest}" \
+            "${SETTINGS_REF:-}" "${SETTINGS_OFFLINE:-${GUI_OFFLINE:-0}}"; then
+        log_warn "  RavenSettingsUI source unavailable; no settings app on the image"
+        return 0
+    fi
+
+    log_info "  building Raven Settings for ${GUI_TARGET}..."
+    local -a cargo_args=(build --release --target "${GUI_TARGET}")
+    [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
+    if ! ( cd "${dest}" && cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}" ); then
+        log_warn "  Raven Settings build failed; no settings app on the image"
+        return 0
+    fi
+
+    local out="${dest}/target/${GUI_TARGET}/release/${SETTINGS_BIN}"
+    if [[ ! -x "${out}" ]]; then
+        log_warn "  Raven Settings produced no binary; no settings app on the image"
+        return 0
+    fi
+
+    install -Dm 0755 "${out}" "${SYSROOT_DIR}/usr/bin/${SETTINGS_BIN}"
+    log_success "  ${SETTINGS_BIN} installed ($(du -h "${out}" | cut -f1))"
+    stage_gui_libraries "${out}"
+
+    local appdata="${SYSROOT_DIR}/usr/share"
+    install -Dm 0644 "${dest}/data/icons/hicolor/scalable/apps/${SETTINGS_APPID}.svg" \
+        "${appdata}/icons/hicolor/scalable/apps/${SETTINGS_APPID}.svg" 2>/dev/null \
+        && log_info "    + ${SETTINGS_APPID}.svg (hicolor/scalable)" \
+        || log_warn "    no icon in the checkout; the dock entry will draw blank"
+    install -Dm 0644 "${dest}/data/${SETTINGS_APPID}.metainfo.xml" \
+        "${appdata}/metainfo/${SETTINGS_APPID}.metainfo.xml" 2>/dev/null || true
+
+    # Brightness. /sys/class/backlight/*/brightness is root-only by default;
+    # this hands it to group video, which every desktop session already holds
+    # for DRM, so the Display page can move the slider without a password.
+    install -Dm 0644 "${dest}/data/90-backlight.rules" \
+        "${SYSROOT_DIR}/etc/udev/rules.d/90-backlight.rules" 2>/dev/null \
+        && log_info "    + 90-backlight.rules (brightness for group video)"
+
+    # The same GTK runtime the file manager needs. Idempotent when the file
+    # manager already staged it; this is what keeps SETTINGS working under
+    # FILEMANAGER_SKIP=1.
+    if declare -F stage_gtk_runtime &>/dev/null; then
+        stage_gtk_runtime
+    fi
+}
+
 install_desktop_entries() {
     local dir="${SYSROOT_DIR}/usr/share/applications"
     mkdir -p "${dir}"
@@ -1372,6 +1463,26 @@ inode/directory=${FILEMANAGER_APPID}.desktop
 DEFAULTS
         chmod 0644 "${dir}/mimeapps.list"
         log_info "    + mimeapps.list (inode/directory)"
+    fi
+
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${SETTINGS_BIN}" ]]; then
+        cat > "${dir}/${SETTINGS_APPID}.desktop" << ENTRY
+[Desktop Entry]
+Type=Application
+Name=Settings
+GenericName=System Settings
+Comment=Configure Raven Linux
+Exec=${SETTINGS_BIN}
+Icon=${SETTINGS_APPID}
+Categories=System;Settings;DesktopSettings;GTK;
+Keywords=settings;preferences;network;wifi;bluetooth;sound;display;theme;wallpaper;updates;
+StartupWMClass=${SETTINGS_BIN}
+StartupNotify=true
+Terminal=false
+ENTRY
+        chmod 0644 "${dir}/${SETTINGS_APPID}.desktop"
+        written=$((written + 1))
+        log_info "    + ${SETTINGS_APPID}.desktop"
     fi
 
     # The launcher reads this directory; update-desktop-database is what makes
@@ -1865,6 +1976,12 @@ print_gui_summary() {
         echo "  [--] wallpaper           not built - huginn's flat background"
     fi
 
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${SETTINGS_BIN}" ]]; then
+        echo "  [OK] settings app        /usr/bin/${SETTINGS_BIN} (Super+Ctrl+P, quick settings > All settings)"
+    else
+        echo "  [--] settings app        not built"
+    fi
+
     if [[ -x "${SYSROOT_DIR}/usr/bin/${ROOSTBAR_BIN}" \
             && -x "${SYSROOT_DIR}/etc/raven/session.d/50-roostbar" ]]; then
         echo "  [OK] status bar          /usr/bin/${ROOSTBAR_BIN} (session.d enabled)"
@@ -2027,6 +2144,11 @@ main() {
     # it can see a binary for.
     log_step "Staging the file manager..."
     stage_filemanager
+
+    # Same rule again, and after the file manager on purpose: both are GTK4
+    # and the toolkit's runtime is staged by whichever comes first.
+    log_step "Staging the settings app..."
+    stage_settings
 
     log_step "Installing application entries..."
     install_desktop_entries
