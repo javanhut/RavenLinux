@@ -84,6 +84,9 @@
 #   SETTINGS_SKIP=1            skip Raven Settings; the desktop keeps working
 #   SETTINGS_OFFLINE=1         as GUI_OFFLINE, for the settings app alone
 #   SETTINGS_REF=<git-ref>     build a particular RavenSettingsUI ref
+#   STORE_SKIP=1               skip Raven Store; rvn still works from a terminal
+#   STORE_OFFLINE=1            as GUI_OFFLINE, for the store alone
+#   STORE_REF=<git-ref>        build a particular RavenStore ref
 #
 #   LOGIN_OFFLINE=1            as GUI_OFFLINE, for the login screen alone
 #   LOGIN_REF=<git-ref>        build a particular RavenLogin ref
@@ -142,6 +145,17 @@ SETTINGS_REPO="RavenSettingsUI"
 SETTINGS_URL="https://github.com/javanhut/${SETTINGS_REPO}.git"
 SETTINGS_BIN="raven-settings"
 SETTINGS_APPID="com.ravensettings.Raven"
+
+# Raven Store: the graphical front-end for rvn. Browse, install, remove and
+# update packages without a terminal. GTK4 + libadwaita like the settings app,
+# so it rides on the same staged toolkit; huginn opens it from Super+Ctrl+I.
+# Everything it does is `rvn --json` underneath, run through sudo -- it
+# reimplements nothing, so an image without it has lost a window and no
+# capability.
+STORE_REPO="RavenStore"
+STORE_URL="https://github.com/javanhut/${STORE_REPO}.git"
+STORE_BIN="raven-store"
+STORE_APPID="com.ravenstore.Raven"
 
 # The login screen. A fourth repository, and the last thing between the boot and
 # somebody's session: ravend reads /etc/shadow, draws a password prompt through
@@ -1362,6 +1376,78 @@ stage_settings() {
     fi
 }
 
+# =============================================================================
+# Raven Store
+# =============================================================================
+#
+# Environment:
+#   STORE_SKIP=1      skip it; rvn from a terminal is the same operations
+#   STORE_OFFLINE=1   never touch the network; use the existing clone
+#   STORE_REF=<ref>   build a particular ref instead of the default
+stage_store() {
+    if [[ "${STORE_SKIP:-0}" == "1" ]]; then
+        log_info "  STORE_SKIP=1: no software store on the image"
+        return 0
+    fi
+
+    command -v cargo &>/dev/null || {
+        log_warn "  cargo not found; Raven Store will not be built"
+        return 0
+    }
+
+    local -a missing=()
+    local mod
+    for mod in gtk4 libadwaita-1 glib-2.0 gio-2.0; do
+        pkg-config --exists "${mod}" 2>/dev/null || missing+=("${mod}")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        log_warn "  missing build dependencies for Raven Store: ${missing[*]}"
+        log_warn "  install them with: pacman -S --needed gtk4 libadwaita"
+        log_warn "  the desktop will ship without a software store"
+        return 0
+    fi
+
+    local dest="${GUI_SRC_DIR}/${STORE_REPO}"
+    if ! fetch_repo "${STORE_REPO}" "${STORE_URL}" "${dest}" \
+            "${STORE_REF:-}" "${STORE_OFFLINE:-${GUI_OFFLINE:-0}}"; then
+        log_warn "  RavenStore source unavailable; no software store on the image"
+        return 0
+    fi
+
+    log_info "  building Raven Store for ${GUI_TARGET}..."
+    local -a cargo_args=(build --release --target "${GUI_TARGET}")
+    [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
+    if ! ( cd "${dest}" && cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}" ); then
+        log_warn "  Raven Store build failed; no software store on the image"
+        return 0
+    fi
+
+    local out="${dest}/target/${GUI_TARGET}/release/${STORE_BIN}"
+    if [[ ! -x "${out}" ]]; then
+        log_warn "  Raven Store produced no binary; no software store on the image"
+        return 0
+    fi
+
+    install -Dm 0755 "${out}" "${SYSROOT_DIR}/usr/bin/${STORE_BIN}"
+    log_success "  ${STORE_BIN} installed ($(du -h "${out}" | cut -f1))"
+    stage_gui_libraries "${out}"
+
+    local appdata="${SYSROOT_DIR}/usr/share"
+    install -Dm 0644 "${dest}/data/icons/hicolor/scalable/apps/${STORE_APPID}.svg" \
+        "${appdata}/icons/hicolor/scalable/apps/${STORE_APPID}.svg" 2>/dev/null \
+        && log_info "    + ${STORE_APPID}.svg (hicolor/scalable)" \
+        || log_warn "    no icon in the checkout; the launcher entry will draw blank"
+    install -Dm 0644 "${dest}/data/${STORE_APPID}.metainfo.xml" \
+        "${appdata}/metainfo/${STORE_APPID}.metainfo.xml" 2>/dev/null || true
+
+    # The GTK runtime, if neither the file manager nor the settings app got
+    # there first. Idempotent; this is what keeps the store working under
+    # FILEMANAGER_SKIP=1 SETTINGS_SKIP=1.
+    if declare -F stage_gtk_runtime &>/dev/null; then
+        stage_gtk_runtime
+    fi
+}
+
 install_desktop_entries() {
     local dir="${SYSROOT_DIR}/usr/share/applications"
     mkdir -p "${dir}"
@@ -1483,6 +1569,26 @@ ENTRY
         chmod 0644 "${dir}/${SETTINGS_APPID}.desktop"
         written=$((written + 1))
         log_info "    + ${SETTINGS_APPID}.desktop"
+    fi
+
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${STORE_BIN}" ]]; then
+        cat > "${dir}/${STORE_APPID}.desktop" << ENTRY
+[Desktop Entry]
+Type=Application
+Name=Raven Store
+GenericName=Software Store
+Comment=Discover, install and update software on Raven Linux
+Exec=${STORE_BIN}
+Icon=${STORE_APPID}
+Categories=System;PackageManager;GTK;
+Keywords=store;apps;software;packages;install;update;rvn;aur;
+StartupWMClass=${STORE_BIN}
+StartupNotify=true
+Terminal=false
+ENTRY
+        chmod 0644 "${dir}/${STORE_APPID}.desktop"
+        written=$((written + 1))
+        log_info "    + ${STORE_APPID}.desktop"
     fi
 
     # The launcher reads this directory; update-desktop-database is what makes
@@ -1982,6 +2088,12 @@ print_gui_summary() {
         echo "  [--] settings app        not built"
     fi
 
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${STORE_BIN}" ]]; then
+        echo "  [OK] software store      /usr/bin/${STORE_BIN} (Super+Ctrl+I)"
+    else
+        echo "  [--] software store      not built - rvn from a terminal"
+    fi
+
     if [[ -x "${SYSROOT_DIR}/usr/bin/${ROOSTBAR_BIN}" \
             && -x "${SYSROOT_DIR}/etc/raven/session.d/50-roostbar" ]]; then
         echo "  [OK] status bar          /usr/bin/${ROOSTBAR_BIN} (session.d enabled)"
@@ -2149,6 +2261,11 @@ main() {
     # and the toolkit's runtime is staged by whichever comes first.
     log_step "Staging the settings app..."
     stage_settings
+
+    # Same rule a third time: GTK4, optional, and install_desktop_entries
+    # needs to see the binary.
+    log_step "Staging the software store..."
+    stage_store
 
     log_step "Installing application entries..."
     install_desktop_entries

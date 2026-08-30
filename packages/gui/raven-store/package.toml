@@ -1,0 +1,48 @@
+[package]
+name = "raven-store"
+version = "0.1.0"
+description = "Raven Store - browse, install, remove and update packages through rvn without a terminal"
+license = "GPL-3.0-or-later"
+homepage = "https://github.com/javanhut/RavenStore"
+repository = "https://github.com/javanhut/RavenStore"
+maintainers = ["RavenLinux Team"]
+categories = ["gui", "wayland", "application"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/RavenStore.git"
+
+[build]
+system = "cargo"
+# GTK4 + libadwaita, like raven-settings, and for the same reason: there is
+# no musl build of that stack to be had.
+target = "x86_64-unknown-linux-gnu"
+build_flags = ["--release", "--locked"]
+
+[dependencies]
+# The GTK half mirrors raven-settings' list. The rest is what the store is a
+# front-end for: every read is `rvn --json ...` parsed from stdout and every
+# change is `sudo rvn --json -y ...` with the events streamed into a dialog.
+# There is no polkit agent on this image, so sudo is the privilege boundary,
+# and an account outside wheel gets a message rather than a hang. rvn must be
+# a build with --json (RavenPackageManager main from 2026-08-30 on).
+runtime = [
+    "gtk4", "libadwaita", "glib2", "gsettings-desktop-schemas",
+    "shared-mime-info", "desktop-file-utils", "librsvg", "gdk-pixbuf2",
+    "hicolor-icon-theme", "adwaita-icon-theme", "dconf",
+    "rvn", "sudo",
+]
+build = ["rust", "cargo", "pkg-config", "gtk4", "libadwaita", "glib2"]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-gnu/release/raven-store", dest = "/usr/bin/raven-store", mode = 755 },
+    { src = "data/icons/hicolor/scalable/apps/com.ravenstore.Raven.svg", dest = "/usr/share/icons/hicolor/scalable/apps/com.ravenstore.Raven.svg", mode = 644 },
+    { src = "data/com.ravenstore.Raven.metainfo.xml", dest = "/usr/share/metainfo/com.ravenstore.Raven.metainfo.xml", mode = 644 },
+]
+
+# The upstream data/com.ravenstore.Raven.desktop is deliberately not in this
+# list: install_desktop_entries() in scripts/stages/stage-gui.sh writes every
+# application entry on this image so the launcher's contents are decided in one
+# place.
+symlinks = []

@@ -58,6 +58,7 @@ And a graphical layer, built separately because it cannot be static:
 | `ravenfilemanager` | [RavenFileManager](https://github.com/javanhut/RavenFileManager), the file manager — the other icon on the dock, and the image's only GTK client |
 | `ravencanvasd`, `ravencanvas` | [RavenCanvas](https://github.com/javanhut/RavenCanvas), the wallpaper — a layer-shell client, started by the session script before the compositor it draws behind |
 | `roostbar` | [RoostBar](https://github.com/javanhut/RoostBar), the layer-shell status bar — date, Wi-Fi, Bluetooth, volume, battery and clock |
+| `raven-store` | [RavenStore](https://github.com/javanhut/RavenStore), the software store — a GTK front-end that runs `rvn --json` underneath; on `Super`+`Ctrl`+`I` |
 | `ravend`, `raven-greeter` | [RavenLogin](https://github.com/javanhut/RavenLogin), the login screen — and the root daemon behind it, which is not the process that draws |
 
 Boot the `Raven Desktop (Huginn)` entry, or add `raven.graphics=wayland` to the
@@ -287,6 +288,8 @@ CANVAS_SKIP=1 imlazy gui                    # no wallpaper daemon; flat backgrou
 CANVAS_REF=v0.1.0 imlazy gui                # pin RavenCanvas to a git ref
 ROOSTBAR_SKIP=1 imlazy gui                  # no status bar
 ROOSTBAR_REF=v0.1.0 imlazy gui              # pin RoostBar to a git ref
+STORE_SKIP=1 imlazy gui                     # no software store; rvn from a terminal
+STORE_REF=v0.1.0 imlazy gui                 # pin RavenStore to a git ref
 ```
 
 Each of those four also takes an `_OFFLINE=1`, which reuses that component's

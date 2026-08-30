@@ -166,6 +166,25 @@ only `wayland`, `libxkbcommon` and `mesa`, all of which the Dockerfile already
 installs for huginn. Its Nerd Fonts are embedded in the binary, so it needs
 nothing from `/usr/share/fonts` either.
 
+## Software Store
+
+| Status | Binary | Repo |
+|--------|--------|------|
+| **wired** | `raven-store` | [javanhut/RavenStore](https://github.com/javanhut/RavenStore) |
+
+Built by `stage_store()` in `stage-gui.sh`, after the settings app and on the
+same GTK4 + libadwaita runtime; `STORE_SKIP=1` leaves it out. Optional in the
+file manager's sense: everything it does is `rvn --json …` run as a child
+process — reads as the user, changes through `sudo -S` with the event stream
+rendered into a progress dialog — so an image without it has lost a window and
+nothing else. huginn opens it on `Super`+`Ctrl`+`I` (`theme::STORE_APP`), the
+way `Super`+`Ctrl`+`P` opens settings.
+
+Two things it needs from the rest of the image: an `rvn` that understands
+`--json` (RavenPackageManager `main` from 2026-08-30 on — an older one makes
+every page report a parse error), and `sudo`, because there is no polkit agent
+here and the store speaks to it directly.
+
 ## Compositor and Desktop Shell
 
 | Status | Binary | Repo |
