@@ -664,6 +664,11 @@ main() {
             cp "${CONFIG_DIR}/config-${KERNEL_VERSION}-raven" "${KERNEL_BUILD_DIR}/.config"
             cd "$KERNEL_BUILD_DIR"
             make olddefconfig
+            # The port and peripheral set is a floor the saved config must
+            # not drop below, whatever menuconfig or a kernel bump did to it.
+            # Idempotent: on a config that already has it this is a no-op.
+            bash "${SCRIPT_DIR}/kernel-ports.sh" "$KERNEL_BUILD_DIR"
+            make olddefconfig
             log_success "Kernel config restored from ${CONFIG_DIR}/config-${KERNEL_VERSION}-raven"
         else
             # No saved config exists, generate new one from scratch

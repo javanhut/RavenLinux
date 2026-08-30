@@ -1,0 +1,44 @@
+[package]
+name = "evdi"
+version = "1.14.16"
+description = "Extensible Virtual Display Interface - kernel half of DisplayLink USB 3 and USB-C docks"
+license = "GPL-2.0-only"
+homepage = "https://github.com/DisplayLink/evdi"
+repository = "https://github.com/DisplayLink/evdi"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "hardware", "kernel-module"]
+
+[source]
+type = "git"
+url = "https://github.com/DisplayLink/evdi.git"
+tag = "v1.14.16"
+
+[build]
+# Out-of-tree kernel module, built by scripts/build-evdi.sh against the
+# kernel tree scripts/build-kernel.sh leaves in build/sources. stage1 runs it
+# right after the kernel.
+system = "custom"
+script = "scripts/build-evdi.sh"
+
+[dependencies]
+runtime = []
+build = ["linux"]
+
+[install]
+files = [
+    { src = "module/evdi.ko", dest = "/usr/lib/modules/6.17.11-raven/extra/evdi.ko", mode = 644 }
+]
+symlinks = []
+directories = []
+
+# What this does and does not give you.
+#
+# DL-1x5 adapters (USB 2) are handled in tree by udl and need nothing here.
+# Every DisplayLink device since -- DL-3xxx/5xxx/6xxx, which is every USB 3
+# and USB-C dock -- needs evdi plus DisplayLink's userspace daemon,
+# DisplayLinkManager, which decodes the proprietary stream and pushes frames
+# into the evdi DRM device. That daemon is under an EULA that does not allow
+# redistribution, so it is not in the image. With this module present, the
+# user installs DisplayLink's Ubuntu .deb or the displaylink-installer package
+# and the dock's screens appear as /dev/dri/cardN, which huginn then drives as
+# secondary GPUs (see RavenGUI docs/outputs.md).

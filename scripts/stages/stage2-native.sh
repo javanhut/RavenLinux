@@ -1483,6 +1483,16 @@ copy_firmware() {
         mrvl                   # Marvell
         amdgpu                 # AMD graphics, 86MB -- see below
         i915                   # Intel graphics, 25MB
+        xe                     # Intel graphics, Lunar Lake and later
+        qca                    # Qualcomm bluetooth
+        # Audio. SOF firmware and topologies for every Intel laptop since
+        # ~2019 and AMD Renoir onward; without them snd_sof loads and the
+        # machine has neither speakers nor microphone. The Cirrus and TI
+        # blobs are the smart amplifiers those same laptops hang off HDA.
+        intel/sof intel/sof-tplg intel/sof-ipc4 intel/sof-ipc4-lib
+        intel/sof-ipc4-tplg intel/sof-ace-tplg
+        amd cirrus ti
+        renesas                # uPD720201/2 xHCI, common in USB 3 add-in cards
     )
 
     # Graphics firmware is not optional on any machine built this decade. Both
@@ -1494,18 +1504,20 @@ copy_firmware() {
     # WiFi and did not cover for graphics.
     #
     # nouveau's GSP blobs are 152MB decompressed against amdgpu's 86 and i915's
-    # 25, and they only matter for a discrete NVIDIA card -- whose connectors
-    # huginn does not drive yet, since it takes the primary GPU and no other.
-    # Opt in with RAVEN_FW_NVIDIA=1 when that changes.
-    if [[ "${RAVEN_FW_NVIDIA:-0}" == "1" ]]; then
+    # 25, and they only matter for a discrete NVIDIA card. On a hybrid laptop
+    # that card owns some of the ports, though -- the HDMI and USB-C outputs on
+    # most gaming laptops are wired to the dGPU -- so without its firmware
+    # those ports are dead no matter what the compositor does. Shipped by
+    # default; RAVEN_FW_NVIDIA=0 drops it for a smaller image.
+    if [[ "${RAVEN_FW_NVIDIA:-1}" == "1" ]]; then
         fw_dirs+=(nvidia)
-        log_info "  RAVEN_FW_NVIDIA=1: including nouveau GSP firmware (+152MB)"
+        log_info "  including nouveau GSP firmware (+152MB; RAVEN_FW_NVIDIA=0 to drop)"
     fi
 
-    # Arch ships firmware zstd-compressed, and this kernel is built with
-    # CONFIG_FW_LOADER_COMPRESS unset, so a .zst blob is a blob the kernel
-    # cannot read. Decompressing on the way in works regardless of what the
-    # running kernel supports, and squashfs compresses it all back down.
+    # Arch ships firmware zstd-compressed. The kernel can read .zst blobs
+    # (CONFIG_FW_LOADER_COMPRESS_ZSTD=y) but only when it goes looking for the
+    # .zst name itself, which not every driver path does. Decompressing on the
+    # way in works regardless, and squashfs compresses it all back down.
     local have_zstd=0
     command -v zstd &>/dev/null && have_zstd=1
 
@@ -1544,6 +1556,15 @@ copy_firmware() {
         rel="$(basename "$f")"
         _install_fw "$f" "${SYSROOT_DIR}/usr/lib/firmware/${rel}" && copied=$((copied + 1))
     done < <(find "${host_firmware}" -maxdepth 1 \( -name 'iwlwifi-*' -o -name 'regulatory.db*' \) 2>/dev/null)
+
+    # Intel bluetooth (btintel) wants intel/ibt-*.sfi and .ddc, which sit as
+    # loose files directly under intel/ next to the subdirectories above. The
+    # directory sweep takes intel/iwlwifi and never these, so the driver
+    # stack was complete and the adapter never came up.
+    while IFS= read -r f; do
+        rel="intel/$(basename "$f")"
+        _install_fw "$f" "${SYSROOT_DIR}/usr/lib/firmware/${rel}" && copied=$((copied + 1))
+    done < <(find "${host_firmware}/intel" -maxdepth 1 -type f -name 'ibt-*' 2>/dev/null)
 
     if (( copied == 0 )); then
         log_warn "Found ${host_firmware} but copied no firmware; WiFi and graphics will not work"

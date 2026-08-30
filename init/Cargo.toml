@@ -56,3 +56,11 @@ path = "src/rc.rs"
 [[bin]]
 name = "raven-powerd"
 path = "src/powerd.rs"
+
+# The port and peripheral inventory, and the wired-link watcher that gets a
+# dock's NIC a lease when it appears. In this crate because it is init's
+# hotplug half: init.toml runs `raven-ports watch --react` as a service and
+# it reuses the same raven-dhcp invocation the boot-time network service does.
+[[bin]]
+name = "raven-ports"
+path = "src/ports.rs"

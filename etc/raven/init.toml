@@ -202,6 +202,22 @@ restart = false
 enabled = true
 critical = false
 
+# Ports: hotplug after boot.
+#
+# The network service above is a one-shot, so a cable plugged in later -- or
+# the NIC in a dock -- got no lease. This watches link state over rtnetlink
+# and runs the same raven-dhcp invocation when a wired link comes up. It is
+# also `raven-ports list`, the port and peripheral inventory, when run by hand.
+[[services]]
+name = "ports"
+description = "Port hotplug: DHCP for wired links that come up after boot"
+exec = "/usr/bin/raven-ports"
+args = ["watch", "--react"]
+after = ["udev", "network"]
+restart = true
+enabled = true
+critical = false
+
 # No ssh services here: OpenSSH is not part of the base image.
 # `rvn install openssh` installs the daemon, creates any accounts it declares,
 # seeds its default config, and drops its service definition into

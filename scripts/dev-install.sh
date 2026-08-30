@@ -150,14 +150,14 @@ install_config() {
 # Targets
 # -----------------------------------------------------------------------------
 do_init() {
-    log_section "init crate (raven-init, raven-rc, raven-powerd)"
+    log_section "init crate (raven-init, raven-rc, raven-powerd, raven-ports)"
     local src="${RAVEN_ROOT}/init"
     ( cd "$src" && "${BUILD_AS[@]}" cargo build --release --locked ) || {
         log_error "cargo build failed; nothing installed"
         return 1
     }
     local out="${src}/target/release"
-    for b in raven-init raven-rc raven-powerd; do
+    for b in raven-init raven-rc raven-powerd raven-ports; do
         install_file "${out}/${b}" "/usr/bin/${b}" 0755
     done
 }
@@ -223,6 +223,10 @@ if (( NO_RESTART == 0 )); then
     if changed /usr/bin/raven-powerd; then
         log_step "restarting powerd"
         "${SUDO[@]}" raven-rc restart powerd || log_warn "raven-rc restart powerd failed"
+    fi
+    if changed /usr/bin/raven-ports; then
+        log_step "restarting ports"
+        "${SUDO[@]}" raven-rc restart ports || log_warn "raven-rc restart ports failed"
     fi
     config_changed=0
     for d in "${CHANGED[@]:-}"; do [[ "$d" == /etc/raven/* ]] && config_changed=1; done

@@ -467,9 +467,9 @@ build_raven_init() {
     local outdir="${RAVEN_STAGE_DIR}"
     mkdir -p "${outdir}"
 
-    if ! build_rust_component "${src}" "raven-init,raven-rc,raven-powerd" "." "${outdir}"; then
+    if ! build_rust_component "${src}" "raven-init,raven-rc,raven-powerd,raven-ports" "." "${outdir}"; then
         log_warn "  raven-init: build failed, skipping"
-        RAVEN_FAILED+=(raven-init raven-rc raven-powerd)
+        RAVEN_FAILED+=(raven-init raven-rc raven-powerd raven-ports)
         return 0
     fi
 
@@ -483,15 +483,19 @@ build_raven_init() {
     # service; it is a third binary out of the same crate because it is the
     # other half of init's suspend.
     install -m 0755 "${outdir}/raven-powerd" "${SYSROOT_DIR}/usr/bin/raven-powerd"
+    # The port and peripheral inventory, and the `ports` service that gets a
+    # wired link a lease when it comes up after boot.
+    install -m 0755 "${outdir}/raven-ports" "${SYSROOT_DIR}/usr/bin/raven-ports"
 
     # stage4 owns the poweroff/reboot/halt/shutdown names and installs a
     # dispatcher that uses raven-rc when raven-init is PID 1, with an emergency
     # kernel fallback for rescue environments.
 
-    RAVEN_BUILT+=(raven-init raven-rc raven-powerd)
+    RAVEN_BUILT+=(raven-init raven-rc raven-powerd raven-ports)
     log_success "  raven-init installed ($(du -h "${outdir}/raven-init" | cut -f1))"
     log_success "  raven-rc installed ($(du -h "${outdir}/raven-rc" | cut -f1))"
     log_success "  raven-powerd installed ($(du -h "${outdir}/raven-powerd" | cut -f1))"
+    log_success "  raven-ports installed ($(du -h "${outdir}/raven-ports" | cut -f1))"
 }
 
 build_all_components() {

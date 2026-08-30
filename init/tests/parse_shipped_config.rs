@@ -76,6 +76,16 @@ fn shipped_configs_parse() {
         // cawd is the only wireless daemon in the image; iwd is not shipped,
         // because two nl80211 daemons on one wiphy fight over the interface.
         assert!(cfg.services.iter().all(|s| s.name != "iwd"), "iwd is gone");
+
+        let ports = cfg
+            .services
+            .iter()
+            .find(|s| s.name == "ports")
+            .expect("ports service is shipped");
+        assert_eq!(ports.exec, "/usr/bin/raven-ports");
+        assert_eq!(ports.args, vec!["watch".to_string(), "--react".to_string()]);
+        assert!(ports.restart, "a dead watcher is a dock NIC with no address");
+        assert!(ports.after.contains(&"udev".to_string()));
         let cawd = cfg
             .services
             .iter()

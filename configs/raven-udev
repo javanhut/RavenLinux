@@ -11,8 +11,8 @@
 # The graphics and wireless drivers are modules rather than built in. A driver
 # compiled into the kernel probes at device_initcall and asks the firmware
 # loader for its blobs there and then -- before any filesystem holding firmware
-# has been mounted -- and it does not retry. CONFIG_FW_LOADER_USER_HELPER is
-# unset, so there is no userspace fallback either. Every firmware-bearing
+# has been mounted -- and it does not retry. Nothing in userspace answers the
+# firmware helper that early either. Every firmware-bearing
 # driver therefore came up dead: amdgpu and i915 failed and CONFIG_DRM_SIMPLEDRM
 # took the EFI framebuffer, and no wireless device appeared at all.
 #

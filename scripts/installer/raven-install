@@ -1055,8 +1055,15 @@ grant_sudo() {
     # the base image does ship, so a seat works either way; `render` is the one
     # that was quietly absent and left /dev/dri/renderD* unopenable by anyone
     # but root. `seat` is created for symmetry and is unused today.
+    #
+    # `caw` is not hardware but belongs in the same loop: cawd checks the
+    # peer's credentials on its socket, and `caw connect`, `disconnect` and
+    # `shutdown` are refused to anyone outside the group. stage2 ships it
+    # with the placeholder as its only member, and remove_group_member has
+    # just stripped that -- so without this the installed user can scan but
+    # never join a network except through sudo.
     local g
-    for g in audio video input render seat; do
+    for g in audio video input render seat caw; do
         ensure_group "$g" || true
         add_group_member "$g" "$USERNAME" || true
     done

@@ -99,13 +99,25 @@ build_kernel() {
 
     local kernel_out="${BUILD_DIR}/kernel/boot/vmlinuz-raven"
     if [[ -f "${kernel_out}" ]]; then
-        if find "${PROJECT_ROOT}/scripts/build-kernel.sh" "${PROJECT_ROOT}/configs/kernel" \
+        if find "${PROJECT_ROOT}/scripts/build-kernel.sh" "${PROJECT_ROOT}/scripts/kernel-ports.sh" \
+            "${PROJECT_ROOT}/configs/kernel" \
             -type f -newer "${kernel_out}" -print -quit 2>/dev/null | grep -q .; then
-            log_warn "Kernel already built but older than build scripts/config; rebuild with: ./scripts/build-kernel.sh --clean"
+            # A config edit that only produced a warning here shipped the old
+            # kernel every time. Rebuild; --clean drops the stale .config so
+            # the saved one is restored.
+            log_warn "Kernel config or build script newer than the built kernel; rebuilding"
+            bash "${PROJECT_ROOT}/scripts/build-kernel.sh" --clean 2>&1 | tee -a "${LOGS_DIR}/kernel.log"
+            bash "${PROJECT_ROOT}/scripts/build-kernel.sh" 2>&1 | tee -a "${LOGS_DIR}/kernel.log"
+            if [[ -f "${kernel_out}" ]]; then
+                log_success "Kernel rebuilt"
+            else
+                log_error "Kernel rebuild failed"
+            fi
+            return 0
         else
             log_info "Kernel already built, skipping"
+            return 0
         fi
-        return 0
     fi
 
     if [[ -x "${PROJECT_ROOT}/scripts/build-kernel.sh" ]]; then
@@ -124,6 +136,26 @@ build_kernel() {
 # =============================================================================
 # Build Initramfs
 # =============================================================================
+# =============================================================================
+# Build DisplayLink's evdi module against the freshly built kernel
+# =============================================================================
+build_evdi() {
+    log_info "Building evdi (DisplayLink) module..."
+
+    local release
+    release="$(ls "${BUILD_DIR}/kernel/lib/modules" 2>/dev/null | head -1)"
+    local evdi_out="${BUILD_DIR}/kernel/lib/modules/${release}/extra/evdi.ko"
+    if [[ -n "${release}" && -f "${evdi_out}" && "${evdi_out}" -nt "${BUILD_DIR}/kernel/boot/vmlinuz-raven" ]]; then
+        log_info "evdi already built against ${release}, skipping"
+        return 0
+    fi
+
+    # Not fatal: a missing evdi costs DisplayLink docks, not the image.
+    if ! bash "${PROJECT_ROOT}/scripts/build-evdi.sh" 2>&1 | tee "${LOGS_DIR}/evdi.log"; then
+        log_warn "evdi build failed; DisplayLink USB 3/USB-C docks will not work (see ${LOGS_DIR}/evdi.log)"
+    fi
+}
+
 build_initramfs() {
     log_info "Building initramfs..."
 
@@ -304,6 +336,7 @@ main() {
 
     build_coreutils
     build_kernel
+    build_evdi
     build_initramfs
     setup_sysroot
 

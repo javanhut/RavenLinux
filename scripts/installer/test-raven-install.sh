@@ -142,6 +142,7 @@ video:x:91:raven
 input:x:97:raven
 users:x:100:raven
 raven:x:1000:
+caw:x:970:raven
 nobody:x:65534:
 EOF
     cat > "$t/etc/shadow" <<'EOF'
@@ -237,6 +238,10 @@ matches "added to input"                  '^input:x:97:javan$' "$TARGET/etc/grou
 # the membership and lets ensure_group pick.
 matches "render group created"            '^render:x:[0-9]+:javan$' "$TARGET/etc/group"
 matches "seat group created"              '^seat:x:[0-9]+:javan$' "$TARGET/etc/group"
+# caw gates cawd's state-changing socket commands on group membership. The
+# image ships it with only the placeholder as a member, which the placeholder
+# removal strips, so the new user has to be put back in.
+matches "added to caw"                    '^caw:x:970:javan$' "$TARGET/etc/group"
 matches "sudoers.d grants wheel"          '^%wheel ALL=\(ALL:ALL\) ALL$' "$TARGET/etc/sudoers.d/10-wheel"
 matches "sudoers reads sudoers.d"         '@includedir /etc/sudoers\.d' "$TARGET/etc/sudoers"
 
