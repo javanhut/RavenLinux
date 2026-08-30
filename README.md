@@ -61,6 +61,7 @@ And a graphical layer, built separately because it cannot be static:
 | `ravencanvasd`, `ravencanvas` | [RavenCanvas](https://github.com/javanhut/RavenCanvas), the wallpaper — a layer-shell client, started by the session script before the compositor it draws behind |
 | `roostbar` | [RoostBar](https://github.com/javanhut/RoostBar), the layer-shell status bar — date, Wi-Fi, Bluetooth, volume, battery and clock |
 | `raven-store` | [RavenStore](https://github.com/javanhut/RavenStore), the software store — a GTK front-end that runs `rvn --json` underneath; on `Super`+`Ctrl`+`I` |
+| `raven-power` | [RavenBatteryManagement](https://github.com/javanhut/RavenBatteryManagement), native battery profiles, energy diagnostics, application Eco mode and battery health — linked from Settings > General |
 | `ravend`, `raven-greeter` | [RavenLogin](https://github.com/javanhut/RavenLogin), the login screen — and the root daemon behind it, which is not the process that draws |
 
 Boot the `Raven Desktop (Huginn)` entry, or add `raven.graphics=wayland` to the

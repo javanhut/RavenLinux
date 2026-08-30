@@ -1,0 +1,36 @@
+[package]
+name = "raven-power"
+version = "0.1.0"
+description = "Native battery profiles, energy diagnostics, application Eco mode, and battery health for Raven Linux"
+license = "GPL-3.0-or-later"
+homepage = "https://github.com/javanhut/RavenBatteryManagement"
+repository = "https://github.com/javanhut/RavenBatteryManagement"
+maintainers = ["RavenLinux Team"]
+categories = ["gui", "wayland", "application", "system"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/RavenBatteryManagement.git"
+
+[build]
+system = "cargo"
+target = "x86_64-unknown-linux-gnu"
+build_flags = ["--release", "--locked"]
+
+[dependencies]
+runtime = [
+    "gtk4", "libadwaita", "glib2", "gsettings-desktop-schemas",
+    "shared-mime-info", "desktop-file-utils", "librsvg", "gdk-pixbuf2",
+    "hicolor-icon-theme", "adwaita-icon-theme", "dconf",
+]
+build = ["rust", "cargo", "pkg-config", "gtk4", "libadwaita", "glib2"]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-gnu/release/raven-power", dest = "/usr/bin/raven-power", mode = 755 },
+]
+
+# stage-gui.sh owns desktop entries on the image, matching Raven Settings and
+# Raven Store. The application uses the symbolic battery icon from Adwaita.
+symlinks = []
+

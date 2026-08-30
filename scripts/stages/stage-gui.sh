@@ -87,6 +87,9 @@
 #   STORE_SKIP=1               skip Raven Store; rvn still works from a terminal
 #   STORE_OFFLINE=1            as GUI_OFFLINE, for the store alone
 #   STORE_REF=<git-ref>        build a particular RavenStore ref
+#   BATTERY_SKIP=1             skip Raven Power; battery policy still runs
+#   BATTERY_OFFLINE=1          as GUI_OFFLINE, for Raven Power alone
+#   BATTERY_REF=<git-ref>      build a particular RavenBatteryManagement ref
 #
 #   LOGIN_OFFLINE=1            as GUI_OFFLINE, for the login screen alone
 #   LOGIN_REF=<git-ref>        build a particular RavenLogin ref
@@ -156,6 +159,15 @@ STORE_REPO="RavenStore"
 STORE_URL="https://github.com/javanhut/${STORE_REPO}.git"
 STORE_BIN="raven-store"
 STORE_APPID="com.ravenstore.Raven"
+
+# Raven Power: battery profiles, per-application Eco mode, live energy use and
+# battery health. It is a GTK4 + libadwaita client like Settings and Store and
+# is linked from Settings > General. raven-powerd remains the boot-time policy
+# backend if this optional UI is absent.
+BATTERY_REPO="RavenBatteryManagement"
+BATTERY_URL="https://github.com/javanhut/RavenBatteryManagement.git"
+BATTERY_BIN="raven-power"
+BATTERY_APPID="org.raven.Power"
 
 # The login screen. A fourth repository, and the last thing between the boot and
 # somebody's session: ravend reads /etc/shadow, draws a password prompt through
@@ -1448,6 +1460,69 @@ stage_store() {
     fi
 }
 
+# =============================================================================
+# Raven Power
+# =============================================================================
+#
+# Environment:
+#   BATTERY_SKIP=1      skip the battery-management UI
+#   BATTERY_OFFLINE=1   never touch the network; use the existing clone
+#   BATTERY_REF=<ref>   build a particular ref instead of the default
+stage_battery_management() {
+    if [[ "${BATTERY_SKIP:-0}" == "1" ]]; then
+        log_info "  BATTERY_SKIP=1: no battery-management UI on the image"
+        return 0
+    fi
+
+    command -v cargo &>/dev/null || {
+        log_warn "  cargo not found; Raven Power will not be built"
+        return 0
+    }
+
+    local -a missing=()
+    local mod
+    for mod in gtk4 libadwaita-1 glib-2.0 gio-2.0; do
+        pkg-config --exists "${mod}" 2>/dev/null || missing+=("${mod}")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        log_warn "  missing build dependencies for Raven Power: ${missing[*]}"
+        log_warn "  install them with: pacman -S --needed gtk4 libadwaita"
+        log_warn "  the desktop will ship without the battery-management UI"
+        return 0
+    fi
+
+    local dest="${GUI_SRC_DIR}/${BATTERY_REPO}"
+    if ! fetch_repo "${BATTERY_REPO}" "${BATTERY_URL}" "${dest}" \
+            "${BATTERY_REF:-}" "${BATTERY_OFFLINE:-${GUI_OFFLINE:-0}}"; then
+        log_warn "  RavenBatteryManagement source unavailable; no battery UI on the image"
+        return 0
+    fi
+
+    log_info "  building Raven Power for ${GUI_TARGET}..."
+    local -a cargo_args=(build --release --target "${GUI_TARGET}")
+    [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
+    if ! ( cd "${dest}" && cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}" ); then
+        log_warn "  Raven Power build failed; no battery UI on the image"
+        return 0
+    fi
+
+    local out="${dest}/target/${GUI_TARGET}/release/${BATTERY_BIN}"
+    if [[ ! -x "${out}" ]]; then
+        log_warn "  Raven Power produced no binary; no battery UI on the image"
+        return 0
+    fi
+
+    install -Dm 0755 "${out}" "${SYSROOT_DIR}/usr/bin/${BATTERY_BIN}"
+    log_success "  ${BATTERY_BIN} installed ($(du -h "${out}" | cut -f1))"
+    stage_gui_libraries "${out}"
+
+    # Idempotent when another GTK application staged it first, and sufficient
+    # when Raven Power is the only GTK application included in a custom image.
+    if declare -F stage_gtk_runtime &>/dev/null; then
+        stage_gtk_runtime
+    fi
+}
+
 install_desktop_entries() {
     local dir="${SYSROOT_DIR}/usr/share/applications"
     mkdir -p "${dir}"
@@ -1589,6 +1664,26 @@ ENTRY
         chmod 0644 "${dir}/${STORE_APPID}.desktop"
         written=$((written + 1))
         log_info "    + ${STORE_APPID}.desktop"
+    fi
+
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${BATTERY_BIN}" ]]; then
+        cat > "${dir}/${BATTERY_APPID}.desktop" << ENTRY
+[Desktop Entry]
+Type=Application
+Name=Raven Power
+GenericName=Battery Management
+Comment=Manage battery profiles, energy use and battery health
+Exec=${BATTERY_BIN}
+Icon=battery-good-symbolic
+Categories=System;Settings;HardwareSettings;GTK;
+Keywords=battery;power;energy;eco;performance;charge;profile;
+StartupWMClass=${BATTERY_APPID}
+StartupNotify=true
+Terminal=false
+ENTRY
+        chmod 0644 "${dir}/${BATTERY_APPID}.desktop"
+        written=$((written + 1))
+        log_info "    + ${BATTERY_APPID}.desktop"
     fi
 
     # The launcher reads this directory; update-desktop-database is what makes
@@ -2094,6 +2189,12 @@ print_gui_summary() {
         echo "  [--] software store      not built - rvn from a terminal"
     fi
 
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${BATTERY_BIN}" ]]; then
+        echo "  [OK] battery management  /usr/bin/${BATTERY_BIN} (Settings > General)"
+    else
+        echo "  [--] battery management  not built - raven-powerd policy remains active"
+    fi
+
     if [[ -x "${SYSROOT_DIR}/usr/bin/${ROOSTBAR_BIN}" \
             && -x "${SYSROOT_DIR}/etc/raven/session.d/50-roostbar" ]]; then
         echo "  [OK] status bar          /usr/bin/${ROOSTBAR_BIN} (session.d enabled)"
@@ -2266,6 +2367,11 @@ main() {
     # needs to see the binary.
     log_step "Staging the software store..."
     stage_store
+
+    # Linked from Raven Settings and launched independently from the app menu.
+    # It must exist before install_desktop_entries decides what to advertise.
+    log_step "Staging battery management..."
+    stage_battery_management
 
     log_step "Installing application entries..."
     install_desktop_entries
