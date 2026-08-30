@@ -11,6 +11,9 @@
 #   reboot     orderly shutdown, then reboot.
 #   ignore     do nothing at all.
 #
+# The [profile] section is different: it is not about buttons but about how
+# hard the CPU runs, on mains and on battery. See below.
+#
 # There is nothing here about waking. Waking happens in firmware, before any of
 # this is running: raven-powerd arms the power button, the sleep button and the
 # lid as ACPI wakeup sources when it starts, and after that pressing the power
@@ -40,3 +43,39 @@ close = "suspend"
 # power key -- an i8042 armed to wake is a classic cause of a machine that
 # resumes one second after it suspends.
 manage_wakeup = true
+
+# =============================================================================
+# CPU and platform power policy
+# =============================================================================
+#
+# The kernel picks a frequency governor at boot and never looks at whether the
+# cord is plugged in. raven-powerd does: it reads /sys/class/power_supply every
+# few seconds and puts the machine in one of three presets, the same three
+# power-profiles-daemon made familiar:
+#
+#   performance    every core at its top clock; the platform's performance mode.
+#   balanced       scale with load (schedutil, or the firmware's balanced
+#                  energy-performance preference); the platform's default mode.
+#   power-saver    scale with load, leaning lower; the platform's low-power mode;
+#                  PCIe links allowed to sleep; audio codec powers down when idle.
+#
+# None of the presets caps the maximum frequency, turns off turbo or takes
+# cores offline: a build still gets every core at full speed on battery. What
+# they change is how eagerly the machine idles down between bursts, which is
+# where nearly all the battery goes.
+#
+# Which knobs exist depends on the CPU: Intel and newer AMD expose an
+# energy-performance preference and the preset goes there; older AMD and
+# anything on acpi-cpufreq gets the schedutil governor. raven-powerd works out
+# which it has.
+[profile]
+# Set to false to leave the governor alone, if you run TLP or something else
+# for this.
+manage = true
+
+# On mains, and always on a machine with no battery.
+ac = "balanced"
+
+# On battery. "balanced" here gives a little more sustained speed for a little
+# less runtime; "power-saver" is the right call for most laptops.
+battery = "power-saver"

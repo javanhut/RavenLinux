@@ -57,6 +57,8 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+mod profile;
+
 /// Where raven-init listens. Must match control::SOCKET_PATH.
 const SOCKET_PATH: &str = "/run/raven-init.sock";
 
@@ -89,6 +91,15 @@ const CONFIG_PATH: &str = "/etc/raven/power.toml";
 /// seconds. Cheap enough that watching `/dev/input` with inotify would buy
 /// nothing but another failure mode.
 const RESCAN_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How often we look at the power supply.
+///
+/// Pulling the cord is a uevent, and udev would tell us, but a netlink
+/// listener is more machinery than reading two sysfs files every few
+/// seconds costs. Three seconds is well inside how long it takes to notice
+/// a laptop feels different. This is also what re-applies the profile after
+/// a resume, where firmware may have put the platform back the way it likes.
+const SUPPLY_POLL: Duration = Duration::from_secs(3);
 
 /// How long an action suppresses the next one.
 ///
@@ -248,6 +259,9 @@ struct Config {
     /// worse than one that does nothing. Turn it off if you are managing
     /// `/proc/acpi/wakeup` by hand.
     manage_wakeup: bool,
+    /// The CPU and platform power policy on mains and on battery. See
+    /// [`profile`].
+    profile: profile::Profile,
 }
 
 impl Default for Config {
@@ -256,6 +270,7 @@ impl Default for Config {
             buttons: Buttons::default(),
             lid: Lid::default(),
             manage_wakeup: true,
+            profile: profile::Profile::default(),
         }
     }
 }
@@ -311,10 +326,15 @@ fn main() {
 
     let config = Config::load();
     log::info!(
-        "raven-powerd: power={:?} sleep={:?} lid-close={:?}",
+        "raven-powerd: power={:?} sleep={:?} lid-close={:?} profile={}",
         config.buttons.power,
         config.buttons.sleep,
-        config.lid.close
+        config.lid.close,
+        if config.profile.manage {
+            format!("ac:{:?}/battery:{:?}", config.profile.ac, config.profile.battery)
+        } else {
+            "unmanaged".to_string()
+        }
     );
 
     let (tx, rx) = mpsc::channel::<Signal>();
@@ -344,8 +364,34 @@ fn main() {
     let mut last_action: Option<Instant> = None;
     let mut last_scan = Instant::now();
 
+    // The profile is applied at start and then whenever the supply changes,
+    // and re-applied at every poll regardless: the writes are no-ops when
+    // nothing has moved, and after a resume something usually has.
+    let mut supply: Option<profile::Supply> = None;
+    let mut last_supply_poll = Instant::now() - SUPPLY_POLL;
+
     loop {
-        match rx.recv_timeout(RESCAN_INTERVAL) {
+        if config.profile.manage && last_supply_poll.elapsed() >= SUPPLY_POLL {
+            let now = profile::supply();
+            if supply != Some(now) {
+                log::info!(
+                    "On {}",
+                    match now {
+                        profile::Supply::Mains => "mains",
+                        profile::Supply::Battery => "battery",
+                    }
+                );
+                supply = Some(now);
+            }
+            profile::apply(match now {
+                profile::Supply::Mains => config.profile.ac,
+                profile::Supply::Battery => config.profile.battery,
+            });
+            last_supply_poll = Instant::now();
+        }
+
+        let wait = if config.profile.manage { SUPPLY_POLL } else { RESCAN_INTERVAL };
+        match rx.recv_timeout(wait) {
             Ok(Signal::Request(action, stream)) => {
                 log::info!(
                     "Desktop asked to {}",

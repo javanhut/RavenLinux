@@ -23,7 +23,9 @@ What's here:
 - **musl libc** base, cross-built from source with a purpose-built toolchain
 - **Custom init** (`raven-init`) and service manager (`raven-rc`), written in Rust
 - **Power handling** (`raven-powerd`): the power button, the sleep button and
-  the lid suspend the machine, and the buttons wake it again
+  the lid suspend the machine, and the buttons wake it again; on a laptop it
+  also keeps the CPU on a balanced frequency policy and steps it down when the
+  cord comes out (`[profile]` in `/etc/raven/power.toml`)
 - **Custom bootloader** (RavenBoot), a UEFI loader written in Rust, with GRUB as
   the BIOS fallback
 - **uutils coreutils** (Rust) for the core userland

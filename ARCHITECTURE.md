@@ -132,6 +132,7 @@ filesystems, and hands off to `raven-rc` for service supervision.
 | `init/src/rc.rs` | Service manager (`raven-rc`) |
 | `init/src/power.rs` | Suspend to RAM, and the `/run/raven-power/state` marker |
 | `init/src/powerd.rs` | `raven-powerd`: the power button, the sleep button, the lid, and the `/run/raven-power/ctl` socket |
+| `init/src/profile.rs` | `raven-powerd`'s CPU/platform power profile: governor, energy-performance preference, ACPI platform profile and PCIe ASPM, switched between the `[profile]` presets in `power.toml` as the supply changes |
 
 #### Sleep
 
