@@ -29,11 +29,18 @@
 //! daemon listens a second time, on `/run/raven-power/ctl`, for the desktop.
 //! That socket is group `video` and mode 0660 -- `video` because the session
 //! already holds it for the DRM device, so it names exactly "whoever owns the
-//! screen" without inventing a group -- and it takes one word, `suspend`,
-//! `poweroff` or `reboot`, which then goes down the same [`perform`] path as
-//! a lid close. Init's own socket stays root-only: what the desktop gets is a
+//! screen" without inventing a group -- and it takes one line. `suspend`,
+//! `poweroff` and `reboot` go down the same [`perform`] path as a lid close.
+//! `profile performance|balanced|power-saver` holds the machine in one preset
+//! regardless of the supply, until `profile auto` hands the choice back to the
+//! config or the daemon restarts; a bare `profile` asks what the machine is in
+//! and why. Init's own socket stays root-only: what the desktop gets is a
 //! verb into the daemon that already decides these things, never a channel
 //! into PID 1.
+//!
+//! What was last *applied* is also published at `/run/raven-power/profile`,
+//! world-readable, so a bar that only wants to paint a leaf when the machine
+//! is in `power-saver` can read one word instead of holding the socket.
 //!
 //! # Wake
 //!
@@ -72,8 +79,15 @@ const CTL_SOCKET_PATH: &str = "/run/raven-power/ctl";
 /// to sleep are one fact, not two.
 const CTL_GROUP: &str = "video";
 
+/// Where the profile that was last applied is published, one word, for
+/// anything that only wants to read it. Written by [`publish_profile`];
+/// world-readable, root-writable, and gone after a boot like the rest of the
+/// directory -- its absence means no profile has been applied.
+const PROFILE_MARKER: &str = "/run/raven-power/profile";
+
 /// Longest request we will read from the desktop. The longest valid one is
-/// eight bytes plus a newline; the cap is for a client that never stops.
+/// `profile power-saver` -- nineteen bytes plus a newline; the cap is for a
+/// client that never stops.
 const CTL_MAX_REQUEST: u64 = 256;
 
 /// How long one desktop client may take to say its word. The panel writes the
@@ -208,6 +222,41 @@ impl PowerAction {
     }
 }
 
+/// One line from the desktop socket, in full.
+#[derive(Debug)]
+enum CtlRequest {
+    /// `suspend`, `poweroff` or `reboot`: the words the socket always knew.
+    Action(PowerAction),
+    /// `profile <preset>`: hold the machine in one preset whatever the supply
+    /// says, until `profile auto` or a restart of this daemon. Deliberately
+    /// not persisted: a choice made from a panel is a choice about *now*, and
+    /// a machine that boots into last Tuesday's "performance" is a machine
+    /// that runs hot for no reason anyone remembers.
+    SetProfile(profile::Preset),
+    /// `profile auto`: back to the config's ac/battery mapping.
+    ProfileAuto,
+    /// `profile`, bare: what is the machine in right now, and why.
+    ProfileQuery,
+}
+
+impl CtlRequest {
+    /// Same strictness as [`PowerAction::parse_request`], for the same reason:
+    /// every spelling accepted here is one more a client could send by
+    /// mistake. `profile` takes exactly zero or one word, and the word is a
+    /// preset's public name or `auto`.
+    fn parse(line: &str) -> Option<Self> {
+        let mut words = line.split_whitespace();
+        match (words.next(), words.next(), words.next()) {
+            (Some("profile"), None, None) => Some(CtlRequest::ProfileQuery),
+            (Some("profile"), Some("auto"), None) => Some(CtlRequest::ProfileAuto),
+            (Some("profile"), Some(word), None) => {
+                profile::Preset::parse(word).map(CtlRequest::SetProfile)
+            }
+            _ => PowerAction::parse_request(line).map(CtlRequest::Action),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 struct Buttons {
@@ -317,8 +366,9 @@ enum Signal {
     Lid(bool),
     /// The desktop asked, over [`CTL_SOCKET_PATH`]. The stream comes with it
     /// because the reply is the main loop's to write: only it knows whether
-    /// the cooldown applies, and only it performs the action.
-    Request(PowerAction, UnixStream),
+    /// the cooldown applies, what the profile override is, and only it
+    /// performs the action.
+    Request(CtlRequest, UnixStream),
 }
 
 fn main() {
@@ -366,12 +416,17 @@ fn main() {
 
     // The profile is applied at start and then whenever the supply changes,
     // and re-applied at every poll regardless: the writes are no-ops when
-    // nothing has moved, and after a resume something usually has.
+    // nothing has moved, and after a resume something usually has. A desktop
+    // override rides the same poll, which is what keeps it stuck through a
+    // resume that undid it.
     let mut supply: Option<profile::Supply> = None;
     let mut last_supply_poll = Instant::now() - SUPPLY_POLL;
+    let mut profile_override: Option<profile::Preset> = None;
+    let mut published_profile: Option<profile::Preset> = None;
 
     loop {
-        if config.profile.manage && last_supply_poll.elapsed() >= SUPPLY_POLL {
+        let managing = config.profile.manage || profile_override.is_some();
+        if managing && last_supply_poll.elapsed() >= SUPPLY_POLL {
             let now = profile::supply();
             if supply != Some(now) {
                 log::info!(
@@ -383,21 +438,26 @@ fn main() {
                 );
                 supply = Some(now);
             }
-            profile::apply(match now {
+            let preset = profile_override.unwrap_or(match now {
                 profile::Supply::Mains => config.profile.ac,
                 profile::Supply::Battery => config.profile.battery,
             });
+            profile::apply(preset);
+            publish_profile(preset, &mut published_profile);
             last_supply_poll = Instant::now();
         }
 
-        let wait = if config.profile.manage { SUPPLY_POLL } else { RESCAN_INTERVAL };
+        let wait = if managing { SUPPLY_POLL } else { RESCAN_INTERVAL };
         match rx.recv_timeout(wait) {
-            Ok(Signal::Request(action, stream)) => {
-                log::info!(
-                    "Desktop asked to {}",
-                    action.request().unwrap_or("do nothing")
+            Ok(Signal::Request(request, stream)) => {
+                serve_ctl(
+                    request,
+                    stream,
+                    &config.profile,
+                    &mut last_action,
+                    &mut profile_override,
+                    &mut published_profile,
                 );
-                serve_request(action, stream, &mut last_action);
             }
             Ok(signal) => {
                 let action = match signal {
@@ -698,11 +758,11 @@ fn accept_desktop_client(stream: UnixStream, tx: &Sender<Signal>) {
         return;
     }
 
-    match PowerAction::parse_request(&line) {
-        Some(action) => {
+    match CtlRequest::parse(&line) {
+        Some(request) => {
             // If the main loop is gone the client sees a close with no reply,
             // which is the honest answer.
-            let _ = tx.send(Signal::Request(action, stream));
+            let _ = tx.send(Signal::Request(request, stream));
         }
         None => {
             log::warn!("{}: unknown command {:?}", CTL_SOCKET_PATH, line.trim());
@@ -711,7 +771,95 @@ fn accept_desktop_client(stream: UnixStream, tx: &Sender<Signal>) {
     }
 }
 
-/// Carry out a desktop request and answer it, from the main loop.
+/// Answer one desktop request, from the main loop.
+///
+/// The power actions keep their cooldown and their [`serve_request`] path.
+/// The profile verbs have neither: nothing about switching a governor twice
+/// in five seconds needs guarding, and the reply is always written after the
+/// work because none of the work can take the machine away mid-reply.
+fn serve_ctl(
+    request: CtlRequest,
+    stream: UnixStream,
+    profile_config: &profile::Profile,
+    last_action: &mut Option<Instant>,
+    profile_override: &mut Option<profile::Preset>,
+    published: &mut Option<profile::Preset>,
+) {
+    match request {
+        CtlRequest::Action(action) => {
+            log::info!(
+                "Desktop asked to {}",
+                action.request().unwrap_or("do nothing")
+            );
+            serve_request(action, stream, last_action);
+        }
+        CtlRequest::SetProfile(preset) => {
+            log::info!("Desktop set profile {}", preset.name());
+            *profile_override = Some(preset);
+            profile::apply(preset);
+            publish_profile(preset, published);
+            reply(stream, &format!("Profile {}\n", preset.name()));
+        }
+        CtlRequest::ProfileAuto => {
+            log::info!("Desktop returned the profile to auto");
+            *profile_override = None;
+            if profile_config.manage {
+                let preset = configured_preset(profile_config);
+                profile::apply(preset);
+                publish_profile(preset, published);
+            } else {
+                // Nothing is managing the governor now, and the marker must
+                // not claim otherwise.
+                *published = None;
+                let _ = fs::remove_file(PROFILE_MARKER);
+            }
+            reply(stream, "Profile auto\n");
+        }
+        CtlRequest::ProfileQuery => {
+            // First word the preset, the parenthesis for people; a client
+            // parses the word and shows the rest or does not.
+            let text = match (*profile_override, profile_config.manage) {
+                (Some(preset), _) => format!("{} (override)\n", preset.name()),
+                (None, true) => format!("{} (auto)\n", configured_preset(profile_config).name()),
+                (None, false) => "unmanaged\n".to_string(),
+            };
+            reply(stream, &text);
+        }
+    }
+}
+
+/// The preset the config maps the supply to, right now. Read fresh rather
+/// than from the poll's cache: an answer about the present should not be up
+/// to [`SUPPLY_POLL`] stale.
+fn configured_preset(profile_config: &profile::Profile) -> profile::Preset {
+    match profile::supply() {
+        profile::Supply::Mains => profile_config.ac,
+        profile::Supply::Battery => profile_config.battery,
+    }
+}
+
+/// Keep [`PROFILE_MARKER`] saying what was last applied.
+///
+/// Written only on change -- this sits on the same poll as the sysfs writes
+/// -- and made 0644 explicitly rather than trusting the umask, because a
+/// reader that cannot read the marker is the whole feature not working.
+fn publish_profile(preset: profile::Preset, published: &mut Option<profile::Preset>) {
+    if *published == Some(preset) {
+        return;
+    }
+    match fs::write(PROFILE_MARKER, format!("{}\n", preset.name())) {
+        Ok(()) => {
+            fs::set_permissions(PROFILE_MARKER, fs::Permissions::from_mode(0o644)).ok();
+            *published = Some(preset);
+        }
+        // Once per attempted change, not per poll, since `published` is only
+        // left unset on failure -- but the next change will complain again,
+        // which is right: the file being wrong is worth two lines.
+        Err(e) => log::warn!("Cannot publish {}: {}", PROFILE_MARKER, e),
+    }
+}
+
+/// Carry out a desktop power request and answer it, from the main loop.
 ///
 /// The order differs by verb, and the difference is the point. For a suspend
 /// the reply is written and the stream closed *before* [`perform`], for the
@@ -1156,6 +1304,41 @@ mod tests {
         assert_eq!(PowerAction::Poweroff.request(), Some("poweroff"));
         assert_eq!(PowerAction::Reboot.request(), Some("reboot"));
         assert_eq!(PowerAction::Ignore.request(), None);
+    }
+
+    #[test]
+    fn the_ctl_socket_knows_its_verbs() {
+        assert!(matches!(
+            CtlRequest::parse("suspend\n"),
+            Some(CtlRequest::Action(PowerAction::Suspend))
+        ));
+        assert!(matches!(
+            CtlRequest::parse("profile\n"),
+            Some(CtlRequest::ProfileQuery)
+        ));
+        assert!(matches!(
+            CtlRequest::parse("profile auto\n"),
+            Some(CtlRequest::ProfileAuto)
+        ));
+        assert!(matches!(
+            CtlRequest::parse("profile power-saver\n"),
+            Some(CtlRequest::SetProfile(profile::Preset::PowerSaver))
+        ));
+        assert!(matches!(
+            CtlRequest::parse("  profile performance  \n"),
+            Some(CtlRequest::SetProfile(profile::Preset::Performance))
+        ));
+    }
+
+    #[test]
+    fn the_ctl_socket_rejects_near_misses() {
+        // Every spelling accepted is one more a client sends by mistake.
+        assert!(CtlRequest::parse("profile banana\n").is_none());
+        assert!(CtlRequest::parse("profile eco\n").is_none());
+        assert!(CtlRequest::parse("profiles\n").is_none());
+        assert!(CtlRequest::parse("profile power-saver now\n").is_none());
+        assert!(CtlRequest::parse("sleep\n").is_none());
+        assert!(CtlRequest::parse("\n").is_none());
     }
 
     // The desktop socket takes exactly the three words below, and what it

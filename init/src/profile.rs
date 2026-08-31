@@ -77,11 +77,23 @@ pub enum Preset {
 }
 
 impl Preset {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Preset::Performance => "performance",
             Preset::Balanced => "balanced",
             Preset::PowerSaver => "power-saver",
+        }
+    }
+
+    /// The inverse of [`Preset::name`]: the word a desktop client says on the
+    /// control socket. Exactly the three public names, no aliases -- "eco" is
+    /// a label a panel may paint, not a word the protocol knows.
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "performance" => Some(Preset::Performance),
+            "balanced" => Some(Preset::Balanced),
+            "power-saver" => Some(Preset::PowerSaver),
+            _ => None,
         }
     }
 }
@@ -420,6 +432,16 @@ mod tests {
         assert_eq!(choose(Preset::Balanced, &g, false), (Some("performance"), None));
         let g = ["userspace"];
         assert_eq!(choose(Preset::Balanced, &g, false), (None, None));
+    }
+
+    #[test]
+    fn presets_parse_by_their_public_names() {
+        assert_eq!(Preset::parse("performance"), Some(Preset::Performance));
+        assert_eq!(Preset::parse("balanced"), Some(Preset::Balanced));
+        assert_eq!(Preset::parse("power-saver"), Some(Preset::PowerSaver));
+        // The panel's label, not the protocol's word.
+        assert_eq!(Preset::parse("eco"), None);
+        assert_eq!(Preset::parse(""), None);
     }
 
     #[test]

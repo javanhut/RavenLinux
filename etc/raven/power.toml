@@ -71,6 +71,11 @@ manage_wakeup = true
 [profile]
 # Set to false to leave the governor alone, if you run TLP or something else
 # for this.
+#
+# Whatever this says, the desktop can hold the machine in one preset for the
+# session -- `profile <preset>` on /run/raven-power/ctl, `profile auto` to
+# hand the choice back -- and the preset last applied is readable at
+# /run/raven-power/profile. Overrides do not survive a restart of the daemon.
 manage = true
 
 # On mains, and always on a machine with no battery.
