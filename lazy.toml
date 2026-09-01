@@ -70,6 +70,10 @@ run = ["./scripts/dev-install.sh"]
 desc = "Show what 'dev' would change on this running Raven system, without writing"
 run = ["./scripts/dev-install.sh all --dry-run"]
 
+[commands.dev-configs]
+desc = "dev's configs target alone: new /etc/raven files land, edited ones are shown as diffs"
+run = ["./scripts/dev-install.sh configs"]
+
 [commands.dev-all]
 desc = "dev plus /etc/raven configs (overwrites machine-local edits)"
 run = ["./scripts/dev-install.sh all --force-configs"]

@@ -186,6 +186,11 @@ critical = false
 # /run/raven-time/ctl (group video, like powerd's) is how the Settings app's
 # Date & Time page and the `raven-timed` CLI ask.
 #
+# No `after = network`, deliberately: raven-rc treats `after` as a dependency
+# it must start, and a machine without raven-dhcp would then have no clock
+# daemon at all. The daemon retries on its own, so starting early costs the
+# first attempt and nothing else.
+#
 # Policy is /etc/raven/time.toml. With no such file the defaults are: sync on,
 # against pool.ntp.org, every hour.
 [[services]]
@@ -193,7 +198,7 @@ name = "timed"
 description = "Clock sync and timezone"
 exec = "/usr/bin/raven-timed"
 args = []
-after = ["network"]
+after = []
 runtime_dirs = ["/run/raven-time"]
 restart = true
 enabled = true

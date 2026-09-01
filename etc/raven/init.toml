@@ -210,10 +210,11 @@ critical = false
 # /run/raven-time/ctl (group video, like powerd's) is how the Settings app's
 # Date & Time page and the `raven-timed` CLI ask.
 #
-# after = network because the first thing it does is ask an NTP server, and
-# asking before there is a default route only spends the first retry. It backs
-# off and retries on its own, so a boot with no network costs nothing but log
-# lines.
+# No `after = network`, deliberately: the first sync would like the network,
+# but raven-rc treats `after` as a dependency it must start, and a machine
+# without raven-dhcp would then have no clock daemon at all. The daemon backs
+# off and retries on its own, so starting before there is a default route
+# costs the first attempt and nothing else.
 #
 # Policy is /etc/raven/time.toml. With no such file the defaults are: sync on,
 # against pool.ntp.org, every hour.
@@ -222,7 +223,7 @@ name = "timed"
 description = "Clock sync and timezone"
 exec = "/usr/bin/raven-timed"
 args = []
-after = ["network"]
+after = []
 runtime_dirs = ["/run/raven-time"]
 restart = true
 enabled = true

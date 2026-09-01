@@ -23,12 +23,15 @@
 # `raven-timed sync off` is how you stop that without stopping the daemon --
 # the timezone verbs on its socket are worth having either way.
 
+# No `after = network`: raven-rc treats `after` as a dependency it must start,
+# and a machine without the network one-shot would then have no clock daemon
+# at all. The daemon retries on its own until the network answers.
 [[services]]
 name = "timed"
 description = "Clock sync and timezone"
 exec = "/usr/bin/raven-timed"
 args = []
-after = ["network"]
+after = []
 runtime_dirs = ["/run/raven-time"]
 restart = true
 enabled = true
