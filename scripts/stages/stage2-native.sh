@@ -2332,6 +2332,14 @@ EOF
 	        chmod 0644 "${SYSROOT_DIR}/etc/raven/power.toml" 2>/dev/null || true
 	    fi
 
+	    # /etc/raven/time.toml (NTP servers and the sync interval). Same deal
+	    # as power.toml: raven-timed falls back to these exact defaults, but
+	    # the file is where a person finds out the settings exist.
+	    if [[ -f "${PROJECT_ROOT}/etc/raven/time.toml" ]]; then
+	        cp "${PROJECT_ROOT}/etc/raven/time.toml" "${SYSROOT_DIR}/etc/raven/time.toml"
+	        chmod 0644 "${SYSROOT_DIR}/etc/raven/time.toml" 2>/dev/null || true
+	    fi
+
 	    # Service drop-ins: raven-init reads /etc/raven/init.d/*.toml alongside
 	    # init.toml, so daemons installed later (`rvn install openssh`) get a
 	    # service definition by copying a template -- no editing init.toml. The

@@ -17,12 +17,13 @@
 #
 # Targets (default: init installer tools):
 #   init        build init/ natively; install raven-init, raven-rc,
-#               raven-powerd to /usr/bin (stage-raven.sh:build_raven_init)
+#               raven-powerd, raven-ports, raven-timed to /usr/bin
+#               (stage-raven.sh:build_raven_init)
 #   installer   scripts/installer/* -> /usr/bin, configs/installer/profiles
 #               -> /etc/raven/install-profiles (stage4-iso.sh:install_installer)
 #   tools       configs/raven-console-font, configs/raven-udev,
 #               etc/raven/raven-shell -> /usr/bin
-#   configs     etc/raven/{init,power}.toml -> /etc/raven,
+#   configs     etc/raven/{init,power,time}.toml -> /etc/raven,
 #               configs/raven/services/*.toml -> /etc/raven/init.d,
 #               configs/raven/session.d/* -> /etc/raven/session.d.
 #               Diff-only unless --force-configs: the live init.toml carries
@@ -150,14 +151,14 @@ install_config() {
 # Targets
 # -----------------------------------------------------------------------------
 do_init() {
-    log_section "init crate (raven-init, raven-rc, raven-powerd, raven-ports)"
+    log_section "init crate (raven-init, raven-rc, raven-powerd, raven-ports, raven-timed)"
     local src="${RAVEN_ROOT}/init"
     ( cd "$src" && "${BUILD_AS[@]}" cargo build --release --locked ) || {
         log_error "cargo build failed; nothing installed"
         return 1
     }
     local out="${src}/target/release"
-    for b in raven-init raven-rc raven-powerd raven-ports; do
+    for b in raven-init raven-rc raven-powerd raven-ports raven-timed; do
         install_file "${out}/${b}" "/usr/bin/${b}" 0755
     done
 }
@@ -186,6 +187,7 @@ do_configs() {
     log_section "configs under /etc/raven"
     install_config "${RAVEN_ROOT}/etc/raven/init.toml"  /etc/raven/init.toml
     install_config "${RAVEN_ROOT}/etc/raven/power.toml" /etc/raven/power.toml
+    install_config "${RAVEN_ROOT}/etc/raven/time.toml"  /etc/raven/time.toml
     local f
     for f in "${RAVEN_ROOT}"/configs/raven/services/*.toml; do
         [[ -e "$f" ]] || continue
@@ -227,6 +229,13 @@ if (( NO_RESTART == 0 )); then
     if changed /usr/bin/raven-ports; then
         log_step "restarting ports"
         "${SUDO[@]}" raven-rc restart ports || log_warn "raven-rc restart ports failed"
+    fi
+    if changed /usr/bin/raven-timed; then
+        log_step "restarting timed"
+        # On a machine that predates the service, restart has nothing to
+        # restart until the drop-in is in place -- that is the configs target.
+        "${SUDO[@]}" raven-rc restart timed \
+            || log_warn "raven-rc restart timed failed (new here? run: imlazy dev configs, then sudo raven-rc start timed)"
     fi
     config_changed=0
     for d in "${CHANGED[@]:-}"; do [[ "$d" == /etc/raven/* ]] && config_changed=1; done

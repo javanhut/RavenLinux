@@ -467,9 +467,9 @@ build_raven_init() {
     local outdir="${RAVEN_STAGE_DIR}"
     mkdir -p "${outdir}"
 
-    if ! build_rust_component "${src}" "raven-init,raven-rc,raven-powerd,raven-ports" "." "${outdir}"; then
+    if ! build_rust_component "${src}" "raven-init,raven-rc,raven-powerd,raven-ports,raven-timed" "." "${outdir}"; then
         log_warn "  raven-init: build failed, skipping"
-        RAVEN_FAILED+=(raven-init raven-rc raven-powerd raven-ports)
+        RAVEN_FAILED+=(raven-init raven-rc raven-powerd raven-ports raven-timed)
         return 0
     fi
 
@@ -486,16 +486,21 @@ build_raven_init() {
     # The port and peripheral inventory, and the `ports` service that gets a
     # wired link a lease when it comes up after boot.
     install -m 0755 "${outdir}/raven-ports" "${SYSROOT_DIR}/usr/bin/raven-ports"
+    # The clock daemon. init.toml starts it as the `timed` service; it is the
+    # other half of init's boot-time hwclock read -- NTP sync keeps the RTC
+    # worth reading, and its socket is how the timezone gets set.
+    install -m 0755 "${outdir}/raven-timed" "${SYSROOT_DIR}/usr/bin/raven-timed"
 
     # stage4 owns the poweroff/reboot/halt/shutdown names and installs a
     # dispatcher that uses raven-rc when raven-init is PID 1, with an emergency
     # kernel fallback for rescue environments.
 
-    RAVEN_BUILT+=(raven-init raven-rc raven-powerd raven-ports)
+    RAVEN_BUILT+=(raven-init raven-rc raven-powerd raven-ports raven-timed)
     log_success "  raven-init installed ($(du -h "${outdir}/raven-init" | cut -f1))"
     log_success "  raven-rc installed ($(du -h "${outdir}/raven-rc" | cut -f1))"
     log_success "  raven-powerd installed ($(du -h "${outdir}/raven-powerd" | cut -f1))"
     log_success "  raven-ports installed ($(du -h "${outdir}/raven-ports" | cut -f1))"
+    log_success "  raven-timed installed ($(du -h "${outdir}/raven-timed" | cut -f1))"
 }
 
 build_all_components() {

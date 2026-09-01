@@ -202,6 +202,32 @@ restart = false
 enabled = true
 critical = false
 
+# The clock: NTP sync and the timezone.
+#
+# init reads the RTC at boot and stops there; nothing else in the image ever
+# asks the network whether that reading was right, and nothing unprivileged
+# can move /etc/localtime. raven-timed does both, and its socket at
+# /run/raven-time/ctl (group video, like powerd's) is how the Settings app's
+# Date & Time page and the `raven-timed` CLI ask.
+#
+# after = network because the first thing it does is ask an NTP server, and
+# asking before there is a default route only spends the first retry. It backs
+# off and retries on its own, so a boot with no network costs nothing but log
+# lines.
+#
+# Policy is /etc/raven/time.toml. With no such file the defaults are: sync on,
+# against pool.ntp.org, every hour.
+[[services]]
+name = "timed"
+description = "Clock sync and timezone"
+exec = "/usr/bin/raven-timed"
+args = []
+after = ["network"]
+runtime_dirs = ["/run/raven-time"]
+restart = true
+enabled = true
+critical = false
+
 # Ports: hotplug after boot.
 #
 # The network service above is a one-shot, so a cable plugged in later -- or

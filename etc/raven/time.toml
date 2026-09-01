@@ -1,0 +1,25 @@
+# RavenLinux time policy
+# /etc/raven/time.toml
+#
+# Read by raven-timed at start; edit and `raven-rc restart timed` to apply.
+# The one exception is `enabled`, which `raven-timed sync on|off` (or the
+# Settings app's Date & Time page) rewrites in place, comments intact.
+#
+# The timezone is not in this file. It is /etc/localtime, a symlink into
+# /usr/share/zoneinfo, and `raven-timed zone Area/City` is how it moves.
+
+[sync]
+# Keep the clock against the servers below. Off means raven-timed only ever
+# touches the clock when asked -- `raven-timed sync` still works, once.
+enabled = true
+
+# Tried in order until one answers. Hostnames or addresses; port 123 unless
+# an entry carries its own. The pool is the right default for a machine that
+# is not told otherwise.
+servers = ["0.pool.ntp.org", "1.pool.ntp.org", "2.pool.ntp.org"]
+
+# How long after a successful sync the next one happens. Failures retry on
+# their own faster schedule, starting at ten seconds and backing off to five
+# minutes, so a laptop that boots before its Wi-Fi is up still gets the time
+# moments after the network arrives.
+interval_minutes = 60
