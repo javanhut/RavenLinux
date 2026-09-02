@@ -1,0 +1,13 @@
+# Keep USB Bluetooth radios out of runtime suspend.
+#
+# btusb parks the radio two seconds after the last transfer and wakes it on
+# the next. Realtek and Intel parts lose ACL fragments across that resume:
+# L2CAP logs "Unexpected start frame" and an A2DP headset drops. The Raven
+# kernel builds with CONFIG_BT_HCIBTUSB_AUTOSUSPEND off; this covers a kernel
+# that was not, and a btusb.enable_autosuspend=1 nobody meant. The radio
+# sleeps between packets on its own, so this costs a few milliwatts.
+#
+# Matches the USB device that owns a btusb-bound interface: ID_USB_INTERFACES
+# lists interface class e0 / subclass 01 / protocol 01, the Bluetooth
+# programming interface, on any radio btusb takes.
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ENV{ID_USB_INTERFACES}=="*:e00101:*", TEST=="power/control", ATTR{power/control}="on"

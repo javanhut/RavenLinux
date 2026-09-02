@@ -380,12 +380,15 @@ copy_system_utils() {
         log_info "  Copied /usr/lib/udev"
     fi
 
-    # Copy custom RavenLinux udev rules for input device access
-    if [[ -f "${RAVEN_ROOT}/configs/72-raven-input.rules" ]]; then
+    # RavenLinux's own udev rules, from configs/udev. They go under /usr/lib
+    # like the host's, so /etc/udev/rules.d stays the administrator's.
+    local rule
+    for rule in "${RAVEN_ROOT}"/configs/udev/*.rules; do
+        [[ -e "$rule" ]] || continue
         mkdir -p "${SYSROOT_DIR}/usr/lib/udev/rules.d"
-        cp "${RAVEN_ROOT}/configs/72-raven-input.rules" "${SYSROOT_DIR}/usr/lib/udev/rules.d/" 2>/dev/null || true
-        log_info "  Copied custom input device udev rules"
-    fi
+        cp "$rule" "${SYSROOT_DIR}/usr/lib/udev/rules.d/"
+        log_info "  Copied udev rule $(basename "$rule")"
+    done
     if [[ -d "/etc/udev" ]]; then
         mkdir -p "${SYSROOT_DIR}/etc"
         cp -a "/etc/udev" "${SYSROOT_DIR}/etc/" 2>/dev/null || true

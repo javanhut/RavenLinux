@@ -181,6 +181,11 @@ do_tools() {
     install_file "${RAVEN_ROOT}/configs/raven-console-font" /usr/bin/raven-console-font 0755
     install_file "${RAVEN_ROOT}/configs/raven-udev"         /usr/bin/raven-udev         0755
     install_file "${RAVEN_ROOT}/etc/raven/raven-shell"      /usr/bin/raven-shell        0755
+    local rule
+    for rule in "${RAVEN_ROOT}"/configs/udev/*.rules; do
+        [[ -e "$rule" ]] || continue
+        install_file "$rule" "/usr/lib/udev/rules.d/$(basename "$rule")" 0644
+    done
 }
 
 do_configs() {

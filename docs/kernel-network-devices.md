@@ -196,6 +196,42 @@ CONFIG_BT_NXPUART=y            # NXP Bluetooth
    bluetoothctl show
    ```
 
+### Bluetooth connects but keeps dropping
+
+Two things to check, in this order.
+
+1. Is the vendor driver actually driving the radio? A Realtek USB radio that
+   btusb recognises prints `hci0: RTL: ...` lines at boot as btrtl loads
+   `rtl_bt/rtl*_fw.bin`; an Intel one prints `hci0: Bootloader revision` and
+   a firmware name. If `dmesg | grep hci0` shows nothing at all, the radio
+   matched btusb's generic class entry, runs on its mask ROM, and has no
+   working Wi-Fi coexistence. Look up its USB ID:
+   ```
+   cat /sys/class/bluetooth/hci0/device/../idVendor /sys/class/bluetooth/hci0/device/../idProduct
+   ```
+   and check it against `drivers/bluetooth/btusb.c`. If it is missing, add it
+   next to its siblings as a patch in `configs/kernel/patches/`;
+   `build-kernel.sh` applies those after extraction. The RTL8821CE at
+   13d3:3530 is the one already there. Until the kernel is rebuilt, the
+   running one can be told to treat the ID like a listed sibling:
+   ```
+   echo "13d3 3530 e0 13d3 3529" > /sys/bus/usb/drivers/btusb/new_id
+   ```
+   then unbind and rebind the USB device so btusb probes it again.
+
+2. Is the radio being runtime-suspended? `CONFIG_BT_HCIBTUSB_AUTOSUSPEND` is
+   off in the Raven config, and `configs/udev/60-raven-bluetooth.rules`
+   also pins `power/control` to `on` for any btusb device, so on a Raven
+   kernel `cat /sys/class/bluetooth/hci0/device/../power/control` says
+   `on`. `auto` means an older kernel or a missing rule; `Unexpected start
+   frame` in dmesg is the fragment loss that goes with it.
+
+The Settings app, RoostBar and Huginn's quick settings all stop scanning on
+their own (60 s, 30 s and 60 s). A scan that never ends starves an A2DP link
+on a combo Wi-Fi/Bluetooth card; `bluetoothctl show` reporting
+`Discovering: yes` when nothing is looking for devices means some client is
+holding one open.
+
 ### WiFi not working
 
 1. Check if the device is detected:

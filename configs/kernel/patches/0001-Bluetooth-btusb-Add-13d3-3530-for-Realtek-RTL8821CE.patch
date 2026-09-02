@@ -1,0 +1,24 @@
+Bluetooth: btusb: Add VID:PID 13d3:3530 for Realtek RTL8821CE
+
+The Bluetooth half of the RTL8821CE combo card (AzureWave AW-CB375NF and
+similar, Wi-Fi at 10ec:c821 on rtw88_8821ce) enumerates on some laptops
+as 13d3:3530. btusb only lists 3529 and 3533 for this chip, so 3530 falls
+through to the generic class match: no BTUSB_REALTEK, so btrtl never
+runs, rtl_bt/rtl8821c_fw.bin is never loaded, and the controller runs on
+its mask ROM. Symptoms: no "hci0: RTL:" lines in dmesg, A2DP links that
+drop under Wi-Fi traffic (the ROM has no working coexistence), and
+"Unexpected start frame" from L2CAP when ACL fragments go missing.
+
+Give 3530 the same entry as 3529.
+
+--- a/drivers/bluetooth/btusb.c
++++ b/drivers/bluetooth/btusb.c
+@@ -504,6 +504,8 @@
+ 	/* Realtek 8821CE Bluetooth devices */
+ 	{ USB_DEVICE(0x13d3, 0x3529), .driver_info = BTUSB_REALTEK |
+ 						     BTUSB_WIDEBAND_SPEECH },
++	{ USB_DEVICE(0x13d3, 0x3530), .driver_info = BTUSB_REALTEK |
++						     BTUSB_WIDEBAND_SPEECH },
+ 
+ 	/* Realtek 8822CE Bluetooth devices */
+ 	{ USB_DEVICE(0x0bda, 0xb00c), .driver_info = BTUSB_REALTEK |

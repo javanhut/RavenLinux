@@ -198,6 +198,36 @@ download_kernel() {
     log_success "Kernel source ready at $KERNEL_BUILD_DIR"
 }
 
+# Apply RavenLinux patches to the kernel source
+#
+# configs/kernel/patches/*.patch, in name order, -p1 against the extracted
+# tree. Each is skipped when the tree already has it (a rerun, or an upstream
+# that caught up), so this is safe to run on every build. A patch that
+# neither applies nor reverses cleanly stops the build: building an
+# unpatched kernel and finding out on the hardware is the worse failure.
+apply_patches() {
+    local dir="${CONFIG_DIR}/patches"
+    [ -d "$dir" ] || return 0
+    local p applied=0
+    cd "$KERNEL_BUILD_DIR"
+    for p in "$dir"/*.patch; do
+        [ -e "$p" ] || continue
+        if patch -p1 -R --dry-run -s -f < "$p" >/dev/null 2>&1; then
+            log_info "Patch already in tree: $(basename "$p")"
+            continue
+        fi
+        if ! patch -p1 -N --dry-run -s -f < "$p" >/dev/null 2>&1; then
+            log_error "Patch does not apply: $(basename "$p")"
+            exit 1
+        fi
+        patch -p1 -N -s -f < "$p"
+        log_info "Applied patch: $(basename "$p")"
+        applied=$((applied + 1))
+    done
+    (( applied > 0 )) && log_success "Applied ${applied} kernel patch(es)"
+    return 0
+}
+
 # Generate kernel config
 generate_config() {
     log_info "Generating kernel configuration..."
@@ -655,6 +685,7 @@ main() {
 
     check_dependencies
     download_kernel
+    apply_patches
 
     # Check if config exists, if not generate or restore it
     if [ ! -f "${KERNEL_BUILD_DIR}/.config" ]; then

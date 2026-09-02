@@ -32,6 +32,7 @@ cd "$src"
 
 y() { for o in "$@"; do "$cfg" --enable "$o"; done; }
 m() { for o in "$@"; do "$cfg" --module "$o"; done; }
+n() { for o in "$@"; do "$cfg" --disable "$o"; done; }
 
 # --- USB Type-C: connector class, port managers, alternate modes ------------
 # Without TYPEC the port is a dumb USB-A behind a different plug: no PD
@@ -126,6 +127,15 @@ y IIO
 y NET_VENDOR_AQUANTIA AQTION          # Aquantia 2.5/5/10G, common in TB docks
 y NET_VENDOR_ATHEROS ALX ATL1 ATL1C ATL1E   # Killer / Atheros on Asus and MSI
 y MARVELL_PHY BROADCOM_PHY MICREL_PHY AQUANTIA_PHY
+
+# --- Bluetooth: keep the USB radio awake ---------------------------------------
+# btusb's runtime suspend parks the radio two seconds after the last URB and
+# wakes it on the next one. Realtek and Intel parts lose ACL fragments across
+# that resume -- L2CAP logs "Unexpected start frame" and an A2DP headset
+# drops -- and the saving is a few milliwatts on a part that sleeps on its
+# own between packets. Off by default; btusb.enable_autosuspend=1 on the
+# command line turns it back on for a machine that wants it.
+n BT_HCIBTUSB_AUTOSUSPEND
 
 # --- Thermal readouts, for the peripherals utility ---------------------------
 y SENSORS_CORETEMP SENSORS_K10TEMP
