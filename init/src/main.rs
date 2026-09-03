@@ -550,6 +550,25 @@ fn mount_essential_filesystems() -> Result<()> {
     // Mount /tmp
     mount_fs("tmpfs", "/tmp", "tmpfs", MsFlags::empty(), "mode=1777")?;
 
+    // The X11 and ICE socket directories. Xwayland (via smithay) binds
+    // /tmp/.X11-unix/X<n> and never creates the directory, so without this the
+    // compositor logs "Could not find a free socket for the XServer" and every
+    // X11-only client (Steam, for one) dies with "Unable to open a connection
+    // to X". systemd-tmpfiles' x11.conf does this on other distros; here init
+    // is the only thing that runs early enough. World-writable with the sticky
+    // bit, as /tmp itself is, and created by root so no user owns it.
+    for dir in ["/tmp/.X11-unix", "/tmp/.ICE-unix"] {
+        if let Err(e) = fs::create_dir(dir) {
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                log::warn!("Failed to create {}: {}", dir, e);
+                continue;
+            }
+        }
+        if let Err(e) = fs::set_permissions(dir, fs::Permissions::from_mode(0o1777)) {
+            log::warn!("Failed to set permissions on {}: {}", dir, e);
+        }
+    }
+
     // Mount cgroups if available
     if Path::new("/sys/fs/cgroup").exists() || fs::create_dir_all("/sys/fs/cgroup").is_ok() {
         mount_fs("cgroup2", "/sys/fs/cgroup", "cgroup2", MsFlags::empty(), "").ok();
