@@ -44,6 +44,7 @@ CLEAN=false
 JOBS=$(nproc)
 ENABLE_LOGGING=true
 LOG_FILE=""
+KERNEL_RELEASE=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -636,6 +637,11 @@ install_kernel() {
     # Install modules
     make INSTALL_MOD_PATH="${OUTPUT_DIR}" modules_install
 
+    # Replace the build symlink modules_install leaves behind with a real
+    # headers tree so out-of-tree modules (DKMS: nvidia, evdi, ...) can be
+    # built on the installed system.
+    install_headers
+
     # Create symlinks
     cd "${OUTPUT_DIR}/boot"
     ln -sf "vmlinuz-${KERNEL_VERSION}-raven" vmlinuz-raven
@@ -650,6 +656,73 @@ install_kernel() {
     echo ""
     log_info "Modules installed to: ${OUTPUT_DIR}/lib/modules/"
     du -sh "${OUTPUT_DIR}/lib/modules/"*
+}
+
+# Install kernel headers next to the modules
+#
+# modules_install points lib/modules/<release>/build at this source tree by
+# absolute path (build/sources/linux-* here, /raven/build/sources/linux-*
+# inside the docker build). That path does not exist on the installed system,
+# so DKMS finds no headers and silently skips building nvidia/evdi/etc.
+#
+# Ship a self-contained headers tree in its place, the way distro
+# linux-headers packages do: the config, Module.symvers, the built host
+# tools under scripts/ (and objtool), every include/ directory, the x86 arch
+# headers and asm-offsets, plus the Kconfig files so `make menuconfig` and
+# conftest-style probes work. It lives inside lib/modules/<release>/ so
+# stage4's copy of the modules directory carries it into the sysroot with no
+# further plumbing, and it stays valid after the source tree is cleaned.
+install_headers() {
+    local release builddir
+    release="$(make -s --no-print-directory kernelrelease)"
+    builddir="${OUTPUT_DIR}/lib/modules/${release}/build"
+
+    log_info "Installing kernel headers to lib/modules/${release}/build..."
+
+    # Drop the symlinks modules_install created (build, and source on
+    # older kernels) and start with an empty directory.
+    rm -rf "${OUTPUT_DIR}/lib/modules/${release}/build" \
+           "${OUTPUT_DIR}/lib/modules/${release}/source"
+    mkdir -p "$builddir"
+
+    install -Dt "$builddir" -m644 .config Makefile Module.symvers System.map
+    install -Dt "$builddir/kernel" -m644 kernel/Makefile
+    install -Dt "$builddir/arch/x86" -m644 arch/x86/Makefile
+    cp -a scripts "$builddir/"
+
+    # Host tools that external module builds call into. objtool is needed
+    # whenever CONFIG_OBJTOOL is set (it is); resolve_btfids only for BTF.
+    install -Dt "$builddir/tools/objtool" tools/objtool/objtool
+    if [ -x tools/bpf/resolve_btfids/resolve_btfids ]; then
+        install -Dt "$builddir/tools/bpf/resolve_btfids" tools/bpf/resolve_btfids/resolve_btfids
+    fi
+
+    cp -a include "$builddir/"
+    cp -a arch/x86/include "$builddir/arch/x86/"
+    install -Dt "$builddir/arch/x86/kernel" -m644 arch/x86/kernel/asm-offsets.s
+
+    # Kconfig files, for menuconfig and kbuild's Kconfig-driven checks.
+    # (A loop rather than find -exec so it behaves the same on any find.)
+    find . -type f -name 'Kconfig*' | while IFS= read -r f; do
+        install -Dm644 "$f" "$builddir/$f"
+    done
+
+    # Trim what a module build never reads: object files from scripts/,
+    # broken symlinks, and the include-only tree's stray artefacts.
+    find "$builddir" -type f \( -name '*.o' -o -name '*.cmd' \) -delete
+    find -L "$builddir" -type l -delete
+
+    # Strip the host tools; leave shell/perl/python scripts alone.
+    find "$builddir" -type f -perm -u+x -exec sh -c \
+        'for f; do case "$(head -c 4 "$f")" in "$(printf "\177ELF")") strip --strip-unneeded "$f" 2>/dev/null || true;; esac; done' _ {} +
+
+    if [ ! -f "$builddir/include/generated/utsrelease.h" ]; then
+        log_error "Headers install incomplete: missing include/generated/utsrelease.h"
+        exit 1
+    fi
+
+    KERNEL_RELEASE="$release"
+    log_success "Kernel headers installed ($(du -sh "$builddir" | cut -f1))"
 }
 
 # Clean build
@@ -725,7 +798,8 @@ main() {
     echo "=========================================="
     echo ""
     echo "Kernel: ${OUTPUT_DIR}/boot/vmlinuz-raven"
-    echo "Modules: ${OUTPUT_DIR}/lib/modules/${KERNEL_VERSION}.0-raven/"
+    echo "Modules: ${OUTPUT_DIR}/lib/modules/${KERNEL_RELEASE}/"
+    echo "Headers: ${OUTPUT_DIR}/lib/modules/${KERNEL_RELEASE}/build/"
     if [ "$ENABLE_LOGGING" = true ] && [ -n "$LOG_FILE" ]; then
         echo "Build Log: ${LOG_FILE}"
     fi
