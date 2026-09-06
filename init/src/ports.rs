@@ -819,6 +819,32 @@ fn print_uevent(msg: &[u8]) {
     println!("{action:<7} {subsystem:<12} {what}{extra}");
 }
 
+/// `struct ifinfomsg` from `<linux/rtnetlink.h>`, declared here rather than
+/// taken from `libc`.
+///
+/// It used to be `libc::ifinfomsg`, which is a dependency on a patch release
+/// rather than on an interface. That type does not exist in libc 0.2.178 --
+/// for any target, not just musl -- and does exist by 0.2.189. So whether this
+/// crate builds depended on which of those a Cargo.lock happened to pin, and
+/// two checkouts of this repository that disagreed by one patch release
+/// disagreed about whether the raven layer builds at all. The error names this
+/// file and says nothing about the lock.
+///
+/// The struct is not libc's to change. It is kernel UAPI, fixed since netlink
+/// existed, and sixteen bytes of plain data; declaring it costs six lines and
+/// removes a build-time dependency on which libc a lock file picked. The test
+/// below pins the layout.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct IfInfoMsg {
+    ifi_family: u8,
+    __ifi_pad: u8,
+    ifi_type: u16,
+    ifi_index: i32,
+    ifi_flags: u32,
+    ifi_change: u32,
+}
+
 /// The RTM_NEWLINK messages in a buffer, as (index, name, running).
 fn link_messages(buf: &[u8]) -> Vec<(i32, String, bool)> {
     const RTM_NEWLINK: u16 = 16;
@@ -826,7 +852,7 @@ fn link_messages(buf: &[u8]) -> Vec<(i32, String, bool)> {
     let mut out = Vec::new();
     let mut offset = 0;
     let hdr_len = std::mem::size_of::<libc::nlmsghdr>();
-    let info_len = std::mem::size_of::<libc::ifinfomsg>();
+    let info_len = std::mem::size_of::<IfInfoMsg>();
     while offset + hdr_len <= buf.len() {
         // SAFETY: bounds checked above; nlmsghdr is plain data read unaligned.
         let hdr: libc::nlmsghdr =
@@ -837,7 +863,7 @@ fn link_messages(buf: &[u8]) -> Vec<(i32, String, bool)> {
         }
         if hdr.nlmsg_type == RTM_NEWLINK && len >= hdr_len + info_len {
             // SAFETY: bounds checked; ifinfomsg is plain data read unaligned.
-            let info: libc::ifinfomsg =
+            let info: IfInfoMsg =
                 unsafe { std::ptr::read_unaligned(buf.as_ptr().add(offset + hdr_len).cast()) };
             let running = info.ifi_flags & (libc::IFF_RUNNING as u32) != 0;
             let mut name = String::new();
@@ -895,10 +921,23 @@ mod tests {
     }
 
     #[test]
+    fn ifinfomsg_matches_the_kernel_layout() {
+        // <linux/rtnetlink.h>: u8, u8, u16, i32, u32, u32. The kernel writes
+        // this and we read it, so the size and the offset of the two fields
+        // actually used are the whole contract.
+        assert_eq!(std::mem::size_of::<IfInfoMsg>(), 16);
+        assert_eq!(std::mem::align_of::<IfInfoMsg>(), 4);
+        let m = IfInfoMsg::default();
+        let base = &m as *const _ as usize;
+        assert_eq!(&m.ifi_index as *const _ as usize - base, 4);
+        assert_eq!(&m.ifi_flags as *const _ as usize - base, 8);
+    }
+
+    #[test]
     fn a_newlink_message_yields_index_name_and_running() {
         // One RTM_NEWLINK for ifindex 4 "enp4s0" with IFF_UP|IFF_RUNNING.
         let hdr_len = std::mem::size_of::<libc::nlmsghdr>();
-        let info_len = std::mem::size_of::<libc::ifinfomsg>();
+        let info_len = std::mem::size_of::<IfInfoMsg>();
         let name = b"enp4s0\0";
         let rta_len = 4 + name.len();
         let total = hdr_len + info_len + ((rta_len + 3) & !3);
@@ -912,7 +951,7 @@ mod tests {
         };
         // SAFETY: writing plain data into a buffer large enough for it.
         unsafe { std::ptr::write_unaligned(buf.as_mut_ptr().cast(), hdr) };
-        let mut info: libc::ifinfomsg = unsafe { std::mem::zeroed() };
+        let mut info = IfInfoMsg::default();
         info.ifi_index = 4;
         info.ifi_flags = (libc::IFF_UP | libc::IFF_RUNNING) as u32;
         // SAFETY: as above, at the offset the parser reads from.

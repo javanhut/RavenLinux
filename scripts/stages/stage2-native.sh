@@ -2511,11 +2511,26 @@ print(crypt.crypt("raven", crypt.mksalt(crypt.METHOD_SHA512)))
         salt="$(cut -d'$' -f3 <<< "$default_pass_hash")"
         if command -v openssl &>/dev/null; then
             if [[ "$(openssl passwd -6 -salt "$salt" raven 2>/dev/null)" != "$default_pass_hash" ]]; then
-                log_error "  The generated password hash does not verify against 'raven'."
-                log_error "  Refusing to ship an image whose documented password does not work."
-                return 1
+                # Loud, and not fatal.
+                #
+                # This used to `return 1`, which was a mistake worth naming:
+                # stage2 runs under `set -e` and nothing checks this function's
+                # status, so a hasher whose output this could not re-derive
+                # would have aborted the whole of stage2 -- and the symptom of
+                # that is an ISO with no raven-init in it, three stages later,
+                # with nothing in the log connecting the two.
+                #
+                # Locking the accounts is the same answer as having no hasher
+                # at all, fails the same way, and says so. It costs su and
+                # sudo; tty1 autologins regardless.
+                log_warn "  The generated password hash does not verify against 'raven'"
+                log_warn "  (openssl could not re-derive it from its own salt)."
+                log_warn "  root and raven will ship LOCKED rather than with a"
+                log_warn "  password that does not work. tty1 still autologins."
+                default_pass_hash="!"
+            else
+                log_info "  Default password hash verified"
             fi
-            log_info "  Default password hash verified"
         fi
     fi
 
