@@ -60,6 +60,14 @@ if [[ -f "${PROJECT_ROOT}/scripts/lib/skeleton.sh" ]]; then
     source "${PROJECT_ROOT}/scripts/lib/skeleton.sh"
 fi
 
+# What the Raven and GUI stages were supposed to build. check_sysroot_layers
+# reads these tables rather than restating them, so a component added to a
+# stage is one this stage immediately checks for. See scripts/lib/components.sh.
+if [[ -f "${PROJECT_ROOT}/scripts/lib/components.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${PROJECT_ROOT}/scripts/lib/components.sh"
+fi
+
 if [[ -f "${PROJECT_ROOT}/scripts/lib/logging.sh" ]]; then
     source "${PROJECT_ROOT}/scripts/lib/logging.sh"
 else
@@ -1062,41 +1070,91 @@ check_usrmerge_layout() {
 # stage4 is the last place that can notice. It does not refuse to build: a
 # console-only image is a legitimate thing to want. It refuses to be quiet
 # about it.
+#
+# WHAT IT LOOKS FOR, AND WHY THAT LIST IS NOT WRITTEN HERE
+#
+# The expected binaries come from scripts/lib/components.sh -- the same tables
+# stage-raven.sh and stage-gui.sh build from. They used to be a literal in this
+# function, and a literal cannot be kept honest: `imlazy` was in
+# RAVEN_COMPONENTS and not in the check, `raven-ports` was built by the init
+# crate and never looked for, and of the ten repositories the GUI stage clones
+# exactly one was checked. Every one of those was a component that could go
+# missing from an image while this function reported the layer present.
+#
+# ABSENT VERSUS PARTIAL
+#
+# These are different failures and they get different messages. A layer with
+# *nothing* in it is the stage2-reset case above: it was never built, and the
+# fix is to run it. A layer missing *some* of its components is the fail-soft
+# path in stage-raven.sh and stage-gui.sh doing its job -- one repository would
+# not clone, or would not compile -- and the fix is that component's build log.
+# Reporting the second as "missing whole layers" is how one failed clone gets
+# mistaken for a build-order mistake.
 check_sysroot_layers() {
+    if ! declare -F raven_layer_binaries >/dev/null 2>&1; then
+        log_warn "scripts/lib/components.sh not loaded; cannot check the sysroot layers"
+        return 0
+    fi
+
+    local -a raven_expected=() gui_expected=()
+    mapfile -t raven_expected < <(raven_layer_binaries)
+    mapfile -t gui_expected   < <(raven_gui_binaries)
+
     local -a raven_missing=() gui_missing=()
     local b
 
-    for b in ravenshell rvn caw cawd crow ivaldi oxigen poxy raven-init raven-rc raven-powerd raven-timed; do
+    for b in "${raven_expected[@]}"; do
         find "${SYSROOT_DIR}" -name "${b}" -type f -print -quit 2>/dev/null | grep -q . \
             || raven_missing+=("${b}")
     done
 
-    for b in huginn raven-lock raven-wayland-session; do
+    for b in "${gui_expected[@]}"; do
         find "${SYSROOT_DIR}" -name "${b}" -type f -print -quit 2>/dev/null | grep -q . \
             || gui_missing+=("${b}")
     done
 
     if (( ${#raven_missing[@]} == 0 && ${#gui_missing[@]} == 0 )); then
-        log_success "Sysroot carries the Raven and GUI layers"
+        log_success "Sysroot carries the Raven and GUI layers (${#raven_expected[@]} + ${#gui_expected[@]} binaries)"
         return 0
     fi
 
+    # A layer nothing landed in was never built. A layer some of it landed in
+    # had components fail one at a time.
+    local raven_absent=0 gui_absent=0
+    (( ${#raven_missing[@]} == ${#raven_expected[@]} )) && raven_absent=1
+    (( ${#gui_missing[@]}   == ${#gui_expected[@]}   )) && gui_absent=1
+
     echo ""
     log_warn "=============================================================="
-    log_warn "  This ISO is missing whole layers of the system."
+    if (( raven_absent == 1 || gui_absent == 1 )); then
+        log_warn "  This ISO is missing whole layers of the system."
+    else
+        log_warn "  This ISO is missing components."
+    fi
     log_warn "=============================================================="
 
-    if (( ${#raven_missing[@]} > 0 )); then
-        log_warn "  Raven layer absent: ${raven_missing[*]}"
+    if (( raven_absent == 1 )); then
+        log_warn "  Raven layer absent: nothing it builds is in the sysroot"
         log_warn "    restore with: imlazy raven"
+    elif (( ${#raven_missing[@]} > 0 )); then
+        log_warn "  Raven layer incomplete (${#raven_missing[@]} of ${#raven_expected[@]} missing):"
+        log_warn "    ${raven_missing[*]}"
+        log_warn "    Each is a component that failed to clone or to build."
+        log_warn "    stage-raven.sh warns and carries on, so the reason is"
+        log_warn "    in build/logs and not here."
     fi
 
-    if (( ${#gui_missing[@]} > 0 )); then
-        log_warn "  GUI layer absent:   ${gui_missing[*]}"
+    if (( gui_absent == 1 )); then
+        log_warn "  GUI layer absent:   nothing it builds is in the sysroot"
         log_warn "    restore with: imlazy gui"
         log_warn "    Without it the compositor, the desktop shell and"
         log_warn "    libinput's library closure are all missing, so a"
         log_warn "    graphical boot has no input and nothing to draw."
+    elif (( ${#gui_missing[@]} > 0 )); then
+        log_warn "  GUI layer incomplete (${#gui_missing[@]} of ${#gui_expected[@]} missing):"
+        log_warn "    ${gui_missing[*]}"
+        log_warn "    That stage is fail-soft per application, so the desktop"
+        log_warn "    still boots -- without these."
     fi
 
     log_warn ""

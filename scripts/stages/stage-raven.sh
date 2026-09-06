@@ -68,6 +68,19 @@ TOOLCHAIN_DIR="${TOOLCHAIN_DIR:-${BUILD_DIR}/toolchain}"
 RAVEN_CROSS_PREFIX="${RAVEN_CROSS_PREFIX:-x86_64-linux-musl}"
 
 # =============================================================================
+# The component table. Shared with the GUI stage and, more to the point, with
+# stage4's sysroot check -- so that adding a component here is what makes
+# stage4 start looking for it. See scripts/lib/components.sh.
+# =============================================================================
+if [[ -f "${PROJECT_ROOT}/scripts/lib/components.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${PROJECT_ROOT}/scripts/lib/components.sh"
+else
+    echo "FATAL: scripts/lib/components.sh not found; nothing declares what to build" >&2
+    exit 1
+fi
+
+# =============================================================================
 # Logging (use shared library or define fallbacks)
 # =============================================================================
 
@@ -90,36 +103,14 @@ fi
 # =============================================================================
 # Component Table
 # =============================================================================
-# key|repo|lang|binaries|build_targets|description
+# RAVEN_COMPONENTS is declared in scripts/lib/components.sh, sourced above, and
+# is read here, by stage-gui.sh and by stage4's sysroot check. It was a literal
+# in this file until the check grew its own copy and the two drifted: `imlazy`
+# was built by this stage and absent from the check for long enough that an ISO
+# could ship without it and pass. The table lives in one place now.
 #
-#   key           short name; also the RAVEN_<KEY>_REF env suffix and the
-#                 packages/raven/<key> directory
-#   repo          github.com/javanhut/<repo>
-#   lang          go | rust
-#   binaries      the installed name(s) in /usr/bin. Comma-separated for a
-#                 component that ships more than one -- caw is a CLI plus the
-#                 daemon it drives, and neither is useful without the other.
-#   build_targets go:   the package path(s) to build, positionally paired with
-#                       `binaries`
-#                 rust: the workspace package(s) to pass to -p, or "." for a
-#                       plain crate
-#
-# The graphical components are intentionally absent. RavenGUI (huginn)
-# links libudev, libdrm, libseat and libinput through smithay, so it cannot be
-# a static musl binary the way everything here is, and its udev/TTY backend is
-# not written yet. RavenTerminal needs the display server RavenGUI is meant to
-# become. Both belong to a graphical stage that does not exist yet.
-
-RAVEN_COMPONENTS=(
-    "ravenshell|RavenShell|go|ravenshell|.|Raven Shell - interactive shell and scripting language"
-    "rvn|RavenPackageManager|rust|rvn|.|Raven Package Manager"
-    "poxy|Poxy|go|poxy|./cmd|Poxy - universal package manager"
-    "ivaldi|Ivaldi|rust|ivaldi|.|Ivaldi - version control system"
-    "crow|CrowTextEditor|rust|crow|.|Crow - text editor"
-    "imlazy|ImLazy|go|imlazy|.|ImLazy - task runner"
-    "oxigen|OxigenLang|rust|oxigen|oxigen|OxigenLang - interpreted language"
-    "caw|CAW|rust|caw,cawd|caw,cawd|CAW - wireless and network utility, with its daemon"
-)
+# Its format, and the reason the graphical components are not in it, are
+# documented at the declaration.
 
 # Populated by build_component() so print_summary and the default-shell switch
 # can tell what actually landed.
@@ -224,7 +215,8 @@ setup_git_trust() {
 fetch_component() {
     local key="$1" repo="$2"
     local dest="${RAVEN_SRC_DIR}/${repo}"
-    local url="https://github.com/javanhut/${repo}.git"
+    local url
+    url="$(raven_component_url "${repo}")"
 
     # RAVEN_IVALDI_REF, RAVEN_CROW_REF, ...
     local ref_var="RAVEN_${key^^}_REF"
@@ -467,9 +459,16 @@ build_raven_init() {
     local outdir="${RAVEN_STAGE_DIR}"
     mkdir -p "${outdir}"
 
-    if ! build_rust_component "${src}" "raven-init,raven-rc,raven-powerd,raven-ports,raven-timed" "." "${outdir}"; then
+    # The binary list comes from RAVEN_INIT_BINARIES so that what is built here
+    # and what stage4 looks for are the same string. raven-ports was in this
+    # call and missing from that check for exactly as long as the two were
+    # written out separately.
+    local -a init_bins
+    raven_split_list init_bins "${RAVEN_INIT_BINARIES}"
+
+    if ! build_rust_component "${src}" "${RAVEN_INIT_BINARIES}" "." "${outdir}"; then
         log_warn "  raven-init: build failed, skipping"
-        RAVEN_FAILED+=(raven-init raven-rc raven-powerd raven-ports raven-timed)
+        RAVEN_FAILED+=("${init_bins[@]}")
         return 0
     fi
 
@@ -495,7 +494,7 @@ build_raven_init() {
     # dispatcher that uses raven-rc when raven-init is PID 1, with an emergency
     # kernel fallback for rescue environments.
 
-    RAVEN_BUILT+=(raven-init raven-rc raven-powerd raven-ports raven-timed)
+    RAVEN_BUILT+=("${init_bins[@]}")
     log_success "  raven-init installed ($(du -h "${outdir}/raven-init" | cut -f1))"
     log_success "  raven-rc installed ($(du -h "${outdir}/raven-rc" | cut -f1))"
     log_success "  raven-powerd installed ($(du -h "${outdir}/raven-powerd" | cut -f1))"

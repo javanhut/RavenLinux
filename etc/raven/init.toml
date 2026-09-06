@@ -187,6 +187,29 @@ restart = true
 enabled = true
 critical = false
 
+# Keyboard backlight and fans.
+#
+# The kernel exposes both and drives neither on its own: the keyboard light is
+# an LED-class device that comes up dark, and a fan taken off firmware control
+# stays wherever it was last told to. raven-controlsd owns the writes and, more
+# to the point, owns giving them back -- on exit, on a signal, on a panic and on
+# a watchdog trip -- which is why fan control is a daemon here and not something
+# the Controls window does for itself.
+#
+# Idle it writes nothing: it holds no channel until somebody asks for a curve or
+# a manual speed. Saved curves are in /var/lib/raven-controls/state.json and are
+# re-applied at boot. Its socket at /run/raven-controls/ctl is group video, like
+# powerd's and timed's, which is how the Controls window asks.
+[[services]]
+name = "controlsd"
+description = "Keyboard backlight and fan control"
+exec = "/usr/bin/raven-controlsd"
+args = []
+after = ["udev"]
+restart = true
+enabled = true
+critical = false
+
 # Network manager (when available)
 #
 # Still handles wired interfaces at boot. cawd runs DHCP itself on the links it

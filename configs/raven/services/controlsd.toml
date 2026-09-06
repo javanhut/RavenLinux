@@ -1,0 +1,50 @@
+# raven-controlsd -- the keyboard backlight and fan daemon.
+#
+# On any image built from this tree you do not need this file: /etc/raven/
+# init.toml defines this service itself and raven-init starts it at boot. It is
+# shipped for the other case -- an already-installed machine that predates
+# raven-controlsd, where the init.toml on disk is the one the old image wrote
+# and nothing will add the service to it.
+#
+# raven-init reads /etc/raven/init.d/*.toml alongside init.toml, so copying this
+# there is how the daemon starts without a reboot and without hand-editing a
+# file the next upgrade may replace:
+#
+#   cp /usr/share/raven/services/controlsd.toml /etc/raven/init.d/
+#   raven-rc reload
+#   raven-rc start controlsd
+#
+# Leaving it there afterwards is safe. When an init.toml that defines controlsd
+# does arrive, init keeps its own definition and logs that this drop-in was
+# ignored -- it cannot end up defined twice.
+#
+# WHY THIS IS A DAEMON AND NOT SOMETHING THE WINDOW DOES
+#
+# Setting a fan speed means writing pwmN_enable=1, which turns off the
+# firmware's own thermal management. From that moment the fan sits wherever it
+# was last told to until something puts it back -- and a settings window is not
+# a safe owner of that, because closing a window is not meant to be able to
+# cook a laptop. This outlives the window, runs the curve, and hands every
+# channel back to firmware on exit, on a signal, on a panic, and on a watchdog
+# trip.
+#
+# `restart = true` matters more here than for most services. If it dies while
+# driving a fan, that fan is left under manual control; restarting puts
+# something back in charge within seconds, and the restarted daemon re-applies
+# the saved curve onto a channel firmware may have meanwhile taken back.
+#
+# Ships enabled. Idle it writes nothing at all -- it holds no channel until
+# somebody asks for a curve or a manual speed -- so the cost of having it there
+# is a few hundred kilobytes of RSS, and the cost of not having it is that the
+# Controls window can offer no fan control at all. Saved curves live in
+# /var/lib/raven-controls/state.json and are re-applied here at boot.
+
+[[services]]
+name = "controlsd"
+description = "Keyboard backlight and fan control"
+exec = "/usr/bin/raven-controlsd"
+args = []
+after = ["udev"]
+restart = true
+enabled = true
+critical = false

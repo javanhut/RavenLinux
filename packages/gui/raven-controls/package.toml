@@ -1,0 +1,66 @@
+[package]
+name = "raven-controls"
+version = "0.1.0"
+description = "Raven Controls - keyboard backlight, fan speeds and thermal profiles, on whatever machine Raven is installed on"
+license = "GPL-3.0-or-later"
+homepage = "https://github.com/javanhut/RavenControls"
+repository = "https://github.com/javanhut/RavenControls"
+maintainers = ["RavenLinux Team"]
+categories = ["gui", "wayland", "application", "system"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/RavenControls.git"
+
+[build]
+system = "cargo"
+# GTK4 + libadwaita, like raven-settings and raven-power, and for the same
+# reason: there is no musl build of that stack to be had.
+target = "x86_64-unknown-linux-gnu"
+# --workspace: this repository produces two binaries, and the daemon is the
+# half that makes fan control safe to offer at all. Building only the default
+# member would ship a window that has to refuse every fan control it draws.
+build_flags = ["--release", "--locked", "--workspace"]
+
+[dependencies]
+# The GTK half mirrors raven-settings' list -- same toolkit, same four silent
+# runtime needs (schemas, MIME database, icon themes, dconf).
+#
+# Nothing else is required. That is the point of the application: it reads
+# /sys/class/leds, /sys/class/hwmon and the ACPI platform profile, all of which
+# are kernel interfaces rather than packages, so there is no vendor tool in this
+# list and no machine-specific dependency to get wrong.
+runtime = [
+    "gtk4", "libadwaita", "glib2", "gsettings-desktop-schemas",
+    "shared-mime-info", "desktop-file-utils", "librsvg", "gdk-pixbuf2",
+    "hicolor-icon-theme", "adwaita-icon-theme", "dconf",
+]
+build = ["rust", "cargo", "pkg-config", "gtk4", "libadwaita", "glib2"]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-gnu/release/raven-controls", dest = "/usr/bin/raven-controls", mode = 755 },
+    # The daemon. init.toml starts it as the `controlsd` service; without it the
+    # window can set the keyboard light and the firmware thermal profiles and
+    # nothing else, because there would be nothing alive to hand a fan back.
+    { src = "target/x86_64-unknown-linux-gnu/release/raven-controlsd", dest = "/usr/bin/raven-controlsd", mode = 755 },
+    { src = "data/icons/hicolor/scalable/apps/com.ravencontrols.Raven.svg", dest = "/usr/share/icons/hicolor/scalable/apps/com.ravencontrols.Raven.svg", mode = 644 },
+    { src = "data/com.ravencontrols.Raven.metainfo.xml", dest = "/usr/share/metainfo/com.ravencontrols.Raven.metainfo.xml", mode = 644 },
+    # Lets the session (group video) set the keyboard backlight without root.
+    # Matched on the LED function rather than a driver, so it covers every
+    # laptop whose keyboard light has a kernel driver.
+    #
+    # It deliberately grants nothing over the fans: a session that can write
+    # pwmN can leave one at zero with nothing running to put it back, which is
+    # exactly what raven-controlsd exists to prevent.
+    { src = "data/90-raven-controls.rules", dest = "/etc/udev/rules.d/90-raven-controls.rules", mode = 644 },
+    # The drop-in, for a machine whose init.toml predates this service. Inert
+    # where it is; see the comments in the file.
+    { src = "data/controlsd.toml", dest = "/usr/share/raven/services/controlsd.toml", mode = 644 },
+]
+
+# The upstream data/com.ravencontrols.Raven.desktop is deliberately not in this
+# list: install_desktop_entries() in scripts/stages/stage-gui.sh writes every
+# application entry on this image so the launcher's contents are decided in one
+# place.
+symlinks = []

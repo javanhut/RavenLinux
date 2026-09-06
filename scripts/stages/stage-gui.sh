@@ -90,6 +90,11 @@
 #   BATTERY_SKIP=1             skip Raven Power; battery policy still runs
 #   BATTERY_OFFLINE=1          as GUI_OFFLINE, for Raven Power alone
 #   BATTERY_REF=<git-ref>      build a particular RavenBatteryManagement ref
+#   CONTROLS_SKIP=1            skip Raven Controls; no keyboard-light or fan UI,
+#                              and no raven-controlsd, so init's controlsd
+#                              service finds nothing to start
+#   CONTROLS_OFFLINE=1         as GUI_OFFLINE, for Raven Controls alone
+#   CONTROLS_REF=<git-ref>     build a particular RavenControls ref
 #
 #   LOGIN_OFFLINE=1            as GUI_OFFLINE, for the login screen alone
 #   LOGIN_REF=<git-ref>        build a particular RavenLogin ref
@@ -120,14 +125,25 @@ RAVEN_JOBS="${RAVEN_JOBS:-$(nproc)}"
 GUI_SRC_DIR="${SOURCES_DIR}/gui"
 GUI_STAGE_DIR="${PACKAGES_DIR}/gui"
 
+# Every repository this stage builds, and every binary each one installs, is
+# declared in scripts/lib/components.sh -- the same table stage4's sysroot
+# check reads. Sourced before the assignments below because they come out of
+# it: raven_gui_app_vars sets <KEY>_REPO, <KEY>_URL and <KEY>_BINARIES.
+if [[ -f "${PROJECT_ROOT}/scripts/lib/components.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${PROJECT_ROOT}/scripts/lib/components.sh"
+else
+    echo "FATAL: scripts/lib/components.sh not found; nothing declares what to build" >&2
+    exit 1
+fi
+
 GUI_REPO="RavenGUI"
-GUI_URL="https://github.com/javanhut/${GUI_REPO}.git"
+GUI_URL="$(raven_component_url "${GUI_REPO}")"
 
 # The terminal. A second repository rather than a component of RavenGUI: it is
 # an ordinary Wayland client that happens to be the one this desktop cannot do
 # without, and it shares no code with the compositor.
-TERMINAL_REPO="RavenTerminal"
-TERMINAL_URL="https://github.com/javanhut/${TERMINAL_REPO}.git"
+raven_gui_app_vars TERMINAL
 
 # The file manager. A third repository, and the first application on this image
 # that is neither the compositor nor something the compositor cannot start
@@ -136,17 +152,15 @@ TERMINAL_URL="https://github.com/javanhut/${TERMINAL_REPO}.git"
 #
 # Its application id is also its .desktop stem, its icon name and its D-Bus
 # name, so it is written once here and used for all four.
-FILEMANAGER_REPO="RavenFileManager"
-FILEMANAGER_URL="https://github.com/javanhut/${FILEMANAGER_REPO}.git"
-FILEMANAGER_BIN="ravenfilemanager"
+raven_gui_app_vars FILEMANAGER
+FILEMANAGER_BIN="${FILEMANAGER_BINARIES}"
 FILEMANAGER_APPID="com.ravenfilemanager.Raven"
 
 # Raven Settings: the one window for network, Bluetooth, sound, screens,
 # appearance and updates. GTK4 like the file manager, so it rides on the same
 # staged toolkit; huginn opens it from quick settings and Super+Ctrl+P.
-SETTINGS_REPO="RavenSettingsUI"
-SETTINGS_URL="https://github.com/javanhut/${SETTINGS_REPO}.git"
-SETTINGS_BIN="raven-settings"
+raven_gui_app_vars SETTINGS
+SETTINGS_BIN="${SETTINGS_BINARIES}"
 SETTINGS_APPID="com.ravensettings.Raven"
 
 # Raven Store: the graphical front-end for rvn. Browse, install, remove and
@@ -155,19 +169,35 @@ SETTINGS_APPID="com.ravensettings.Raven"
 # Everything it does is `rvn --json` underneath, run through sudo -- it
 # reimplements nothing, so an image without it has lost a window and no
 # capability.
-STORE_REPO="RavenStore"
-STORE_URL="https://github.com/javanhut/${STORE_REPO}.git"
-STORE_BIN="raven-store"
+raven_gui_app_vars STORE
+STORE_BIN="${STORE_BINARIES}"
 STORE_APPID="com.ravenstore.Raven"
 
 # Raven Power: battery profiles, per-application Eco mode, live energy use and
 # battery health. It is a GTK4 + libadwaita client like Settings and Store and
 # is linked from Settings > General. raven-powerd remains the boot-time policy
 # backend if this optional UI is absent.
-BATTERY_REPO="RavenBatteryManagement"
-BATTERY_URL="https://github.com/javanhut/RavenBatteryManagement.git"
-BATTERY_BIN="raven-power"
+raven_gui_app_vars BATTERY
+BATTERY_BIN="${BATTERY_BINARIES}"
 BATTERY_APPID="org.raven.Power"
+
+# Raven Controls: the keyboard backlight, fan speeds and thermal profiles. A
+# GTK4 + libadwaita client like Settings, Store and Power.
+#
+# TWO BINARIES, AND WHY THE DAEMON IS BUILT HERE
+#
+# The repository is one cargo workspace producing `raven-controls` (the window)
+# and `raven-controlsd` (the daemon that owns fan writes). They are staged
+# together because they are one clone and one build; splitting the daemon into
+# stage-raven would mean fetching and compiling the same tree twice.
+#
+# The consequence is worth being explicit about: CONTROLS_SKIP=1, or a GUI-less
+# image, has no fan control at all. init.toml still defines the `controlsd`
+# service, and raven-init will log that its binary is missing and carry on --
+# the same way it treats a missing raven-powerd.
+raven_gui_app_vars CONTROLS
+IFS=',' read -r CONTROLS_BIN CONTROLS_DAEMON <<< "${CONTROLS_BINARIES}"
+CONTROLS_APPID="com.ravencontrols.Raven"
 
 # The login screen. A fourth repository, and the last thing between the boot and
 # somebody's session: ravend reads /etc/shadow, draws a password prompt through
@@ -178,8 +208,7 @@ BATTERY_APPID="org.raven.Power"
 # session raven-init has always had, which is a working desktop with no password
 # on it. init decides between the two by looking for the binary, so not building
 # this is exactly what "no login screen" means. See stage_login().
-LOGIN_REPO="RavenLogin"
-LOGIN_URL="https://github.com/javanhut/${LOGIN_REPO}.git"
+raven_gui_app_vars LOGIN
 # The account its greeter runs as. Nothing else on the machine runs as this.
 LOGIN_GREETER_USER="raven-greeter"
 LOGIN_GREETER_HOME="/var/lib/raven-greeter"
@@ -212,29 +241,27 @@ LOGIN_GREETER_UID="${LOGIN_GREETER_UID:-972}"
 # huginn paints its own background under everything, so an image without this
 # is a desktop with a flat colour behind it. Every failure path below warns and
 # returns 0.
-CANVAS_REPO="RavenCanvas"
-CANVAS_URL="https://github.com/javanhut/${CANVAS_REPO}.git"
+raven_gui_app_vars CANVAS
 
 # RoostBar is a layer-shell status bar started through the machine-wide
 # session.d mechanism. It is kept separate from huginn so a failed optional
 # module can never take down the compositor.
-ROOSTBAR_REPO="RoostBar"
-ROOSTBAR_URL="https://github.com/javanhut/${ROOSTBAR_REPO}.git"
-ROOSTBAR_BIN="roostbar"
+raven_gui_app_vars ROOSTBAR
+ROOSTBAR_BIN="${ROOSTBAR_BINARIES}"
 
 # Huginn links glibc, unlike everything in the Raven layer. The host target is
 # the right one: the sysroot carries the host's glibc and its dynamic linker,
 # which is how the Xorg and Mesa binaries stage2 copies already work.
 GUI_TARGET="${GUI_TARGET:-$(rustc -vV 2>/dev/null | awk '/^host:/{print $2}')}"
 
-# key|package|binary|description
-GUI_COMPONENTS=(
-    "huginn-comp|huginn-comp|huginn|Huginn - Wayland compositor, and the shell it draws"
-)
+# GUI_COMPONENTS -- the compositor workspace, key|package|binary|description --
+# is declared in scripts/lib/components.sh alongside GUI_APPS, the table the
+# assignments above come out of. stage4's sysroot check reads both, which is
+# what makes a component added there one that stage4 immediately looks for.
 
-# Every binary this stage ships, derived from the table above rather than
-# written out again: the two lists drifted apart once already, and a hardcoded
-# copy is wrong the moment a component is added or dropped.
+# Every binary this stage ships, derived from the table rather than written out
+# again: the two lists drifted apart once already, and a hardcoded copy is
+# wrong the moment a component is added or dropped.
 declare -a GUI_ALL_BINARIES=()
 for _spec in "${GUI_COMPONENTS[@]}"; do
     IFS='|' read -r _ _ _binary _ <<< "${_spec}"
@@ -941,6 +968,112 @@ stage_filemanager() {
 }
 
 # =============================================================================
+# Raven Controls
+# =============================================================================
+#
+# Environment:
+#   CONTROLS_SKIP=1      skip the keyboard-light and fan UI, and its daemon
+#   CONTROLS_OFFLINE=1   never touch the network; use the existing clone
+#   CONTROLS_REF=<ref>   build a particular ref instead of the default
+stage_controls() {
+    if [[ "${CONTROLS_SKIP:-0}" == "1" ]]; then
+        log_info "  CONTROLS_SKIP=1: no keyboard-light or fan control on the image"
+        return 0
+    fi
+
+    command -v cargo &>/dev/null || {
+        log_warn "  cargo not found; Raven Controls will not be built"
+        return 0
+    }
+
+    local -a missing=()
+    local mod
+    for mod in gtk4 libadwaita-1 glib-2.0 gio-2.0; do
+        pkg-config --exists "${mod}" 2>/dev/null || missing+=("${mod}")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        log_warn "  missing build dependencies for Raven Controls: ${missing[*]}"
+        log_warn "  install them with: pacman -S --needed gtk4 libadwaita"
+        log_warn "  the desktop will ship without keyboard-light or fan control"
+        return 0
+    fi
+
+    local dest="${GUI_SRC_DIR}/${CONTROLS_REPO}"
+    if ! fetch_repo "${CONTROLS_REPO}" "${CONTROLS_URL}" "${dest}" \
+            "${CONTROLS_REF:-}" "${CONTROLS_OFFLINE:-${GUI_OFFLINE:-0}}"; then
+        log_warn "  RavenControls source unavailable; no fan or backlight control"
+        return 0
+    fi
+
+    # --workspace, because the daemon is the half that makes fan control safe
+    # to offer: without it the window can drive the keyboard light and the
+    # firmware thermal profiles and must refuse every fan speed it draws.
+    log_info "  building Raven Controls for ${GUI_TARGET}..."
+    local -a cargo_args=(build --release --workspace --target "${GUI_TARGET}")
+    [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
+    if ! ( cd "${dest}" && cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}" ); then
+        log_warn "  Raven Controls build failed; no fan or backlight control"
+        return 0
+    fi
+
+    local built="${dest}/target/${GUI_TARGET}/release"
+    if [[ ! -x "${built}/${CONTROLS_BIN}" ]]; then
+        log_warn "  Raven Controls produced no window binary; nothing installed"
+        return 0
+    fi
+    install -Dm 0755 "${built}/${CONTROLS_BIN}" "${SYSROOT_DIR}/usr/bin/${CONTROLS_BIN}"
+    log_success "  ${CONTROLS_BIN} installed ($(du -h "${built}/${CONTROLS_BIN}" | cut -f1))"
+    stage_gui_libraries "${built}/${CONTROLS_BIN}"
+
+    # A warning and not a failure: the window is still worth having, and it
+    # says so itself when the daemon is absent rather than drawing fan controls
+    # that would not work.
+    if [[ -x "${built}/${CONTROLS_DAEMON}" ]]; then
+        install -Dm 0755 "${built}/${CONTROLS_DAEMON}" \
+            "${SYSROOT_DIR}/usr/bin/${CONTROLS_DAEMON}"
+        log_success "  ${CONTROLS_DAEMON} installed (init starts it as the controlsd service)"
+        stage_gui_libraries "${built}/${CONTROLS_DAEMON}"
+    else
+        log_warn "  no ${CONTROLS_DAEMON} binary; the window will refuse fan control"
+    fi
+
+    local appdata="${SYSROOT_DIR}/usr/share"
+
+    # The launcher icon. install_desktop_entries writes the entry that names it.
+    install -Dm 0644 "${dest}/data/icons/hicolor/scalable/apps/${CONTROLS_APPID}.svg" \
+        "${appdata}/icons/hicolor/scalable/apps/${CONTROLS_APPID}.svg" 2>/dev/null \
+        && log_info "    + ${CONTROLS_APPID}.svg (hicolor/scalable)" \
+        || log_warn "    no icon in the checkout; the launcher entry will draw blank"
+
+    install -Dm 0644 "${dest}/data/${CONTROLS_APPID}.metainfo.xml" \
+        "${appdata}/metainfo/${CONTROLS_APPID}.metainfo.xml" 2>/dev/null || true
+
+    # The keyboard backlight is an LED-class device owned by root, so without
+    # this rule the slider in the window is drawn disabled with an explanation.
+    # Matched on the LED function rather than on any driver, so the one rule
+    # covers every laptop whose keyboard light has a kernel driver.
+    #
+    # It grants nothing over the fans, deliberately -- see the comments in the
+    # file, and raven-controlsd for what does.
+    if install -Dm 0644 "${dest}/data/90-raven-controls.rules" \
+            "${SYSROOT_DIR}/etc/udev/rules.d/90-raven-controls.rules" 2>/dev/null; then
+        log_info "    + 90-raven-controls.rules (keyboard backlight for group video)"
+    else
+        log_warn "    no udev rule staged; the keyboard light will need root"
+    fi
+
+    # The drop-in, for a machine installed before this service existed. Inert
+    # where it lands; /etc/raven/init.toml on this image defines controlsd
+    # itself.
+    install -Dm 0644 "${dest}/data/controlsd.toml" \
+        "${appdata}/raven/services/controlsd.toml" 2>/dev/null || true
+
+    if declare -F stage_gtk_runtime &>/dev/null; then
+        stage_gtk_runtime
+    fi
+}
+
+# =============================================================================
 # The application menu
 # =============================================================================
 # `launcher::scan_applications()` reads $XDG_DATA_DIRS/applications, and
@@ -1022,8 +1155,10 @@ stage_login() {
     # and a missing lock screen turns that into ten seconds of black display
     # before the compositor gives up and un-blanks.
     local built="${dest}/target/${GUI_TARGET}/release"
+    local -a login_bins
+    raven_split_list login_bins "${LOGIN_BINARIES}"
     local binary
-    for binary in ravend raven-greeter raven-lock; do
+    for binary in "${login_bins[@]}"; do
         if [[ ! -x "${built}/${binary}" ]]; then
             log_warn "  ${binary} was not produced by the build; the image will autologin"
             return 0
@@ -1035,7 +1170,7 @@ stage_login() {
         return 0
     }
 
-    for binary in ravend raven-greeter raven-lock; do
+    for binary in "${login_bins[@]}"; do
         install -m 0755 "${built}/${binary}" "${SYSROOT_DIR}/usr/bin/${binary}"
         log_success "  ${binary} installed ($(du -h "${built}/${binary}" | cut -f1))"
     done
@@ -1178,15 +1313,17 @@ stage_canvas() {
     # themselves -- `raven-set-wallpaper` sets the machine's, which is not the
     # same thing.
     local built="${dest}/target/${GUI_TARGET}/release"
+    local -a canvas_bins
+    raven_split_list canvas_bins "${CANVAS_BINARIES}"
     local binary
-    for binary in ravencanvasd ravencanvas; do
+    for binary in "${canvas_bins[@]}"; do
         if [[ ! -x "${built}/${binary}" ]]; then
             log_warn "  ${binary} was not produced by the build; no wallpaper daemon"
             return 0
         fi
     done
 
-    for binary in ravencanvasd ravencanvas; do
+    for binary in "${canvas_bins[@]}"; do
         install -m 0755 "${built}/${binary}" "${SYSROOT_DIR}/usr/bin/${binary}"
         log_success "  ${binary} installed ($(du -h "${built}/${binary}" | cut -f1))"
     done
@@ -1684,6 +1821,31 @@ ENTRY
         chmod 0644 "${dir}/${BATTERY_APPID}.desktop"
         written=$((written + 1))
         log_info "    + ${BATTERY_APPID}.desktop"
+    fi
+
+    # Icon= names the SVG stage_controls staged into hicolor, rather than a
+    # stock symbolic: this one ships an icon, as Settings and the file manager
+    # do. StartupWMClass matches the application id libadwaita sets from
+    # `adw::Application::builder().application_id(...)`, which is how the dock
+    # associates a running window with this entry.
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${CONTROLS_BIN}" ]]; then
+        cat > "${dir}/${CONTROLS_APPID}.desktop" << ENTRY
+[Desktop Entry]
+Type=Application
+Name=Controls
+GenericName=Keyboard Backlight and Fans
+Comment=Keyboard backlight, fan speeds and thermal profiles
+Exec=${CONTROLS_BIN}
+Icon=${CONTROLS_APPID}
+Categories=System;Settings;HardwareSettings;GTK;
+Keywords=keyboard;backlight;light;fan;cooling;thermal;rpm;curve;profile;quiet;
+StartupWMClass=${CONTROLS_APPID}
+StartupNotify=true
+Terminal=false
+ENTRY
+        chmod 0644 "${dir}/${CONTROLS_APPID}.desktop"
+        written=$((written + 1))
+        log_info "    + ${CONTROLS_APPID}.desktop"
     fi
 
     # The launcher reads this directory; update-desktop-database is what makes
@@ -2195,6 +2357,23 @@ print_gui_summary() {
         echo "  [--] battery management  not built - raven-powerd policy remains active"
     fi
 
+    # Three states worth telling apart, because the middle one is a working
+    # window that has to refuse half of what it draws.
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${CONTROLS_BIN}" ]]; then
+        if [[ -x "${SYSROOT_DIR}/usr/bin/${CONTROLS_DAEMON}" ]]; then
+            echo "  [OK] backlight and fans  /usr/bin/${CONTROLS_BIN}, ${CONTROLS_DAEMON} (init: controlsd)"
+        else
+            echo "  [--] backlight and fans  window only - no ${CONTROLS_DAEMON}, so no fan control"
+        fi
+        if [[ -f "${SYSROOT_DIR}/etc/udev/rules.d/90-raven-controls.rules" ]]; then
+            echo "  [OK] keyboard light      udev rule staged (group video)"
+        else
+            echo "  [--] keyboard light      no udev rule - setting it will need root"
+        fi
+    else
+        echo "  [--] backlight and fans  not built"
+    fi
+
     if [[ -x "${SYSROOT_DIR}/usr/bin/${ROOSTBAR_BIN}" \
             && -x "${SYSROOT_DIR}/etc/raven/session.d/50-roostbar" ]]; then
         echo "  [OK] status bar          /usr/bin/${ROOSTBAR_BIN} (session.d enabled)"
@@ -2372,6 +2551,12 @@ main() {
     # It must exist before install_desktop_entries decides what to advertise.
     log_step "Staging battery management..."
     stage_battery_management
+
+    # Before install_desktop_entries, like the rest: the entry is written only
+    # if the binary is there to see. This one also stages a udev rule and the
+    # daemon that /etc/raven/init.toml starts as the `controlsd` service.
+    log_step "Staging keyboard-light and fan control..."
+    stage_controls
 
     log_step "Installing application entries..."
     install_desktop_entries
