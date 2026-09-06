@@ -16,6 +16,10 @@ publish = false
 # bootloader's arithmetic and not the host's slightly different `std`.
 libm = "0.2"
 
+# Deflate, for png.rs. Pure Rust (miniz_oxide), host-side only: nothing here
+# reaches the .efi, which has no PNGs and no compressor.
+flate2 = "1"
+
 [build-dependencies]
 ab_glyph = "0.2"
 

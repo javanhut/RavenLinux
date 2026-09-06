@@ -87,7 +87,7 @@ pub enum Tone {
 /// Tracking a monospaced face is normally a mistake — it is already evenly
 /// spaced — but at display size a five-letter all-caps word needs to read as a
 /// mark and not as a word, and this is what does it.
-const WORDMARK_TRACKING: f32 = 0.28;
+pub const WORDMARK_TRACKING: f32 = 0.28;
 
 /// Draw one frame.
 ///

@@ -507,10 +507,75 @@ setup_ravenboot() {
 }
 
 # =============================================================================
+# GRUB theme
+# =============================================================================
+# Installs the Raven look for the BIOS menu: bootloader/preview generates the
+# pixmaps and theme.txt from the same constants and the same renderer RavenBoot
+# draws with (see configs/grub/theme), and this converts the repository's
+# JetBrains Mono to the .pf2 GRUB needs and puts the lot on the ISO.
+#
+# GRUB is the BIOS half only -- UEFI gets RavenBoot, and raven-install never
+# writes GRUB to a disk. It is still the first screen a BIOS machine sees, which
+# is the whole reason it should not be the one screen in the image wearing
+# somebody else's colours.
+#
+# Returns non-zero when the theme cannot be installed, and setup_grub falls back
+# to plain gfxterm in the Raven palette rather than to GRUB's own blue.
+install_grub_theme() {
+    local src="${PROJECT_ROOT}/configs/grub/theme"
+    local dest="${ISO_ROOT}/boot/grub/themes/raven"
+    local ttf="${PROJECT_ROOT}/fonts/JetBrainsMonoNerdFontMono-Regular.ttf"
+
+    [[ -f "${src}/theme.txt" ]] || {
+        log_warn "No GRUB theme at ${src}; the BIOS menu will be text-only"
+        log_info "  Regenerate it with: cd bootloader/preview && cargo run --release -- grub-theme"
+        return 1
+    }
+
+    command -v grub-mkfont &>/dev/null || {
+        log_warn "grub-mkfont not found; the BIOS menu will be text-only"
+        return 1
+    }
+
+    [[ -f "${ttf}" ]] || {
+        log_warn "No ${ttf}; the BIOS menu will be text-only"
+        return 1
+    }
+
+    mkdir -p "${dest}"
+    cp "${src}"/*.png "${src}/theme.txt" "${dest}/" || return 1
+
+    # -n sets the name stored in the .pf2, and it has to match the `font =`
+    # strings in theme.txt exactly -- GRUB looks a font up by that string and
+    # silently renders nothing when it does not resolve. Left to itself
+    # grub-mkfont would name these after the Nerd Font's own family, which is
+    # "JetBrainsMonoNL Nerd Font Mono" and not something theme.txt can predict.
+    local size name
+    for size in 16 13; do
+        name="JetBrains Mono Regular ${size}"
+        if ! grub-mkfont -s "${size}" -n "${name}" \
+                -o "${dest}/body-${size}.pf2" "${ttf}" \
+                2>&1 | tee -a "${LOGS_DIR}/grub-mkfont.log"; then
+            log_warn "grub-mkfont failed at ${size}px; the BIOS menu will be text-only"
+            rm -rf "${dest}"
+            return 1
+        fi
+    done
+
+    log_success "  GRUB theme installed ($(du -sh "${dest}" | cut -f1))"
+    return 0
+}
+
+# =============================================================================
 # Setup GRUB (fallback/BIOS)
 # =============================================================================
 setup_grub() {
     log_step "Setting up GRUB bootloader..."
+
+    # The Raven look, if it can be built. Done before grub.cfg is written
+    # because the config branches on whether it landed.
+    local themed=0
+    install_grub_theme && themed=1
 
     # Create GRUB config with clean menu structure
     cat > "${ISO_ROOT}/boot/grub/grub.cfg" << 'EOF'
@@ -519,12 +584,43 @@ set timeout=5
 
 insmod all_video
 insmod gfxterm
+insmod png
+insmod gfxmenu
 terminal_output gfxterm
 set gfxmode=auto
 set gfxpayload=keep
+EOF
 
-set color_normal=cyan/black
-set color_highlight=white/blue
+    # The theme is loaded by a runtime test rather than by baking one branch or
+    # the other in, because this same grub.cfg is what grub-mkstandalone embeds
+    # for the EFI fallback -- and that image carries the config alone, without
+    # the theme's fonts or pixmaps beside it. The test fails there and the
+    # palette below is used instead, which is right: an EFI machine only reaches
+    # GRUB at all when RavenBoot is missing, and a themeless menu beats none.
+    if [[ ${themed} -eq 1 ]]; then
+        cat >> "${ISO_ROOT}/boot/grub/grub.cfg" << 'EOF'
+
+if [ -f ${prefix}/themes/raven/theme.txt ]; then
+    loadfont ${prefix}/themes/raven/body-16.pf2
+    loadfont ${prefix}/themes/raven/body-13.pf2
+    set theme=${prefix}/themes/raven/theme.txt
+else
+    set color_normal=light-gray/black
+    set color_highlight=black/light-blue
+fi
+EOF
+    else
+        # gfxterm names sixteen colours and takes no hex, so this is as close to
+        # the Raven palette as an unthemed menu gets: light-gray on black for the
+        # body, and the accent's nearest neighbour behind the selection.
+        cat >> "${ISO_ROOT}/boot/grub/grub.cfg" << 'EOF'
+
+set color_normal=light-gray/black
+set color_highlight=black/light-blue
+EOF
+    fi
+
+    cat >> "${ISO_ROOT}/boot/grub/grub.cfg" << 'EOF'
 
 # Default: console on tty1
 menuentry "Raven Linux" --class raven {
@@ -792,7 +888,7 @@ prepare_bios_boot() {
             biosdisk iso9660 part_msdos part_gpt fat ext2 \
             normal linux linux16 configfile search search_fs_uuid search_label \
             echo test boot chain minicmd ls cat halt reboot \
-            gfxterm gfxmenu all_video videoinfo font \
+            gfxterm gfxmenu all_video videoinfo font png gettext \
             2>&1 | tee -a "${LOGS_DIR}/grub-mkimage.log"; then
         log_warn "grub-mkimage failed; the ISO will be EFI-only"
         return 1

@@ -28,6 +28,8 @@ mod font;
 #[path = "../../src/menu.rs"]
 mod menu;
 
+mod grub;
+mod grubsim;
 mod png;
 
 use menu::{Row, RowKind, Status, Tone, View};
@@ -60,6 +62,30 @@ const LABELS: &[&str] = &[
 ];
 
 fn main() {
+    // `cargo run -- grub-theme [dir]` writes the BIOS menu's theme instead of
+    // the previews. Same renderer, so the two menus cannot drift apart.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("grub-theme") {
+        let dir = args.get(1).map_or_else(
+            || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs/grub/theme"),
+            std::path::PathBuf::from,
+        );
+        grub::generate(&dir).expect("cannot write the GRUB theme");
+        println!("{}", dir.display());
+
+        // Render what the theme composes to, at the sizes a BIOS machine is
+        // likely to hand GRUB. See `grubsim` for what this does and does not
+        // prove.
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("out");
+        std::fs::create_dir_all(&out).expect("cannot create preview/out");
+        for (w, h) in [(1024usize, 768usize), (1920, 1080)] {
+            let path = out.join(format!("grub-{w}x{h}.png"));
+            grubsim::render(&dir, &path, w, h).expect("cannot render the GRUB theme");
+            println!("{}", path.display());
+        }
+        return;
+    }
+
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("out");
     std::fs::create_dir_all(&out).expect("cannot create preview/out");
 
