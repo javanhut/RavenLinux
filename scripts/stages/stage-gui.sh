@@ -1160,6 +1160,15 @@ stage_controls() {
 # `ravend` on the image and starts it in place of the autologin session when it
 # finds one, so installing the binary is the whole of turning the login screen
 # on, and LOGIN_SKIP=1 is the whole of leaving it off.
+#
+# On an installed disk, that is. raven-init refuses to put a login screen in
+# front of a live boot however this stage builds the image, and it is right to:
+# the only account a greeter would offer on the ISO is the `raven` placeholder,
+# whose password is either the documented default or -- on a build host with no
+# way to hash one, see stage2 -- locked outright. A prompt with no correct
+# answer is not a login screen, it is a wall. The daemon is shipped here for the
+# machine this ISO installs, which gets a root= on its command line and a
+# password the installer set; see booted_live() in init/src/overrides.rs.
 stage_login() {
     if [[ "${LOGIN_SKIP:-0}" == "1" ]]; then
         log_warn "  LOGIN_SKIP=1: the image will autologin with no password prompt"
@@ -2381,7 +2390,7 @@ print_gui_summary() {
         echo "Login:"
         printf "  [OK] %-14s %-6s %s\n" "ravend" \
             "$(du -h "${SYSROOT_DIR}/usr/bin/ravend" | cut -f1)" \
-            "boots to a password prompt; raven-init starts this, not the session"
+            "installed disks boot to a password prompt; the live ISO autologins"
     else
         echo "Login:"
         printf "  [--] %-14s %-6s %s\n" "ravend" "" \

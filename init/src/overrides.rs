@@ -68,6 +68,34 @@ fn find_program_in(dirs: &[&str], name: &str) -> Option<String> {
         .find(|path| Path::new(path).is_file())
 }
 
+/// Whether this boot is the live image rather than a machine somebody installed.
+///
+/// Deliberately the same rule the initramfs already uses -- see
+/// `raven_root_from_cmdline` and the boot banner in scripts/build-initramfs.sh.
+/// A command line that names a root filesystem is booting a disk: raven-install
+/// writes `root=UUID=...` into the entries it creates. The ISO's entries, in
+/// stage4-iso.sh and in RavenBoot's compiled-in defaults, carry `rdinit=/init`
+/// and no `root=` at all. `raven.live` is the documented escape hatch for
+/// booting the live image from a disk that does have one, so it wins outright.
+///
+/// The direction of the default is the point, and it is the safe one. An
+/// installed machine always has a `root=`, so it is never mistaken for live and
+/// never loses its login screen. A live boot that somehow arrives here with one
+/// gets a login screen it did not need, which is an annoyance; the opposite
+/// mistake would be an installed machine that lets anybody in.
+fn booted_live(cmdline: &str) -> bool {
+    let mut has_root = false;
+    for arg in cmdline.split_whitespace() {
+        if arg == "raven.live" {
+            return true;
+        }
+        if let Some(spec) = arg.strip_prefix("root=") {
+            has_root |= !spec.is_empty();
+        }
+    }
+    !has_root
+}
+
 pub(crate) fn fixup_getty_login_programs(config: &mut InitConfig) {
     if Path::new("/bin/raven-shell").exists() {
         return;
@@ -101,6 +129,11 @@ pub(crate) fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<
     }
 
     log::info!("Kernel cmdline requested Wayland graphics");
+
+    // Read once here rather than at the use below, so that the one place this
+    // function asks what kind of boot this is sits with the rest of the
+    // command-line parsing.
+    let live = booted_live(&cmdline);
 
     // Disable tty1 getty by default to avoid fighting for the tty.
     for svc in &mut config.services {
@@ -256,20 +289,42 @@ pub(crate) fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<
         .map(|p| vec![p])
         .unwrap_or_default();
 
-    // A login screen, if this image has one.
+    // A login screen, if this image has one and this boot is one that wants it.
     //
     // ravend draws the greeter, checks the password and starts the session
     // itself -- the same job the service below does, minus the "auto". Only
     // one of the two can hold the GPU and the seat, so finding ravend replaces
     // that service rather than adding to it.
     //
-    // Deciding it here, on whether the binary is installed, is what
-    // RavenLogin's README asks for and is the difference between a login
-    // screen you get by installing a package and one you get by editing
-    // init.toml and disabling a getty by hand. Removing ravend falls back to
-    // the autologin session with no edit anywhere and nothing on the kernel
-    // cmdline either way.
-    if let Some(ravend_exec) = find_program("ravend") {
+    // Deciding it on whether the binary is installed is what RavenLogin's
+    // README asks for and is the difference between a login screen you get by
+    // installing a package and one you get by editing init.toml and disabling
+    // a getty by hand. Removing ravend falls back to the autologin session
+    // with no edit anywhere and nothing on the kernel cmdline either way.
+    //
+    // Except on a live boot, which is the second half of the question and used
+    // to be missing. The ISO ships ravend so that the machine installed from it
+    // has one, but the live image itself has no account anybody has been given
+    // a password for: `raven` is a placeholder that exists so the image has a
+    // non-root user, and root is not offered by a greeter at all. So the login
+    // screen there was a prompt with no correct answer -- on a build host
+    // without a password hasher the shipped accounts are locked outright, and
+    // the ISO's own desktop could not be reached. A live image is a tool for
+    // installing the machine and looking at the hardware; it autologins, the
+    // same way its tty1 does with --skip-login, and raven-install turns the
+    // login screen on for the disk it writes by giving that disk a root=.
+    let login_daemon = match (live, find_program("ravend")) {
+        (true, Some(_)) => {
+            log::info!(
+                "Live boot: the desktop autologins. ravend is installed for the machine \
+                 this image installs, not for the image."
+            );
+            None
+        }
+        (_, found) => found,
+    };
+
+    if let Some(ravend_exec) = login_daemon {
         log::info!("Found ravend; the graphical session starts behind a login screen");
 
         let mut env = HashMap::new();
@@ -470,5 +525,59 @@ mod path_resolution_tests {
         assert!(SYSTEM_BIN_DIRS.contains(&"/sbin"));
         assert!(SYSTEM_BIN_DIRS.contains(&"/usr/bin"));
         assert!(SYSTEM_BIN_DIRS.contains(&"/bin"));
+    }
+}
+
+#[cfg(test)]
+mod live_boot_tests {
+    use super::booted_live;
+
+    /// The ISO's own entries, from stage4-iso.sh and RavenBoot's defaults.
+    #[test]
+    fn the_isos_entries_are_live() {
+        assert!(booted_live(
+            "rdinit=/init quiet loglevel=3 raven.graphics=wayland \
+             raven.wayland=huginn raven.user=root console=tty0"
+        ));
+        assert!(booted_live(
+            "rdinit=/init quiet loglevel=3 raven.graphics=x11 \
+             console=ttyS0,115200 console=tty0"
+        ));
+    }
+
+    /// The entries raven-install writes. This is the one that must not drift:
+    /// an installed machine read as live is an installed machine with no login
+    /// screen.
+    #[test]
+    fn an_installed_disk_is_not_live() {
+        assert!(!booted_live(
+            "root=UUID=1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed rw quiet \
+             raven.graphics=wayland raven.wayland=huginn"
+        ));
+        assert!(!booted_live("root=/dev/sda2 rw"));
+        assert!(!booted_live("root=PARTUUID=abc-123 ro"));
+    }
+
+    /// The documented escape hatch, and the same precedence the initramfs
+    /// banner gives it: booting the live image from a disk that has a root=.
+    #[test]
+    fn raven_live_outranks_a_root() {
+        assert!(booted_live("root=UUID=abc-123 rw raven.live"));
+        assert!(booted_live("raven.live root=/dev/sda2"));
+    }
+
+    /// A bare `root=` names nothing, so it is not a disk to boot.
+    #[test]
+    fn an_empty_root_does_not_count_as_installed() {
+        assert!(booted_live("quiet root= rw"));
+    }
+
+    /// `raven.live` is the whole word. `raven.livepatch` is not it, and a
+    /// substring match here would take the login screen off an installed
+    /// machine.
+    #[test]
+    fn a_longer_argument_is_not_raven_live() {
+        assert!(!booted_live("root=UUID=abc-123 rw raven.livepatch=1"));
+        assert!(!booted_live("root=UUID=abc-123 rw noraven.live"));
     }
 }

@@ -1409,6 +1409,21 @@ set_passwords() {
         else
             failed=1
         fi
+    else
+        # add_user() created the account with '!' in shadow, so it is locked
+        # rather than open -- which is the right way round, and is also the one
+        # state the graphical login screen cannot be talked past: `ravend`
+        # offers this account, the person types the password nobody set, and
+        # there is no answer that works. The live image gets away with an
+        # account like this because it autologins; an installed disk does not.
+        #
+        # So this has to be said out loud. It used to be the one path through
+        # here that set nothing and warned about nothing, and the summary at
+        # the end still told you to log in as this user.
+        warn "${USERNAME} has no password and is locked"
+        echo "        Boot the rescue entry and run 'passwd ${USERNAME}' before"
+        echo "        the login screen -- there is no password that will get past it."
+        NEEDS_PASSWORD_ON_FIRST_BOOT=1
     fi
 
     if [[ $failed -eq 1 ]]; then
@@ -1754,7 +1769,8 @@ finish() {
     echo
     echo "  Log in as ${WHITE}${USERNAME}${NC} on tty1."
     if [[ ${NEEDS_PASSWORD_ON_FIRST_BOOT:-0} -eq 1 ]]; then
-        echo "  ${YELLOW}No password was set. Boot 'RavenLinux (rescue shell)' and run passwd.${NC}"
+        echo "  ${YELLOW}No password was set, and the login screen cannot be passed without one.${NC}"
+        echo "  ${YELLOW}Boot 'RavenLinux (rescue shell)' and run passwd ${USERNAME} first.${NC}"
     fi
     echo
     echo "  Before rebooting:"
