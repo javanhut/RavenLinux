@@ -1,0 +1,23 @@
+# Renders the boot menu to a PNG on the host.
+#
+# Its own workspace, and not a member of anything: it exists so that changing
+# the menu's layout does not require building an ISO and booting it, and it must
+# not become something `cargo build` in the parent has to compile.
+[package]
+name = "raven-boot-preview"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# The same crate the bootloader uses, so the preview's arithmetic is the
+# bootloader's arithmetic and not the host's slightly different `std`.
+libm = "0.2"
+
+[build-dependencies]
+ab_glyph = "0.2"
+
+[profile.release]
+opt-level = 2

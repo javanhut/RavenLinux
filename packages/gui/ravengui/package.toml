@@ -11,13 +11,16 @@ categories = ["gui", "wayland"]
 [source]
 type = "git"
 url = "https://github.com/javanhut/RavenGUI.git"
-# Deliberately unpinned, like ravenlogin and ravencanvas below. The reason here
-# is not "nothing has been tagged yet" but that the pin named a commit nothing
-# built: the GUI stage fetches this repository itself (fetch_repo in
-# scripts/stages/stage-gui.sh, with no ref) and hard-resets to the default
-# branch, so every image carries HEAD while this file claimed 69a7414. A hash
-# that disagrees with what ships is worse than no hash -- it reads like a
-# guarantee. Pin it at the first release, and pin the GUI stage with it.
+# Deliberately unpinned, like ravenlogin and ravencanvas below.
+#
+# The objection this comment used to raise has been dealt with. It said the pin
+# named a commit nothing built -- the GUI stage fetched this repository with no
+# ref and hard-reset to the default branch, so every image carried HEAD while
+# this file claimed 69a7414. fetch_repo now resolves its ref through
+# raven_resolve_ref, which reads the commit below, so a hash here IS the hash
+# that ships. What is left is the ordinary reason: nothing has been tagged yet.
+# Add a `commit = "..."` line at the first release and the GUI stage will build
+# it, with no change to any script.
 
 [build]
 system = "cargo"

@@ -31,7 +31,16 @@
 #   RAVEN_ONLY=crow,ivaldi        build only these components
 #   RAVEN_SKIP=oxigen             skip these components
 #   RAVEN_OFFLINE=1               never touch the network; use existing clones
-#   RAVEN_<KEY>_REF=<git-ref>     pin one component (e.g. RAVEN_IVALDI_REF=v0.1.2)
+#   RAVEN_<KEY>_REF=<git-ref>     pin one component (e.g. RAVEN_IVALDI_REF=v0.1.2),
+#                                 overriding its manifest pin. A 40-character
+#                                 commit id works here as well as a tag.
+#   RAVEN_IGNORE_MANIFEST_PINS=1  ignore every packages/*/package.toml pin and
+#                                 build the default branch of everything
+#
+# With neither of those set, each component is fetched at the [source] commit
+# in packages/raven/<key>/package.toml. Those pins are what make two builds of
+# an unchanged tree produce the same software; a component whose manifest
+# carries no pin tracks its default branch and says so in the log.
 #   RAVEN_KEEP_BASH_DEFAULT=1     install ravenshell but leave bash as the
 #                                 default login shell
 #   RAVEN_PACMAN_FROM_HOST=1      give rvn the build host's pacman.conf and
@@ -218,48 +227,16 @@ fetch_component() {
     local url
     url="$(raven_component_url "${repo}")"
 
-    # RAVEN_IVALDI_REF, RAVEN_CROW_REF, ...
+    # RAVEN_IVALDI_REF, RAVEN_CROW_REF, ... override everything. With none set,
+    # the pin comes from packages/raven/<key>/package.toml -- the manifest
+    # directory is the component key, which is why there is no manifest column
+    # in RAVEN_COMPONENTS.
     local ref_var="RAVEN_${key^^}_REF"
-    local ref="${!ref_var:-}"
+    local ref origin
+    IFS=$'\t' read -r origin ref < <(raven_resolve_ref "${!ref_var:-}" "raven/${key}")
 
-    if [[ "${RAVEN_OFFLINE:-0}" == "1" ]]; then
-        if [[ -d "${dest}/.git" ]]; then
-            log_info "  offline: using existing clone of ${repo}"
-            return 0
-        fi
-        log_warn "  offline: no clone of ${repo} in ${RAVEN_SRC_DIR}"
-        return 1
-    fi
-
-    if ! command -v git &>/dev/null; then
-        log_warn "  git not found, cannot fetch ${repo}"
-        return 1
-    fi
-
-    mkdir -p "${RAVEN_SRC_DIR}"
-
-    if [[ -d "${dest}/.git" ]]; then
-        log_info "  updating ${repo}..."
-        # Unshallow-safe: --depth on fetch keeps shallow clones shallow.
-        if ! (cd "${dest}" && git fetch --tags --depth 1 origin "${ref:-HEAD}" 2>/dev/null \
-              && git reset --hard FETCH_HEAD >/dev/null 2>&1); then
-            log_warn "  could not update ${repo}, using the existing checkout"
-        fi
-    else
-        log_info "  cloning ${repo}..."
-        rm -rf "${dest}"
-        if [[ -n "${ref}" ]]; then
-            git clone --depth 1 --branch "${ref}" -q "${url}" "${dest}" 2>/dev/null \
-                || git clone --depth 1 -q "${url}" "${dest}" || return 1
-        else
-            git clone --depth 1 -q "${url}" "${dest}" || return 1
-        fi
-    fi
-
-    local rev
-    rev="$(cd "${dest}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-    log_info "  ${repo} @ ${rev}"
-    return 0
+    raven_fetch_repo "${repo}" "${url}" "${dest}" "${ref}" \
+        "${RAVEN_OFFLINE:-0}" "${origin}"
 }
 
 # =============================================================================

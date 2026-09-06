@@ -73,6 +73,13 @@
 #                              do not fetch or compile any GUI component
 #   GUI_OFFLINE=1              never touch the network; use the existing clones
 #   GUI_REF=<git-ref>          build a particular RavenGUI ref
+#
+# Every <NAME>_REF below overrides that component's manifest pin. With none
+# set, each repository is fetched at the [source] commit in its
+# packages/gui/<name>/package.toml, and one with no such pin tracks its default
+# branch -- which is what most of them still do. RAVEN_IGNORE_MANIFEST_PINS=1
+# ignores the manifests wholesale. See the Pins section of
+# scripts/lib/components.sh.
 #   GUI_TARGET=<rust-target>   override the host target (rarely wanted)
 #   TERMINAL_SKIP=1            skip RavenTerminal; the desktop ships unusable
 #   TERMINAL_OFFLINE=1         as GUI_OFFLINE, for the terminal alone
@@ -359,50 +366,29 @@ have_gui_toolchain() {
 # branch-then-default clone retry are all easy to get subtly different, and a
 # terminal that silently built from a stale checkout would look like a code bug.
 #
-#   fetch_repo <name> <url> <dest> [ref] [offline]
+# The clone and update themselves now live in scripts/lib/components.sh, shared
+# with the Raven stage for exactly the same reason one step up: this file and
+# that one had a copy each, and only one of them learned to fetch a commit id.
+# What stays here is the ref resolution, because the manifest a component is
+# pinned by is a property of the component and not of git.
+#
+#   fetch_repo <name> <url> <dest> [ref] [offline] [manifest]
 fetch_repo() {
-    local name="$1" url="$2" dest="$3" ref="${4:-}" offline="${5:-0}"
-    local parent
-    parent="$(dirname "${dest}")"
+    local name="$1" url="$2" dest="$3" env_ref="${4:-}" offline="${5:-0}"
+    local manifest="${6:-}"
 
-    if [[ "${offline}" == "1" ]]; then
-        if [[ -d "${dest}/.git" ]]; then
-            log_info "  offline: using existing clone of ${name}"
-            return 0
-        fi
-        log_warn "  offline: no clone of ${name} in ${parent}"
-        return 1
-    fi
+    # <KEY>_REF wins; failing that the [source] commit in the component's
+    # packages/ manifest; failing that the default branch. See the Pins section
+    # of scripts/lib/components.sh for why the manifest is consulted at all.
+    local ref origin
+    IFS=$'\t' read -r origin ref < <(raven_resolve_ref "${env_ref}" "${manifest}")
 
-    command -v git &>/dev/null || { log_warn "  git not found"; return 1; }
-    mkdir -p "${parent}"
-
-    if [[ -d "${dest}/.git" ]]; then
-        log_info "  updating ${name}..."
-        if ! (cd "${dest}" && git fetch --tags --depth 1 origin "${ref:-HEAD}" 2>/dev/null \
-              && git reset --hard FETCH_HEAD >/dev/null 2>&1); then
-            log_warn "  could not update ${name}, using the existing checkout"
-        fi
-    else
-        log_info "  cloning ${name}..."
-        rm -rf "${dest}"
-        if [[ -n "${ref}" ]]; then
-            git clone --depth 1 --branch "${ref}" -q "${url}" "${dest}" 2>/dev/null \
-                || git clone --depth 1 -q "${url}" "${dest}" || return 1
-        else
-            git clone --depth 1 -q "${url}" "${dest}" || return 1
-        fi
-    fi
-
-    local rev
-    rev="$(cd "${dest}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-    log_info "  ${name} @ ${rev}"
-    return 0
+    raven_fetch_repo "${name}" "${url}" "${dest}" "${ref}" "${offline}" "${origin}"
 }
 
 fetch_gui_source() {
     fetch_repo "${GUI_REPO}" "${GUI_URL}" "${GUI_SRC_DIR}/${GUI_REPO}" \
-        "${GUI_REF:-}" "${GUI_OFFLINE:-0}"
+        "${GUI_REF:-}" "${GUI_OFFLINE:-0}" "${GUI_MANIFEST}"
 }
 
 # =============================================================================
@@ -624,7 +610,7 @@ stage_terminal() {
 
     local dest="${GUI_SRC_DIR}/${TERMINAL_REPO}"
     if ! fetch_repo "${TERMINAL_REPO}" "${TERMINAL_URL}" "${dest}" \
-            "${TERMINAL_REF:-}" "${TERMINAL_OFFLINE:-${GUI_OFFLINE:-0}}"; then
+            "${TERMINAL_REF:-}" "${TERMINAL_OFFLINE:-${GUI_OFFLINE:-0}}" "${TERMINAL_MANIFEST}"; then
         log_warn "  RavenTerminal source unavailable; the desktop will have no terminal"
         return 0
     fi
@@ -891,7 +877,7 @@ stage_filemanager() {
 
     local dest="${GUI_SRC_DIR}/${FILEMANAGER_REPO}"
     if ! fetch_repo "${FILEMANAGER_REPO}" "${FILEMANAGER_URL}" "${dest}" \
-            "${FILEMANAGER_REF:-}" "${FILEMANAGER_OFFLINE:-${GUI_OFFLINE:-0}}"; then
+            "${FILEMANAGER_REF:-}" "${FILEMANAGER_OFFLINE:-${GUI_OFFLINE:-0}}" "${FILEMANAGER_MANIFEST}"; then
         log_warn "  RavenFileManager source unavailable; no file manager on the image"
         return 0
     fi
@@ -1000,7 +986,7 @@ stage_controls() {
 
     local dest="${GUI_SRC_DIR}/${CONTROLS_REPO}"
     if ! fetch_repo "${CONTROLS_REPO}" "${CONTROLS_URL}" "${dest}" \
-            "${CONTROLS_REF:-}" "${CONTROLS_OFFLINE:-${GUI_OFFLINE:-0}}"; then
+            "${CONTROLS_REF:-}" "${CONTROLS_OFFLINE:-${GUI_OFFLINE:-0}}" "${CONTROLS_MANIFEST}"; then
         log_warn "  RavenControls source unavailable; no fan or backlight control"
         return 0
     fi
@@ -1131,7 +1117,7 @@ stage_login() {
 
     local dest="${GUI_SRC_DIR}/${LOGIN_REPO}"
     if ! fetch_repo "${LOGIN_REPO}" "${LOGIN_URL}" "${dest}" \
-            "${LOGIN_REF:-}" "${LOGIN_OFFLINE:-${GUI_OFFLINE:-0}}"; then
+            "${LOGIN_REF:-}" "${LOGIN_OFFLINE:-${GUI_OFFLINE:-0}}" "${LOGIN_MANIFEST}"; then
         log_warn "  RavenLogin source unavailable; the image will autologin"
         return 0
     fi
@@ -1290,7 +1276,7 @@ stage_canvas() {
 
     local dest="${GUI_SRC_DIR}/${CANVAS_REPO}"
     if ! fetch_repo "${CANVAS_REPO}" "${CANVAS_URL}" "${dest}" \
-            "${CANVAS_REF:-}" "${CANVAS_OFFLINE:-${GUI_OFFLINE:-0}}"; then
+            "${CANVAS_REF:-}" "${CANVAS_OFFLINE:-${GUI_OFFLINE:-0}}" "${CANVAS_MANIFEST}"; then
         log_warn "  RavenCanvas source unavailable; no wallpaper daemon"
         return 0
     fi
@@ -1392,7 +1378,7 @@ stage_roostbar() {
 
     local dest="${GUI_SRC_DIR}/${ROOSTBAR_REPO}"
     if ! fetch_repo "${ROOSTBAR_REPO}" "${ROOSTBAR_URL}" "${dest}" \
-            "${ROOSTBAR_REF:-}" "${ROOSTBAR_OFFLINE:-${GUI_OFFLINE:-0}}"; then
+            "${ROOSTBAR_REF:-}" "${ROOSTBAR_OFFLINE:-${GUI_OFFLINE:-0}}" "${ROOSTBAR_MANIFEST}"; then
         log_warn "  RoostBar source unavailable; no status bar on the image"
         return 0
     fi
@@ -1479,7 +1465,7 @@ stage_settings() {
 
     local dest="${GUI_SRC_DIR}/${SETTINGS_REPO}"
     if ! fetch_repo "${SETTINGS_REPO}" "${SETTINGS_URL}" "${dest}" \
-            "${SETTINGS_REF:-}" "${SETTINGS_OFFLINE:-${GUI_OFFLINE:-0}}"; then
+            "${SETTINGS_REF:-}" "${SETTINGS_OFFLINE:-${GUI_OFFLINE:-0}}" "${SETTINGS_MANIFEST}"; then
         log_warn "  RavenSettingsUI source unavailable; no settings app on the image"
         return 0
     fi
@@ -1558,7 +1544,7 @@ stage_store() {
 
     local dest="${GUI_SRC_DIR}/${STORE_REPO}"
     if ! fetch_repo "${STORE_REPO}" "${STORE_URL}" "${dest}" \
-            "${STORE_REF:-}" "${STORE_OFFLINE:-${GUI_OFFLINE:-0}}"; then
+            "${STORE_REF:-}" "${STORE_OFFLINE:-${GUI_OFFLINE:-0}}" "${STORE_MANIFEST}"; then
         log_warn "  RavenStore source unavailable; no software store on the image"
         return 0
     fi
@@ -1630,7 +1616,7 @@ stage_battery_management() {
 
     local dest="${GUI_SRC_DIR}/${BATTERY_REPO}"
     if ! fetch_repo "${BATTERY_REPO}" "${BATTERY_URL}" "${dest}" \
-            "${BATTERY_REF:-}" "${BATTERY_OFFLINE:-${GUI_OFFLINE:-0}}"; then
+            "${BATTERY_REF:-}" "${BATTERY_OFFLINE:-${GUI_OFFLINE:-0}}" "${BATTERY_MANIFEST}"; then
         log_warn "  RavenBatteryManagement source unavailable; no battery UI on the image"
         return 0
     fi

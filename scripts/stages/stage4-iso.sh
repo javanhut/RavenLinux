@@ -625,11 +625,20 @@ create_efi_image() {
     # Calculate size needed: kernel + initramfs + bootloader + some headroom
     local kernel_size=0
     local initrd_size=0
+    local boot_size=0
     [[ -f "${ISO_ROOT}/boot/vmlinuz" ]] && kernel_size=$(stat -c%s "${ISO_ROOT}/boot/vmlinuz")
     [[ -f "${ISO_ROOT}/boot/initramfs.img" ]] && initrd_size=$(stat -c%s "${ISO_ROOT}/boot/initramfs.img")
+    # RavenBoot goes on twice -- \EFI\BOOT\BOOTX64.EFI and \EFI\raven -- and
+    # it is no longer a rounding error against the headroom: it carries the boot
+    # menu's font atlas, which is most of its size. The comment above always
+    # said the bootloader was counted; now it is.
+    if [[ -f "${ISO_ROOT}/EFI/BOOT/BOOTX64.EFI" ]]; then
+        boot_size=$(( 2 * $(stat -c%s "${ISO_ROOT}/EFI/BOOT/BOOTX64.EFI") ))
+    fi
 
-    # Size in MB: (kernel + initramfs + 5MB headroom) / 1MB, minimum 40MB
-    local size_mb=$(( (kernel_size + initrd_size + 5*1024*1024) / (1024*1024) ))
+    # Size in MB: (kernel + initramfs + bootloader + 5MB headroom) / 1MB,
+    # minimum 40MB
+    local size_mb=$(( (kernel_size + initrd_size + boot_size + 5*1024*1024) / (1024*1024) ))
     [[ $size_mb -lt 40 ]] && size_mb=40
 
     log_info "Creating ${size_mb}MB EFI boot image..."

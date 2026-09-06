@@ -14,6 +14,15 @@ uefi-services = "0.25"
 # Logging
 log = "0.4"
 
+# Floating-point maths. `core` has none, and gfx.rs is a distance-field
+# rasterizer -- see the note at the bottom of that file.
+libm = "0.2"
+
+[build-dependencies]
+# Rasterizes the menu's font into an atlas at build time. Host-side only: it
+# never reaches the .efi, only the coverage bitmaps it produces do.
+ab_glyph = "0.2"
+
 [profile.dev]
 panic = "abort"
 

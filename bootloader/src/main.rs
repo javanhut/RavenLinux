@@ -9,7 +9,6 @@
 extern crate alloc;
 
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::fmt::Write;
 use uefi::prelude::*;
 use uefi::proto::console::text::{Color, Key, ScanCode};
@@ -20,13 +19,22 @@ use uefi::table::runtime::{VariableAttributes, VariableVendor};
 use uefi::CString16;
 
 mod config;
+mod font;
+mod gfx;
 mod linux;
 mod menu;
+mod screen;
+mod theme;
+
+use alloc::format;
+use alloc::vec::Vec;
 
 use config::{
     BootConfig, BootEntry, EntryType, CONFIG_PATHS, KNOWN_BOOTLOADERS, MAX_SUBMENU_DEPTH,
 };
 use linux::{boot_efi_stub, chainload_efi, KernelError};
+use menu::{Row, RowKind, Status as MenuStatus, Tone, View};
+use screen::Screen;
 
 /// Menu navigation state
 struct MenuNav<'a> {
@@ -113,7 +121,7 @@ impl<'a> MenuNav<'a> {
     /// Get menu title for current level
     fn menu_title(&self) -> &str {
         if self.depth == 0 {
-            "Select an operating system to boot:"
+            "Select an operating system to boot"
         } else {
             // Get parent submenu name
             let mut entries = &self.config.entries;
@@ -142,12 +150,13 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // Initialize UEFI services (also sets up allocator)
     uefi::helpers::init(&mut system_table).unwrap();
 
-    // Clear screen and set colors
+    // The text console is only ever the fallback now, but the config load below
+    // reports on it, so it is cleared either way. `Screen::open` paints over
+    // this the moment it succeeds.
     {
         let stdout = system_table.stdout();
         let _ = stdout.clear();
-        let _ = stdout.set_color(Color::LightCyan, Color::Black);
-        print_banner(stdout);
+        let _ = stdout.set_color(Color::LightGray, Color::Black);
     }
 
     // Load configuration
@@ -199,16 +208,36 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         }
     }
 
+    // The panel, if the firmware has one to give. `None` means the text menu
+    // below -- see `Screen::open`, which is the only place that decides.
+    let mut screen = Screen::open(system_table.boot_services());
+    let version = format!("RavenBoot {VERSION}");
+
+    // A boot that failed, or a UEFI shell that was not there. Shown under the
+    // card until the next keypress, in place of the countdown.
+    let mut message: Option<String> = None;
+
     // Main menu loop with submenu support
     let mut nav = MenuNav::new(&config);
 
     loop {
         // Display boot menu and handle navigation
-        let action = display_menu_with_nav(&mut system_table, &mut nav);
+        let action = match &mut screen {
+            Some(screen) => {
+                display_menu_graphical(&mut system_table, &mut nav, screen, &version, &mut message)
+            }
+            None => display_menu_with_nav(&mut system_table, &mut nav),
+        };
 
         match action {
             MenuAction::Boot(entry) => {
-                {
+                // Leave the panel holding the backdrop before handing control
+                // over. From here until `raven-greeter`'s first frame nothing
+                // else draws, so this colour is the whole of the boot -- see
+                // `Screen::hand_off`.
+                if let Some(screen) = &mut screen {
+                    screen.hand_off(system_table.boot_services());
+                } else {
                     let stdout = system_table.stdout();
                     let _ = stdout.set_color(Color::White, Color::Black);
                     let _ = writeln!(stdout, "\nBooting: {}", entry.name);
@@ -220,14 +249,26 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                     boot_entry(boot_services, image_handle, &entry)
                 };
 
-                // If we get here, boot failed
-                {
+                // If we get here, boot failed. The backdrop is still on the
+                // panel, so the menu can simply be drawn over it again.
+                // The error, not the `Result` wrapping it: `{result:?}` put a
+                // literal "Err(...)" on the screen.
+                let failure = match &result {
+                    Err(error) => format!("Boot failed: {error:?}"),
+                    // `boot_entry` does not return on a successful boot, so an
+                    // `Ok` here means the image loaded, ran, and handed control
+                    // back -- which for a kernel means it declined to start.
+                    Ok(()) => format!("{} returned without booting", entry.name),
+                };
+                if screen.is_some() {
+                    message = Some(failure);
+                } else {
                     let stdout = system_table.stdout();
                     let _ = stdout.set_color(Color::Red, Color::Black);
-                    let _ = writeln!(stdout, "\nBoot failed: {:?}", result);
+                    let _ = writeln!(stdout, "\n{failure}");
                     let _ = writeln!(stdout, "Press any key to return to menu...");
+                    wait_for_key(system_table.boot_services());
                 }
-                wait_for_key(system_table.boot_services());
             }
             MenuAction::Reboot => {
                 let runtime_services = system_table.runtime_services();
@@ -246,17 +287,28 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                 );
             }
             MenuAction::UefiShell => {
+                // The shell draws on the text console, so the panel is handed
+                // over the same way a kernel would have it -- otherwise the
+                // shell's first line lands on top of the menu.
+                if let Some(screen) = &mut screen {
+                    screen.hand_off(system_table.boot_services());
+                }
+
                 // Try to launch UEFI shell
                 let result = {
                     let boot_services = system_table.boot_services();
                     launch_uefi_shell(boot_services, image_handle)
                 };
                 if result.is_err() {
-                    let stdout = system_table.stdout();
-                    let _ = stdout.set_color(Color::Red, Color::Black);
-                    let _ = writeln!(stdout, "\nUEFI Shell not found.");
-                    let _ = writeln!(stdout, "Press any key to return to menu...");
-                    wait_for_key(system_table.boot_services());
+                    if screen.is_some() {
+                        message = Some(String::from("UEFI Shell not found"));
+                    } else {
+                        let stdout = system_table.stdout();
+                        let _ = stdout.set_color(Color::Red, Color::Black);
+                        let _ = writeln!(stdout, "\nUEFI Shell not found.");
+                        let _ = writeln!(stdout, "Press any key to return to menu...");
+                        wait_for_key(system_table.boot_services());
+                    }
                 }
             }
             MenuAction::FirmwareSetup => {
@@ -278,17 +330,24 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                     );
                 }
 
-                {
-                    let stdout = system_table.stdout();
-                    let _ = stdout.set_color(Color::Red, Color::Black);
-                    let _ = writeln!(
-                        stdout,
-                        "\nThis firmware does not support rebooting into its settings."
-                    );
-                    let _ = writeln!(stdout, "Use the machine's setup key during reboot instead.");
-                    let _ = writeln!(stdout, "Press any key to return to the menu...");
+                if screen.is_some() {
+                    message = Some(String::from(
+                        "This firmware cannot reboot into its settings; use its setup key",
+                    ));
+                } else {
+                    {
+                        let stdout = system_table.stdout();
+                        let _ = stdout.set_color(Color::Red, Color::Black);
+                        let _ = writeln!(
+                            stdout,
+                            "\nThis firmware does not support rebooting into its settings."
+                        );
+                        let _ =
+                            writeln!(stdout, "Use the machine's setup key during reboot instead.");
+                        let _ = writeln!(stdout, "Press any key to return to the menu...");
+                    }
+                    wait_for_key(system_table.boot_services());
                 }
-                wait_for_key(system_table.boot_services());
             }
             MenuAction::Continue => {
                 // Navigation action, continue loop
@@ -361,6 +420,134 @@ fn print_banner(stdout: &mut uefi::proto::console::text::Output) {
         r"    ╚══════════════════════════════════════════════════════╝"
     );
     let _ = writeln!(stdout, "");
+}
+
+/// The graphical menu: draw a frame, wait for a key or a second, repeat.
+///
+/// Structurally the same loop as [`display_menu_with_nav`] below, and
+/// deliberately so — the two share `handle_nav_key` and
+/// `handle_entry_selection`, so a change to what a key does cannot apply to
+/// only one of them. What differs is the drawing and, because a frame here is
+/// a few megabytes rather than a few hundred bytes of console writes, that the
+/// frame is composed once per visible change rather than once per poll.
+fn display_menu_graphical(
+    system_table: &mut SystemTable<Boot>,
+    nav: &mut MenuNav,
+    screen: &mut Screen,
+    version: &str,
+    message: &mut Option<String>,
+) -> MenuAction {
+    let mut timeout = nav.config.timeout;
+    let scale = screen.scale();
+
+    // A message means something just failed, and a countdown that carried on
+    // ticking underneath it would boot the entry the user is reading about.
+    let mut countdown_active = nav.depth == 0 && message.is_none();
+
+    loop {
+        {
+            let entries = nav.current_entries();
+            let rows: Vec<Row> = entries
+                .iter()
+                .map(|entry| Row {
+                    label: &entry.name,
+                    kind: row_kind(entry.entry_type),
+                })
+                .collect();
+
+            // Owns the formatted countdown for as long as `view` borrows it.
+            let countdown;
+            let status = if let Some(text) = message.as_deref() {
+                Some(MenuStatus {
+                    text,
+                    tone: Tone::Failure,
+                })
+            } else if countdown_active && timeout > 0 {
+                let name = entries
+                    .get(nav.selected)
+                    .map_or("the default entry", |entry| entry.name.as_str());
+                countdown = format!("Booting {name} in {timeout}s");
+                Some(MenuStatus {
+                    text: &countdown,
+                    tone: Tone::Caution,
+                })
+            } else {
+                None
+            };
+
+            let view = View {
+                rows: &rows,
+                selected: nav.selected,
+                prompt: nav.menu_title(),
+                status,
+                version,
+                can_go_back: nav.depth > 0,
+            };
+
+            menu::draw(&mut screen.canvas, &view, scale);
+        }
+        let _ = screen.present(system_table.boot_services());
+
+        // Wait for input or timeout
+        if countdown_active && timeout > 0 {
+            match wait_for_key_timeout(system_table.boot_services(), 1_000_000) {
+                Some(key) => {
+                    countdown_active = false;
+                    *message = None;
+                    if let Key::Printable(c) = key {
+                        if c == uefi::Char16::try_from('\r').unwrap() {
+                            if let Some(entry) = nav.selected_entry() {
+                                return handle_entry_selection(nav, entry.clone());
+                            }
+                        }
+                    }
+                    handle_nav_key(key, nav);
+                }
+                None => {
+                    timeout -= 1;
+                    if timeout == 0 {
+                        if let Some(entry) = nav.selected_entry() {
+                            return handle_entry_selection(nav, entry.clone());
+                        }
+                    }
+                }
+            }
+        } else {
+            let key = wait_for_key(system_table.boot_services());
+
+            // Any key dismisses the message. It is a report on something the
+            // user just asked for, not a state they have to clear.
+            *message = None;
+
+            match key {
+                Key::Printable(c) if c == uefi::Char16::try_from('\r').unwrap() => {
+                    if let Some(entry) = nav.selected_entry() {
+                        return handle_entry_selection(nav, entry.clone());
+                    }
+                }
+                Key::Special(ScanCode::ESCAPE) => {
+                    if nav.depth > 0 {
+                        nav.go_back();
+                    }
+                }
+                Key::Printable(c) if c == uefi::Char16::try_from('\x08').unwrap() => {
+                    if nav.depth > 0 {
+                        nav.go_back();
+                    }
+                }
+                _ => handle_nav_key(key, nav),
+            }
+        }
+    }
+}
+
+/// How a boot entry is drawn, which is all the menu needs to know about it.
+fn row_kind(entry_type: EntryType) -> RowKind {
+    match entry_type {
+        EntryType::Submenu => RowKind::Submenu,
+        EntryType::Back => RowKind::Back,
+        _ => RowKind::Action,
+    }
 }
 
 fn display_menu_with_nav(system_table: &mut SystemTable<Boot>, nav: &mut MenuNav) -> MenuAction {
@@ -507,26 +694,6 @@ fn handle_nav_key(key: Key, nav: &mut MenuNav) {
         Key::Special(ScanCode::UP) => nav.move_up(),
         Key::Special(ScanCode::DOWN) => nav.move_down(),
         _ => {}
-    }
-}
-
-fn handle_key(key: Key, current: usize, max: usize) -> usize {
-    match key {
-        Key::Special(ScanCode::UP) => {
-            if current > 0 {
-                current - 1
-            } else {
-                max.saturating_sub(1)
-            }
-        }
-        Key::Special(ScanCode::DOWN) => {
-            if current < max.saturating_sub(1) {
-                current + 1
-            } else {
-                0
-            }
-        }
-        _ => current,
     }
 }
 

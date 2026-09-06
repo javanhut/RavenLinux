@@ -28,8 +28,8 @@ categories = ["gui", "wayland", "desktop"]
 type = "git"
 url = "https://github.com/javanhut/RavenCanvas.git"
 # Unpinned, like ravenlogin above it and for the same reason: nothing has been
-# tagged in that repository yet, and a hash invented here would name a commit
-# that is not the one the GUI stage builds. Pin it at the first release.
+# tagged in that repository yet. A `commit` added here is read by the GUI stage
+# (raven_resolve_ref), so pinning it at the first release needs no script edit.
 
 [build]
 system = "cargo"

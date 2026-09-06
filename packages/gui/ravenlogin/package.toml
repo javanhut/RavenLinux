@@ -21,10 +21,10 @@ categories = ["gui", "wayland", "login"]
 [source]
 type = "git"
 url = "https://github.com/javanhut/RavenLogin.git"
-# Deliberately unpinned, as ravengui above it now is too. Nothing has been
-# tagged in that repository yet, and a hash invented here would name a commit
-# that is not the one the GUI stage builds -- which is worse than saying "HEAD"
-# out loud. Pin it at the first release.
+# Deliberately unpinned, as ravengui above it is too. Nothing has been tagged
+# in that repository yet. A hash added here is now the hash the GUI stage
+# builds -- fetch_repo reads this field through raven_resolve_ref -- so pinning
+# it at the first release is a one-line change here and nowhere else.
 
 [build]
 system = "cargo"
