@@ -112,6 +112,46 @@ fn main() {
         },
     ];
 
+    // `cargo run -- 2560x1080 800x600 ...` renders the root menu at sizes that
+    // are not in PANELS. The layout is computed from the canvas rather than
+    // chosen from a table, so the useful check is an awkward shape nobody
+    // designed against: an ultrawide, a portrait panel, something too short for
+    // the rows to fit.
+    if !args.is_empty() {
+        for spec in &args {
+            let (w, h) = spec
+                .split_once(['x', 'X'])
+                .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+                .unwrap_or_else(|| panic!("bad size '{spec}' (expected WIDTHxHEIGHT)"));
+
+            // The same rule `screen::scale_for` applies, kept in step by hand.
+            let scale = match h {
+                0..=1152 => 1.0,
+                1153..=1800 => 1.5,
+                _ => 2.0,
+            };
+
+            let view = View {
+                rows: &root,
+                selected: 0,
+                prompt: "Select an operating system to boot",
+                status: Some(Status {
+                    text: "Booting Raven Linux in 5s",
+                    tone: Tone::Caution,
+                }),
+                version: "RavenBoot 0.1.0",
+                can_go_back: false,
+            };
+
+            let mut canvas = gfx::Canvas::new(w, h);
+            menu::draw(&mut canvas, &view, scale);
+            let path = out.join(format!("size-{w}x{h}.png"));
+            png::write(&path, &canvas).expect("cannot write PNG");
+            println!("{}   scale {scale}", path.display());
+        }
+        return;
+    }
+
     let system = [
         Row {
             label: "System UEFI Settings",
