@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.raveninstaller.Raven</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Install RavenLinux</name>
+  <summary>Install RavenLinux onto a disk</summary>
+  <description>
+    <p>
+      The graphical front-end for raven-install. It asks the questions the
+      terminal installer asks -- the disk, the account, the timezone, the
+      package profile -- shows the plan before anything is written, and then
+      runs raven-install, which is what actually partitions the disk, copies
+      the system and installs the bootloader.
+    </p>
+    <p>
+      The terminal installer remains available and does the same thing: this
+      is a second way to drive it, not a second implementation of it.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.raveninstaller.Raven.desktop</launchable>
+  <categories>
+    <category>System</category>
+  </categories>
+  <url type="homepage">https://github.com/javanhut/RavenLinux</url>
+  <developer id="org.ravenlinux">
+    <name>RavenLinux Team</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+</component>

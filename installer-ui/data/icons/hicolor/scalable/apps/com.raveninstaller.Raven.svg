@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A disk, and something going onto it. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3d3846"/>
+      <stop offset="1" stop-color="#241f31"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#99c1f1"/>
+      <stop offset="1" stop-color="#3584e4"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#plate)"/>
+
+  <!-- The disk: a platter seen edge-on, which is the shape every installer
+       icon has settled on and the one that reads at 24 pixels. -->
+  <ellipse cx="64" cy="88" rx="34" ry="11" fill="none" stroke="#c0bfbc" stroke-width="6"/>
+  <ellipse cx="64" cy="88" rx="6" ry="2.5" fill="#c0bfbc"/>
+
+  <!-- Onto it. -->
+  <path d="M64 24 L64 60" stroke="url(#arrow)" stroke-width="11" stroke-linecap="round" fill="none"/>
+  <path d="M46 54 L64 72 L82 54" stroke="url(#arrow)" stroke-width="11"
+        stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>

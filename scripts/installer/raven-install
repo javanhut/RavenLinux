@@ -16,6 +16,15 @@
 #   6. configure   -- fstab, users, hostname, timezone, locale, init handoff
 #   7. bootloader  -- RavenBoot on the ESP, at both \EFI\raven and the fallback
 #
+# Steps 2 and 3 are the only ones that need a person. Everything else is the
+# engine, and the engine is reachable without a terminal: --probe reports what
+# a front-end needs to ask about, --answers supplies the answers a wizard would
+# have collected, and --progress-fd streams the same status lines this prints
+# as one record per line. raven-installer-ui (installer-ui/ in the source tree)
+# is a front-end built on exactly those three options -- it does not partition,
+# copy or configure anything itself, so there is one implementation of the
+# disk-destroying half and two ways to drive it. See PROTOCOL below.
+#
 # The bootloader is installed to \EFI\BOOT\BOOTX64.EFI as well as
 # \EFI\raven\raven-boot.efi. The fallback path is what makes this boot on
 # firmware that will not take an NVRAM entry from us -- which is most laptop
@@ -35,6 +44,11 @@ set -uo pipefail
 # =============================================================================
 
 RAVEN_INSTALL_VERSION="1.0"
+
+# The wire format --probe and --progress-fd speak. Bumped when a record changes
+# meaning; a front-end that reads a version it does not know should refuse to
+# drive the installer rather than guess.
+RAVEN_INSTALL_PROTOCOL="1"
 
 ESP_SIZE_DEFAULT="512M"
 ESP_LABEL="RAVEN_ESP"      # FAT labels are capped at 11 characters
@@ -57,11 +71,57 @@ else
     RED=""; GREEN=""; YELLOW=""; BLUE=""; WHITE=""; CYAN=""; NC=""
 fi
 
-ok()   { echo "  [  ${GREEN}OK${NC}  ] $*"; }
-warn() { echo "  [${YELLOW}WARN${NC} ] $*"; }
-fail() { echo "  [${RED}FAIL${NC} ] $*"; }
-info() { echo "  [ ${BLUE}**${NC}  ] $*"; }
-step() { echo; echo "${WHITE}>>>${NC} $*"; }
+# -----------------------------------------------------------------------------
+# The progress stream
+# -----------------------------------------------------------------------------
+# PROTOCOL, version ${RAVEN_INSTALL_PROTOCOL}
+#
+# With --progress-fd N every status line below is written a second time to file
+# descriptor N, as one record per line: a verb, a space, and the rest of the
+# line. No colour, no escapes, no continuation lines.
+#
+#   phase <id> <text>   a phase started; <id> is one of the ids in main()
+#   ok    <text>        a thing succeeded
+#   warn  <text>        a thing is wrong but not fatal
+#   fail  <text>        a thing failed; a `done` with a non-zero code follows
+#   info  <text>        neither, just news
+#   pct   <id> <0-100>  progress *within* phase <id>
+#   dirty <0|1>         whether the target disk has been written to yet
+#   done  <exit-code>   the last record, always written, exactly once
+#
+# The verbs are a summary, deliberately. The full human log still goes to
+# stdout, escapes stripped when stdout is not a terminal, and a front-end is
+# expected to show that as the detail behind these records rather than to
+# reconstruct it from them -- which is what keeps the two in parity when a
+# message here grows a second explanatory line.
+PROGRESS_FD=""
+PHASE=""
+
+emit() {
+    [[ -n "$PROGRESS_FD" ]] || return 0
+    # Never let a closed or broken progress pipe take the install down: the
+    # front-end may have died, and a half-partitioned disk is a far worse
+    # outcome than an unwatched install that finishes.
+    printf '%s %s\n' "$1" "${2-}" >&"$PROGRESS_FD" 2>/dev/null || true
+}
+
+ok()   { echo "  [  ${GREEN}OK${NC}  ] $*"; emit ok "$*"; }
+warn() { echo "  [${YELLOW}WARN${NC} ] $*"; emit warn "$*"; }
+fail() { echo "  [${RED}FAIL${NC} ] $*"; emit fail "$*"; }
+info() { echo "  [ ${BLUE}**${NC}  ] $*"; emit info "$*"; }
+step() { echo; echo "${WHITE}>>>${NC} $*"; emit step "$*"; }
+
+# A step that also names the phase it opens. Everything main() calls uses this
+# rather than step(), so a front-end can map progress onto a fixed list of
+# phases instead of matching on prose that is free to change.
+phase() {
+    PHASE="$1"; shift
+    echo; echo "${WHITE}>>>${NC} $*"
+    emit phase "${PHASE} $*"
+}
+
+# Progress inside the current phase, 0-100.
+pct() { emit pct "${PHASE} $1"; }
 
 # Print the reason and leave. The EXIT trap owns the "aborted" banner and the
 # unmounting, so this must not do either -- doing them here printed the banner
@@ -70,6 +130,24 @@ die() {
     echo
     fail "$*"
     exit 1
+}
+
+# Every check --probe reports on is written once, as a `die` in the real
+# preflight, and read twice. In probe mode nothing is fatal -- a machine with
+# no UEFI is a fact the front-end has to *show* someone, and a probe that
+# exited on it would have nothing to show them -- so the same call records the
+# reason and returns non-zero, and its caller returns instead of exiting.
+#
+# This is why probe and install cannot disagree about whether a machine is
+# installable: they are not two checks with the same intent, they are one call.
+PROBE_ERRORS=()
+
+soft_die() {
+    if (( OPT_PROBE )); then
+        PROBE_ERRORS+=("$*")
+        return 1
+    fi
+    die "$@"
 }
 
 banner() {
@@ -98,6 +176,9 @@ OPT_NVRAM=0
 OPT_DRY_RUN=0
 OPT_YES=0
 OPT_PROFILE=""
+OPT_ANSWERS=""
+OPT_NONINTERACTIVE=0
+OPT_PROBE=0
 
 usage() {
     cat <<USAGE
@@ -125,6 +206,28 @@ Options:
                      WITH NO FURTHER PROMPT.
   -h, --help         This message.
 
+Driving it from a front-end (see PROTOCOL near the top of this file):
+
+  --probe            Report what a front-end needs in order to ask the
+                     questions this wizard asks -- the preflight results, the
+                     disks and what is on them, the source tree it found, the
+                     timezones, the profiles -- as key=value lines on stdout,
+                     and exit. Nothing is written and nothing is fatal: a
+                     failed check is reported as a value, not an exit code.
+  --answers FILE     Read the wizard's answers from FILE instead of asking.
+                     One key=value per line, '#' comments, no quoting and no
+                     substitution -- the value is the rest of the line, so a
+                     password may contain anything but a newline. Keys are the
+                     ones --probe names in answers.key. FILE holds passwords in
+                     the clear, so put it on a tmpfs at mode 0600 and unlink it
+                     afterwards; the installer refuses one that is readable by
+                     anyone else.
+  --non-interactive  Never read stdin. Requires --answers, implies --yes, and
+                     turns a missing or invalid answer into an error instead of
+                     a prompt. The final "reboot now?" is skipped.
+  --progress-fd N    Also write each status line to file descriptor N, as the
+                     one-record-per-line protocol documented above.
+
 The target disk is erased completely. Dual-boot installation is not supported
 yet -- if this machine has another OS you want to keep, stop here.
 USAGE
@@ -140,10 +243,33 @@ while [[ $# -gt 0 ]]; do
         --profile)   OPT_PROFILE="${2:-}"; shift 2 ;;
         --dry-run)   OPT_DRY_RUN=1; shift ;;
         -y|--yes)    OPT_YES=1; shift ;;
+        --answers)   OPT_ANSWERS="${2:-}"; shift 2 ;;
+        --non-interactive) OPT_NONINTERACTIVE=1; OPT_YES=1; shift ;;
+        --progress-fd) PROGRESS_FD="${2:-}"; shift 2 ;;
+        --probe)     OPT_PROBE=1; shift ;;
         -h|--help)   usage; exit 0 ;;
         *)           echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
+
+if [[ -n "$PROGRESS_FD" ]]; then
+    [[ "$PROGRESS_FD" =~ ^[0-9]+$ ]] || { echo "--progress-fd takes a number" >&2; exit 2; }
+    # Written to before the trap that would report the failure is installed, so
+    # a bad descriptor is caught here rather than silently swallowed by emit's
+    # own error suppression for the whole run.
+    # In a subshell: a bad redirection is reported by the shell itself, before
+    # the command's own 2>/dev/null can catch it, so the test has to happen
+    # somewhere whose stderr is already redirected.
+    if ! ( : >&"$PROGRESS_FD" ) 2>/dev/null; then
+        echo "--progress-fd ${PROGRESS_FD} is not open for writing" >&2
+        exit 2
+    fi
+fi
+
+if (( OPT_NONINTERACTIVE )) && [[ -z "$OPT_ANSWERS" ]]; then
+    echo "--non-interactive requires --answers FILE" >&2
+    exit 2
+fi
 
 # =============================================================================
 # Cleanup
@@ -170,6 +296,8 @@ on_error() {
     [[ $rc -eq 0 ]] && return 0
     echo
     fail "Installation aborted."
+    emit dirty "$DISK_DIRTY"
+    emit done "$rc"
     if [[ $DISK_DIRTY -eq 1 ]]; then
         echo "  ${YELLOW}The target disk has already been modified and is not bootable.${NC}"
         echo "  Re-run raven-install to start over."
@@ -189,9 +317,9 @@ trap 'die "Interrupted."' INT TERM
 have() { command -v "$1" >/dev/null 2>&1; }
 
 preflight() {
-    step "Preflight checks"
+    phase preflight "Preflight checks"
 
-    [[ "$(id -u)" == "0" ]] || die "raven-install must run as root."
+    [[ "$(id -u)" == "0" ]] || soft_die "raven-install must run as root." || return 1
     ok "Running as root"
 
     if [[ -d /sys/firmware/efi ]]; then
@@ -208,7 +336,7 @@ preflight() {
         echo
         echo "  Installing to a genuinely BIOS-only machine is not supported yet;"
         echo "  it needs GRUB in the sysroot, which the build does not ship."
-        die "UEFI firmware required."
+        soft_die "UEFI firmware required." || return 1
     fi
 
     # Secure Boot rejects RavenBoot before it gets a chance to run, and the
@@ -243,7 +371,7 @@ preflight() {
         echo "  These come from util-linux and dosfstools and are copied into the"
         echo "  sysroot by stage2. If you are on an ISO built before they were added"
         echo "  to that list, rebuild with 'imlazy stage2 && imlazy iso'."
-        die "Cannot continue without the tools above."
+        soft_die "Cannot continue without the tools above." || return 1
     fi
     ok "Disk tools present"
 
@@ -251,7 +379,7 @@ preflight() {
         ext4|xfs|btrfs) ;;
         *) die "Unsupported root filesystem: ${OPT_FS} (ext4, xfs, btrfs)" ;;
     esac
-    have "mkfs.${OPT_FS}" || die "mkfs.${OPT_FS} is not installed; use --fs ext4."
+    have "mkfs.${OPT_FS}" || soft_die "mkfs.${OPT_FS} is not installed; use --fs ext4." || return 1
     ok "Root filesystem: ${OPT_FS}"
 
     if [[ -n "${OPT_SWAP}" && "${OPT_SWAP}" != "none" ]]; then
@@ -260,7 +388,7 @@ preflight() {
 
     have chpasswd || warn "chpasswd not found; passwords will have to be set on first boot"
 
-    mkdir -p "${TARGET}" "${SRCMNT}" || die "Cannot create ${WORK}"
+    mkdir -p "${TARGET}" "${SRCMNT}" || soft_die "Cannot create ${WORK}" || return 1
 }
 
 # =============================================================================
@@ -292,7 +420,7 @@ find_first() {
 }
 
 locate_source() {
-    step "Locating the system to install"
+    phase locate "Locating the system to install"
 
     # The squashfs is the better source: it is the pristine sysroot, with none
     # of the tmpfs scribbling the live overlay has accumulated since boot, and
@@ -348,17 +476,18 @@ locate_source() {
         done
     fi
 
-    [[ -n "$SRC_KERNEL" ]] || die "No kernel found. Looked in: ${search_dirs[*]}"
-    [[ -n "$SRC_INITRD" ]] || die "No initramfs found. Looked in: ${search_dirs[*]}"
+    [[ -n "$SRC_KERNEL" ]] || soft_die "No kernel found. Looked in: ${search_dirs[*]}" || return 1
+    [[ -n "$SRC_INITRD" ]] || soft_die "No initramfs found. Looked in: ${search_dirs[*]}" || return 1
     ok "Kernel:    ${SRC_KERNEL}"
     ok "Initramfs: ${SRC_INITRD}"
 
     if [[ -n "$SRC_EFI" ]]; then
         ok "Bootloader: ${SRC_EFI}"
     else
-        die "No RavenBoot EFI binary found. stage3 builds it to
+        soft_die "No RavenBoot EFI binary found. stage3 builds it to
        build/packages/boot/raven-boot.efi -- if that file is missing on the
-       build host, the ISO shipped without it and there is nothing to install."
+       build host, the ISO shipped without it and there is nothing to install." \
+            || return 1
     fi
 
     # An initramfs that predates root= support will mount the squashfs and
@@ -391,11 +520,25 @@ partdev() {
     fi
 }
 
+# Is $1 the disk we booted from? Shared with --probe, which greys the same
+# device out in a front-end's list -- so the disk the installer would refuse is
+# the disk the front-end never offers, rather than two guesses at the same rule.
+is_live_media() {
+    local disk="$1" media src_dev
+    for media in $(media_dirs); do
+        src_dev=$(findmnt -no SOURCE --target "$media" 2>/dev/null | sed 's/\[.*//')
+        [[ -n "$src_dev" && "$src_dev" == "$disk"* ]] && return 0
+    done
+    return 1
+}
+
 choose_disk() {
-    step "Choosing the target disk"
+    phase disk "Choosing the target disk"
 
     if [[ -n "${OPT_DISK}" ]]; then
         DISK="${OPT_DISK}"
+    elif (( OPT_NONINTERACTIVE )); then
+        die "No target disk. --non-interactive needs 'disk=' in the answers file."
     else
         echo
         echo "  Disks on this machine:"
@@ -428,14 +571,9 @@ choose_disk() {
     # Refuse to install onto the stick we booted from. It is mounted, the copy
     # would read from a device it is simultaneously erasing, and the failure is
     # ugly and halfway through.
-    local media
-    for media in $(media_dirs); do
-        local src_dev
-        src_dev=$(findmnt -no SOURCE --target "$media" 2>/dev/null | sed 's/\[.*//')
-        if [[ -n "$src_dev" && "$src_dev" == "$DISK"* ]]; then
-            die "${DISK} is the live boot media. Pick the machine's internal disk."
-        fi
-    done
+    if is_live_media "$DISK"; then
+        die "${DISK} is the live boot media. Pick the machine's internal disk."
+    fi
 
     DISK_SIZE=$(lsblk -dn -o SIZE "$DISK" 2>/dev/null | tr -d ' ')
     DISK_MODEL=$(lsblk -dn -o MODEL "$DISK" 2>/dev/null | sed 's/ *$//')
@@ -455,6 +593,86 @@ choose_disk() {
             echo "  whole disk -- it cannot install alongside another OS yet."
         fi
     fi
+}
+
+# =============================================================================
+# The answers file
+# =============================================================================
+# What a front-end sends instead of standing at the keyboard. One key=value per
+# line; the value is everything after the first '=' including spaces, quotes
+# and '#', because a password is a value like any other and stripping anything
+# from it would silently install a machine nobody can log into.
+#
+# Parsed by hand rather than sourced. Sourcing it would be four lines shorter
+# and would also execute whatever is in the file as shell, as root, before the
+# disk is touched -- and this file is written by another process, in /run,
+# during an install. There is no eval anywhere below for the same reason.
+
+declare -A ANS=()
+
+# Keys, and which of them are required. Printed by --probe as answers.key so a
+# front-end reads the list rather than hardcoding it.
+ANSWER_KEYS=(
+    disk fs esp_size swap hostname username fullname user_password user_sudo
+    root_password timezone locale keymap profile efi_nvram
+)
+ANSWER_REQUIRED=(disk hostname username)
+
+load_answers() {
+    local file="$1"
+
+    [[ -f "$file" ]] || die "No such answers file: ${file}"
+    [[ -r "$file" ]] || die "Cannot read ${file}"
+
+    # It holds passwords. A file anyone on the machine can read is a mistake
+    # worth stopping for rather than warning about, because by the time the
+    # warning scrolls past, the install has already used it.
+    local mode
+    mode=$(stat -c '%a' "$file" 2>/dev/null || echo "")
+    if [[ -n "$mode" && "${mode: -2}" != "00" ]]; then
+        die "${file} is mode ${mode}; it holds passwords. Use 0600."
+    fi
+
+    local line key value lineno=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        lineno=$((lineno + 1))
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        [[ "${line#"${line%%[![:space:]]*}"}" == \#* ]] && continue
+        [[ "$line" == *=* ]] || die "${file}:${lineno}: not key=value: ${line}"
+
+        key="${line%%=*}"
+        value="${line#*=}"
+        # Only the key is trimmed. A trailing space in a password is a
+        # character somebody typed.
+        key="${key//[[:space:]]/}"
+
+        local known=0 k
+        for k in "${ANSWER_KEYS[@]}"; do
+            [[ "$k" == "$key" ]] && { known=1; break; }
+        done
+        (( known )) || die "${file}:${lineno}: unknown key '${key}'"
+
+        ANS["$key"]="$value"
+    done < "$file"
+
+    local req
+    for req in "${ANSWER_REQUIRED[@]}"; do
+        [[ -n "${ANS[$req]:-}" ]] || die "${file}: missing required key '${req}'"
+    done
+
+    # The keys that have a command-line equivalent feed the same variables the
+    # flag would, so there is one code path from here on. An explicit flag wins:
+    # it is the more specific instruction, and it is how a front-end overrides
+    # one field of a saved answers file without rewriting it.
+    [[ -z "$OPT_DISK"    ]] && OPT_DISK="${ANS[disk]:-}"
+    [[ -z "$OPT_PROFILE" ]] && OPT_PROFILE="${ANS[profile]:-}"
+    [[ -z "$OPT_SWAP"    ]] && OPT_SWAP="${ANS[swap]:-}"
+    [[ "$OPT_FS" == "ext4" && -n "${ANS[fs]:-}" ]] && OPT_FS="${ANS[fs]}"
+    [[ "$OPT_ESP_SIZE" == "${ESP_SIZE_DEFAULT}" && -n "${ANS[esp_size]:-}" ]] \
+        && OPT_ESP_SIZE="${ANS[esp_size]}"
+    [[ "${ANS[efi_nvram]:-0}" == "1" ]] && OPT_NVRAM=1
+
+    ok "Answers loaded from ${file}"
 }
 
 # =============================================================================
@@ -513,6 +731,16 @@ valid_username() {
     [[ "$1" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]
 }
 
+# Swap the size of RAM, rounded up, so hibernate has somewhere to go. Shared by
+# the prompt, the answers file and --probe, so all three offer the same number.
+suggested_swap() {
+    local memkb memgb
+    memkb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    memgb=$(( (memkb + 1048575) / 1048576 ))
+    [[ $memgb -lt 1 ]] && memgb=2
+    echo "${memgb}G"
+}
+
 valid_hostname() {
     [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]]
 }
@@ -527,7 +755,11 @@ zoneinfo_dir() {
 }
 
 run_wizard() {
-    step "System configuration"
+    phase wizard "System configuration"
+    if (( OPT_NONINTERACTIVE )); then
+        apply_answers
+        return 0
+    fi
     echo
 
     while true; do
@@ -612,12 +844,10 @@ run_wizard() {
 
     echo
     if [[ -z "${OPT_SWAP}" ]]; then
-        local memkb memgb
-        memkb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
-        memgb=$(( (memkb + 1048575) / 1048576 ))
-        [[ $memgb -lt 1 ]] && memgb=2
-        if ask_yn "Create a ${memgb}G swap partition? (enables hibernate)" "Y"; then
-            SWAP_SIZE="${memgb}G"
+        local suggested
+        suggested="$(suggested_swap)"
+        if ask_yn "Create a ${suggested} swap partition? (enables hibernate)" "Y"; then
+            SWAP_SIZE="${suggested}"
         else
             SWAP_SIZE=""
         fi
@@ -626,6 +856,75 @@ run_wizard() {
     else
         SWAP_SIZE="${OPT_SWAP}"
     fi
+}
+
+# The answers file's half of run_wizard. Every value goes through the validator
+# the prompt above it uses -- valid_hostname, valid_username, the zoneinfo
+# lookup, the profile case -- because a front-end that lets someone type a
+# hostname is one text entry away from sending "my laptop" and an installed
+# machine whose /etc/hostname is not a hostname.
+#
+# It refuses rather than corrects. A front-end can show the message; an
+# installer that quietly rewrote the answer would install a machine that does
+# not match what the person confirmed on the summary page.
+apply_answers() {
+    HOSTNAME="${ANS[hostname]:-raven}"
+    valid_hostname "$HOSTNAME" || die "answers: invalid hostname '${HOSTNAME}'"
+
+    USERNAME="${ANS[username]:-raven}"
+    valid_username "$USERNAME" || die "answers: invalid username '${USERNAME}'"
+    [[ "$USERNAME" == "root" ]] && die "answers: username cannot be root"
+
+    FULLNAME="${ANS[fullname]:-$USERNAME}"
+    # It lands in a colon-separated field of /etc/passwd, so a colon in it
+    # would shift every field after it by one.
+    [[ "$FULLNAME" == *:* ]] && die "answers: fullname cannot contain ':'"
+
+    USER_PASSWORD="${ANS[user_password]:-}"
+    ROOT_PASSWORD="${ANS[root_password]:-}"
+
+    case "${ANS[user_sudo]:-1}" in
+        1|yes|true) USER_SUDO=1 ;;
+        0|no|false) USER_SUDO=0 ;;
+        *) die "answers: user_sudo must be 0 or 1" ;;
+    esac
+
+    if [[ -z "$ROOT_PASSWORD" && -z "$USER_PASSWORD" ]]; then
+        warn "Neither account has a password. Anyone with the machine can log in."
+    fi
+
+    TIMEZONE="${ANS[timezone]:-UTC}"
+    local tzdir
+    if tzdir=$(zoneinfo_dir); then
+        [[ -f "${tzdir}/${TIMEZONE}" ]] || die "answers: no timezone '${TIMEZONE}' in the database."
+    else
+        warn "No timezone database in the source tree; the clock will run on UTC."
+        TIMEZONE="UTC"
+    fi
+
+    LOCALE="${ANS[locale]:-en_US.UTF-8}"
+    KEYMAP="${ANS[keymap]:-us}"
+
+    INSTALL_PROFILE="${OPT_PROFILE:-minimal}"
+    case "$INSTALL_PROFILE" in
+        minimal|desktop|developer) ;;
+        *) die "answers: unknown install profile '${INSTALL_PROFILE}'" ;;
+    esac
+
+    # Same three cases as the prompt: unset means "decide for me", which here
+    # is the same memory-sized default the wizard offers.
+    if [[ -z "${OPT_SWAP}" ]]; then
+        SWAP_SIZE="$(suggested_swap)"
+    elif [[ "${OPT_SWAP}" == "none" ]]; then
+        SWAP_SIZE=""
+    else
+        SWAP_SIZE="${OPT_SWAP}"
+    fi
+
+    ok "Hostname: ${HOSTNAME}"
+    ok "User: ${USERNAME}${FULLNAME:+ (${FULLNAME})}"
+    ok "Timezone: ${TIMEZONE}, locale ${LOCALE}, keymap ${KEYMAP}"
+    ok "Profile: ${INSTALL_PROFILE}, swap: ${SWAP_SIZE:-none}"
 }
 
 # =============================================================================
@@ -648,7 +947,7 @@ plan_partitions() {
 confirm() {
     plan_partitions
 
-    step "Installation plan"
+    phase confirm "Installation plan"
     cat <<PLAN
 
     Disk           ${DISK} (${DISK_SIZE}${DISK_MODEL:+, ${DISK_MODEL}})
@@ -680,6 +979,14 @@ PLAN
         exit 0
     fi
 
+    if (( OPT_NONINTERACTIVE )); then
+        # The front-end owns the confirmation. It has the same plan on screen --
+        # it built every line of it -- and a typed YES on a terminal nobody is
+        # looking at would just be an install that never starts.
+        info "Non-interactive: the plan above was confirmed by the front-end."
+        return 0
+    fi
+
     if [[ $OPT_YES -eq 1 ]]; then
         warn "--yes given; proceeding without confirmation."
         return 0
@@ -697,7 +1004,7 @@ PLAN
 # =============================================================================
 
 partition_disk() {
-    step "Partitioning ${DISK}"
+    phase partition "Partitioning ${DISK}"
 
     DISK_DIRTY=1
 
@@ -738,7 +1045,7 @@ partition_disk() {
 }
 
 format_partitions() {
-    step "Creating filesystems"
+    phase format "Creating filesystems"
 
     mkfs.vfat -F 32 -n "${ESP_LABEL}" "$ESP_DEV" >/dev/null 2>&1 \
         || die "mkfs.vfat failed on ${ESP_DEV}"
@@ -781,6 +1088,9 @@ copy_progress() {
                 "$BLUE" "$NC" "${spin:i++%4:1}"
             sleep 1
         done
+        # Nothing measurable to report, so the stream says so once rather than
+        # leaving a front-end to decide whether a silent phase is a hang.
+        emit info "Copying system files (size unknown)"
         printf '\r%*s\r' 70 ''
         return 0
     fi
@@ -794,6 +1104,7 @@ copy_progress() {
         if [[ $pct -ne $last ]]; then
             printf '\r  [ %s**%s  ] Copying system files... %d%% (%d/%d MB)' \
                 "$BLUE" "$NC" "$pct" "$used_mb" "$total_mb"
+            pct "$pct"
             last=$pct
         fi
         sleep 2
@@ -802,7 +1113,7 @@ copy_progress() {
 }
 
 copy_system() {
-    step "Copying the system to ${ROOT_DEV}"
+    phase copy "Copying the system to ${ROOT_DEV}"
 
     local total_mb=0
     if have du; then
@@ -1190,6 +1501,29 @@ switch_to_raven_init() {
     touch "${TARGET}/etc/.raven-first-boot-done"
 }
 
+# Strip the live image's credentials from the installed system.
+#
+# The twin of the tty1 change above, and it exists for the same reason: what is
+# correct on a live ISO is unacceptable once the machine has real accounts on
+# it.
+#
+# stage4 writes /etc/sudoers.d/10-raven-live-installer so the graphical
+# installer can reach root on an image whose session user is the `raven`
+# placeholder and whose tty1 is already an unauthenticated root shell. Neither
+# of those is true of the machine being installed here -- switch_to_raven_init
+# has just given tty1 a real login prompt -- so a passwordless route to
+# raven-install would be a genuine hole rather than a convenience, and it would
+# be one nobody would ever notice, because nothing on the installed system
+# prompts for it.
+remove_live_credentials() {
+    local rule="${TARGET}/etc/sudoers.d/10-raven-live-installer"
+
+    if [[ -f "$rule" ]]; then
+        rm -f "$rule"
+        ok "Live installer's passwordless sudo rule removed"
+    fi
+}
+
 # Put the seatd service definition where raven-rc can see it.
 #
 # The other templates under /usr/share/raven/services are inert until `rvn
@@ -1220,7 +1554,7 @@ install_seat_service() {
 }
 
 configure_system() {
-    step "Configuring the installed system"
+    phase configure "Configuring the installed system"
 
     NEEDS_PASSWORD_ON_FIRST_BOOT=0
 
@@ -1230,6 +1564,7 @@ configure_system() {
     set_passwords
     set_locale_and_time
     switch_to_raven_init
+    remove_live_credentials
     install_seat_service
     {
         echo "profile=${INSTALL_PROFILE}"
@@ -1244,7 +1579,7 @@ configure_system() {
 # =============================================================================
 
 install_bootloader() {
-    step "Installing RavenBoot to the ESP"
+    phase boot "Installing RavenBoot to the ESP"
 
     local esp="${TARGET}/boot/efi"
     mkdir -p "${esp}/EFI/BOOT" "${esp}/EFI/raven"
@@ -1403,7 +1738,7 @@ register_nvram_entry() {
 # =============================================================================
 
 finish() {
-    step "Finishing up"
+    phase finish "Finishing up"
 
     sync
     umount "${TARGET}/boot/efi" 2>/dev/null
@@ -1439,10 +1774,208 @@ finish() {
 }
 
 # =============================================================================
+# Probe
+# =============================================================================
+# Everything a front-end needs to draw the wizard, as key=value lines on
+# stdout. Keys repeat where the value is a list; a `disk.begin`/`disk.end` pair
+# brackets one device's records.
+#
+# It runs the *real* preflight and the *real* source lookup -- soft_die is the
+# whole of the difference -- so what it reports is what the install would find,
+# and it cannot drift from it by being a second opinion. The human log those
+# two produce goes to stderr, leaving stdout carrying only the report.
+#
+# Nothing here writes. The one side effect is the squashfs loop-mount that
+# locate_source makes, and cleanup() in main() unmounts it.
+
+pk() { printf '%s=%s\n' "$1" "${2-}"; }
+
+probe_disks() {
+    local line name dev size model bytes rm existing
+    while read -r line; do
+        [[ -z "$line" ]] && continue
+        name=$(echo "$line" | awk '{print $1}')
+        dev="/dev/${name}"
+
+        pk disk.begin "$dev"
+        size=$(lsblk -dn -o SIZE  "$dev" 2>/dev/null | tr -d ' ')
+        bytes=$(lsblk -dnb -o SIZE "$dev" 2>/dev/null | tr -d ' ')
+        model=$(lsblk -dn -o MODEL "$dev" 2>/dev/null | sed 's/ *$//')
+        rm=$(lsblk -dn -o RM "$dev" 2>/dev/null | tr -d ' ')
+        pk disk.size  "$size"
+        pk disk.bytes "${bytes:-0}"
+        pk disk.model "$model"
+        pk disk.removable "${rm:-0}"
+        pk disk.live_media "$(is_live_media "$dev" && echo 1 || echo 0)"
+
+        # The same listing choose_disk prints before it asks. A front-end that
+        # shows "this disk currently holds..." is showing these rows.
+        existing=$(lsblk -n -o NAME,SIZE,FSTYPE,LABEL "$dev" 2>/dev/null | tail -n +2)
+        if [[ -n "$existing" ]]; then
+            while read -r part; do
+                [[ -z "${part//[[:space:]]/}" ]] && continue
+                # Pipe-separated so a label containing a space survives; the
+                # tree-drawing characters lsblk prefixes the name with go.
+                pk disk.part "$(echo "$part" | sed 's/^[^[:alnum:]]*//' | awk '{
+                    name=$1; size=$2; fstype=$3; label="";
+                    for (i = 4; i <= NF; i++) label = label (i > 4 ? " " : "") $i;
+                    print name "|" size "|" fstype "|" label
+                }')"
+            done <<< "$existing"
+            pk disk.windows "$(echo "$existing" | grep -qiE 'ntfs|Microsoft|Windows|Basic data' && echo 1 || echo 0)"
+        else
+            pk disk.windows 0
+        fi
+        pk disk.end "$dev"
+    done < <(list_disks)
+}
+
+probe_timezones() {
+    local tzdir
+    tzdir=$(zoneinfo_dir) || return 0
+    # Zone files only: the database also carries tables (zone.tab), the
+    # compiled source (tzdata.zi), the leap-second list, and the posix/ and
+    # right/ trees, none of which is a timezone anyone should be offered.
+    find "$tzdir" -type f \
+        -not -path "*/posix/*" -not -path "*/right/*" \
+        -not -name "*.tab" -not -name "*.zi" -not -name "*.list" \
+        -not -name "leapseconds" -not -name "leap-seconds*" \
+        -not -name "localtime" -not -name "Factory" \
+        -printf '%P\n' 2>/dev/null | LC_ALL=C sort
+}
+
+probe_report() {
+    # Discovery talks to stderr; the report owns stdout. fd 9 parks the real
+    # stdout for the duration.
+    exec 9>&1
+    exec 1>&2
+    preflight     || true
+    locate_source || true
+    exec 1>&9 9>&-
+
+    pk probe.protocol "${RAVEN_INSTALL_PROTOCOL}"
+    pk probe.installer_version "${RAVEN_INSTALL_VERSION}"
+    pk probe.euid "$(id -u)"
+    pk probe.ok "$(( ${#PROBE_ERRORS[@]} == 0 ))"
+    local e
+    for e in "${PROBE_ERRORS[@]:-}"; do
+        [[ -z "$e" ]] && continue
+        # Errors are multi-line in two places. One record per line, or a
+        # front-end reading line by line loses the second half of the reason.
+        while IFS= read -r line; do pk probe.error "$line"; done <<< "$e"
+    done
+
+    pk preflight.firmware   "$([[ -d /sys/firmware/efi ]] && echo uefi || echo bios)"
+    case "${SECUREBOOT_STATE}" in
+        1)  pk preflight.secureboot on ;;
+        "") pk preflight.secureboot unknown ;;
+        *)  pk preflight.secureboot off ;;
+    esac
+
+    local t missing=()
+    for t in sfdisk blkid lsblk findmnt mount umount mountpoint mkfs.vfat wipefs; do
+        have "$t" || missing+=("$t")
+    done
+    pk preflight.tools_missing "${missing[*]:-}"
+
+    # Only the filesystems this machine can actually make. A front-end offering
+    # btrfs on an image with no mkfs.btrfs offers an install that dies at the
+    # mkfs, three steps after the disk was erased.
+    local fs
+    for fs in ext4 xfs btrfs; do
+        have "mkfs.${fs}" && pk preflight.fs "$fs"
+    done
+    pk preflight.chpasswd   "$(have chpasswd   && echo 1 || echo 0)"
+    pk preflight.mkswap     "$(have mkswap     && echo 1 || echo 0)"
+    pk preflight.efibootmgr "$(have efibootmgr && echo 1 || echo 0)"
+
+    pk source.kind   "${SRC_KIND}"
+    pk source.root   "${SRC_ROOT}"
+    pk source.kernel "${SRC_KERNEL}"
+    pk source.initrd "${SRC_INITRD}"
+    pk source.efi    "${SRC_EFI}"
+
+    # Measured the way copy_system measures it, so the number a front-end shows
+    # is the number the progress percentage is computed against.
+    local total_mb=0
+    if [[ -n "${SRC_ROOT}" ]] && have du; then
+        total_mb=$(du -sm --one-file-system "$SRC_ROOT" 2>/dev/null | awk '{print $1}')
+    fi
+    [[ "$total_mb" =~ ^[0-9]+$ ]] || total_mb=0
+    pk source.size_mb "$total_mb"
+
+    local rootsupport=unknown
+    if [[ -n "${SRC_INITRD}" ]] && have zcat; then
+        if zcat -f "$SRC_INITRD" 2>/dev/null | grep -aq 'raven_root_from_cmdline'; then
+            rootsupport=yes
+        else
+            rootsupport=no
+        fi
+    fi
+    pk source.initrd_root_support "$rootsupport"
+
+    # Whether the tree being installed carries a compositor. install_bootloader
+    # asks the same question of the copied root to decide whether to write the
+    # Desktop entry; asking it here is what lets a front-end grey out the
+    # desktop profile on an image that has no desktop in it.
+    local has_desktop=0
+    if [[ -n "${SRC_ROOT}" ]]; then
+        [[ -x "${SRC_ROOT%/}/usr/bin/huginn" || -x "${SRC_ROOT%/}/bin/huginn" ]] && has_desktop=1
+    fi
+    pk source.has_desktop "$has_desktop"
+
+    pk mem.total_mb "$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
+    pk swap.suggested   "$(suggested_swap)"
+    pk esp.size_default "${ESP_SIZE_DEFAULT}"
+
+    probe_disks
+
+    local z
+    while IFS= read -r z; do
+        [[ -z "$z" ]] && continue
+        pk tz "$z"
+    done < <(probe_timezones)
+
+    # What raven-postinstall will be able to apply, read from the directory
+    # rather than listed here, so adding a .packages file adds a profile.
+    local p found=0 dir
+    for dir in "${SRC_ROOT%/}/etc/raven/install-profiles" /etc/raven/install-profiles; do
+        [[ -d "$dir" ]] || continue
+        for p in "$dir"/*.packages; do
+            [[ -e "$p" ]] || continue
+            p="$(basename "$p")"
+            pk profile "${p%.packages}"
+            found=1
+        done
+        (( found )) && break
+    done
+    if (( ! found )); then
+        # The three run_wizard accepts. Named here only when the image ships no
+        # profile directory to read them from.
+        for p in minimal desktop developer; do pk profile "$p"; done
+    fi
+
+    local k
+    for k in "${ANSWER_KEYS[@]}";     do pk answers.key "$k"; done
+    for k in "${ANSWER_REQUIRED[@]}"; do pk answers.required "$k"; done
+
+    pk probe.end 1
+}
+
+# =============================================================================
 # Main
 # =============================================================================
 
 main() {
+    [[ -n "$OPT_ANSWERS" ]] && load_answers "$OPT_ANSWERS"
+
+    if (( OPT_PROBE )); then
+        probe_report
+        cleanup
+        trap - EXIT
+        exit 0
+    fi
+
     banner
     preflight
     locate_source
@@ -1457,6 +1990,13 @@ main() {
     finish
 
     trap - EXIT
+    emit done 0
+
+    # The front-end asks this one itself: it is the only question left, it is
+    # the only one whose answer is "close this window", and reading stdin here
+    # would block an install nobody is sitting in front of.
+    (( OPT_NONINTERACTIVE )) && return 0
+
     echo
     if ask_yn "Reboot now?" "N"; then
         echo "  Rebooting..."

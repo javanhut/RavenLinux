@@ -69,6 +69,7 @@ line:
 | `ravencanvasd`, `ravencanvas` | RavenCanvas | Rust | The wallpaper: a wlr-layer-shell client, and its control CLI |
 | `roostbar` | RoostBar | Rust | Layer-shell status bar, started through the global session.d drop-in |
 | `ravend`, `raven-greeter` | RavenLogin | Rust | The login daemon, which reads `/etc/shadow`, and the login screen, which does not |
+| `raven-installer-ui` | `installer-ui/` (this repo) | Rust | The graphical installer (GTK4, libadwaita): a front-end for `raven-install`, which does the installing |
 
 What they drag in spans two orders of magnitude, and the stage has a written
 list of none of it. `huginn` links seventeen shared libraries — libdrm, libgbm,
@@ -277,6 +278,66 @@ It is a shell script rather than a Rust binary on purpose: it shells out to
 `sfdisk`, `mkfs` and `blkid` for everything that matters, and being a script
 means it can be read and patched on the machine that is refusing to install.
 
+#### The graphical installer (`installer-ui/`)
+
+`raven-installer-ui` is a second way to drive that script and not a second
+implementation of it. It partitions nothing: it asks the questions the wizard
+asks, writes the answers to a file, and runs `raven-install`. Three options on
+that script are the whole interface, and they are documented as `PROTOCOL` at
+the top of it:
+
+| Option | What it is for |
+|--------|----------------|
+| `--probe` | Report the preflight results, the disks and what is on them, the source tree, the timezones and the profiles as `key=value` on stdout. Nothing is written, and a failed check is reported as a value rather than an exit code. |
+| `--answers FILE --non-interactive` | Take the wizard's answers from a file instead of a person. Validated by `apply_answers`, which uses the same validators the prompts do and refuses rather than corrects. |
+| `--progress-fd N` | Write each status line a second time to descriptor N as one record per line: `phase`, `pct`, `ok`, `warn`, `fail`, `info`, `dirty`, `done`. |
+
+The probe is what keeps the two front-ends in parity. It runs the *real*
+preflight and the *real* source lookup — `soft_die` is the whole of the
+difference — so the disks, filesystems and profiles the window offers are the
+ones the script would offer, including the ones it refuses. A machine
+`raven-install` will not install onto is a machine the window will not offer to
+install onto, in the script's own words, without the window having been taught
+what those words are.
+
+It is in this tree rather than a repository of its own, unlike every other GUI
+component, because it is the other half of a file in `scripts/installer/` and a
+version skew between them is a wizard that cannot drive the installer it is
+looking at. `scripts/installer/test-raven-install.sh` fails when the two
+disagree about the answer keys, the phase ids or the protocol version.
+
+#### Reaching root, and who the live desktop is
+
+The live ISO's desktop runs as **root**, and only the live one. Its boot
+entries — the GRUB entry in `stage4-iso.sh` and RavenBoot's compiled-in
+defaults in `bootloader/src/config.rs` — carry `raven.user=root`, which is the
+override `raven-init` already reads. Without it the session falls to
+`user::first_regular()`, which on this image is the `raven` placeholder: an
+account that exists so the image has a non-root user, not because anyone is
+meant to be it.
+
+It is live-only by construction rather than by a runtime check. Those two
+entries are what boot the ISO; the entries `install_bootloader` writes to an
+installed disk carry `root=UUID=` and no `raven.user`, so an installed machine
+uses the account the installer created. `test-raven-install.sh` fails if
+`raven.user` ever appears in what `raven-install` writes.
+
+On an installed system the window therefore runs as an ordinary user, and
+getting to root is `sudo` — there is no polkit agent on this image. Only the
+call that installs is elevated, and the password, asked for before the wizard
+rather than in front of the install, fills sudo's timestamp and is not kept.
+`privesc::detect` asks `sudo -n -l -- <installer>` rather than `sudo -n true`,
+because the live image's grant is scoped to that one command and a blanket
+question would be answered "password required" on the image built not to need
+one.
+
+That grant is `/etc/sudoers.d/10-raven-live-installer`, written by stage4 and
+deleted by `remove_live_credentials()` during `configure_system`, beside where
+the tty1 autologin is replaced with a real login prompt. It is not a hole on
+the live image — tty1 there runs with `--skip-login` and is already an
+unauthenticated root shell — and it is the reason the graphical installer still
+works if someone boots the ISO with a different `raven.user=`.
+
 The login shell is resolved by `/etc/raven/raven-shell`, which prefers
 `ravenshell`, falls back to `bash`, and finally to `/bin/sh`. stage3 sets bash
 as root's default so a base build without the Raven layer still boots to a
@@ -417,7 +478,9 @@ The base is designed to be grown, not modified:
 - **How a disk boots** → the init script generated by
   `scripts/build-initramfs.sh` (`raven_root_from_cmdline`,
   `raven_mount_disk_root`)
-- **Installation** → `scripts/installer/raven-install`
+- **Installation** → `scripts/installer/raven-install`. A question the wizard
+  asks needs a key in its `ANSWER_KEYS` and `apply_answers`, and a row in
+  `installer-ui/src/pages.rs`; the parity tests fail until both are there
 - **The console font** → `scripts/make-console-font.py` (glyph set),
   `install_console_font()` in stage4 (cell sizes), `configs/raven-console-font`
   (selection at boot)

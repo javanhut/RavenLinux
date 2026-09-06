@@ -142,6 +142,16 @@ pub(crate) fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<
         .or_else(user::first_regular);
 
     match &session_user {
+        // uid 0 is worth a warn even when it was asked for: everything the
+        // dock launches inherits it, and the video/render/input groups stop
+        // meaning anything because root ignores them. On the live ISO that is
+        // the intent -- see raven.user=root in the boot entries -- and this
+        // line is how an installed machine that ended up there by accident
+        // says so in the log.
+        Some(account) if account.uid == 0 => log::warn!(
+            "Wayland session will run as root. Correct for the live image; \
+             on an installed system, check raven.user= on the kernel cmdline."
+        ),
         Some(account) => log::info!(
             "Wayland session will run as {} (uid {})",
             account.name,

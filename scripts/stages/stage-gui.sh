@@ -206,6 +206,15 @@ raven_gui_app_vars CONTROLS
 IFS=',' read -r CONTROLS_BIN CONTROLS_DAEMON <<< "${CONTROLS_BINARIES}"
 CONTROLS_APPID="com.ravencontrols.Raven"
 
+# The graphical installer. Unlike every other application on this image its
+# source is in this repository, under installer-ui/, because it is the other
+# half of scripts/installer/raven-install and the two have to ship together --
+# the front-end reads a protocol that script defines, and a version skew
+# between them is a wizard that cannot drive the installer it is looking at.
+INSTALLER_UI_BIN="raven-installer-ui"
+INSTALLER_UI_APPID="com.raveninstaller.Raven"
+INSTALLER_UI_SRC="${PROJECT_ROOT}/installer-ui"
+
 # The login screen. A fourth repository, and the last thing between the boot and
 # somebody's session: ravend reads /etc/shadow, draws a password prompt through
 # a greeter it starts as an unprivileged account, and starts the session itself.
@@ -1512,6 +1521,77 @@ stage_settings() {
 }
 
 # =============================================================================
+# The graphical installer
+# =============================================================================
+#
+# Environment:
+#   INSTALLER_UI_SKIP=1   skip it; raven-install in a terminal installs the
+#                         same way, and does not need GTK to do it
+#
+# No fetch_repo: the source is in this tree. Everything else is stage_settings'
+# shape -- same toolkit, same target, same "warn and carry on" on a missing
+# dependency, because an ISO without the graphical installer is an ISO that
+# still installs.
+stage_installer_ui() {
+    if [[ "${INSTALLER_UI_SKIP:-0}" == "1" ]]; then
+        log_info "  INSTALLER_UI_SKIP=1: no graphical installer on the image"
+        return 0
+    fi
+
+    command -v cargo &>/dev/null || {
+        log_warn "  cargo not found; the graphical installer will not be built"
+        return 0
+    }
+
+    if [[ ! -f "${INSTALLER_UI_SRC}/Cargo.toml" ]]; then
+        log_warn "  installer-ui/ is not in this tree; no graphical installer"
+        return 0
+    fi
+
+    local -a missing=()
+    local mod
+    for mod in gtk4 libadwaita-1 glib-2.0 gio-2.0; do
+        pkg-config --exists "${mod}" 2>/dev/null || missing+=("${mod}")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        log_warn "  missing build dependencies for the graphical installer: ${missing[*]}"
+        log_warn "  install them with: pacman -S --needed gtk4 libadwaita"
+        log_warn "  the ISO will ship with raven-install only"
+        return 0
+    fi
+
+    log_info "  building the graphical installer for ${GUI_TARGET}..."
+    local -a cargo_args=(build --release --target "${GUI_TARGET}")
+    [[ -f "${INSTALLER_UI_SRC}/Cargo.lock" ]] && cargo_args+=(--locked)
+    if ! ( cd "${INSTALLER_UI_SRC}" && cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}" ); then
+        log_warn "  the graphical installer failed to build; the ISO will ship with raven-install only"
+        return 0
+    fi
+
+    local out="${INSTALLER_UI_SRC}/target/${GUI_TARGET}/release/${INSTALLER_UI_BIN}"
+    if [[ ! -x "${out}" ]]; then
+        log_warn "  the graphical installer produced no binary; raven-install only"
+        return 0
+    fi
+
+    install -Dm 0755 "${out}" "${SYSROOT_DIR}/usr/bin/${INSTALLER_UI_BIN}"
+    log_success "  ${INSTALLER_UI_BIN} installed ($(du -h "${out}" | cut -f1))"
+    stage_gui_libraries "${out}"
+
+    local appdata="${SYSROOT_DIR}/usr/share"
+    install -Dm 0644 "${INSTALLER_UI_SRC}/data/icons/hicolor/scalable/apps/${INSTALLER_UI_APPID}.svg" \
+        "${appdata}/icons/hicolor/scalable/apps/${INSTALLER_UI_APPID}.svg" 2>/dev/null \
+        && log_info "    + ${INSTALLER_UI_APPID}.svg (hicolor/scalable)" \
+        || log_warn "    no icon in the tree; the launcher entry will draw blank"
+    install -Dm 0644 "${INSTALLER_UI_SRC}/data/${INSTALLER_UI_APPID}.metainfo.xml" \
+        "${appdata}/metainfo/${INSTALLER_UI_APPID}.metainfo.xml" 2>/dev/null || true
+
+    if declare -F stage_gtk_runtime &>/dev/null; then
+        stage_gtk_runtime
+    fi
+}
+
+# =============================================================================
 # Raven Store
 # =============================================================================
 #
@@ -1767,6 +1847,21 @@ ENTRY
         chmod 0644 "${dir}/${SETTINGS_APPID}.desktop"
         written=$((written + 1))
         log_info "    + ${SETTINGS_APPID}.desktop"
+    fi
+
+    # The one entry on this image that is copied rather than written here.
+    #
+    # Every other application is an upstream checkout, and this function owns
+    # their entries so the launcher's contents are decided in one place. The
+    # installer's source is in this tree, so "one place" and "next to the
+    # application" are the same place -- and a heredoc here would be a second
+    # copy of a file already in the repository, free to disagree with it.
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${INSTALLER_UI_BIN}" ]] \
+        && [[ -f "${INSTALLER_UI_SRC}/data/${INSTALLER_UI_APPID}.desktop" ]]; then
+        install -Dm 0644 "${INSTALLER_UI_SRC}/data/${INSTALLER_UI_APPID}.desktop" \
+            "${dir}/${INSTALLER_UI_APPID}.desktop"
+        written=$((written + 1))
+        log_info "    + ${INSTALLER_UI_APPID}.desktop"
     fi
 
     if [[ -x "${SYSROOT_DIR}/usr/bin/${STORE_BIN}" ]]; then
@@ -2325,6 +2420,11 @@ print_gui_summary() {
         echo "  [--] wallpaper           not built - huginn's flat background"
     fi
 
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${INSTALLER_UI_BIN}" ]]; then
+        echo "  [OK] graphical installer /usr/bin/${INSTALLER_UI_BIN} (drives raven-install)"
+    else
+        echo "  [--] graphical installer (raven-install in a terminal still installs)"
+    fi
     if [[ -x "${SYSROOT_DIR}/usr/bin/${SETTINGS_BIN}" ]]; then
         echo "  [OK] settings app        /usr/bin/${SETTINGS_BIN} (Super+Ctrl+P, quick settings > All settings)"
     else
@@ -2543,6 +2643,12 @@ main() {
     # daemon that /etc/raven/init.toml starts as the `controlsd` service.
     log_step "Staging keyboard-light and fan control..."
     stage_controls
+
+    # Before install_desktop_entries like every other application, and last
+    # among them because it is the only one whose absence costs nothing: the
+    # ISO installs from a terminal either way.
+    log_step "Staging the graphical installer..."
+    stage_installer_ui
 
     log_step "Installing application entries..."
     install_desktop_entries

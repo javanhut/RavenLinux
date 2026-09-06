@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Install RavenLinux
+GenericName=System Installer
+Comment=Install RavenLinux onto a disk in this machine
+Exec=raven-installer-ui
+Icon=com.raveninstaller.Raven
+Categories=System;
+Keywords=install;installer;setup;disk;partition;raven;
+StartupWMClass=raven-installer-ui
+StartupNotify=true
+Terminal=false

@@ -74,6 +74,10 @@ run = ["./scripts/dev-install.sh all --dry-run"]
 desc = "dev's configs target alone: new /etc/raven files land, edited ones are shown as diffs"
 run = ["./scripts/dev-install.sh configs"]
 
+[commands.dev-ui]
+desc = "dev's installer-ui target alone: build the graphical installer and install it here"
+run = ["./scripts/dev-install.sh installer-ui"]
+
 [commands.dev-all]
 desc = "dev plus /etc/raven configs (overwrites machine-local edits)"
 run = ["./scripts/dev-install.sh all --force-configs"]
@@ -92,6 +96,7 @@ desc = "Run manifest, init, installer, and console-font tests"
 run = [
   "./scripts/check-manifests.sh",
   "cargo test --manifest-path init/Cargo.toml",
+  "cargo test --manifest-path installer-ui/Cargo.toml",
   "./scripts/installer/test-raven-install.sh",
   "./scripts/test-console-font.sh",
 ]

@@ -199,7 +199,18 @@ impl Default for BootConfig {
             // raven.wayland names the compositor binary. raven-init passes it
             // to /bin/raven-wayland-session as RAVEN_WAYLAND_COMPOSITOR; the
             // launcher still accepts the old "raven" and maps it to huginn.
-            cmdline: String::from("rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=huginn console=ttyS0,115200 console=tty0"),
+            //
+            // raven.user=root: the live desktop runs as root. Without it
+            // raven-init picks the lowest-uid regular account -- the `raven`
+            // placeholder, which exists so the image has a non-root user and
+            // not because anyone is meant to be it -- and the desktop's job
+            // here is installing the machine, which is root's work.
+            //
+            // These defaults are only ever read when the ESP carries no
+            // boot.cfg, and raven-install always writes one. So this is the
+            // live ISO's menu and nothing else: an installed disk boots the
+            // entries that installer generated, which carry no raven.user.
+            cmdline: String::from("rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=huginn raven.user=root console=ttyS0,115200 console=tty0"),
             entry_type: EntryType::LinuxEfi,
             children: Vec::new(),
         });

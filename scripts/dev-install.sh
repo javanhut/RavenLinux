@@ -19,6 +19,10 @@
 #   init        build init/ natively; install raven-init, raven-rc,
 #               raven-powerd, raven-ports, raven-timed to /usr/bin
 #               (stage-raven.sh:build_raven_init)
+#   installer-ui  build installer-ui/ natively; install raven-installer-ui and
+#               its launcher entry, icon and metainfo. Not in the default set:
+#               it is a GTK4 build, and it is only worth waiting for when the
+#               graphical installer is what changed.
 #   installer   scripts/installer/* -> /usr/bin, configs/installer/profiles
 #               -> /etc/raven/install-profiles (stage4-iso.sh:install_installer)
 #   tools       configs/raven-console-font, configs/raven-udev,
@@ -64,8 +68,8 @@ for arg in "$@"; do
         --no-restart)      NO_RESTART=1 ;;
         --allow-non-raven) ALLOW_NON_RAVEN=1 ;;
         -h|--help)         sed -n '2,/^# ====.*$/{/^# ====/d;s/^# \{0,1\}//p}' "$0"; exit 0 ;;
-        init|installer|tools|configs) TARGETS+=("$arg") ;;
-        all)               TARGETS+=(init installer tools configs) ;;
+        init|installer|installer-ui|tools|configs) TARGETS+=("$arg") ;;
+        all)               TARGETS+=(init installer installer-ui tools configs) ;;
         *) log_error "unknown argument: $arg"; exit 2 ;;
     esac
 done
@@ -176,6 +180,41 @@ do_installer() {
     done
 }
 
+# The graphical installer. Separate from `installer` because it is a cargo
+# build against GTK4 and the shell scripts above are a copy -- somebody fixing
+# a prompt in raven-install should not wait for libadwaita to link.
+#
+# Not in the default target list for the same reason.
+do_installer_ui() {
+    log_section "installer-ui"
+    local src="${RAVEN_ROOT}/installer-ui"
+
+    if [[ ! -f "${src}/Cargo.toml" ]]; then
+        log_warn "installer-ui/ is not in this tree; skipped"
+        return 0
+    fi
+    local mod missing=()
+    for mod in gtk4 libadwaita-1 glib-2.0 gio-2.0; do
+        pkg-config --exists "$mod" 2>/dev/null || missing+=("$mod")
+    done
+    if (( ${#missing[@]} )); then
+        log_error "missing build dependencies: ${missing[*]}"
+        return 1
+    fi
+
+    ( cd "$src" && "${BUILD_AS[@]}" cargo build --release --locked ) || {
+        log_error "cargo build failed; nothing installed"
+        return 1
+    }
+    install_file "${src}/target/release/raven-installer-ui" /usr/bin/raven-installer-ui 0755
+    install_file "${src}/data/com.raveninstaller.Raven.desktop" \
+        /usr/share/applications/com.raveninstaller.Raven.desktop 0644
+    install_file "${src}/data/icons/hicolor/scalable/apps/com.raveninstaller.Raven.svg" \
+        /usr/share/icons/hicolor/scalable/apps/com.raveninstaller.Raven.svg 0644
+    install_file "${src}/data/com.raveninstaller.Raven.metainfo.xml" \
+        /usr/share/metainfo/com.raveninstaller.Raven.metainfo.xml 0644
+}
+
 do_tools() {
     log_section "repo-sourced tools"
     install_file "${RAVEN_ROOT}/configs/raven-console-font" /usr/bin/raven-console-font 0755
@@ -205,7 +244,9 @@ do_configs() {
 }
 
 for t in "${TARGETS[@]}"; do
-    "do_${t}"
+    # installer-ui -> do_installer_ui. A target name is what someone types on
+    # the command line; a function name cannot carry a hyphen comfortably.
+    "do_${t//-/_}"
 done
 
 # -----------------------------------------------------------------------------

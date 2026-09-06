@@ -2465,10 +2465,58 @@ EOF
         default_pass_hash=$(openssl passwd -6 "raven" 2>/dev/null) || true
     fi
 
-    # Fallback to pre-computed SHA512 hash if openssl failed
+    # Second and third opinions, so a build host without openssl still gets a
+    # real hash rather than the branch below.
+    if [[ -z "$default_pass_hash" ]] && command -v mkpasswd &>/dev/null; then
+        default_pass_hash=$(mkpasswd -m sha-512 "raven" 2>/dev/null) || true
+    fi
+    if [[ -z "$default_pass_hash" ]] && command -v python3 &>/dev/null; then
+        default_pass_hash=$(python3 -c '
+import sys
+try:
+    import crypt  # removed in Python 3.13
+except ImportError:
+    sys.exit(1)
+print(crypt.crypt("raven", crypt.mksalt(crypt.METHOD_SHA512)))
+' 2>/dev/null) || true
+    fi
+
+    # There used to be a hardcoded "pre-computed SHA512 hash for password
+    # raven" here. It was not one. It was 86 plausible-looking characters that
+    # hashed to nothing, so on any build host without openssl this image
+    # shipped two accounts whose passwords could never be entered correctly --
+    # and it looked exactly like a working image until somebody typed the
+    # documented password and was told it was wrong.
+    #
+    # A locked account is the honest version of the same situation: it fails
+    # the same way and says so. tty1 is configured with --skip-login, so the
+    # live console still works; what is lost is su and sudo, which the fake
+    # hash had already lost without admitting it.
     if [[ -z "$default_pass_hash" ]]; then
-        # Pre-computed SHA512 hash for password "raven" (salt: ravenlinux)
-        default_pass_hash='$6$ravenlinux$O8Y5jKz8VgZ3LfJk5QT2xK9mNwH6pR1yB4vC7dE0fG2hI3jK4lM5nO6pQ7rS8tU9vW0xY1zA2bC3dE4fG5hI6j'
+        log_warn "  No way to hash a password on this build host"
+        log_warn "  (tried openssl, mkpasswd, python3-crypt)"
+        log_warn "  root and raven will ship LOCKED. tty1 still autologins, but"
+        log_warn "  su and sudo will not work. Install openssl and rebuild stage2."
+        default_pass_hash="!"
+    else
+        # Verify it before shipping it. This is the check whose absence let the
+        # fake hash survive: a hash is a string until something proves it
+        # matches the password it claims to be for.
+        # Field 3 of "$6$<salt>$<body>". Done with cut rather than parameter
+        # expansion: the pattern needed there is a literal "$", which is also
+        # the character that starts an expansion, and the version of this that
+        # used ${h%$*} silently expanded $* to the positional parameters and
+        # matched nothing.
+        local salt
+        salt="$(cut -d'$' -f3 <<< "$default_pass_hash")"
+        if command -v openssl &>/dev/null; then
+            if [[ "$(openssl passwd -6 -salt "$salt" raven 2>/dev/null)" != "$default_pass_hash" ]]; then
+                log_error "  The generated password hash does not verify against 'raven'."
+                log_error "  Refusing to ship an image whose documented password does not work."
+                return 1
+            fi
+            log_info "  Default password hash verified"
+        fi
     fi
 
     # Calculate days since epoch for password last change

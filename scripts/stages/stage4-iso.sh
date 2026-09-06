@@ -681,8 +681,23 @@ EOF
 # cmdline, disables the tty1 getty, starts seatd, and execs
 # /bin/raven-wayland-session, which execs huginn. There is no shell client
 # after it: the compositor draws the dock, launcher and notifications itself.
+#
+# raven.user=root: the live desktop runs as root, and only the live one.
+#
+# raven-init otherwise picks the lowest-uid regular account, which on this
+# image is the `raven` placeholder -- an account that exists so the live image
+# has a non-root user, not because anybody is meant to be it. A live ISO's
+# desktop is a tool for installing the machine and looking at the hardware, and
+# both of those are root's work: the installer partitions disks, and the
+# console this desktop replaces is already an unauthenticated root shell,
+# because tty1 here runs with --skip-login.
+#
+# It is live-only by construction rather than by a check. This entry, and
+# RavenBoot's compiled-in defaults, are what boot the ISO; the entries
+# raven-install writes to an installed disk's ESP carry root=UUID= and no
+# raven.user, so an installed machine keeps the account the installer made.
 menuentry "Raven Desktop (Huginn)" --class raven {
-    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=huginn console=tty0
+    linux /boot/vmlinuz rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=huginn raven.user=root console=tty0
     initrd /boot/initramfs.img
 }
 EOF
@@ -1116,7 +1131,55 @@ install_installer() {
         cp "${profiles}"/*.packages "${SYSROOT_DIR}/etc/raven/install-profiles/"
     fi
 
+    install_live_installer_sudoers
+
     log_success "raven-install installed to /usr/bin/raven-install (also /sbin/raven-install)"
+}
+
+# The live image's installer runs without asking for a password.
+#
+# WHY THIS IS NOT A HOLE
+#
+# The Wayland session does not run as root: raven-init picks the first regular
+# account (user::first_regular), which on this image is the `raven`
+# placeholder. So the graphical installer starts as uid 1000 and has to get to
+# root somehow, and the only route is sudo -- there is no polkit agent here.
+#
+# Without this rule that means a password prompt, on a live ISO, for a
+# placeholder account whose password is a build-time detail nobody booting the
+# image knows. And it would be protecting nothing: /etc/raven/init.toml runs
+# tty1 with --skip-login, so this image already hands an unauthenticated root
+# shell to anyone who presses Ctrl+Alt+F1. A password on the installer is not a
+# boundary, it is a locked door next to an open one.
+#
+# It is scoped to the two commands the installer window actually runs, to wheel
+# rather than to everyone, and it does not survive the install: configure_system
+# in raven-install deletes it from the target, the same way and for the same
+# reason it replaces the tty1 autologin with a real login prompt.
+install_live_installer_sudoers() {
+    local dir="${SYSROOT_DIR}/etc/sudoers.d"
+    local rule="${dir}/10-raven-live-installer"
+
+    mkdir -p "${dir}"
+    cat > "${rule}" << 'RULE'
+# The live image's installer. REMOVED BY raven-install ON THE INSTALLED SYSTEM.
+#
+# The graphical installer runs as the session user, which is not root, and a
+# live ISO cannot ask for a password nobody has been given. This grants the two
+# commands that window runs and nothing else.
+#
+# It is not a privilege escalation on the live image: tty1 there is configured
+# with --skip-login and is already an unauthenticated root shell.
+#
+# If you are reading this on an installed system, something went wrong -- see
+# remove_live_credentials() in raven-install. Delete it.
+%wheel ALL=(root) NOPASSWD: /usr/bin/raven-install, /usr/bin/reboot
+RULE
+    # sudo ignores a drop-in that is group- or world-writable, and refuses to
+    # run at all if it is world-readable in some builds. 0440 is the mode
+    # visudo writes.
+    chmod 0440 "${rule}"
+    log_info "  sudoers drop-in for the live installer (removed at install time)"
 }
 
 # =============================================================================

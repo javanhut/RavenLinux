@@ -372,7 +372,14 @@ tmpfs overlay and do not survive a reboot of a live image.
 
 ## Installing
 
-The live image installs itself. Boot it, and at the shell:
+The live image installs itself, from a window or from a shell. Both do the same
+thing, because the window runs the script.
+
+From the desktop, boot the **Raven Desktop (Huginn)** entry and open **Install
+RavenLinux** from the launcher. It asks the same questions in the same order,
+shows the same plan, and streams the installer's own output under "Details".
+
+From a shell:
 
 ```bash
 raven-install
@@ -390,6 +397,20 @@ raven-install --efi-nvram            # also register a UEFI NVRAM boot entry
 raven-install --profile minimal      # smallest install; add packages later
 raven-install --profile desktop      # record the desktop package template
 ```
+
+The graphical installer is built on three more options, which exist for it and
+are useful on their own — `--probe` reports what the installer can see about
+this machine as `key=value`, and `--answers FILE --non-interactive` installs
+from a file of answers with no prompts at all:
+
+```bash
+raven-install --probe                          # what this machine looks like
+raven-install --answers /run/my.conf --non-interactive
+```
+
+The answers file is `key=value`, one per line, and `--probe` lists the keys it
+accepts under `answers.key`. It holds passwords in the clear, so it must be
+mode `0600` — the installer refuses anything looser.
 
 The layout is GPT, and **the target disk is erased completely** — there is no
 dual-boot mode yet, and no manual partitioning:

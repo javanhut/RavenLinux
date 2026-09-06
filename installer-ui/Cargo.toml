@@ -1,0 +1,44 @@
+# The graphical front-end for raven-install.
+#
+# It partitions nothing. Every disk-destroying operation in a RavenLinux
+# install lives in scripts/installer/raven-install and only there; this crate
+# asks the questions that script's wizard asks, writes the answers to a file,
+# and runs the script. That is the whole design, and it is the reason a change
+# to the way Raven installs needs no change here: --probe tells this program
+# what to ask about, and the answers file is how it answers.
+#
+# In-tree rather than a repository of its own, unlike every other GUI package,
+# because it is not an application -- it is the other half of a file in
+# scripts/installer, and the two have to ship as one version. See PROTOCOL at
+# the top of raven-install.
+[package]
+name = "raven-installer-ui"
+version = "0.1.0"
+edition = "2021"
+authors = ["RavenLinux Team"]
+description = "RavenLinux graphical installer - a front-end for raven-install"
+license = "MIT"
+
+[dependencies]
+# GTK4 and libadwaita, the same toolkit ravenfilemanager, raven-settings and
+# raven-controls are built with, for the same reason: it is the one graphical
+# stack the image already carries, and stage-gui.sh already stages its runtime.
+# v4_12 for CssProvider::load_from_string, which is what RavenSettingsUI's
+# theme module uses and the non-deprecated way to install a stylesheet. The
+# image carries GTK 4.22.
+gtk = { package = "gtk4", version = "0.10", features = ["v4_12"] }
+adw = { package = "libadwaita", version = "0.8", features = ["v1_5"] }
+
+# How the reader threads reach the GTK main loop. glib's own channel was
+# removed in the 0.18 cycle; this is what replaced it in the bindings' own
+# examples, paired with glib::spawn_future_local.
+async-channel = "2"
+
+[[bin]]
+name = "raven-installer-ui"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
