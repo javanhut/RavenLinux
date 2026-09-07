@@ -121,6 +121,21 @@ GUI_MANIFEST="gui/ravengui"
 # this one boots to a compositor drawing nothing.
 GUI_SESSION_BINARIES="raven-wayland-session"
 
+# The graphical installer. Built by stage-gui.sh's stage_installer_ui from
+# installer-ui/ in THIS repository rather than cloned, so it is not a GUI_APPS
+# row -- exactly the same reason RAVEN_INIT_BINARIES above is a constant and
+# not a row. And for the same reason it needs to be here: the check has to know
+# about everything the stages install, not just everything they clone.
+#
+# It was missing from this file, and that is not a hypothetical. stage_installer_ui
+# builds it, installs it to /usr/bin and writes its .desktop -- and stage4's
+# check_sysroot_layers looked for fifteen GUI binaries, none of them this one.
+# When the GTK4 toolkit was absent from the build container the installer was
+# skipped along with the other five GTK applications, and the one function whose
+# entire job is to notice a missing component reported the GUI layer complete.
+# An ISO that cannot install itself, built green.
+GUI_INSTALLER_BINARIES="raven-installer-ui"
+
 # =============================================================================
 # Accessors
 # =============================================================================
@@ -155,6 +170,7 @@ raven_gui_binaries() {
         printf '%s\n' "${binaries//,/$'\n'}"
     done
     printf '%s\n' "${GUI_SESSION_BINARIES//,/$'\n'}"
+    printf '%s\n' "${GUI_INSTALLER_BINARIES//,/$'\n'}"
 }
 
 # The repository a Raven-layer or GUI component is cloned from.

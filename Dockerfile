@@ -19,9 +19,11 @@
 # Arch Linux is used as the base because RavenLinux is primarily tested there
 # and check-deps.sh maps the most complete package set to pacman.
 #
-# The base system is a console system -- no graphical stack is built, so no
-# GUI toolkits are installed here. Add what you need alongside whatever you
-# add back to the distribution.
+# This image carries the build dependencies of every layer the ISO ships, the
+# desktop included: the compositor's C libraries and the GTK4 toolkit its
+# applications are written against. It said the opposite for a long time -- "no
+# graphical stack is built, so no GUI toolkits are installed here" -- and the
+# stages took it at its word, skipping six applications per build.
 # =============================================================================
 
 # RavenLinux only targets x86_64, and Arch Linux only publishes an x86_64 image
@@ -118,6 +120,60 @@ RUN pacman -Syu --noconfirm --needed \
         # binary and its libraries into the sysroot; without it in the image the
         # stage warns and moves on, and the ISO ships with no X11 support at all.
         xorg-xwayland \
+        # The GTK4 stack -- SIX of the image's applications, and every one of
+        # its graphical *applications* as opposed to its shell, is a GTK4 +
+        # libadwaita client: Files, Settings, Store, Power, Controls and the
+        # graphical installer. Each of their stage_* functions in stage-gui.sh
+        # opens with the same `pkg-config --exists gtk4 libadwaita-1 glib-2.0
+        # gio-2.0` guard and, per this stage's fail-soft rule, warns and
+        # returns 0 when it does not hold.
+        #
+        # This container had none of them, and the result was not a warning
+        # anyone saw: install_desktop_entries writes an entry only for a binary
+        # it can see, so all six were skipped together and the ISO booted to a
+        # launcher holding exactly two things -- Terminal, and Crow inside it.
+        # A desktop with no file manager, no settings and no installer looks
+        # like a compositor bug rather than six absent build dependencies.
+        #
+        # glib2-devel is not what satisfies the guard -- glib-2.0.pc,
+        # gio-2.0.pc and glib-compile-schemas are all owned by glib2, which
+        # arrives as a dependency of gtk4. It is here for the development
+        # tooling around them (gdbus-codegen, glib-mkenums) that a -sys crate
+        # may shell out to, and because stage_gtk_runtime names it. Verified
+        # with pacman -Qo rather than assumed: an earlier version of this
+        # comment had the .pc files in the wrong package.
+        gtk4 libadwaita glib2-devel \
+        # The other half of a GTK application: the data it reads at run time,
+        # which stage_gtk_runtime() copies out of this container and into the
+        # sysroot. None of it is linked, so none of it is found by ldd, and
+        # each piece fails separately and quietly on the image:
+        #
+        #   gsettings-desktop-schemas  org.gnome.desktop.interface. Without it
+        #                              every g_settings_new() is a fatal GLib
+        #                              error and the applications abort on
+        #                              startup, having built perfectly.
+        #   shared-mime-info           update-mime-database and the source XML.
+        #                              Without it every file is
+        #                              application/octet-stream.
+        #   desktop-file-utils         update-desktop-database, which is what
+        #                              makes the MIME half of the launcher's
+        #                              entries resolve.
+        #   glycin + glycin-gtk4       image decoding. Since gdk-pixbuf 2.44
+        #                              the loaders are out-of-process: `glycin`
+        #                              owns /usr/lib/glycin-loaders, which is
+        #                              the directory stage_gtk_runtime() looks
+        #                              for, and glycin-gtk4 is the toolkit's
+        #                              side of it. gtk4 depends on neither.
+        #   bubblewrap                 the sandbox glycin refuses to decode
+        #                              outside of, so GTK draws no image at all
+        #                              without it.
+        #   librsvg                    the SVG loader. The application icons
+        #                              staged into hicolor are SVG.
+        #   dconf                      the GSettings backend. Without it
+        #                              settings apply for the life of the
+        #                              process and are forgotten on exit.
+        gsettings-desktop-schemas shared-mime-info desktop-file-utils \
+        glycin glycin-gtk4 bubblewrap librsvg dconf \
         # The terminal needs no packages of its own. stage-gui.sh builds
         # RavenTerminal from source with `go build -tags wayland`, whose GLFW
         # compiles from vendored C against wayland-client/cursor/egl and

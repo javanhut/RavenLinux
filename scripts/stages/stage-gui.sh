@@ -308,6 +308,50 @@ fi
 # Unlike the Raven stage there is no musl target to probe. What this needs is
 # the development side of the libraries smithay binds: a build host without
 # libdrm or libinput headers fails at link time, not at run time.
+# The toolkit every graphical *application* on the image is written against,
+# as opposed to the compositor's own C libraries above.
+#
+# Six stage_* functions -- the file manager, settings, store, power, controls
+# and the graphical installer -- open with the identical `pkg-config --exists
+# gtk4 libadwaita-1 glib-2.0 gio-2.0` guard and, being fail-soft, warn and
+# return 0 when it fails. On a host without GTK4 that is six separate warnings,
+# each phrased as though it were about one application, scattered through a
+# build log thousands of lines long; and the only downstream trace is a
+# launcher with two entries in it, because install_desktop_entries writes an
+# entry only for a binary it can see.
+#
+# The build container had no GTK4 in it at all, and shipped ISO after ISO whose
+# entire application menu was Terminal and Crow. Saying it once, up front, in
+# the plural, is what turns six scattered warnings into the one fact they all
+# are: the toolkit is not here, so none of the applications will be.
+#
+# It does not gate anything -- each stage_* still makes its own decision, and a
+# deliberately console-only or compositor-only image is a legitimate thing to
+# build. It only refuses to let the reason go unnamed.
+report_gtk_toolkit() {
+    command -v pkg-config &>/dev/null || return 0
+
+    local -a missing=()
+    local mod
+    for mod in gtk4 libadwaita-1 glib-2.0 gio-2.0; do
+        pkg-config --exists "${mod}" 2>/dev/null || missing+=("${mod}")
+    done
+    (( ${#missing[@]} == 0 )) && return 0
+
+    log_warn "=============================================================="
+    log_warn "  No GTK4 toolkit on this build host: ${missing[*]}"
+    log_warn "=============================================================="
+    log_warn "  Every graphical application on the image is GTK4 +"
+    log_warn "  libadwaita, so all of these will be skipped together:"
+    log_warn "    Files, Settings, Store, Power, Controls, Installer"
+    log_warn "  The compositor still builds. The launcher will hold only"
+    log_warn "  the terminal and Crow inside it."
+    log_warn ""
+    log_warn "  install with: pacman -S --needed gtk4 libadwaita"
+    log_warn "  or rebuild the container: imlazy clean-image && imlazy image"
+    log_warn "=============================================================="
+}
+
 have_gui_toolchain() {
     command -v cargo &>/dev/null || return 1
     command -v pkg-config &>/dev/null || return 1
@@ -767,7 +811,7 @@ stage_gtk_runtime() {
         else
             log_warn "  glib-compile-schemas not on the build host: the schemas are"
             log_warn "  staged but not compiled, which is the same as not staged"
-            log_warn "  install it with: pacman -S --needed glib2-devel"
+            log_warn "  install it with: pacman -S --needed glib2"
         fi
     else
         log_warn "  no GSettings schemas on the build host; GTK applications will abort"
@@ -2663,6 +2707,10 @@ main() {
 
     log_step "Staging XWayland..."
     stage_xwayland
+
+    # Once, and before the six functions that each repeat this check: a missing
+    # toolkit is one fact about the host, not six facts about six applications.
+    report_gtk_toolkit
 
     # Before the entries: install_desktop_entries writes only what it can see
     # a binary for, so a terminal staged after it would not be described.
