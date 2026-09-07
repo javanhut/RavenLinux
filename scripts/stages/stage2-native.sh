@@ -441,6 +441,7 @@ copy_networking() {
     # daemon and speaks nl80211 itself. A second daemon on the wiphy fights it
     # for the interface, and the tools would have nothing to talk to.
     ensure_dhcpcd    # DHCP client
+    install_raven_dhcp   # ...and the thing init.toml actually runs
 
     local net_tools=(
         ip ping ping6 ss netstat route
@@ -841,6 +842,84 @@ ensure_dbus() {
 }
 
 # =============================================================================
+# dhcpcd's hooks -- what turns a lease into a working resolver
+# =============================================================================
+# dhcpcd does not write /etc/resolv.conf. Nothing in the daemon knows how:
+# every bit of that is in the shell scripts under its hooks directory, and
+# `20-resolv.conf` is the one that takes the DNS servers out of the lease and
+# puts them somewhere the resolver reads. `30-hostname` is the same story for
+# the hostname the lease offers.
+#
+# `copy_from_host` copies one executable and nothing around it, so the branch
+# above this brought the binary over and left every hook behind. The result is
+# a machine that gets an address, gets a default route, and cannot resolve a
+# name -- which reads to whoever is sitting at it as no network at all.
+#
+# It was hidden by stage2 shipping an /etc/resolv.conf with 8.8.8.8 and
+# 1.1.1.1 already in it. That covers a plain home network and nothing else:
+# not a local `.lan` name, not a corporate resolver, not split-horizon DNS,
+# and not any network that blocks outbound DNS to a public resolver -- where
+# the fallback does not degrade, it fails shut.
+#
+# The source-build path needs none of this: `make install` lays down its own
+# hooks under DESTDIR.
+copy_dhcpcd_hooks() {
+    local src=""
+    for candidate in /usr/libexec/dhcpcd-hooks /usr/lib/dhcpcd/dhcpcd-hooks \
+                     /libexec/dhcpcd-hooks /usr/share/dhcpcd/hooks; do
+        if [[ -d "$candidate" ]]; then
+            src="$candidate"
+            break
+        fi
+    done
+
+    if [[ -z "$src" ]]; then
+        log_warn "  No dhcpcd hooks on the build host; DHCP will set no DNS"
+        return 0
+    fi
+
+    # To where dhcpcd looks, which is where it found them on the host: the
+    # path is compiled in, so staging them anywhere else stages nothing.
+    local dest="${SYSROOT_DIR}${src}"
+    mkdir -p "${dest}"
+    cp -a "${src}/." "${dest}/" 2>/dev/null || {
+        log_warn "  Could not stage dhcpcd hooks from ${src}"
+        return 0
+    }
+
+    log_info "  Staged dhcpcd hooks from ${src}"
+}
+
+# =============================================================================
+# raven-dhcp -- the wired-DHCP entry point the rest of the system calls
+# =============================================================================
+# /etc/raven/init.toml runs `/bin/raven-dhcp --all -q` as the `network`
+# service, and init/src/ports.rs runs the same path when a wired link gains
+# carrier after boot. Neither of them was running anything: no stage built or
+# installed a `raven-dhcp`, so the service failed its exec on every boot and,
+# being `critical = false`, said nothing about it.
+#
+# It is installed here rather than in stage-raven.sh on purpose. The Raven
+# layer is droppable -- a base build with RAVEN_SKIP=1 is a supported image --
+# and wired networking is not something that should disappear with it. This
+# needs only /bin/sh and the dhcpcd staged directly above, both of which are
+# stage2's.
+install_raven_dhcp() {
+    local src="${PROJECT_ROOT}/configs/raven-dhcp"
+
+    if [[ ! -f "${src}" ]]; then
+        log_warn "  configs/raven-dhcp is missing; wired links will get no address"
+        return 0
+    fi
+
+    # /usr/bin, which is what /bin/raven-dhcp resolves to after the usr-merge;
+    # see scripts/lib/usrmerge.sh. init.toml's /bin path is left alone rather
+    # than "corrected" -- both spellings are the same file.
+    install -D -m 0755 "${src}" "${SYSROOT_DIR}/usr/bin/raven-dhcp"
+    log_info "  Installed raven-dhcp"
+}
+
+# =============================================================================
 # Ensure dhcpcd is available (DHCP client)
 # =============================================================================
 ensure_dhcpcd() {
@@ -860,6 +939,7 @@ ensure_dhcpcd() {
                 cp /etc/dhcpcd.conf "${SYSROOT_DIR}/etc/" 2>/dev/null || true
             fi
             mkdir -p "${SYSROOT_DIR}/var/lib/dhcpcd"
+            copy_dhcpcd_hooks
             return 0
         fi
     fi

@@ -15,6 +15,7 @@ use uefi::proto::console::text::{Color, Key, ScanCode};
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::media::file::{File, FileAttribute, FileMode};
 use uefi::proto::media::fs::SimpleFileSystem;
+use uefi::table::boot::SearchType;
 use uefi::table::runtime::{VariableAttributes, VariableVendor};
 use uefi::CString16;
 
@@ -150,6 +151,19 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // Initialize UEFI services (also sets up allocator)
     uefi::helpers::init(&mut system_table).unwrap();
 
+    // Before anything reads a key or looks for a filesystem. See the function:
+    // on a cold boot the keyboard is usually not connected to a driver yet,
+    // and the menu is unusable until something asks the firmware to do it.
+    connect_all_controllers(system_table.boot_services());
+
+    // Now that the keyboard is behind ConIn, drop whatever is in its buffer.
+    // A keystroke from the firmware's own boot-menu prompt would otherwise be
+    // read here as the user's first answer to this one, and cancel the
+    // countdown -- or select an entry -- before the menu has been drawn.
+    // `false` skips the extended self-test, which on some firmware takes
+    // seconds and proves nothing this needs.
+    let _ = system_table.stdin().reset(false);
+
     // The text console is only ever the fallback now, but the config load below
     // reports on it, so it is cleared either way. `Screen::open` paints over
     // this the moment it succeeds.
@@ -199,7 +213,7 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                 let _ = writeln!(stdout, "\nBoot failed: {:?}", result);
                 let _ = writeln!(stdout, "Press any key to reboot...");
             }
-            wait_for_key(system_table.boot_services());
+            wait_for_key(&mut system_table);
             system_table.runtime_services().reset(
                 uefi::table::runtime::ResetType::COLD,
                 Status::SUCCESS,
@@ -267,7 +281,7 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                     let _ = stdout.set_color(Color::Red, Color::Black);
                     let _ = writeln!(stdout, "\n{failure}");
                     let _ = writeln!(stdout, "Press any key to return to menu...");
-                    wait_for_key(system_table.boot_services());
+                    wait_for_key(&mut system_table);
                 }
             }
             MenuAction::Reboot => {
@@ -307,7 +321,7 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                         let _ = stdout.set_color(Color::Red, Color::Black);
                         let _ = writeln!(stdout, "\nUEFI Shell not found.");
                         let _ = writeln!(stdout, "Press any key to return to menu...");
-                        wait_for_key(system_table.boot_services());
+                        wait_for_key(&mut system_table);
                     }
                 }
             }
@@ -346,7 +360,7 @@ fn main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                             writeln!(stdout, "Use the machine's setup key during reboot instead.");
                         let _ = writeln!(stdout, "Press any key to return to the menu...");
                     }
-                    wait_for_key(system_table.boot_services());
+                    wait_for_key(&mut system_table);
                 }
             }
             MenuAction::Continue => {
@@ -360,6 +374,47 @@ fn has_text_input(boot_services: &BootServices) -> bool {
     boot_services
         .get_handle_for_protocol::<uefi::proto::console::text::Input>()
         .is_ok()
+}
+
+/// Bind a driver to every device the firmware has enumerated.
+///
+/// This is the fix for a menu that draws, counts down, and ignores the
+/// keyboard -- until you reboot, after which the same menu takes arrow keys
+/// perfectly well.
+///
+/// UEFI does not have to have connected anything. The firmware is required to
+/// connect the console and the device it is booting from; everything else is
+/// left for the loader to ask for, and every fast-boot implementation takes
+/// that permission. A USB keyboard on a cold start is typically *enumerated*
+/// -- the host controller saw it -- and not *connected*: no driver is bound to
+/// it, so UsbKbDxe never produces a SimpleTextInput for it, so the ConSplitter
+/// has nothing to aggregate and ConIn returns NOT_READY forever. The second
+/// boot works because the firmware kept the device connected across a warm
+/// reset, which is exactly the asymmetry that makes this look like a bug in
+/// the menu rather than in what ran before it.
+///
+/// So do what a loader is supposed to do: walk every handle and call
+/// ConnectController on it, recursively, which drives the driver-binding
+/// protocol over the whole device tree and gets UsbKbDxe onto the keyboard.
+/// GRUB has carried this as `grub_efi_connect_all` for over a decade for this
+/// same reason; it is not a workaround for one vendor's firmware.
+///
+/// Failures are ignored on purpose and there is nothing useful to report. A
+/// handle with no driver willing to bind to it -- most of them -- returns
+/// NOT_FOUND, and that is the ordinary case rather than an error; logging it
+/// would print a screenful of noise about the devices that are working.
+///
+/// Cost is a scan of the handle database and one call per handle, which is
+/// tens of milliseconds on a machine with a hundred handles. It runs once,
+/// before the menu.
+fn connect_all_controllers(boot_services: &BootServices) {
+    let Ok(handles) = boot_services.locate_handle_buffer(SearchType::AllHandles) else {
+        return;
+    };
+
+    for handle in handles.iter() {
+        let _ = boot_services.connect_controller(*handle, None, None, true);
+    }
 }
 
 /// Result of menu interaction
@@ -490,7 +545,7 @@ fn display_menu_graphical(
 
         // Wait for input or timeout
         if countdown_active && timeout > 0 {
-            match wait_for_key_timeout(system_table.boot_services(), 1_000_000) {
+            match wait_for_key_timeout(system_table, 1_000_000) {
                 Some(key) => {
                     countdown_active = false;
                     *message = None;
@@ -513,7 +568,7 @@ fn display_menu_graphical(
                 }
             }
         } else {
-            let key = wait_for_key(system_table.boot_services());
+            let key = wait_for_key(system_table);
 
             // Any key dismisses the message. It is a report on something the
             // user just asked for, not a state they have to clear.
@@ -620,7 +675,7 @@ fn display_menu_with_nav(system_table: &mut SystemTable<Boot>, nav: &mut MenuNav
 
         // Wait for input or timeout
         if countdown_active && timeout > 0 {
-            let key_result = wait_for_key_timeout(system_table.boot_services(), 1_000_000);
+            let key_result = wait_for_key_timeout(system_table, 1_000_000);
             match key_result {
                 Some(key) => {
                     countdown_active = false;
@@ -645,7 +700,7 @@ fn display_menu_with_nav(system_table: &mut SystemTable<Boot>, nav: &mut MenuNav
                 }
             }
         } else {
-            let key = wait_for_key(system_table.boot_services());
+            let key = wait_for_key(system_table);
             match key {
                 Key::Printable(c) if c == uefi::Char16::try_from('\r').unwrap() => {
                     if let Some(entry) = nav.selected_entry() {
@@ -697,38 +752,62 @@ fn handle_nav_key(key: Key, nav: &mut MenuNav) {
     }
 }
 
-fn wait_for_key(boot_services: &BootServices) -> Key {
+fn wait_for_key(system_table: &mut SystemTable<Boot>) -> Key {
     loop {
-        if let Some(key) = try_get_key(boot_services) {
+        if let Some(key) = try_get_key(system_table) {
             return key;
         }
-        boot_services.stall(10_000); // 10ms
+        system_table.boot_services().stall(10_000); // 10ms
     }
 }
 
-fn wait_for_key_timeout(boot_services: &BootServices, timeout_us: u64) -> Option<Key> {
+fn wait_for_key_timeout(system_table: &mut SystemTable<Boot>, timeout_us: u64) -> Option<Key> {
     let iterations = timeout_us / 10_000;
     for _ in 0..iterations {
-        if let Some(key) = try_get_key(boot_services) {
+        if let Some(key) = try_get_key(system_table) {
             return Some(key);
         }
-        boot_services.stall(10_000);
+        system_table.boot_services().stall(10_000);
     }
     None
 }
 
-fn try_get_key(boot_services: &BootServices) -> Option<Key> {
-    let stdin = boot_services.get_handle_for_protocol::<uefi::proto::console::text::Input>();
-    if let Ok(handle) = stdin {
-        if let Ok(mut input) =
-            boot_services.open_protocol_exclusive::<uefi::proto::console::text::Input>(handle)
-        {
-            if let Ok(Some(key)) = input.read_key() {
-                return Some(key);
-            }
-        }
+/// One keystroke from the console, if there is one waiting.
+///
+/// This reads ConIn -- `SystemTable::stdin` -- and not a handle located by
+/// protocol, which is what it used to do:
+///
+/// ```ignore
+/// let handle = boot_services.get_handle_for_protocol::<Input>()?;
+/// let mut input = boot_services.open_protocol_exclusive::<Input>(handle)?;
+/// ```
+///
+/// Two things are wrong with that, and both of them are why the menu ignored
+/// the keyboard until the machine had been rebooted once.
+///
+/// `get_handle_for_protocol` returns the *first* handle carrying the protocol,
+/// and on a machine with a keyboard there is more than one: the ConSplitter's
+/// virtual handle, which aggregates every input device the firmware knows
+/// about, and one handle per physical keyboard behind it. Which of those comes
+/// first is whatever order the firmware happens to have installed them in. Pick
+/// a physical handle and only that one keyboard works; pick the built-in
+/// PS/2-emulation handle on a laptop whose keyboard is USB-attached and none of
+/// them do.
+///
+/// `open_protocol_exclusive` then makes it worse rather than better. EXCLUSIVE
+/// tells the firmware to disconnect any driver holding the protocol BY_DRIVER
+/// first -- and on a physical keyboard handle the driver holding it is the
+/// ConSplitter. So the poll that was meant to read a key could instead detach
+/// that keyboard from the console it feeds, at a hundred opens and closes a
+/// second, for as long as the menu was on screen.
+///
+/// ConIn is the aggregate and it is already open. Reading it needs no handle
+/// search and no protocol open at all.
+fn try_get_key(system_table: &mut SystemTable<Boot>) -> Option<Key> {
+    match system_table.stdin().read_key() {
+        Ok(key) => key,
+        Err(_) => None,
     }
-    None
 }
 
 fn load_config(boot_services: &BootServices, image_handle: Handle) -> Result<BootConfig, ()> {

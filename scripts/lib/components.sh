@@ -74,6 +74,27 @@ declare -a RAVEN_COMPONENTS=(
 RAVEN_INIT_BINARIES="raven-init,raven-rc,raven-powerd,raven-ports,raven-timed"
 
 # =============================================================================
+# The base layer -- scripts/stages/stage2-native.sh and stage4-iso.sh
+# =============================================================================
+# Not a component table: these are not built from repositories and most of them
+# are not ours. They are here because they are the programs /etc/raven/init.toml
+# names in an `exec` and the layers below do not provide -- so nothing checked
+# whether any of them was in the image, and a boot service pointing at a path
+# that does not exist fails silently by design (`critical = false`).
+#
+# raven-dhcp is why this list exists. init.toml has run `/bin/raven-dhcp --all
+# -q` as the `network` service for as long as there has been an init.toml, and
+# init/src/ports.rs runs the same path when a wired link comes up after boot.
+# No stage built it and no stage installed it. There was no such program, on
+# any image this repository has ever produced, and every wired machine booted
+# with no address and no complaint. It is a shell script in configs/ now, and
+# stage2's install_raven_dhcp puts it in place.
+#
+# syslogd and klogd are deliberately absent: their services ship
+# `enabled = false`, so an image without them is the intended image.
+RAVEN_BASE_BINARIES="raven-udev,raven-console-font,agetty,dbus-daemon,raven-dhcp,dhcpcd"
+
+# =============================================================================
 # The GUI layer -- scripts/stages/stage-gui.sh
 # =============================================================================
 # The compositor workspace. key|package|binary|description -- one cargo build
@@ -156,6 +177,11 @@ raven_layer_binaries() {
         printf '%s\n' "${binaries//,/$'\n'}"
     done
     printf '%s\n' "${RAVEN_INIT_BINARIES//,/$'\n'}"
+}
+
+# Every base-layer program /etc/raven/init.toml expects to be able to exec.
+raven_base_binaries() {
+    printf '%s\n' "${RAVEN_BASE_BINARIES//,/$'\n'}"
 }
 
 # Every binary the GUI layer installs, one per line, in table order.

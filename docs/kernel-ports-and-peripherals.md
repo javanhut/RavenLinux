@@ -37,6 +37,14 @@ runs once at boot from `init.toml`; the `ports` service (`raven-ports watch
 wired link comes up later, which is what makes a cable plugged in after boot,
 or a dock's NIC, get a lease.
 
+`raven-dhcp` is `configs/raven-dhcp`, a wrapper around `dhcpcd` rather than a
+DHCP client of its own. What it owns is the two decisions above the protocol:
+which links to run on -- ethernet with a real device behind it, never the
+wireless one, which is `cawd`'s -- and not starting a second client on a link
+that already has one, which is what stops a reseated cable leaving a pile of
+daemons behind. `raven-dhcp --list` prints what it would serve and configures
+nothing; it is the first thing to run when a cable is in and nothing happened.
+
 ## USB
 
 USB 1.1 through 3.2 need only the host controllers, all built in: `USB_XHCI_HCD`

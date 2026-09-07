@@ -52,6 +52,19 @@ The upstream `dist/cawd.service` and `dist/caw.sysusers` are systemd artifacts
 and go uninstalled; the `caw` group is created in stage2 instead. `raven-dhcp`
 still runs for wired interfaces.
 
+That last sentence was false for as long as it had been written. `raven-dhcp`
+is what `init.toml`'s `network` service execs and what `raven-ports watch
+--react` runs on a wired hotplug, and **no stage built or installed it** — the
+service failed its exec on every boot of every image, silently, because it is
+`critical = false`. It is `configs/raven-dhcp` now: a `/bin/sh` wrapper that
+picks the wired links out of sysfs and runs the `dhcpcd` stage2 already stages,
+installed by `stage2-native.sh:install_raven_dhcp` and checked for by stage4
+through `RAVEN_BASE_BINARIES`.
+
+It will not touch a wireless interface, and there is no flag to make it. `cawd`
+runs its own DHCP on the link it has associated; a second client on that
+interface races it for the lease and then fights it over the default route.
+
 Autoconnect works as of `b58a394`. `cawd` scans on start and rejoins the
 strongest saved network by itself, so a headless box comes back after a reboot
 without anyone at the console — which matters here, because RavenLinux ships

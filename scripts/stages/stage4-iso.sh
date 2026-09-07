@@ -1264,12 +1264,27 @@ check_sysroot_layers() {
         return 0
     fi
 
-    local -a raven_expected=() gui_expected=()
+    local -a base_expected=() raven_expected=() gui_expected=()
+    # The base list is newer than this function; an older components.sh has no
+    # accessor for it, and a missing table must not turn into an empty one that
+    # silently checks nothing.
+    if declare -F raven_base_binaries >/dev/null 2>&1; then
+        mapfile -t base_expected < <(raven_base_binaries)
+    fi
     mapfile -t raven_expected < <(raven_layer_binaries)
     mapfile -t gui_expected   < <(raven_gui_binaries)
 
-    local -a raven_missing=() gui_missing=()
+    local -a base_missing=() raven_missing=() gui_missing=()
     local b
+
+    # No -type f here, unlike the two loops below. These are not all binaries
+    # this build produced: agetty and dbus-daemon are staged from the host and
+    # can arrive as a symlink beside the real file, and a symlink that resolves
+    # is a program init can exec.
+    for b in "${base_expected[@]}"; do
+        find "${SYSROOT_DIR}" -name "${b}" -print -quit 2>/dev/null | grep -q . \
+            || base_missing+=("${b}")
+    done
 
     for b in "${raven_expected[@]}"; do
         find "${SYSROOT_DIR}" -name "${b}" -type f -print -quit 2>/dev/null | grep -q . \
@@ -1281,8 +1296,8 @@ check_sysroot_layers() {
             || gui_missing+=("${b}")
     done
 
-    if (( ${#raven_missing[@]} == 0 && ${#gui_missing[@]} == 0 )); then
-        log_success "Sysroot carries the Raven and GUI layers (${#raven_expected[@]} + ${#gui_expected[@]} binaries)"
+    if (( ${#base_missing[@]} == 0 && ${#raven_missing[@]} == 0 && ${#gui_missing[@]} == 0 )); then
+        log_success "Sysroot carries the base, Raven and GUI layers (${#base_expected[@]} + ${#raven_expected[@]} + ${#gui_expected[@]} binaries)"
         return 0
     fi
 
@@ -1300,6 +1315,15 @@ check_sysroot_layers() {
         log_warn "  This ISO is missing components."
     fi
     log_warn "=============================================================="
+
+    if (( ${#base_missing[@]} > 0 )); then
+        log_warn "  Base layer incomplete (${#base_missing[@]} of ${#base_expected[@]} missing):"
+        log_warn "    ${base_missing[*]}"
+        log_warn "    Each of these is named in an /etc/raven/init.toml exec."
+        log_warn "    A service whose exec does not exist fails silently --"
+        log_warn "    they are all critical = false -- so this warning is the"
+        log_warn "    only place it will ever be said. Fix in stage2."
+    fi
 
     if (( raven_absent == 1 )); then
         log_warn "  Raven layer absent: nothing it builds is in the sysroot"

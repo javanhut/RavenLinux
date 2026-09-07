@@ -26,7 +26,7 @@
 #   installer   scripts/installer/* -> /usr/bin, configs/installer/profiles
 #               -> /etc/raven/install-profiles (stage4-iso.sh:install_installer)
 #   tools       configs/raven-console-font, configs/raven-udev,
-#               etc/raven/raven-shell -> /usr/bin
+#               configs/raven-dhcp, etc/raven/raven-shell -> /usr/bin
 #   configs     etc/raven/{init,power,time}.toml -> /etc/raven,
 #               configs/raven/services/*.toml -> /etc/raven/init.d,
 #               configs/raven/session.d/* -> /etc/raven/session.d.
@@ -219,6 +219,7 @@ do_tools() {
     log_section "repo-sourced tools"
     install_file "${RAVEN_ROOT}/configs/raven-console-font" /usr/bin/raven-console-font 0755
     install_file "${RAVEN_ROOT}/configs/raven-udev"         /usr/bin/raven-udev         0755
+    install_file "${RAVEN_ROOT}/configs/raven-dhcp"         /usr/bin/raven-dhcp         0755
     install_file "${RAVEN_ROOT}/etc/raven/raven-shell"      /usr/bin/raven-shell        0755
     local rule
     for rule in "${RAVEN_ROOT}"/configs/udev/*.rules; do
@@ -285,6 +286,16 @@ if (( NO_RESTART == 0 )); then
     fi
     config_changed=0
     for d in "${CHANGED[@]:-}"; do [[ "$d" == /etc/raven/* ]] && config_changed=1; done
+    if changed /usr/bin/raven-dhcp; then
+        log_step "restarting network"
+        # On a machine that predates raven-dhcp existing at all, the `network`
+        # service has been failing its exec on every boot -- there is nothing
+        # running to restart, and `start` is the verb that gets a lease now
+        # rather than at the next boot.
+        "${SUDO[@]}" raven-rc restart network \
+            || "${SUDO[@]}" raven-rc start network \
+            || log_warn "raven-rc could not start the network service"
+    fi
     if (( config_changed )); then
         log_step "reloading init configuration"
         "${SUDO[@]}" raven-rc reload || log_warn "raven-rc reload failed"

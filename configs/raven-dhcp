@@ -1,0 +1,215 @@
+#!/bin/sh
+# =============================================================================
+# raven-dhcp -- a DHCP lease for every wired link
+# =============================================================================
+#
+# Ships at /usr/bin/raven-dhcp, which is /bin/raven-dhcp after the usr-merge.
+#
+# WHY THIS FILE EXISTS
+#
+# Three places in this system named it and nothing built it:
+#
+#   /etc/raven/init.toml   the `network` service, `exec = "/bin/raven-dhcp"`
+#                          with args ["--all", "-q"], run once at boot
+#   init/src/ports.rs      `const DHCP: &str = "/bin/raven-dhcp"`, which
+#                          `raven-ports watch --react` runs when a wired link
+#                          gains carrier after boot
+#   REPOSFORRAVEN.md       "`raven-dhcp` still runs for wired interfaces"
+#
+# There was no such program. raven-init started the `network` service, the
+# exec failed, and because the service is `critical = false` the boot carried
+# on without a word about it; `raven-ports --react` called the same missing
+# path on every carrier transition for the same silent nothing. A machine on a
+# cable had no address, and the one line of configuration that was supposed to
+# give it one had been pointing at a hole the whole time.
+#
+# WHY IT IS A WRAPPER AND NOT A DHCP CLIENT
+#
+# Because the image already has one. stage2-native.sh's `ensure_dhcpcd` copies
+# dhcpcd from the build host, or builds 10.0.6 from source when it cannot, and
+# either way there is a working, audited DHCPv4/DHCPv6 client in /usr/bin
+# before this script is ever read. What was missing was not a protocol
+# implementation. It was the two decisions above it: which interfaces to run on,
+# and how not to run twice on the same one.
+#
+# WHY IT WILL NOT TOUCH A WIRELESS INTERFACE
+#
+# cawd owns the wiphy. It speaks nl80211 itself, holds the EAPOL socket, and
+# runs its own DHCP client (CAW's `caw-dhcp` crate) on the link it has just
+# associated -- see the `cawd` service in init.toml. Two DHCP clients on one
+# interface race for the lease and then fight over the default route, and the
+# loser's `dhcpcd` will happily tear down an address cawd is still using. So
+# the wireless links are skipped here, unconditionally and without a flag to
+# turn it off: this program has no correct behaviour on one.
+#
+# That is also the answer to "why not just run dhcpcd with no interface
+# argument". Its master mode takes every interface it can see, which is
+# precisely the wifi-interface case above.
+#
+# Usage:
+#   raven-dhcp [--all] [-q] [--list] [interface...]
+#
+#   --all     serve every wired link. The default, and named explicitly by
+#             init.toml, so it is accepted rather than rejected.
+#   -q        quiet: passed through to dhcpcd.
+#   --list    print the interfaces that would be served and exit. Nothing is
+#             configured. This is the "why did my cable not come up" command.
+# =============================================================================
+
+DHCPCD=/usr/bin/dhcpcd
+quiet=""
+list_only=0
+ifaces=""
+
+for arg in "$@"; do
+    case "$arg" in
+        --all)      ;;               # the default; see above
+        -q|--quiet) quiet="-q" ;;
+        --list)     list_only=1 ;;
+        -*)         echo "raven-dhcp: unknown option: $arg" >&2; exit 2 ;;
+        *)          ifaces="${ifaces} ${arg}" ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Which links are ours
+# ---------------------------------------------------------------------------
+# Everything here is read from sysfs rather than parsed out of `ip link`, so
+# the script needs nothing but /bin/sh and the kernel.
+is_wired() {
+    path="/sys/class/net/$1"
+
+    [ -d "$path" ] || return 1
+    [ "$1" = "lo" ] && return 1
+
+    # Wireless is cawd's, and there are two markers because there are two
+    # generations of them: `wireless/` is the old cfg80211 directory, and
+    # `phy80211` is the symlink an nl80211 device gets. A card can have
+    # either, so both are checked.
+    [ -d "$path/wireless" ] && return 1
+    [ -e "$path/phy80211" ] && return 1
+
+    # ARPHRD_ETHER. This is what rules out sit0, the tunnels, and anything
+    # else that cannot carry the broadcast a DHCPDISCOVER goes out as.
+    [ "$(cat "$path/type" 2>/dev/null)" = "1" ] || return 1
+
+    # A real device behind the interface. Without this the loop also picks up
+    # docker0, virbr0, and every veth and bridge the machine invents for
+    # itself -- interfaces where running DHCP is not merely useless but
+    # actively wrong, because something else is already the address authority
+    # on them.
+    #
+    # It does mean a bridge over a real NIC is skipped. That is deliberate:
+    # a machine with a bridge has had its networking configured by hand, and
+    # this is the thing that runs when nobody has.
+    [ -e "$path/device" ] || return 1
+
+    return 0
+}
+
+# Set when a name from the command line could not be served. Discovery and
+# explicit naming have different failure modes -- finding nothing to do is the
+# normal state of a wifi-only laptop, being handed a name that cannot be served
+# is a mistake by whoever typed it -- and this is what tells them apart below.
+rejected=0
+
+if [ -z "$ifaces" ]; then
+    for path in /sys/class/net/*; do
+        [ -e "$path" ] || continue
+        name="${path##*/}"
+        is_wired "$name" && ifaces="${ifaces} ${name}"
+    done
+else
+    # A named interface goes through exactly the same filter as a discovered
+    # one. "Wireless is cawd's" is a property of this program and not of how
+    # it was called: `raven-dhcp wlan0` would otherwise be a supported way to
+    # put a second DHCP client on the interface cawd is holding, which is the
+    # one thing the whole file is written to prevent.
+    kept=""
+    for name in $ifaces; do
+        if is_wired "$name"; then
+            kept="${kept} ${name}"
+        elif [ ! -d "/sys/class/net/$name" ]; then
+            echo "raven-dhcp: no such interface: ${name}" >&2
+            rejected=1
+        elif [ -d "/sys/class/net/$name/wireless" ] || [ -e "/sys/class/net/$name/phy80211" ]; then
+            echo "raven-dhcp: ${name} is wireless; use 'caw connect <ssid>'" >&2
+            rejected=1
+        else
+            echo "raven-dhcp: ${name} is not a wired ethernet device" >&2
+            rejected=1
+        fi
+    done
+    ifaces="$kept"
+fi
+
+if [ "$list_only" = "1" ]; then
+    for iface in $ifaces; do
+        carrier="$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || echo '?')"
+        case "$carrier" in
+            1) state="cable in" ;;
+            0) state="no cable" ;;
+            *) state="link down" ;;   # carrier is unreadable while a link is down
+        esac
+        echo "${iface}	${state}"
+    done
+    exit 0
+fi
+
+if [ -z "$ifaces" ]; then
+    # Being handed names and serving none of them is an error: the reason was
+    # printed above, and exiting 0 here would tell a script that the addresses
+    # it asked for are on their way.
+    [ "$rejected" = "1" ] && exit 1
+
+    # Finding none, on the other hand, is the ordinary state of a laptop with
+    # wifi and no ethernet port -- cawd is the whole of its networking. The
+    # `network` service runs on every such machine, so this has to exit clean
+    # or every one of them boots with a failed service in the log.
+    [ -n "$quiet" ] || echo "raven-dhcp: no wired interfaces; wireless is cawd's"
+    exit 0
+fi
+
+if [ ! -x "$DHCPCD" ]; then
+    echo "raven-dhcp: $DHCPCD is missing; no wired interface can get an address" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Ask for the leases
+# ---------------------------------------------------------------------------
+rc=0
+for iface in $ifaces; do
+    # raven-ports runs this again on every carrier transition, and a cable
+    # that is reseated a few times would otherwise leave a pile of dhcpcd
+    # processes on one interface, all renewing the same lease. dhcpcd writes
+    # a pidfile per interface; an existing live one means this link is
+    # already served and there is nothing to do.
+    pidfile="/run/dhcpcd/${iface}.pid"
+    pid=""
+    [ -r "$pidfile" ] && pid="$(cat "$pidfile" 2>/dev/null)"
+
+    # The digits test is not belt and braces. `kill -0` in bash exits 0 for an
+    # argument it cannot parse as a pid at all -- an empty pidfile or a
+    # truncated one included -- so testing the signal alone would read a
+    # corrupt file as "a healthy client is already on this link" and skip the
+    # interface on every run, forever, without a word. A pidfile is written by
+    # a daemon that can be killed mid-write, so this is a state that happens.
+    case "$pid" in
+        ''|*[!0-9]*) pid="" ;;
+    esac
+
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        [ -n "$quiet" ] || echo "raven-dhcp: ${iface} already has a client (pid ${pid})"
+        continue
+    fi
+
+    # -b backgrounds immediately instead of blocking until a lease arrives.
+    # This runs from init as a one-shot on the boot path, and an unplugged
+    # port would otherwise hold the boot for dhcpcd's full timeout before
+    # failing at something nobody asked for. Backgrounded, the daemon keeps
+    # trying on its own and the cable can go in later.
+    "$DHCPCD" -b $quiet "$iface" || rc=$?
+done
+
+exit $rc
