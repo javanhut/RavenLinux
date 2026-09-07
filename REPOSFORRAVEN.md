@@ -94,6 +94,19 @@ that, so there is no hook that fires while `cawd` is still alive. Until
 raven-init learns a per-service stop command, a reboot still drops the station
 without a deauth and the AP holds it until the inactivity timeout.
 
+DHCP was a stub at `b58a394`, the commit this package pinned through the ISOs
+built before 2026-09-07. `Action::StartDhcp` in `cawd`'s engine returned
+`address configuration is not wired up yet: the DHCP client is not in the
+reactor's poll set` and `Action::ApplyLease` a matching one for `caw-rtnl`, so
+every join on those images scanned, associated and finished the four-way
+handshake and then failed at `configuring addresses` — from `caw connect` and
+from the settings app alike, since both go through the same daemon. Nothing on
+the system side could fix it: `raven-rc restart cawd` reran the same stub.
+Upstream filled it in over `349c320`..`e38601c` (the poll-set wiring, the
+rtnetlink address and route calls, an rp_filter exception so the reply reaches
+the socket, and a give-up path when no server answers), and the pin is
+`e38601c` now.
+
 WPA2/3-Enterprise stays off: its TLS stack pulls in a C crypto provider, which
 would end the static build.
 

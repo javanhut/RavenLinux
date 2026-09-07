@@ -11,7 +11,7 @@ categories = ["raven", "network"]
 [source]
 type = "git"
 url = "https://github.com/javanhut/CAW.git"
-commit = "b58a39444e7ada1c077d5733020bfd2578c3d8f8"
+commit = "e38601ce911e04232f74d67cb083b115cfcbe77d"
 
 [build]
 system = "cargo"
