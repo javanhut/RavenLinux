@@ -412,8 +412,44 @@ The answers file is `key=value`, one per line, and `--probe` lists the keys it
 accepts under `answers.key`. It holds passwords in the clear, so it must be
 mode `0600` — the installer refuses anything looser.
 
-The layout is GPT, and **the target disk is erased completely** — there is no
-dual-boot mode yet, and no manual partitioning:
+The layout is GPT. By default **the target disk is erased completely**; with
+`--alongside` nothing on it is erased and RavenLinux is fitted into space taken
+from one partition, or into space already unallocated:
+
+```bash
+raven-install --disk /dev/nvme0n1                                   # erase it
+raven-install --disk /dev/nvme0n1 --alongside                       # use free space
+raven-install --disk /dev/nvme0n1 --shrink /dev/nvme0n1p3 --size 120G
+raven-install --disk /dev/nvme0n1 --alongside --shrink /dev/nvme0n1p3 --dry-run
+```
+
+`--shrink` shrinks the filesystem first and the partition afterwards — in that
+order, because a filesystem smaller than its partition still works and a
+partition smaller than its filesystem does not. ext2/3/4 and NTFS only: XFS
+cannot shrink at all, and btrfs only while mounted, which is not something to
+do to another OS's root from a live image. The partition must not be mounted,
+and the installer refuses rather than guessing when the filesystem will not
+report how small it can be made.
+
+It never formats the EFI System Partition in this mode — it reuses the one the
+other OS boots from, which is the single action that would make that OS
+unbootable. An existing `\EFI\BOOT\BOOTX64.EFI` is kept as
+`BOOTX64.RAVENBAK.EFI` before RavenBoot takes that path. RavenBoot finds
+Windows, Ubuntu, Fedora, Debian and Arch on the shared ESP by itself and puts
+them in its menu, so there is nothing to configure for the other side of the
+dual boot.
+
+Two things it will not do, and says so rather than trying: it needs a GPT disk
+with an ESP already on it — that is what "another UEFI OS is here" means — and
+it will not shrink NTFS that Windows left dirty. Hibernation and Fast Startup
+both leave it that way; `shutdown /s /t 0` from a Windows command prompt does
+not.
+
+`raven-install --probe` reports all of this per disk before anything is chosen:
+`disk.alongside` and, when it is 0, `disk.alongside_why`; then one
+`part.begin`/`part.end` block per partition carrying `part.os`,
+`part.shrinkable`, `part.used_bytes` and `part.spare_bytes`. The graphical
+installer draws its "install alongside" page from exactly those records.
 
 The base installation stays small. After the installed system has networking,
 run `sudo raven-postinstall` to preview and apply the selected package profile,

@@ -18,6 +18,33 @@ pub struct Partition {
     pub label: String,
 }
 
+/// A partition that could give up space for an install alongside what is
+/// already on the disk. One `part.begin`/`part.end` bracket from the probe.
+///
+/// Separate from `Partition` above, which is the lsblk listing the disk page
+/// shows. These carry the answers to a different question -- can this one be
+/// shrunk, by how much, and if not why not -- and the installer pays a
+/// resize2fs or ntfsresize probe for each of them.
+#[derive(Debug, Clone, Default)]
+pub struct ShrinkCandidate {
+    pub dev: String,
+    pub size_bytes: u64,
+    pub fstype: String,
+    pub label: String,
+    /// What the installer thinks is on it: "Windows", "Windows Recovery",
+    /// "ext4 (ubuntu)". Its own words, from part_os_hint.
+    pub os: String,
+    pub shrinkable: bool,
+    /// Why not, when `shrinkable` is false. Shown rather than hidden: "this
+    /// partition is greyed out" with no reason is the thing people file bugs
+    /// about.
+    pub why: String,
+    /// What the filesystem says it needs, from its own resizer.
+    pub used_bytes: u64,
+    /// The most it could give up while keeping `used_bytes` plus headroom.
+    pub spare_bytes: u64,
+}
+
 /// A disk the installer could be pointed at.
 #[derive(Debug, Clone, Default)]
 pub struct Disk {
@@ -32,6 +59,20 @@ pub struct Disk {
     /// Something on it looks like a Windows installation.
     pub windows: bool,
     pub parts: Vec<Partition>,
+
+    /// The installer could put RavenLinux on this disk without erasing it.
+    pub alongside: bool,
+    /// Why not, when it could not. The installer's own sentence.
+    pub alongside_why: String,
+    /// The EFI System Partition already on the disk, which an alongside
+    /// install reuses rather than replaces.
+    pub esp: String,
+    /// The largest unallocated run on the disk. When this is big enough on its
+    /// own, nothing has to be shrunk.
+    pub free_bytes: u64,
+    pub min_root_bytes: u64,
+    pub min_headroom_bytes: u64,
+    pub candidates: Vec<ShrinkCandidate>,
 }
 
 impl Disk {
@@ -46,6 +87,19 @@ impl Disk {
             s.push_str(" (removable)");
         }
         s
+    }
+
+    /// The partitions actually worth offering as a source of space.
+    pub fn shrinkable(&self) -> Vec<&ShrinkCandidate> {
+        self.candidates.iter().filter(|c| c.shrinkable).collect()
+    }
+
+    /// True when the disk already has room and no filesystem needs touching.
+    /// This is the safe case and it is worth saying so on screen: it is the
+    /// difference between "we will resize Windows" and "we will use the space
+    /// you already left".
+    pub fn has_free_room(&self) -> bool {
+        self.min_root_bytes > 0 && self.free_bytes >= self.min_root_bytes
     }
 
     pub fn holds_summary(&self) -> Option<String> {
@@ -86,6 +140,10 @@ pub struct Probe {
     pub chpasswd: bool,
     pub mkswap: bool,
     pub efibootmgr: bool,
+    /// The two resizers. Not required for an install; required for an install
+    /// alongside a filesystem of the matching kind.
+    pub resize2fs: bool,
+    pub ntfsresize: bool,
 
     pub source_kind: String,
     pub source_root: String,
@@ -182,6 +240,24 @@ pub fn size_to_mb(s: &str) -> Option<u64> {
     num.trim().parse::<u64>().ok().map(|n| n * mult)
 }
 
+/// Bytes as the installer prints them, so the same number reads the same way
+/// on the confirmation screen and on the page that produced it. Binary units,
+/// because that is what the partition table is in and what sfdisk means by G.
+pub fn human_bytes(b: u64) -> String {
+    const U: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    let mut v = b as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < U.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{b} B")
+    } else {
+        format!("{v:.1} {}", U[i])
+    }
+}
+
 /// Run the probe and parse it. `argv` is the command to run it with, which is
 /// how the privilege escalation gets in front of it.
 pub fn run(argv: &[String]) -> Result<Probe, String> {
@@ -228,6 +304,10 @@ pub fn run(argv: &[String]) -> Result<Probe, String> {
 pub fn parse(text: &str) -> Probe {
     let mut p = Probe::default();
     let mut disk: Option<Disk> = None;
+    // part.* records arrive inside a disk.begin/disk.end bracket and belong to
+    // the disk that is open. They are not named disk.* because they are about
+    // one partition rather than the disk, so they need their own arms below.
+    let mut cand: Option<ShrinkCandidate> = None;
     // Everything that is not a repeating record, so single-valued keys need no
     // match arm of their own below.
     let mut single: HashMap<&str, String> = HashMap::new();
@@ -244,8 +324,37 @@ pub fn parse(text: &str) -> Probe {
                 });
             }
             "disk.end" => {
+                // A `part.begin` with no `part.end` would otherwise leak into
+                // the next disk. The probe always closes them, so this is
+                // about what happens when it one day does not.
+                cand = None;
                 if let Some(d) = disk.take() {
                     p.disks.push(d);
+                }
+            }
+            "part.begin" => {
+                cand = Some(ShrinkCandidate {
+                    dev: value.to_string(),
+                    ..Default::default()
+                });
+            }
+            "part.end" => {
+                if let (Some(c), Some(d)) = (cand.take(), disk.as_mut()) {
+                    d.candidates.push(c);
+                }
+            }
+            _ if key.starts_with("part.") => {
+                let Some(c) = cand.as_mut() else { continue };
+                match key {
+                    "part.size_bytes" => c.size_bytes = value.parse().unwrap_or(0),
+                    "part.fstype" => c.fstype = value.to_string(),
+                    "part.label" => c.label = value.to_string(),
+                    "part.os" => c.os = value.to_string(),
+                    "part.shrinkable" => c.shrinkable = value == "1",
+                    "part.why" => c.why = value.to_string(),
+                    "part.used_bytes" => c.used_bytes = value.parse().unwrap_or(0),
+                    "part.spare_bytes" => c.spare_bytes = value.parse().unwrap_or(0),
+                    _ => {}
                 }
             }
             _ if key.starts_with("disk.") => {
@@ -257,6 +366,14 @@ pub fn parse(text: &str) -> Probe {
                     "disk.removable" => d.removable = value == "1",
                     "disk.live_media" => d.live_media = value == "1",
                     "disk.windows" => d.windows = value == "1",
+                    "disk.alongside" => d.alongside = value == "1",
+                    "disk.alongside_why" => d.alongside_why = value.to_string(),
+                    "disk.esp" => d.esp = value.to_string(),
+                    "disk.free_bytes" => d.free_bytes = value.parse().unwrap_or(0),
+                    "disk.min_root_bytes" => d.min_root_bytes = value.parse().unwrap_or(0),
+                    "disk.min_headroom_bytes" => {
+                        d.min_headroom_bytes = value.parse().unwrap_or(0)
+                    }
                     "disk.part" => {
                         let f: Vec<&str> = value.splitn(4, '|').collect();
                         d.parts.push(Partition {
@@ -309,6 +426,8 @@ pub fn parse(text: &str) -> Probe {
     p.chpasswd = b("preflight.chpasswd");
     p.mkswap = b("preflight.mkswap");
     p.efibootmgr = b("preflight.efibootmgr");
+    p.resize2fs = b("preflight.resize2fs");
+    p.ntfsresize = b("preflight.ntfsresize");
     p.source_kind = s("source.kind");
     p.source_root = s("source.root");
     p.source_kernel = s("source.kernel");
@@ -377,6 +496,76 @@ probe.end=1
         assert_eq!(p.source_size_mb, 1400);
         assert!(p.has_desktop);
         assert!(p.tools_missing.is_empty());
+    }
+
+    #[test]
+    fn alongside_records_land_on_the_right_disk() {
+        // part.* records are not disk.* records and arrive between a
+        // disk.begin and its disk.end. Getting that wrong would attach a
+        // Windows partition to the wrong disk, on the page that decides which
+        // one gets resized.
+        let p = parse(
+            "disk.begin=/dev/sda\n\
+             disk.alongside=1\n\
+             disk.esp=/dev/sda1\n\
+             disk.free_bytes=0\n\
+             disk.min_root_bytes=12884901888\n\
+             part.begin=/dev/sda3\n\
+             part.size_bytes=66571993088\n\
+             part.fstype=ntfs\n\
+             part.os=Windows\n\
+             part.shrinkable=1\n\
+             part.used_bytes=21474836480\n\
+             part.spare_bytes=40802189312\n\
+             part.end=/dev/sda3\n\
+             part.begin=/dev/sda4\n\
+             part.fstype=xfs\n\
+             part.shrinkable=0\n\
+             part.why=xfs cannot be shrunk here\n\
+             part.end=/dev/sda4\n\
+             disk.end=/dev/sda\n\
+             disk.begin=/dev/sdb\n\
+             disk.alongside=0\n\
+             disk.alongside_why=no EFI System Partition\n\
+             disk.end=/dev/sdb\n",
+        );
+
+        assert_eq!(p.disks.len(), 2);
+        let a = &p.disks[0];
+        assert!(a.alongside);
+        assert_eq!(a.esp, "/dev/sda1");
+        assert!(!a.has_free_room(), "0 free is not room for a 12 GiB root");
+        assert_eq!(a.candidates.len(), 2);
+        assert_eq!(a.shrinkable().len(), 1);
+        assert_eq!(a.shrinkable()[0].dev, "/dev/sda3");
+        assert_eq!(a.shrinkable()[0].os, "Windows");
+        assert_eq!(a.candidates[1].why, "xfs cannot be shrunk here");
+
+        // The second disk gets none of the first disk's partitions.
+        let b = &p.disks[1];
+        assert!(!b.alongside);
+        assert!(b.candidates.is_empty());
+        assert_eq!(b.alongside_why, "no EFI System Partition");
+    }
+
+    #[test]
+    fn free_space_alone_is_enough_room() {
+        let p = parse(
+            "disk.begin=/dev/sda\n\
+             disk.alongside=1\n\
+             disk.free_bytes=68719476736\n\
+             disk.min_root_bytes=12884901888\n\
+             disk.end=/dev/sda\n",
+        );
+        assert!(p.disks[0].has_free_room());
+    }
+
+    #[test]
+    fn bytes_read_the_way_the_installer_prints_them() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+        assert_eq!(human_bytes(1024), "1.0 KiB");
+        assert_eq!(human_bytes(68719476736), "64.0 GiB");
     }
 
     #[test]

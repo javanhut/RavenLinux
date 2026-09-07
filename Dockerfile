@@ -93,6 +93,20 @@ RUN pacman -Syu --noconfirm --needed \
         # these from the build host, and without this package that host is this
         # container, which had no /lib/firmware at all.
         linux-firmware \
+        # NTFS, for the installer. raven-install --alongside shrinks the
+        # partition the other OS lives on to make room, and on any machine that
+        # ships with Windows that partition is NTFS -- ntfsresize is the whole
+        # of how that is done, and without it "install alongside Windows" is a
+        # button that cannot work.
+        #
+        # Both packages, and that is not belt and braces: ntfs-3g is now only
+        # the FUSE driver -- `pacman -Si ntfs-3g` lists ntfsprogs as an
+        # *optional* dependency -- and ntfsresize, ntfsfix and mkfs.ntfs all
+        # live in ntfsprogs. Installing ntfs-3g alone gets a container that can
+        # mount NTFS and cannot resize it, which is the wrong half. The driver
+        # is worth having too: it is what lets the installed system read the
+        # Windows partition it just made room next to.
+        ntfs-3g ntfsprogs \
         # regulatory.db + its signature. The kernel is built with
         # CFG80211_REQUIRE_SIGNED_REGDB, so without these cfg80211 falls back to
         # the built-in world domain: the card associates, but loses channels and

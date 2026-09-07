@@ -91,9 +91,9 @@ fn welcome(app: &Rc<App>) {
     let intro = adw::PreferencesGroup::builder()
         .title("Install RavenLinux")
         .description(
-            "This installs RavenLinux onto a disk in this machine. The disk you \
-             choose is erased completely -- installing alongside another \
-             operating system is not supported yet.",
+            "This installs RavenLinux onto a disk in this machine. It can erase \
+             the disk, or keep what is on it and install alongside -- taking \
+             space from a partition, or from space you have already left free.",
         )
         .build();
     page.add(&intro);
@@ -152,6 +152,201 @@ fn welcome(app: &Rc<App>) {
     push(app, "welcome", "Welcome", &scrolled(&page), Box::new(|_, _| Vec::new()));
 }
 
+
+// =============================================================================
+// Erase, or move in next to what is there
+// =============================================================================
+// One group per disk, all built now and all but one hidden. The alternative is
+// rebuilding this group whenever the disk selection changes, and the options in
+// it -- which partitions can be shrunk, and by how much -- are per-disk facts
+// the probe already reported for every disk. Building them once means the
+// answer shown is always the probe's answer for that exact disk, with nothing
+// recomputed in between.
+fn install_mode(app: &Rc<App>, page: &adw::PreferencesPage, disks: &[Disk]) {
+    for d in disks {
+        let group = adw::PreferencesGroup::builder()
+            .title("What to do with this disk")
+            .build();
+
+        // Erase is first and is the default. It is the mode that always works,
+        // and it is what an installer does when nobody has said otherwise.
+        let erase = adw::ActionRow::builder()
+            .title("Erase the whole disk")
+            .subtitle("Everything on it is destroyed, including any other operating system")
+            .build();
+        let erase_check = gtk::CheckButton::new();
+        erase_check.set_active(true);
+        erase.add_prefix(&erase_check);
+        erase.set_activatable_widget(Some(&erase_check));
+        group.add(&erase);
+
+        let along = adw::ActionRow::builder().title("Install alongside").build();
+        let along_check = gtk::CheckButton::new();
+        along_check.set_group(Some(&erase_check));
+        along.add_prefix(&along_check);
+        group.add(&along);
+
+        // Not offered where it cannot work, and the probe's reason is shown
+        // instead of nothing. A greyed-out row with no explanation is the thing
+        // people file bugs about.
+        if d.alongside {
+            along.set_subtitle(&if d.has_free_room() {
+                format!(
+                    "Keep everything on the disk. RavenLinux goes into the {} \
+                     of unallocated space already on it, and boots from the EFI \
+                     partition that is already there.",
+                    probe::human_bytes(d.free_bytes)
+                )
+            } else {
+                "Keep everything on the disk. Space is taken from a partition \
+                 you choose below, and RavenLinux boots from the EFI partition \
+                 that is already there."
+                    .to_string()
+            });
+            along.set_activatable_widget(Some(&along_check));
+        } else {
+            along.set_sensitive(false);
+            along.set_subtitle(&if d.alongside_why.is_empty() {
+                "Not possible on this disk.".to_string()
+            } else {
+                format!("Not possible here: {}.", d.alongside_why)
+            });
+        }
+        along.set_subtitle_lines(0);
+
+        // ---- where the space comes from -------------------------------------
+        // Hidden until "install alongside" is chosen, and skipped entirely when
+        // the disk already has room: offering to resize somebody's Windows when
+        // nothing needs resizing is offering a risk for no reason.
+        let source = adw::ExpanderRow::builder()
+            .title("Take the space from")
+            .visible(false)
+            .build();
+        source.set_expanded(true);
+
+        let size_row = adw::EntryRow::builder().title("Space for RavenLinux").build();
+        let mut first_part: Option<gtk::CheckButton> = None;
+
+        for c in &d.candidates {
+            let row = adw::ActionRow::builder()
+                .title(&c.dev)
+                .subtitle(if c.shrinkable {
+                    format!(
+                        "{} — {}, {} in use, up to {} can be freed",
+                        c.os,
+                        probe::human_bytes(c.size_bytes),
+                        probe::human_bytes(c.used_bytes),
+                        probe::human_bytes(c.spare_bytes)
+                    )
+                } else {
+                    format!(
+                        "{} — {}. Cannot be shrunk: {}",
+                        c.os,
+                        probe::human_bytes(c.size_bytes),
+                        c.why
+                    )
+                })
+                .build();
+            row.set_subtitle_lines(0);
+
+            if !c.shrinkable {
+                row.set_sensitive(false);
+                source.add_row(&row);
+                continue;
+            }
+
+            let check = gtk::CheckButton::new();
+            if let Some(f) = &first_part {
+                check.set_group(Some(f));
+            } else {
+                first_part = Some(check.clone());
+            }
+            row.add_prefix(&check);
+            row.set_activatable_widget(Some(&check));
+
+            check.connect_toggled({
+                let app = app.clone();
+                let dev = c.dev.clone();
+                let spare = c.spare_bytes;
+                let min = d.min_root_bytes;
+                let size_row = size_row.clone();
+                move |ch| {
+                    if !ch.is_active() {
+                        return;
+                    }
+                    app.answers.borrow_mut().shrink_part = dev.clone();
+                    // Half of what it can spare, which is the same default the
+                    // terminal wizard offers. A number in the box beats an
+                    // empty box: it is a working answer, and it shows the shape
+                    // the field wants.
+                    if size_row.text().is_empty() {
+                        let half = (spare / 2).max(min);
+                        let gib = (half / (1024 * 1024 * 1024)).max(1);
+                        size_row.set_text(&format!("{gib}G"));
+                    }
+                    app.revalidate();
+                }
+            });
+            source.add_row(&row);
+        }
+
+        size_row.connect_changed({
+            let app = app.clone();
+            move |e| {
+                app.answers.borrow_mut().alongside_size = e.text().to_string();
+                app.revalidate();
+            }
+        });
+        source.add_row(&size_row);
+        group.add(&source);
+
+        // Only shown when a partition actually has to give something up.
+        let needs_shrink = !d.has_free_room();
+
+        along_check.connect_toggled({
+            let app = app.clone();
+            let source = source.clone();
+            move |c| {
+                if !c.is_active() {
+                    return;
+                }
+                app.answers.borrow_mut().mode = "alongside".into();
+                source.set_visible(needs_shrink);
+                app.revalidate();
+            }
+        });
+        erase_check.connect_toggled({
+            let app = app.clone();
+            let source = source.clone();
+            move |c| {
+                if !c.is_active() {
+                    return;
+                }
+                {
+                    let mut a = app.answers.borrow_mut();
+                    a.mode = "wipe".into();
+                    // Cleared rather than kept: leaving them set would write an
+                    // answers file describing a shrink next to a mode that
+                    // erases the partition it names.
+                    a.shrink_part.clear();
+                    a.alongside_size.clear();
+                }
+                source.set_visible(false);
+                app.revalidate();
+            }
+        });
+
+        // This whole group belongs to one disk; it appears when that disk is
+        // the selected one. The first disk is preselected by the group above,
+        // so the matching group starts visible and the rest do not.
+        group.set_visible(app.answers.borrow().disk == d.dev);
+        app.mode_groups
+            .borrow_mut()
+            .push((d.dev.clone(), group.clone(), erase_check.clone()));
+        page.add(&group);
+    }
+}
+
 // =============================================================================
 // Disk
 // =============================================================================
@@ -163,8 +358,9 @@ fn disk(app: &Rc<App>) {
     let group = adw::PreferencesGroup::builder()
         .title("Target disk")
         .description(
-            "Everything on the disk you pick is destroyed. The disk this machine \
-             booted from is not offered.",
+            "Pick the disk, then choose below whether to erase it or install \
+             alongside what is on it. The disk this machine booted from is not \
+             offered.",
         )
         .build();
 
@@ -199,12 +395,16 @@ fn disk(app: &Rc<App>) {
         row.set_activatable_widget(Some(&check));
 
         if d.windows {
-            // choose_disk prints this in red before it asks. The same fact, in
-            // the place where the click happens.
+            // choose_disk prints this before it asks. The same fact, in the
+            // place where the click happens -- but it is no longer
+            // unconditionally true, so it says what the current mode would do
+            // rather than what erasing would.
             let icon = gtk::Image::from_icon_name("dialog-warning-symbolic");
-            icon.set_tooltip_text(Some(
-                "This looks like a Windows installation. It will be erased.",
-            ));
+            icon.set_tooltip_text(Some(if d.alongside {
+                "This looks like a Windows installation. It can be kept --                  choose Install alongside below."
+            } else {
+                "This looks like a Windows installation. It will be erased."
+            }));
             icon.add_css_class("warning");
             row.add_suffix(&icon);
         }
@@ -213,10 +413,29 @@ fn disk(app: &Rc<App>) {
             let app = app.clone();
             let dev = d.dev.clone();
             move |c| {
-                if c.is_active() {
-                    app.answers.borrow_mut().disk = dev.clone();
-                    app.revalidate();
+                if !c.is_active() {
+                    return;
                 }
+                app.answers.borrow_mut().disk = dev.clone();
+                // Show this disk's mode group and hide the rest. The mode
+                // itself goes back to erasing, and the shrink target is
+                // dropped: both were answers about the disk being left, and
+                // shrink_part in particular names a partition that is not on
+                // the disk now selected.
+                {
+                    let mut a = app.answers.borrow_mut();
+                    a.mode = "wipe".into();
+                    a.shrink_part.clear();
+                    a.alongside_size.clear();
+                }
+                for (owner, mgroup, erase) in app.mode_groups.borrow().iter() {
+                    mgroup.set_visible(*owner == dev);
+                    // set_active on an already-active button emits nothing, so
+                    // this is the reset above made visible rather than a second
+                    // way of doing it.
+                    erase.set_active(true);
+                }
+                app.revalidate();
             }
         });
         group.add(&row);
@@ -243,6 +462,8 @@ fn disk(app: &Rc<App>) {
         }
     }
     page.add(&group);
+
+    install_mode(app, &page, &installable);
 
     // ---- layout -------------------------------------------------------------
     let layout = adw::PreferencesGroup::builder().title("Layout").build();
@@ -778,15 +999,59 @@ fn plan_rows(a: &Answers, p: &Probe) -> Vec<(String, String)> {
         .map(|d| format!("{} ({})", d.dev, d.subtitle()))
         .unwrap_or_else(|| a.disk.clone());
 
-    let mut layout = format!("{esp}   {}   EFI System Partition (FAT32) → /boot/efi", a.esp_size);
-    if let Some(sd) = &swap {
-        layout.push_str(&format!("\n{sd}   {swap_size}   swap"));
-    }
-    layout.push_str(&format!("\n{root}   rest   {} → /", a.fs));
+    // The alongside layout cannot be written as device names: which numbers the
+    // new partitions get is sfdisk's decision at the moment they are created --
+    // --append fills the lowest free slots -- so the plan describes them by
+    // what they are instead of by a node that would be a guess.
+    let (partitioning, layout) = if a.mode == "alongside" {
+        let disk = p.disks.iter().find(|d| d.dev == a.disk);
+        let mut l = String::new();
+        if a.shrink_part.is_empty() {
+            let free = disk.map(|d| d.free_bytes).unwrap_or(0);
+            l.push_str(&format!(
+                "{} of unallocated space on the disk is used",
+                probe::human_bytes(free)
+            ));
+        } else {
+            let c = disk.and_then(|d| d.candidates.iter().find(|c| c.dev == a.shrink_part));
+            l.push_str(&format!(
+                "{} is shrunk by {}, keeping its data{}",
+                a.shrink_part,
+                if a.alongside_size.is_empty() {
+                    "about half of what it can spare".to_string()
+                } else {
+                    a.alongside_size.clone()
+                },
+                c.map(|c| format!(" ({}, {} in use)", c.os, probe::human_bytes(c.used_bytes)))
+                    .unwrap_or_default()
+            ));
+        }
+        let existing_esp = disk.map(|d| d.esp.clone()).unwrap_or_default();
+        l.push_str(&format!(
+            "\n{}   reused as the EFI System Partition, not formatted",
+            if existing_esp.is_empty() { "the existing ESP".to_string() } else { existing_esp }
+        ));
+        if !swap_size.is_empty() {
+            l.push_str(&format!("\nnew partition   {swap_size}   swap"));
+        }
+        l.push_str(&format!("\nnew partition   the rest   {} → /", a.fs));
+        (
+            "Alongside what is already installed. Every other partition is left as it is."
+                .to_string(),
+            l,
+        )
+    } else {
+        let mut l = format!("{esp}   {}   EFI System Partition (FAT32) → /boot/efi", a.esp_size);
+        if let Some(sd) = &swap {
+            l.push_str(&format!("\n{sd}   {swap_size}   swap"));
+        }
+        l.push_str(&format!("\n{root}   rest   {} → /", a.fs));
+        ("GPT, erasing everything on the disk".to_string(), l)
+    };
 
     vec![
         ("Disk".into(), disk_info),
-        ("Partitioning".into(), format!("GPT, erasing everything on the disk\n{layout}")),
+        ("Partitioning".into(), format!("{partitioning}\n{layout}")),
         ("Hostname".into(), a.hostname.clone()),
         (
             "User".into(),
@@ -870,7 +1135,18 @@ fn summary(app: &Rc<App>) {
                 plan.add(&row);
                 rows.borrow_mut().push(row);
             }
-            danger_row.set_title(&format!("Everything on {} will be destroyed", a.disk));
+            danger_row.set_title(&if a.mode == "alongside" {
+                if a.shrink_part.is_empty() {
+                    format!("{}'s partition table will be changed", a.disk)
+                } else {
+                    format!(
+                        "{} will be resized. Back up anything on it you cannot lose.",
+                        a.shrink_part
+                    )
+                }
+            } else {
+                format!("Everything on {} will be destroyed", a.disk)
+            });
             nopw.set_visible(a.no_password_anywhere());
         }
     };

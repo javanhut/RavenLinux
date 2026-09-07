@@ -15,6 +15,18 @@ use std::fmt::Write as _;
 #[derive(Debug, Clone)]
 pub struct Answers {
     pub disk: String,
+    /// "wipe" or "alongside". The installer defaults to wipe when this is
+    /// absent, so an older raven-install reading a newer answers file would
+    /// only ever erase -- which is the direction a version mismatch should
+    /// fail in, but it is not a mismatch worth having: `mode` is in the
+    /// installer's ANSWER_KEYS, and an unknown key is fatal there, so an old
+    /// installer refuses this file outright rather than misreading it.
+    pub mode: String,
+    /// Which partition an alongside install takes its space from. Empty means
+    /// "use the unallocated space that is already on the disk".
+    pub shrink_part: String,
+    /// How much space to take, as a size the installer parses ("120G").
+    pub alongside_size: String,
     pub fs: String,
     pub esp_size: String,
     /// "" means "let the installer pick", "none" means no swap partition.
@@ -37,6 +49,9 @@ impl Default for Answers {
         // The same defaults the wizard offers in its prompts.
         Self {
             disk: String::new(),
+            mode: "wipe".into(),
+            shrink_part: String::new(),
+            alongside_size: String::new(),
             fs: "ext4".into(),
             esp_size: "512M".into(),
             swap: String::new(),
@@ -128,6 +143,22 @@ impl Answers {
         if self.profile.is_empty() {
             v.push("No package profile chosen.".into());
         }
+        if self.mode == "alongside" && !self.shrink_part.is_empty() {
+            // Only checked for shape. Whether the partition can actually give
+            // up this much is a question about a filesystem, and the answer
+            // lives in the probe and is checked again by plan_shrink -- which
+            // is the copy that decides. What is caught here is an empty or
+            // unparseable box, which the front-end can say something useful
+            // about at the moment it is typed into.
+            if self.alongside_size.is_empty() {
+                v.push("Say how much space to take from the partition being shrunk.".into());
+            } else if crate::probe::size_to_mb(&self.alongside_size).is_none() {
+                v.push(
+                    "The space for RavenLinux should be a size like 120G or 40960M."
+                        .into(),
+                );
+            }
+        }
         v
     }
 
@@ -146,6 +177,14 @@ impl Answers {
             let _ = writeln!(s, "{k}={v}");
         };
         put("disk", &self.disk);
+        put("mode", &self.mode);
+        // Both are only meaningful for an alongside install, and writing them
+        // for a wipe would be writing a plan that contradicts the mode. The
+        // installer would ignore them; a person reading the file would not.
+        if self.mode == "alongside" {
+            put("shrink_part", &self.shrink_part);
+            put("alongside_size", &self.alongside_size);
+        }
         put("fs", &self.fs);
         put("esp_size", &self.esp_size);
         put("swap", &self.swap);
@@ -196,6 +235,49 @@ mod tests {
     }
 
     #[test]
+    fn alongside_needs_a_size_when_it_shrinks() {
+        let mut a = good();
+        a.mode = "alongside".into();
+        a.shrink_part = "/dev/nvme0n1p3".into();
+        assert!(!a.problems().is_empty(), "no size given");
+
+        a.alongside_size = "not a size".into();
+        assert!(!a.problems().is_empty(), "unparseable size");
+
+        a.alongside_size = "120G".into();
+        assert!(a.problems().is_empty(), "120G is a size: {:?}", a.problems());
+    }
+
+    #[test]
+    fn alongside_without_a_shrink_needs_no_size() {
+        // Taking space that is already unallocated needs no number from
+        // anybody: it is however much is there.
+        let mut a = good();
+        a.mode = "alongside".into();
+        assert!(a.problems().is_empty(), "{:?}", a.problems());
+    }
+
+    #[test]
+    fn wipe_does_not_write_a_shrink_plan() {
+        // The two fields survive in the struct when someone switches back to
+        // erasing -- the UI clears them, but the file is the thing the
+        // installer reads, and it must not describe a shrink of a partition
+        // that is about to be erased.
+        let mut a = good();
+        a.shrink_part = "/dev/nvme0n1p3".into();
+        a.alongside_size = "120G".into();
+        let f = a.to_file();
+        assert!(f.contains("mode=wipe"));
+        assert!(!f.contains("shrink_part="), "{f}");
+        assert!(!f.contains("alongside_size="), "{f}");
+
+        a.mode = "alongside".into();
+        let f = a.to_file();
+        assert!(f.contains("shrink_part=/dev/nvme0n1p3"), "{f}");
+        assert!(f.contains("alongside_size=120G"), "{f}");
+    }
+
+    #[test]
     fn a_good_set_has_no_problems() {
         assert!(good().problems().is_empty());
     }
@@ -234,7 +316,7 @@ mod tests {
     fn every_key_is_written_exactly_once() {
         let f = good().to_file();
         for k in [
-            "disk", "fs", "esp_size", "swap", "hostname", "username", "fullname",
+            "disk", "mode", "fs", "esp_size", "swap", "hostname", "username", "fullname",
             "user_password", "user_sudo", "root_password", "timezone", "locale",
             "keymap", "profile", "efi_nvram",
         ] {

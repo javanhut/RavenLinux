@@ -691,12 +691,29 @@ fi
 # a test that cannot detect a write proves nothing by not detecting one.
 section "--dry-run writes nothing"
 
-if ! unshare -r true 2>/dev/null; then
-    # The run has to get past preflight's root check, and a user namespace is
-    # how that is done without being root -- uid 0 inside it, and no privilege
-    # at all over the host's block devices, so a guard that failed would be
-    # stopped by the kernel rather than by luck.
-    pass "no unshare -r on this host; --dry-run write test skipped"
+# The run has to get past preflight's root check, and a user namespace is how
+# that is done without being root -- uid 0 inside it, and no privilege at all
+# over the host's block devices, so a guard that failed would be stopped by the
+# kernel rather than by luck.
+#
+# Being uid 0 in the namespace is not enough on its own. The installer's first
+# act after preflight is to create /run/raven-install, and /run belongs to the
+# host's real root: a namespace maps the uid, it does not grant any power over
+# a filesystem outside it. Where that mkdir cannot succeed the installer dies
+# in preflight, before any of the code this section is about, and every
+# assertion below fails for a reason that has nothing to do with --dry-run.
+#
+# So the second half of the guard is the one that matters, and it is the whole
+# operation rather than a proxy for it: can this namespace actually create the
+# directory the installer will create.
+dry_run_possible() {
+    unshare -r true 2>/dev/null || return 1
+    unshare -r sh -c 'mkdir -p /run/raven-install-probe && rmdir /run/raven-install-probe' \
+        2>/dev/null
+}
+
+if ! dry_run_possible; then
+    pass "this host cannot run the installer under unshare -r; --dry-run write test skipped"
 else
     DRY="${WORKDIR}/dryrun"
     mkdir -p "${DRY}/bin"
@@ -818,6 +835,217 @@ else
     installer_proto="$(awk -F'"' '/^RAVEN_INSTALL_PROTOCOL=/ {print $2}' "$INSTALLER")"
     ui_proto="$(awk -F'"' '/^pub const SUPPORTED_PROTOCOL/ {print $2}' "${UI_DIR}/src/probe.rs")"
     eq "both sides speak the same protocol version" "$ui_proto" "$installer_proto"
+fi
+
+# =============================================================================
+# Installing alongside another OS: the partition arithmetic
+# =============================================================================
+# The header above says partitioning is not covered here because a test that
+# fabricates a block device is testing losetup. That is still true of mkfs and
+# the copy -- and it is not true of this. sfdisk reads and writes a partition
+# table in a plain file exactly as it does on a disk, so a GPT built here is
+# the real thing, and every number the alongside planner produces can be
+# checked against it and then applied to it.
+#
+# This is the part of the installer most worth testing: it is arithmetic on
+# somebody else's disk, the failure mode is a partition that overlaps the one
+# holding their Windows, and it is the one thing here that cannot be tried out
+# safely on a real machine.
+section "installing alongside: partition arithmetic"
+
+if ! command -v sfdisk >/dev/null 2>&1; then
+    echo "  SKIP  sfdisk is not installed"
+else
+
+# The constants the planner reads, taken from the installer rather than
+# restated, so a change to the minimum root size does not quietly stop being
+# the size these tests assert about.
+eval "$(grep -E '^(ALIGN_BYTES|GUID_[A-Z]+|ALONGSIDE_MIN_[A-Z]+|ROOT_LABEL|SWAP_LABEL)=' "$INSTALLER")"
+DISK_TABLE=""; DISK_SECTOR=512; DISK_FIRST_LBA=2048; DISK_LAST_LBA=0; DISK_LABEL=""
+ESP_DEV=""; SWAP_DEV=""; ROOT_DEV=""; ROOT_ALONGSIDE_BYTES=0
+ESP_REUSED=0; SHRINK_DEV=""; SHRINK_OLD_SECTORS=0; SHRINK_NEW_SECTORS=0
+SHRINK_NEW_BYTES=0; SHRINK_MIN_BYTES=0; GAP_START=0; GAP_SECTORS=0
+ALONGSIDE_PARTS=""; OPT_SHRINK_PART=""; OPT_ALONGSIDE_SIZE=""; SWAP_SIZE=""
+
+import_fn to_bytes to_human read_disk_table table_rows part_field find_esp \
+          free_gaps largest_gap align_up align_down \
+          plan_alongside plan_shrink plan_alongside_partitions part_by_name
+
+# A laptop as it comes from the shop: ESP, Microsoft Reserved, a 62G Windows
+# partition, and a recovery partition *after* it -- so shrinking Windows leaves
+# a hole in the middle of the disk rather than space at the end. That is the
+# case the planner has to get right and the one a naive implementation gets
+# wrong.
+IMG="${WORKDIR}/win.img"
+truncate -s 64G "$IMG"
+sfdisk -q "$IMG" >/dev/null 2>&1 <<'PARTS'
+label: gpt
+size=260M, type=uefi, name="EFI system partition"
+size=16M,  type=E3C9E316-0B5C-4DB8-817D-F92DF00215AE, name="Microsoft reserved"
+size=62G,  type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name="Basic data partition"
+           type=DE94BBA4-06D1-4D40-A16A-BFD50179D6AC, name="Basic data partition"
+PARTS
+
+# The four things that ask the kernel about a block device. Everything else
+# under test is the installer's own code.
+fs_type_of()    { echo ntfs; }
+fs_label_of()   { echo "Windows"; }
+fs_shrinkable() { return 0; }
+fs_min_bytes()  { echo $(( 20 * 1024 * 1024 * 1024 )); }   # 20 GiB in use
+findmnt()       { return 1; }
+# The partitions of an image file are not block devices and not mounted; the
+# real code's guards for both are exercised by the refusal tests below.
+plan_shrink_guarded=$(declare -f plan_shrink)
+eval "${plan_shrink_guarded/'[[ -b "$SHRINK_DEV" ]] || die "${SHRINK_DEV} is not a block device."'/:}"
+
+eq "to_bytes 8G"     "$(to_bytes 8G)"     "8589934592"
+eq "to_bytes 1.5T"   "$(to_bytes 1.5T)"   "1649267441664"
+eq "to_bytes junk"   "$(to_bytes wat)"    "0"
+eq "to_human 64 GiB" "$(to_human 68719476736)" "64.0 GiB"
+
+DISK="$IMG"
+read_disk_table "$IMG"
+eq "reads the label"     "$DISK_LABEL"  "gpt"
+eq "reads sector size"   "$DISK_SECTOR" "512"
+eq "finds the ESP"       "$(find_esp)"  "${IMG}1"
+eq "four partitions"     "$(table_rows | wc -l)" "4"
+eq "start of Windows"    "$(part_field "${IMG}3" start)" "567296"
+
+# A shop-fresh disk is full, so there is nothing to take without shrinking.
+eq "a full disk has no usable gap" \
+   "$(largest_gap | cut -f3)" "2015"
+
+# --- the plan ----------------------------------------------------------------
+OPT_SHRINK_PART="${IMG}3"
+OPT_ALONGSIDE_SIZE="30G"
+SWAP_SIZE="8G"
+plan_alongside
+
+eq "reuses the existing ESP"   "$ESP_DEV"    "${IMG}1"
+eq "marks the ESP as reused"   "$ESP_REUSED" "1"
+eq "shrinks Windows to 32 GiB" "$(to_human "$SHRINK_NEW_BYTES")" "32.0 GiB"
+eq "frees exactly 30 GiB"      "$(to_human $(( GAP_SECTORS * DISK_SECTOR )))" "30.0 GiB"
+eq "root gets the rest"        "$(to_human "$ROOT_ALONGSIDE_BYTES")" "22.0 GiB"
+
+if (( GAP_START % (ALIGN_BYTES / DISK_SECTOR) == 0 )); then
+    pass "the gap starts on a 1 MiB boundary"
+else
+    failed "the gap starts on a 1 MiB boundary" "start sector ${GAP_START}"
+fi
+
+# The gap must begin exactly where the shrunk partition now ends -- one sector
+# either way is a partition that overlaps Windows or a megabyte lost.
+eq "the gap begins where Windows now ends" \
+   "$GAP_START" "$(( $(part_field "${IMG}3" start) + SHRINK_NEW_SECTORS ))"
+
+# ...and end exactly where Windows used to, so it does not run into recovery.
+eq "the gap ends where Windows used to" \
+   "$(( GAP_START + GAP_SECTORS ))" \
+   "$(( $(part_field "${IMG}3" start) + SHRINK_OLD_SECTORS ))"
+
+# --- applying it -------------------------------------------------------------
+# The same two sfdisk invocations partition_alongside runs.
+printf 'start=%s, size=%s\n' "$(part_field "${IMG}3" start)" "$SHRINK_NEW_SECTORS" \
+    | sfdisk -N 3 --no-reread -w never -W never -q "$IMG" >/dev/null 2>&1
+printf '%s' "$ALONGSIDE_PARTS" \
+    | sfdisk --append --no-reread -w never -W never -q "$IMG" >/dev/null 2>&1
+
+if sfdisk --verify "$IMG" 2>&1 | grep -q "No errors detected"; then
+    pass "the resulting table verifies"
+else
+    failed "the resulting table verifies" "$(sfdisk --verify "$IMG" 2>&1 | head -3)"
+fi
+
+read_disk_table "$IMG"
+eq "root is found by its GPT name" \
+   "$(part_by_name "$ROOT_LABEL" | grep -c .)" "1"
+eq "swap is found by its GPT name" \
+   "$(part_by_name "$SWAP_LABEL" | grep -c .)" "1"
+
+# Windows keeps its identity. sfdisk -N rewrites one entry, and a rewrite that
+# reset the type GUID would leave the partition unrecognised by Windows.
+eq "Windows keeps its type GUID" \
+   "$(part_field "${IMG}3" type)" "$GUID_MSDATA"
+eq "recovery is untouched" \
+   "$(part_field "${IMG}4" start)" "130590720"
+eq "the ESP is untouched" \
+   "$(part_field "${IMG}1" start)" "2048"
+
+# Nothing may overlap. This is the assertion the whole section exists for.
+overlaps=$(table_rows | awk -F'\t' '{print $2"\t"($2+$3)}' | sort -n \
+           | awk -F'\t' 'NR>1 && $1 < prev { c++ } { prev=$2 } END { print c+0 }')
+eq "no two partitions overlap" "$overlaps" "0"
+
+# --- the refusals ------------------------------------------------------------
+# Each of these is a way to lose somebody's data, and each has to stop before
+# anything is written rather than report a problem afterwards.
+refuses() { # refuses DESC SETUP-EXPR ERE
+    local out
+    out=$( eval "$2" ; plan_alongside 2>&1 )
+    if grep -qE "$3" <<< "$out"; then pass "$1"; else failed "$1" "want /$3/" "got: ${out:-<nothing>}"; fi
+}
+die() { echo "$*"; return 1; }   # from here a refusal is a value, not an exit
+
+read_disk_table "$IMG" >/dev/null
+IMG2="${WORKDIR}/win2.img"
+cp "$IMG" "$IMG2" 2>/dev/null || truncate -s 64G "$IMG2"
+
+DISK="$IMG"
+refuses "refuses to take more than the filesystem can spare" \
+        'OPT_SHRINK_PART="${IMG}3"; OPT_ALONGSIDE_SIZE=500G' \
+        "cannot go below"
+refuses "refuses to shrink the ESP" \
+        'OPT_SHRINK_PART="${IMG}1"; OPT_ALONGSIDE_SIZE=10G' \
+        "is the EFI System Partition"
+refuses "refuses a partition on another disk" \
+        'OPT_SHRINK_PART=/dev/sdz9; OPT_ALONGSIDE_SIZE=10G' \
+        "is not a partition of"
+refuses "refuses a root smaller than the minimum" \
+        'OPT_SHRINK_PART="${IMG}3"; OPT_ALONGSIDE_SIZE=1G' \
+        "is not enough for RavenLinux"
+refuses "refuses a mounted partition" \
+        'findmnt() { echo /mnt/win; return 0; }; OPT_SHRINK_PART="${IMG}3"; OPT_ALONGSIDE_SIZE=10G' \
+        "is mounted"
+findmnt() { return 1; }
+refuses "refuses a filesystem it cannot shrink" \
+        'fs_shrinkable() { return 1; }; fs_type_of() { echo xfs; }; OPT_SHRINK_PART="${IMG}3"' \
+        "Cannot shrink"
+fs_shrinkable() { return 0; }; fs_type_of() { echo ntfs; }
+refuses "refuses when the filesystem will not report its minimum" \
+        'fs_min_bytes() { return 1; }; OPT_SHRINK_PART="${IMG}3"; OPT_ALONGSIDE_SIZE=10G' \
+        "would not report how small"
+fs_min_bytes() { echo $(( 20 * 1024 * 1024 * 1024 )); }
+
+# A disk with no ESP has no other UEFI OS on it to install alongside.
+NOESP="${WORKDIR}/noesp.img"
+truncate -s 32G "$NOESP"
+sfdisk -q "$NOESP" >/dev/null 2>&1 <<'PARTS'
+label: gpt
+type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="data"
+PARTS
+refuses "refuses a disk with no EFI System Partition" \
+        'DISK="$NOESP"; OPT_SHRINK_PART=""; OPT_ALONGSIDE_SIZE=""' \
+        "no EFI System Partition"
+
+# And a disk with room already on it needs no resize at all.
+FREE="${WORKDIR}/free.img"
+truncate -s 128G "$FREE"
+sfdisk -q "$FREE" >/dev/null 2>&1 <<'PARTS'
+label: gpt
+size=1G,  type=uefi, name="EFI system partition"
+size=60G, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="linux-root"
+PARTS
+DISK="$FREE"; OPT_SHRINK_PART=""; OPT_ALONGSIDE_SIZE=""; SWAP_SIZE=""
+unset -f die; die() { echo "unexpected die: $*" >&2; exit 9; }
+plan_alongside
+eq "unallocated space needs no shrink" "$SHRINK_DEV" ""
+eq "and all of it is used"             "$(to_human $(( GAP_SECTORS * DISK_SECTOR )))" "67.0 GiB"
+
+DISK="$FREE"; OPT_ALONGSIDE_SIZE="40G"
+plan_alongside
+eq "--size caps what is taken from free space" \
+   "$(to_human "$ROOT_ALONGSIDE_BYTES")" "40.0 GiB"
+
 fi
 
 # =============================================================================

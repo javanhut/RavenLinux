@@ -80,6 +80,12 @@ pub struct App {
     /// then on closing the window is a question, not a click.
     pub disk_dirty: Cell<bool>,
     pub installing: Cell<bool>,
+    /// The per-disk "erase or install alongside" groups on the disk page, and
+    /// the Erase button of each. One disk's group is on screen at a time and
+    /// the disk radio above them decides which; they are held here because the
+    /// thing that has to show and hide them is a callback on a different
+    /// widget, built in a different loop.
+    pub mode_groups: RefCell<Vec<(String, adw::PreferencesGroup, gtk::CheckButton)>>,
 }
 
 impl App {
@@ -381,6 +387,7 @@ fn build_wizard(window: &adw::ApplicationWindow, p: Probe, level: Priv, installe
         current: Cell::new(0),
         disk_dirty: Cell::new(false),
         installing: Cell::new(false),
+        mode_groups: RefCell::new(Vec::new()),
     });
 
     pages::build_all(&app);

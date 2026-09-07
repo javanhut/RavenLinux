@@ -169,6 +169,14 @@ BANNER
 # =============================================================================
 
 OPT_DISK=""
+# wipe: erase the disk and lay out a fresh GPT. alongside: keep what is on it,
+# take space from one partition or from a hole already there, and reuse the ESP
+# the other OS boots from. wipe stays the default -- it is what an installer
+# does when nobody says otherwise, and it is the one that cannot be asked to
+# resize a filesystem it did not create.
+OPT_MODE="wipe"
+OPT_SHRINK_PART=""     # which partition alongside mode takes space from
+OPT_ALONGSIDE_SIZE=""  # how much to take, or empty for "about half of what is free"
 OPT_FS="ext4"
 OPT_SWAP=""          # "", "none", or a size like 8G
 OPT_ESP_SIZE="${ESP_SIZE_DEFAULT}"
@@ -189,6 +197,20 @@ pre-answer individual questions rather than replacing the wizard.
 
 Options:
   --disk DEVICE      Target disk (e.g. /dev/nvme0n1). Prompted for if omitted.
+  --alongside        Keep what is on the disk. RavenLinux goes into free space,
+                     or into space taken from a partition named with --shrink,
+                     and boots from the EFI System Partition that is already
+                     there. Nothing else on the disk is formatted or moved.
+  --shrink PART      The partition --alongside takes space from (e.g.
+                     /dev/nvme0n1p3). Its filesystem is shrunk first, then its
+                     partition; ext2/3/4 and NTFS only, and it must not be
+                     mounted. Omit it to use unallocated space that is already
+                     on the disk.
+  --size SIZE        How much space to give RavenLinux, e.g. 120G. With
+                     --shrink and no --size, about half of what the partition
+                     can spare.
+  --wipe             Erase the disk. The default, so this is only worth typing
+                     to say so out loud in a script.
   --fs TYPE          Root filesystem: ext4 (default) or xfs or btrfs, if the
                      matching mkfs is present.
   --swap SIZE        Swap partition size (e.g. 8G), or "none" for no swap.
@@ -228,14 +250,26 @@ Driving it from a front-end (see PROTOCOL near the top of this file):
   --progress-fd N    Also write each status line to file descriptor N, as the
                      one-record-per-line protocol documented above.
 
-The target disk is erased completely. Dual-boot installation is not supported
-yet -- if this machine has another OS you want to keep, stop here.
+The target disk is erased completely unless --alongside is given, in which case
+only the space this takes is written to and every other partition is left
+exactly as it was. RavenBoot finds the other OS on the shared ESP by itself and
+puts it in the boot menu; there is nothing to configure for that.
+
+  raven-install --disk /dev/nvme0n1 --alongside --shrink /dev/nvme0n1p3 --size 120G
+
+Shrinking NTFS needs Windows shut down properly first -- not hibernated, and
+not with Fast Startup on, both of which leave the filesystem dirty and make
+ntfsresize refuse. "shutdown /s /t 0" from a Windows command prompt does it.
 USAGE
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --disk)      OPT_DISK="${2:-}"; shift 2 ;;
+        --alongside) OPT_MODE="alongside"; shift ;;
+        --wipe)      OPT_MODE="wipe"; shift ;;
+        --shrink)    OPT_SHRINK_PART="${2:-}"; OPT_MODE="alongside"; shift 2 ;;
+        --size)      OPT_ALONGSIDE_SIZE="${2:-}"; shift 2 ;;
         --fs)        OPT_FS="${2:-}"; shift 2 ;;
         --swap)      OPT_SWAP="${2:-}"; shift 2 ;;
         --esp-size)  OPT_ESP_SIZE="${2:-}"; shift 2 ;;
@@ -298,7 +332,11 @@ on_error() {
     fail "Installation aborted."
     emit dirty "$DISK_DIRTY"
     emit done "$rc"
-    if [[ $DISK_DIRTY -eq 1 ]]; then
+    if [[ $DISK_DIRTY -eq 1 && "$OPT_MODE" == "alongside" ]]; then
+        echo "  ${YELLOW}The disk has been modified: RavenLinux is not installed.${NC}"
+        echo "  The other operating system on this disk was not formatted and"
+        echo "  should still boot. Re-run raven-install to try again."
+    elif [[ $DISK_DIRTY -eq 1 ]]; then
         echo "  ${YELLOW}The target disk has already been modified and is not bootable.${NC}"
         echo "  Re-run raven-install to start over."
     else
@@ -532,6 +570,463 @@ is_live_media() {
     return 1
 }
 
+# =============================================================================
+# Disk layout
+# =============================================================================
+# Everything below reads or reshapes an existing partition table. It exists for
+# one feature -- installing alongside another operating system -- and that is
+# the only thing in this installer that has to do arithmetic on a disk rather
+# than hand sfdisk a description and let it lay the disk out from scratch.
+#
+# The whole-disk path does not use any of it and is unchanged: it still wipes
+# and writes a three-partition GPT, because when you are erasing the disk there
+# is nothing to measure.
+
+# 1 MiB, the alignment every partition here starts on. Not a preference: an SSD
+# that reports 512-byte logical sectors is almost always writing 4K or larger
+# underneath, and a partition starting mid-erase-block makes every write in it
+# a read-modify-write for the life of the machine.
+ALIGN_BYTES=1048576
+
+# Sizes to bytes and back. sfdisk parses "8G" perfectly well on its own, which
+# is why nothing here needed a size parser until now -- "how much can this
+# partition give up, and is what is left enough for a root" is arithmetic, and
+# it has to happen before anything is handed to sfdisk.
+#
+# awk rather than bash: "1.5T" is a size a person types, and bash has no
+# floating point. Units are binary throughout, which is what sfdisk means by G
+# and what a disk's advertised "512 GB" is not -- the difference is 7% and it
+# is the difference between a plan that fits and one that does not.
+to_bytes() {
+    awk -v v="${1:-0}" 'BEGIN {
+        gsub(/[ \t]/, "", v)
+        if (v == "") { print 0; exit }
+        if (match(v, /[KkMmGgTtPp]/)) {
+            u = toupper(substr(v, RSTART, 1))
+            n = substr(v, 1, RSTART - 1)
+        } else { u = ""; n = v }
+        if (n !~ /^[0-9]+(\.[0-9]+)?$/) { print 0; exit }
+        m = 1
+        if      (u == "K") m = 1024
+        else if (u == "M") m = 1024 ^ 2
+        else if (u == "G") m = 1024 ^ 3
+        else if (u == "T") m = 1024 ^ 4
+        else if (u == "P") m = 1024 ^ 5
+        printf "%.0f\n", n * m
+    }'
+}
+
+to_human() {
+    awk -v b="${1:-0}" 'BEGIN {
+        split("B KiB MiB GiB TiB PiB", u, " ")
+        i = 1
+        while (b >= 1024 && i < 6) { b /= 1024; i++ }
+        if (i == 1) printf "%d %s\n", b, u[i]
+        else        printf "%.1f %s\n", b, u[i]
+    }'
+}
+
+# The GUIDs this file recognises. Partition type is the one piece of evidence
+# about a partition that needs nothing mounted and cannot be wrong about what
+# the partition is *for*, which is what makes it the right thing to key on.
+GUID_ESP="C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+GUID_MSR="E3C9E316-0B5C-4DB8-817D-F92DF00215AE"     # Microsoft Reserved
+GUID_MSDATA="EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"  # Basic data: NTFS, and also FAT
+GUID_WINRE="DE94BBA4-06D1-4D40-A16A-BFD50179D6AC"   # Windows Recovery
+GUID_LINUX="0FC63DAF-8483-4772-8E79-3D69D8477DE4"
+GUID_SWAP="0657FD6D-A4AB-43C4-84E5-0933C84B4F4F"
+
+# The cached `sfdisk -d` of the target, and the header fields out of it.
+DISK_TABLE=""
+DISK_SECTOR=512
+DISK_FIRST_LBA=2048
+DISK_LAST_LBA=0
+DISK_LABEL=""
+
+# Reads the table into the variables above. Returns 1 for a disk with no
+# partition table at all, which is not an error -- it is an empty disk, and the
+# whole-disk path is the only thing that can be done with one anyway.
+read_disk_table() {
+    local disk="$1"
+    DISK_TABLE="$(sfdisk -d "$disk" 2>/dev/null)" || return 1
+    [[ -n "$DISK_TABLE" ]] || return 1
+
+    DISK_LABEL=$(awk -F': *' '/^label:/ { print $2; exit }' <<< "$DISK_TABLE")
+    DISK_SECTOR=$(awk -F': *' '/^sector-size:/ { print $2; exit }' <<< "$DISK_TABLE")
+    DISK_FIRST_LBA=$(awk -F': *' '/^first-lba:/ { print $2; exit }' <<< "$DISK_TABLE")
+    DISK_LAST_LBA=$(awk -F': *' '/^last-lba:/ { print $2; exit }' <<< "$DISK_TABLE")
+
+    # sector-size and first-lba are recent additions to the dump format. A
+    # 512-byte sector and a 2048-sector first LBA are what every GPT this will
+    # meet actually uses, so defaulting is better than refusing -- but last-lba
+    # cannot be guessed, and without it every gap calculation below is wrong.
+    [[ -n "$DISK_SECTOR"    ]] || DISK_SECTOR=512
+    [[ -n "$DISK_FIRST_LBA" ]] || DISK_FIRST_LBA=2048
+    [[ -n "$DISK_LAST_LBA"  ]] || return 1
+    return 0
+}
+
+# One line per partition: node, start, size, type -- all in sectors, tab
+# separated, in table order.
+table_rows() {
+    awk '
+        /^[^[:space:]]+[0-9]+[[:space:]]*:[[:space:]]*start=/ {
+            node = $1
+            start = size = type = ""
+            if (match($0, /start=[[:space:]]*[0-9]+/))
+                { start = substr($0, RSTART + 6, RLENGTH - 6); gsub(/[[:space:]]/, "", start) }
+            if (match($0, /size=[[:space:]]*[0-9]+/))
+                { size = substr($0, RSTART + 5, RLENGTH - 5);  gsub(/[[:space:]]/, "", size) }
+            if (match($0, /type=[0-9A-Fa-f-]+/))
+                { type = substr($0, RSTART + 5, RLENGTH - 5) }
+            if (start != "" && size != "") print node "\t" start "\t" size "\t" type
+        }
+    ' <<< "$DISK_TABLE"
+}
+
+# start, size or type for one partition node.
+part_field() {
+    local node="$1" field="$2"
+    table_rows | awk -F'\t' -v n="$node" -v f="$field" '
+        $1 == n { print (f == "start" ? $2 : f == "size" ? $3 : $4); exit }'
+}
+
+# The disk's EFI System Partition, or nothing. Installing alongside means using
+# the one that is already there: a second ESP is legal in the specification and
+# a coin toss in practice, because the firmware picks which one it boots from
+# and nothing says it will pick ours.
+find_esp() {
+    table_rows | awk -F'\t' -v esp="$GUID_ESP" '
+        toupper($4) == esp { print $1; exit }'
+}
+
+# Unallocated space, as start/end/sectors, in table order. `sfdisk -F` prints
+# this too, in a human format with a header, units that change with the size,
+# and no promise about either -- so it is computed here from the same rows
+# everything else reads.
+free_gaps() {
+    table_rows \
+        | awk -F'\t' '{ print $2 "\t" ($2 + $3 - 1) }' \
+        | sort -n -k1,1 \
+        | awk -F'\t' -v first="$DISK_FIRST_LBA" -v last="$DISK_LAST_LBA" '
+            BEGIN { cursor = first }
+            {
+                if ($1 > cursor) print cursor "\t" ($1 - 1) "\t" ($1 - cursor)
+                if ($2 >= cursor) cursor = $2 + 1
+            }
+            END { if (last >= cursor) print cursor "\t" last "\t" (last - cursor + 1) }
+        '
+}
+
+# The biggest one, as start/end/sectors. Empty when the disk is full.
+largest_gap() {
+    free_gaps | sort -n -k3,3 | tail -n 1
+}
+
+
+# =============================================================================
+# Filesystems on somebody else's partition
+# =============================================================================
+# The smallest root worth creating. The tree this copies is around 1.5 GB and
+# an installed desktop settles near 6, so 12 GiB is not the floor of what fits
+# -- it is the floor of what is still usable a month later, with a kernel or
+# two, a package cache and somewhere to put a file. Below it the install would
+# succeed and the machine would be full.
+ALONGSIDE_MIN_ROOT="$(( 12 * 1024 * 1024 * 1024 ))"
+
+# What must be left in the other OS's filesystem beyond the bytes it is
+# actually using. A Windows that boots into 200 MB of headroom does not boot
+# for long: the page file, the update cache and the restore points all want
+# room, and the person shrinking it will blame the installer rather than the
+# slider.
+ALONGSIDE_MIN_HEADROOM="$(( 4 * 1024 * 1024 * 1024 ))"
+
+fs_type_of() { blkid -o value -s TYPE "$1" 2>/dev/null; }
+fs_label_of() { blkid -o value -s LABEL "$1" 2>/dev/null; }
+
+# Can this filesystem be made smaller without losing what is in it?
+#
+# The list is short on purpose. ext2/3/4 and NTFS are the two families with a
+# shrink that is offline, in place, and old enough to trust. XFS cannot shrink
+# at all -- the feature has never existed. btrfs can, but only while mounted,
+# which means mounting somebody else's root read-write from a live image to
+# resize it, and that is a different risk than this is willing to take on
+# their behalf. FAT is refused because a partition that is FAT and big enough
+# to be worth shrinking is nearly always an ESP.
+fs_shrinkable() {
+    case "$(fs_type_of "$1")" in
+        ext2|ext3|ext4) have resize2fs && have e2fsck ;;
+        ntfs)           have ntfsresize ;;
+        *)              return 1 ;;
+    esac
+}
+
+# The smallest this filesystem says it could become, in bytes, or nothing if it
+# cannot be asked. This is the number the shrink is checked against, and it is
+# the filesystem's own estimate rather than "space in use" -- the two differ by
+# however badly the data is scattered, and it is the estimate that decides
+# whether the resize succeeds.
+fs_min_bytes() {
+    local dev="$1" blocks bs min
+
+    case "$(fs_type_of "$dev")" in
+        ext2|ext3|ext4)
+            blocks=$(resize2fs -P "$dev" 2>/dev/null | awk -F': *' '/minimum size/ { print $2 }')
+            [[ "$blocks" =~ ^[0-9]+$ ]] || return 1
+            bs=$(dumpe2fs -h "$dev" 2>/dev/null | awk -F': *' '/^Block size/ { print $2 }')
+            [[ "$bs" =~ ^[0-9]+$ ]] || bs=4096
+            echo $(( blocks * bs ))
+            ;;
+        ntfs)
+            # `ntfsresize --info` reports the smallest supported size as a byte
+            # count on its "You might resize at N bytes" line. It exits 1 when
+            # the volume is already at its minimum, which is a real answer and
+            # not a failure, so the output is parsed either way.
+            min=$(ntfsresize --info --force "$dev" 2>/dev/null \
+                  | awk '/You might resize at/ { print $5; exit }')
+            [[ "$min" =~ ^[0-9]+$ ]] || return 1
+            echo "$min"
+            ;;
+        *)  return 1 ;;
+    esac
+}
+
+# A name for what is on a partition, for the plan and for a front-end's list.
+# Type GUID first because it needs nothing mounted and cannot lie about intent;
+# the filesystem label is a fallback and the filesystem type the last resort.
+part_os_hint() {
+    local node="$1" type label fstype
+    type=$(part_field "$node" type | tr 'a-z' 'A-Z')
+    label=$(fs_label_of "$node")
+    fstype=$(fs_type_of "$node")
+
+    case "$type" in
+        "$GUID_ESP") echo "EFI System Partition"; return ;;
+        "$GUID_MSR") echo "Microsoft Reserved";   return ;;
+        "$GUID_WINRE") echo "Windows Recovery";   return ;;
+    esac
+
+    if [[ "$fstype" == "ntfs" ]]; then
+        # The volume label is worth showing -- it is how somebody tells two
+        # Windows partitions apart -- except when it is the word already being
+        # printed, which on an OEM disk it very often is.
+        if [[ -n "$label" && "${label,,}" != "windows" ]]; then
+            echo "Windows (${label})"
+        else
+            echo "Windows"
+        fi
+        return
+    fi
+    if [[ -n "$label" ]]; then
+        echo "${fstype:-unknown} (${label})"
+        return
+    fi
+    echo "${fstype:-unformatted}"
+}
+
+# =============================================================================
+# Planning an install alongside what is already there
+# =============================================================================
+# Everything this decides is decided before a byte is written, and confirm()
+# prints all of it. The numbers below are sectors unless they say bytes.
+
+SHRINK_DEV=""          # the partition being made smaller, or empty
+SHRINK_OLD_SECTORS=0
+SHRINK_NEW_SECTORS=0
+SHRINK_NEW_BYTES=0
+SHRINK_MIN_BYTES=0
+GAP_START=0            # where the space for RavenLinux begins
+GAP_SECTORS=0
+ESP_REUSED=0           # 1 when ESP_DEV is somebody else's ESP, not one we made
+
+# sectors -> the next lower multiple of the 1 MiB alignment
+align_down() {
+    local sectors="$1" a=$(( ALIGN_BYTES / DISK_SECTOR ))
+    (( a < 1 )) && a=1
+    echo $(( sectors / a * a ))
+}
+align_up() {
+    local sectors="$1" a=$(( ALIGN_BYTES / DISK_SECTOR ))
+    (( a < 1 )) && a=1
+    echo $(( (sectors + a - 1) / a * a ))
+}
+
+plan_alongside() {
+    # Start from nothing. Every one of these is set by exactly one branch
+    # below, so a value left over from an earlier call is a plan describing a
+    # shrink that this call did not decide to do -- and confirm() prints
+    # whatever is in them.
+    SHRINK_DEV=""
+    SHRINK_OLD_SECTORS=0
+    SHRINK_NEW_SECTORS=0
+    SHRINK_NEW_BYTES=0
+    SHRINK_MIN_BYTES=0
+    GAP_START=0
+    GAP_SECTORS=0
+    ALONGSIDE_PARTS=""
+
+    read_disk_table "$DISK" \
+        || die "${DISK} has no partition table to install alongside. Use --wipe to erase it."
+
+    [[ "${DISK_LABEL,,}" == "gpt" ]] \
+        || die "${DISK} is ${DISK_LABEL:-MBR}, not GPT. Installing alongside needs a GPT disk;
+       a UEFI machine has one, so this disk is probably from a BIOS install."
+
+    # The ESP is reused, never created and never formatted. A second ESP is
+    # legal and useless: the firmware chooses which one it boots from, and
+    # nothing in the specification says it will choose ours.
+    ESP_DEV="$(find_esp)"
+    [[ -n "$ESP_DEV" ]] \
+        || die "${DISK} has no EFI System Partition. There is no other UEFI OS on it
+       to install alongside -- use --wipe to erase the disk and start clean."
+    ESP_REUSED=1
+
+    local want_bytes=0
+    [[ -n "$OPT_ALONGSIDE_SIZE" ]] && want_bytes=$(to_bytes "$OPT_ALONGSIDE_SIZE")
+
+    if [[ -n "$OPT_SHRINK_PART" ]]; then
+        plan_shrink "$want_bytes"
+    else
+        # No partition named: take the largest hole already on the disk. This
+        # is the case where somebody has left space unallocated on purpose,
+        # and it needs no resize at all.
+        local gap
+        gap="$(largest_gap)"
+        [[ -n "$gap" ]] || die "There is no free space on ${DISK} and no partition was given to shrink.
+       Pass --shrink <partition> to take space from one, or --wipe to erase the disk."
+
+        GAP_START=$(echo "$gap" | cut -f1)
+        GAP_SECTORS=$(echo "$gap" | cut -f3)
+
+        # Align the start, and give back what alignment cost from the length.
+        local aligned; aligned=$(align_up "$GAP_START")
+        GAP_SECTORS=$(( GAP_SECTORS - (aligned - GAP_START) ))
+        GAP_START=$aligned
+        GAP_SECTORS=$(align_down "$GAP_SECTORS")
+
+        if (( want_bytes > 0 && want_bytes < GAP_SECTORS * DISK_SECTOR )); then
+            GAP_SECTORS=$(align_down $(( want_bytes / DISK_SECTOR )))
+        fi
+
+        # A disk with a megabyte of slack at the end has "free space" and no
+        # room, and the generic size check below would report that as "0 B is
+        # not enough" -- true, and no help at all to somebody who has not been
+        # told that taking space from a partition is the other option.
+        if (( GAP_SECTORS * DISK_SECTOR < ALONGSIDE_MIN_ROOT )); then
+            die "${DISK} has only $(to_human $(( GAP_SECTORS * DISK_SECTOR ))) unallocated, and RavenLinux needs $(to_human $ALONGSIDE_MIN_ROOT).
+       Pass --shrink <partition> to take the space from one of the partitions
+       that is already there, or --wipe to erase the disk."
+        fi
+    fi
+
+    local gap_bytes=$(( GAP_SECTORS * DISK_SECTOR ))
+    local need=$ALONGSIDE_MIN_ROOT
+    [[ -n "$SWAP_SIZE" ]] && need=$(( need + $(to_bytes "$SWAP_SIZE") ))
+
+    (( gap_bytes >= need )) || die "$(to_human $gap_bytes) is not enough for RavenLinux.
+       It needs at least $(to_human $need)${SWAP_SIZE:+ (including ${SWAP_SIZE} of swap)}."
+
+    plan_alongside_partitions
+}
+
+# Works out how far the chosen partition can be pulled back, and refuses rather
+# than guessing when the answer is "not that far".
+plan_shrink() {
+    local want_bytes="$1"
+
+    SHRINK_DEV="$OPT_SHRINK_PART"
+    [[ -b "$SHRINK_DEV" ]] || die "${SHRINK_DEV} is not a block device."
+    [[ "$SHRINK_DEV" == "$DISK"* ]] || die "${SHRINK_DEV} is not a partition of ${DISK}."
+    [[ "$SHRINK_DEV" != "$ESP_DEV" ]] || die "${SHRINK_DEV} is the EFI System Partition. Shrinking it would
+       take the space the other OS boots from. Choose a data partition."
+
+    local start size
+    start=$(part_field "$SHRINK_DEV" start)
+    size=$(part_field "$SHRINK_DEV" size)
+    [[ "$start" =~ ^[0-9]+$ && "$size" =~ ^[0-9]+$ ]] \
+        || die "Cannot read ${SHRINK_DEV} from ${DISK}'s partition table."
+    SHRINK_OLD_SECTORS="$size"
+
+    # Mounted is fatal, not a warning. Every shrink here is an offline one;
+    # resizing underneath a mounted filesystem corrupts it.
+    if findmnt -no TARGET --source "$SHRINK_DEV" >/dev/null 2>&1; then
+        die "${SHRINK_DEV} is mounted. Unmount it and run the installer again."
+    fi
+
+    local fstype; fstype=$(fs_type_of "$SHRINK_DEV")
+    if ! fs_shrinkable "$SHRINK_DEV"; then
+        # The two cases read very differently to whoever hit them: one is "this
+        # filesystem cannot be shrunk by anything", the other is "it can, and
+        # this image is missing the program that does it".
+        if [[ "$fstype" == "ntfs" ]]; then
+            die "Cannot shrink ${SHRINK_DEV}: ntfsresize is not installed on this image.
+       Without it an NTFS partition cannot be made smaller. Install ntfsprogs,
+       or erase the disk with --wipe."
+        fi
+        die "Cannot shrink ${SHRINK_DEV}: it is ${fstype:-unrecognised}.
+       Shrinking is supported for ext2/3/4 and NTFS. XFS cannot shrink at all,
+       and btrfs only while mounted, which this will not do to another OS's
+       filesystem. Free space inside it and use that, or erase the disk."
+    fi
+
+    SHRINK_MIN_BYTES=$(fs_min_bytes "$SHRINK_DEV") \
+        || die "${SHRINK_DEV} would not report how small it can be made.
+       On NTFS this usually means Windows was hibernated or shut down with Fast
+       Startup on, which leaves the filesystem dirty. Boot Windows, shut it
+       down fully (Shift-click Restart, or 'shutdown /s /t 0'), and try again."
+
+    local floor=$(( SHRINK_MIN_BYTES + ALONGSIDE_MIN_HEADROOM ))
+    local old_bytes=$(( SHRINK_OLD_SECTORS * DISK_SECTOR ))
+
+    (( want_bytes > 0 )) || want_bytes=$(( (old_bytes - floor) / 2 ))
+    (( want_bytes > 0 )) || die "${SHRINK_DEV} has no room to give.
+       It holds $(to_human $SHRINK_MIN_BYTES) and is $(to_human $old_bytes)."
+
+    local new_bytes=$(( old_bytes - want_bytes ))
+    (( new_bytes >= floor )) || die "Taking $(to_human $want_bytes) would leave ${SHRINK_DEV} at $(to_human $new_bytes).
+       It cannot go below $(to_human $floor): $(to_human $SHRINK_MIN_BYTES) is in use and
+       $(to_human $ALONGSIDE_MIN_HEADROOM) is the headroom that OS needs to keep working.
+       The most it can give up is $(to_human $(( old_bytes - floor )))."
+
+    # The new boundary is where the gap starts, so it is what gets aligned;
+    # the partition's size follows from it rather than the other way round.
+    local new_end_excl
+    new_end_excl=$(align_down $(( start + new_bytes / DISK_SECTOR )))
+    SHRINK_NEW_SECTORS=$(( new_end_excl - start ))
+    SHRINK_NEW_BYTES=$(( SHRINK_NEW_SECTORS * DISK_SECTOR ))
+
+    GAP_START=$new_end_excl
+    GAP_SECTORS=$(( start + SHRINK_OLD_SECTORS - new_end_excl ))
+    GAP_SECTORS=$(align_down "$GAP_SECTORS")
+
+    (( SHRINK_NEW_SECTORS > 0 && GAP_SECTORS > 0 )) \
+        || die "The shrink works out to nothing after alignment. Ask for more space."
+}
+
+# Splits the gap into swap and root. Both get explicit start sectors: they are
+# going into a hole between existing partitions, and sfdisk only picks a start
+# for you when it is appending to the end of the disk.
+ALONGSIDE_PARTS=""     # the sfdisk script, one line per partition to create
+
+plan_alongside_partitions() {
+    local cursor=$GAP_START
+    local end_excl=$(( GAP_START + GAP_SECTORS ))
+    local lines=""
+
+    if [[ -n "$SWAP_SIZE" ]]; then
+        local swap_sectors
+        swap_sectors=$(align_up $(( $(to_bytes "$SWAP_SIZE") / DISK_SECTOR )))
+        lines+="start=${cursor}, size=${swap_sectors}, type=${GUID_SWAP}, name=\"${SWAP_LABEL}\""$'\n'
+        cursor=$(( cursor + swap_sectors ))
+    fi
+
+    local root_sectors=$(( end_excl - cursor ))
+    lines+="start=${cursor}, size=${root_sectors}, type=${GUID_LINUX}, name=\"${ROOT_LABEL}\""$'\n'
+
+    ALONGSIDE_PARTS="$lines"
+    ROOT_ALONGSIDE_BYTES=$(( root_sectors * DISK_SECTOR ))
+}
+
 choose_disk() {
     phase disk "Choosing the target disk"
 
@@ -587,12 +1082,137 @@ choose_disk() {
         echo
         echo "  ${YELLOW}This disk currently holds:${NC}"
         echo "$existing" | sed 's/^/      /'
-        if echo "$existing" | grep -qiE 'ntfs|Microsoft|Windows|Basic data'; then
-            echo
-            echo "  ${RED}This looks like a Windows installation.${NC} raven-install erases the"
-            echo "  whole disk -- it cannot install alongside another OS yet."
-        fi
     fi
+
+    choose_install_mode
+}
+
+# Erase the disk, or move in next to what is on it.
+#
+# Only asked when there is something to ask about. A blank disk, or one with no
+# ESP, has no other OS to install alongside and the question would be a choice
+# between one real option and one that dies two functions later.
+choose_install_mode() {
+    # A flag or an answers file has already decided. --shrink implies
+    # --alongside in the parser, so there is no half-set state to reconcile.
+    [[ "$OPT_MODE" == "alongside" ]] && { choose_shrink_target; return 0; }
+    (( OPT_NONINTERACTIVE )) && return 0
+    (( OPT_YES )) && return 0
+
+    read_disk_table "$DISK" 2>/dev/null || return 0
+    [[ "${DISK_LABEL,,}" == "gpt" ]] || return 0
+    [[ -n "$(find_esp)" ]] || return 0
+
+    # An ESP on its own is not another OS -- a disk this installer wrote has
+    # one too. What makes the question worth asking is an ESP plus something
+    # that is not ours next to it.
+    local others=0 row node
+    while IFS=$'\t' read -r node _ _ type; do
+        [[ -z "$node" ]] && continue
+        case "${type^^}" in
+            "$GUID_ESP") continue ;;
+        esac
+        others=$((others + 1))
+    done < <(table_rows)
+    (( others > 0 )) || return 0
+
+    echo
+    echo "  ${YELLOW}This disk already has an operating system on it.${NC}"
+    echo
+    echo "    1) Install alongside it -- keep it, and take space for RavenLinux"
+    echo "    2) Erase the whole disk"
+    echo
+    local choice=""
+    while true; do
+        read -r -p "  Which? [1-2] " choice
+        case "$choice" in
+            1) OPT_MODE="alongside"; break ;;
+            2) OPT_MODE="wipe";      break ;;
+            *) warn "Enter 1 or 2." ;;
+        esac
+    done
+
+    [[ "$OPT_MODE" == "alongside" ]] && choose_shrink_target
+    return 0
+}
+
+# Which partition gives up the space, and how much.
+#
+# Skipped entirely when the disk already has a big enough hole in it: taking
+# space that is not allocated to anything needs no resize, and offering to
+# shrink a filesystem when there is no need to is offering a risk for nothing.
+choose_shrink_target() {
+    read_disk_table "$DISK" 2>/dev/null || return 0
+
+    local gap gap_bytes=0
+    gap="$(largest_gap)"
+    [[ -n "$gap" ]] && gap_bytes=$(( $(echo "$gap" | cut -f3) * DISK_SECTOR ))
+
+    if [[ -z "$OPT_SHRINK_PART" ]] && (( gap_bytes >= ALONGSIDE_MIN_ROOT )); then
+        info "Using the $(to_human $gap_bytes) of unallocated space already on ${DISK}."
+        return 0
+    fi
+
+    # Everything that could give up space: a filesystem this can shrink, not
+    # the ESP, and not mounted.
+    local -a cand=() cand_min=() cand_size=()
+    local node start size type minb
+    while IFS=$'\t' read -r node start size type; do
+        [[ -z "$node" ]] && continue
+        [[ "${type^^}" == "$GUID_ESP" ]] && continue
+        [[ -b "$node" ]] || continue
+        findmnt -no TARGET --source "$node" >/dev/null 2>&1 && continue
+        fs_shrinkable "$node" || continue
+        minb=$(fs_min_bytes "$node") || continue
+        # Nothing to offer if it cannot spare a root plus the headroom.
+        (( size * DISK_SECTOR - minb - ALONGSIDE_MIN_HEADROOM >= ALONGSIDE_MIN_ROOT )) || continue
+        cand+=("$node"); cand_min+=("$minb"); cand_size+=("$(( size * DISK_SECTOR ))")
+    done < <(table_rows)
+
+    if [[ -n "$OPT_SHRINK_PART" ]]; then
+        return 0        # named on the command line; plan_shrink validates it
+    fi
+
+    if (( ${#cand[@]} == 0 )); then
+        die "Nothing on ${DISK} can give up $(to_human $ALONGSIDE_MIN_ROOT) for RavenLinux.
+       Free space inside the other OS first, or erase the disk with --wipe.
+       ext2/3/4 and NTFS can be shrunk; XFS and btrfs cannot be, here."
+    fi
+
+    echo
+    echo "  Which partition should give up space?"
+    echo
+    local i
+    for i in "${!cand[@]}"; do
+        printf '    %d) %-16s %-9s %-22s can spare up to %s\n' \
+            $((i + 1)) "${cand[$i]}" "$(to_human "${cand_size[$i]}")" \
+            "$(part_os_hint "${cand[$i]}")" \
+            "$(to_human $(( cand_size[i] - cand_min[i] - ALONGSIDE_MIN_HEADROOM )))"
+    done
+    echo
+
+    local choice=""
+    while true; do
+        read -r -p "  Which? [1-${#cand[@]}] " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#cand[@]} )); then
+            OPT_SHRINK_PART="${cand[$((choice - 1))]}"
+            break
+        fi
+        warn "Enter a number between 1 and ${#cand[@]}."
+    done
+
+    local idx=$((choice - 1))
+    local spare=$(( cand_size[idx] - cand_min[idx] - ALONGSIDE_MIN_HEADROOM ))
+    echo
+    echo "  ${OPT_SHRINK_PART} can give RavenLinux between $(to_human $ALONGSIDE_MIN_ROOT) and $(to_human $spare)."
+    while true; do
+        ask OPT_ALONGSIDE_SIZE "How much for RavenLinux" "$(to_human $(( spare / 2 )) | tr -d ' ' | sed 's/iB$//')"
+        local want; want=$(to_bytes "$OPT_ALONGSIDE_SIZE")
+        if (( want >= ALONGSIDE_MIN_ROOT && want <= spare )); then
+            break
+        fi
+        warn "Between $(to_human $ALONGSIDE_MIN_ROOT) and $(to_human $spare), e.g. 120G."
+    done
 }
 
 # =============================================================================
@@ -613,7 +1233,8 @@ declare -A ANS=()
 # Keys, and which of them are required. Printed by --probe as answers.key so a
 # front-end reads the list rather than hardcoding it.
 ANSWER_KEYS=(
-    disk fs esp_size swap hostname username fullname user_password user_sudo
+    disk mode shrink_part alongside_size
+    fs esp_size swap hostname username fullname user_password user_sudo
     root_password timezone locale keymap profile efi_nvram
 )
 ANSWER_REQUIRED=(disk hostname username)
@@ -665,6 +1286,13 @@ load_answers() {
     # it is the more specific instruction, and it is how a front-end overrides
     # one field of a saved answers file without rewriting it.
     [[ -z "$OPT_DISK"    ]] && OPT_DISK="${ANS[disk]:-}"
+    [[ "$OPT_MODE" == "wipe" && -n "${ANS[mode]:-}" ]] && OPT_MODE="${ANS[mode]}"
+    [[ -z "$OPT_SHRINK_PART"    ]] && OPT_SHRINK_PART="${ANS[shrink_part]:-}"
+    [[ -z "$OPT_ALONGSIDE_SIZE" ]] && OPT_ALONGSIDE_SIZE="${ANS[alongside_size]:-}"
+    # shrink_part on its own means alongside: naming a partition to take space
+    # from is not something you do to a disk you are erasing, and making the
+    # front-end send two keys that cannot disagree is two chances to disagree.
+    [[ -n "$OPT_SHRINK_PART" ]] && OPT_MODE="alongside"
     [[ -z "$OPT_PROFILE" ]] && OPT_PROFILE="${ANS[profile]:-}"
     [[ -z "$OPT_SWAP"    ]] && OPT_SWAP="${ANS[swap]:-}"
     [[ "$OPT_FS" == "ext4" && -n "${ANS[fs]:-}" ]] && OPT_FS="${ANS[fs]}"
@@ -934,8 +1562,20 @@ apply_answers() {
 ESP_DEV=""
 SWAP_DEV=""
 ROOT_DEV=""
+ROOT_ALONGSIDE_BYTES=0
 
 plan_partitions() {
+    if [[ "$OPT_MODE" == "alongside" ]]; then
+        # Every number in the alongside plan comes off the disk that is
+        # already there, so the plan cannot be written down until it has been
+        # read. plan_alongside dies with a reason rather than returning one.
+        plan_alongside
+        # The device nodes do not exist yet and their numbers are sfdisk's to
+        # choose, so there is nothing to name here -- partition_alongside
+        # fills ROOT_DEV and SWAP_DEV in once the table has been written.
+        return 0
+    fi
+
     local n=1
     ESP_DEV="$(partdev "$DISK" $n)"; n=$((n + 1))
     if [[ -n "$SWAP_SIZE" ]]; then
@@ -944,21 +1584,60 @@ plan_partitions() {
     ROOT_DEV="$(partdev "$DISK" $n)"
 }
 
+# Which of the two partitioners runs. Named for what it does rather than for
+# how, so main() reads the same whichever mode it is in.
+partition_target() {
+    if [[ "$OPT_MODE" == "alongside" ]]; then
+        partition_alongside
+    else
+        partition_disk
+    fi
+}
+
 confirm() {
     plan_partitions
 
     phase confirm "Installation plan"
-    cat <<PLAN
+
+    if [[ "$OPT_MODE" == "alongside" ]]; then
+        cat <<PLAN
+
+    Disk           ${DISK} (${DISK_SIZE}${DISK_MODEL:+, ${DISK_MODEL}})
+    Partitioning   Alongside what is already installed
+PLAN
+        if [[ -n "$SHRINK_DEV" ]]; then
+            printf '\n      %s is shrunk\n' "$SHRINK_DEV"
+            printf '        %-24s %s\n' "now"       "$(to_human $(( SHRINK_OLD_SECTORS * DISK_SECTOR )))"
+            printf '        %-24s %s\n' "after"     "$(to_human "$SHRINK_NEW_BYTES")"
+            printf '        %-24s %s\n' "in use"    "$(to_human "$SHRINK_MIN_BYTES")"
+            printf '        %-24s %s\n' "holds"     "$(part_os_hint "$SHRINK_DEV")"
+            echo   "        its data is kept; only the free space at the end is taken"
+        else
+            printf '\n      %s of unallocated space is used\n' "$(to_human $(( GAP_SECTORS * DISK_SECTOR )))"
+        fi
+
+        printf '\n      %s  reused as the EFI System Partition (not formatted)\n' "$ESP_DEV"
+        [[ -n "$SWAP_SIZE" ]] && printf '      new           %-8s swap\n' "$SWAP_SIZE"
+        printf '      new           %-8s %s -> /\n' "$(to_human "$ROOT_ALONGSIDE_BYTES")" "$OPT_FS"
+
+        echo
+        echo "    Every other partition on ${DISK} is left exactly as it is."
+        cat <<PLAN
+PLAN
+    else
+        cat <<PLAN
 
     Disk           ${DISK} (${DISK_SIZE}${DISK_MODEL:+, ${DISK_MODEL}})
     Partitioning   GPT, erasing everything on the disk
 
       ${ESP_DEV}   ${OPT_ESP_SIZE}  EFI System Partition (FAT32) -> /boot/efi
 PLAN
-    # %-4s keeps the size column lined up with the 512M and "rest" above.
-    [[ -n "$SWAP_DEV" ]] && printf '      %s   %-4s  swap\n' "$SWAP_DEV" "$SWAP_SIZE"
+        # %-4s keeps the size column lined up with the 512M and "rest" above.
+        [[ -n "$SWAP_DEV" ]] && printf '      %s   %-4s  swap\n' "$SWAP_DEV" "$SWAP_SIZE"
+        printf '      %s   rest  %s -> /\n' "$ROOT_DEV" "$OPT_FS"
+    fi
+
     cat <<PLAN
-      ${ROOT_DEV}   rest  ${OPT_FS} -> /
 
     Hostname       ${HOSTNAME}
     User           ${USERNAME}${FULLNAME:+ (${FULLNAME})}$([[ $USER_SUDO -eq 1 ]] && echo ", may use sudo via wheel")
@@ -992,7 +1671,15 @@ PLAN
         return 0
     fi
 
-    echo "  ${RED}Everything on ${DISK} will be destroyed.${NC}"
+    if [[ "$OPT_MODE" == "alongside" ]]; then
+        if [[ -n "$SHRINK_DEV" ]]; then
+            echo "  ${YELLOW}${SHRINK_DEV} will be resized. Back up anything on it you cannot lose.${NC}"
+        else
+            echo "  ${YELLOW}${DISK}'s partition table will be changed.${NC}"
+        fi
+    else
+        echo "  ${RED}Everything on ${DISK} will be destroyed.${NC}"
+    fi
     echo
     local reply=""
     read -r -p "  Type YES to install, anything else to abort: " reply
@@ -1002,6 +1689,118 @@ PLAN
 # =============================================================================
 # Partition and format
 # =============================================================================
+
+# Makes the room, then takes it. Ordered so that every step that can fail
+# without consequence happens before the first one that cannot.
+partition_alongside() {
+    local fstype
+    [[ -n "$SHRINK_DEV" ]] && fstype=$(fs_type_of "$SHRINK_DEV")
+
+    if [[ -n "$SHRINK_DEV" ]]; then
+        phase partition "Shrinking ${SHRINK_DEV}"
+
+        # The filesystem check is not optional and is not just hygiene. Both
+        # resizers refuse to shrink a filesystem they have not verified, and
+        # finding out here -- before anything has been written -- is the
+        # difference between an install that stops and one that stops halfway.
+        case "$fstype" in
+            ext2|ext3|ext4)
+                # e2fsck's exit status is a bitfield: 1 is "errors corrected",
+                # 2 is "corrected, reboot suggested", and neither is a reason
+                # to stop. 4 and up mean errors it left alone.
+                e2fsck -f -p "$SHRINK_DEV" >/dev/null 2>&1
+                local rc=$?
+                (( rc < 4 )) || die "e2fsck found errors on ${SHRINK_DEV} it could not fix (status ${rc}).
+       Nothing has been written. Repair it and run the installer again."
+                ;;
+            ntfs)
+                ntfsresize --info --force "$SHRINK_DEV" >/dev/null 2>&1 \
+                    || die "ntfsresize will not read ${SHRINK_DEV}.
+       Nothing has been written. Boot Windows and shut it down fully first."
+                ;;
+        esac
+        ok "${SHRINK_DEV}: filesystem checked"
+
+        # From here the disk is being changed. The filesystem goes first: a
+        # filesystem smaller than its partition is a working filesystem, and a
+        # partition smaller than its filesystem is a lost one -- so if only one
+        # of the two steps happens, it has to be this one.
+        DISK_DIRTY=1
+        case "$fstype" in
+            ext2|ext3|ext4)
+                resize2fs "$SHRINK_DEV" "$(( SHRINK_NEW_BYTES / 1024 ))K" >/dev/null 2>&1 \
+                    || die "resize2fs failed on ${SHRINK_DEV}. The filesystem is unchanged."
+                ;;
+            ntfs)
+                # ntfsresize asks for a confirmation on a terminal even with
+                # --force. The plan it is confirming is the one already shown
+                # and agreed to, and there is no terminal here on the
+                # non-interactive path.
+                printf 'y\n' | ntfsresize --force --no-progress-bar \
+                    --size "${SHRINK_NEW_BYTES}" "$SHRINK_DEV" >/dev/null 2>&1 \
+                    || die "ntfsresize failed on ${SHRINK_DEV}. The filesystem is unchanged."
+                ;;
+        esac
+        ok "${SHRINK_DEV}: filesystem now $(to_human "$SHRINK_NEW_BYTES")"
+
+        # And now the partition, to the boundary the filesystem has already
+        # moved behind. Signature wiping is off in both directions: -w would
+        # erase the filesystem this just carefully preserved.
+        local start; start=$(part_field "$SHRINK_DEV" start)
+        printf 'start=%s, size=%s\n' "$start" "$SHRINK_NEW_SECTORS" \
+            | sfdisk -N "${SHRINK_DEV##*[!0-9]}" --no-reread -w never -W never -q "$DISK" >/dev/null 2>&1 \
+            || die "sfdisk could not resize ${SHRINK_DEV}.
+       The filesystem on it is already smaller, so nothing has been lost --
+       but the partition still claims the old size. Re-run the installer."
+        ok "${SHRINK_DEV}: partition now $(to_human "$SHRINK_NEW_BYTES")"
+    fi
+
+    phase partition "Adding RavenLinux to ${DISK}"
+    DISK_DIRTY=1
+
+    printf '%s' "$ALONGSIDE_PARTS" \
+        | sfdisk --append --no-reread -w never -W never -q "$DISK" >/dev/null 2>&1 \
+        || die "sfdisk could not add the new partitions to ${DISK}."
+    ok "Partitions added"
+
+    sync
+    partx -u "$DISK" >/dev/null 2>&1 || blockdev --rereadpt "$DISK" >/dev/null 2>&1 || true
+    have udevadm && udevadm settle --timeout=10 >/dev/null 2>&1
+
+    # Which numbers they got is sfdisk's decision, not ours: --append fills the
+    # lowest free slots in the table, so a disk with a hole in its numbering
+    # gets partitions whose numbers have nothing to do with where they sit.
+    # They are found by the name written above instead.
+    read_disk_table "$DISK" || die "Cannot re-read ${DISK}'s partition table."
+    ROOT_DEV=$(part_by_name "$ROOT_LABEL")
+    [[ -n "$ROOT_DEV" ]] || die "The root partition was created but cannot be found on ${DISK}."
+    if [[ -n "$SWAP_SIZE" ]]; then
+        SWAP_DEV=$(part_by_name "$SWAP_LABEL")
+        [[ -n "$SWAP_DEV" ]] || die "The swap partition was created but cannot be found on ${DISK}."
+    fi
+
+    local waited=0
+    while [[ ! -b "$ROOT_DEV" ]] || { [[ -n "$SWAP_DEV" ]] && [[ ! -b "$SWAP_DEV" ]]; }; do
+        sleep 1
+        waited=$((waited + 1))
+        [[ $waited -ge 15 ]] && die "Partition nodes did not appear (${ROOT_DEV}${SWAP_DEV:+, ${SWAP_DEV}})"
+    done
+    ok "Partition devices ready"
+}
+
+# The node whose GPT name is $1. Names are ours -- RAVEN_ROOT and RAVEN_SWAP --
+# and set in the same script that creates the partitions.
+part_by_name() {
+    local want="$1"
+    awk -v want="$want" '
+        /name="/ {
+            if (match($0, /name="[^"]*"/)) {
+                n = substr($0, RSTART + 6, RLENGTH - 7)
+                if (n == want) { print $1; exit }
+            }
+        }
+    ' <<< "$DISK_TABLE"
+}
 
 partition_disk() {
     phase partition "Partitioning ${DISK}"
@@ -1047,9 +1846,35 @@ partition_disk() {
 format_partitions() {
     phase format "Creating filesystems"
 
-    mkfs.vfat -F 32 -n "${ESP_LABEL}" "$ESP_DEV" >/dev/null 2>&1 \
-        || die "mkfs.vfat failed on ${ESP_DEV}"
-    ok "${ESP_DEV}: FAT32 (${ESP_LABEL})"
+    if (( ESP_REUSED )); then
+        # Somebody else's ESP, holding the bootloader of the OS being installed
+        # alongside. Formatting it is the one action in this whole file that
+        # would make the other operating system unbootable, so it is the one
+        # the alongside path must not take.
+        #
+        # It does have to be big enough for two. RavenBoot, a kernel and an
+        # initramfs come to around 100 MB, and an ESP with less than that free
+        # fails later, in the middle of the bootloader step, on an install
+        # that has already copied the whole system.
+        local free_kb
+        mkdir -p "${WORK}/espcheck"
+        if mount -o ro "$ESP_DEV" "${WORK}/espcheck" 2>/dev/null; then
+            free_kb=$(df -k "${WORK}/espcheck" 2>/dev/null | awk 'NR==2 { print $4 }')
+            umount "${WORK}/espcheck" 2>/dev/null
+        fi
+        rmdir "${WORK}/espcheck" 2>/dev/null
+        if [[ "$free_kb" =~ ^[0-9]+$ ]] && (( free_kb < 120000 )); then
+            die "${ESP_DEV} has only $(to_human $(( free_kb * 1024 ))) free.
+       RavenBoot, the kernel and the initramfs need about 120 MB. Free some
+       space on the EFI partition -- old distributions leave \\EFI directories
+       behind -- and run the installer again."
+        fi
+        ok "${ESP_DEV}: reusing the existing EFI partition (not formatted)"
+    else
+        mkfs.vfat -F 32 -n "${ESP_LABEL}" "$ESP_DEV" >/dev/null 2>&1 \
+            || die "mkfs.vfat failed on ${ESP_DEV}"
+        ok "${ESP_DEV}: FAT32 (${ESP_LABEL})"
+    fi
 
     case "${OPT_FS}" in
         ext4)  mkfs.ext4 -F -L "${ROOT_LABEL}" "$ROOT_DEV" >/dev/null 2>&1 ;;
@@ -1599,6 +2424,27 @@ install_bootloader() {
     local esp="${TARGET}/boot/efi"
     mkdir -p "${esp}/EFI/BOOT" "${esp}/EFI/raven"
 
+    # \EFI\BOOT\BOOTX64.EFI is the removable-media fallback: one file, one
+    # name, and whatever is in it is what the firmware runs when no NVRAM entry
+    # matches. On a disk that already has an OS, something is usually in it
+    # already -- OEM machines ship a copy of the Windows loader there -- and
+    # overwriting it is exactly how a dual-boot install ends up being the only
+    # thing that boots.
+    #
+    # Keeping a copy is not a nicety. RavenBoot chainloads the other OS from
+    # its own menu, so the normal path is unaffected, but if RavenLinux is
+    # later removed the machine is left with a fallback loader pointing at a
+    # partition that is gone. Renaming rather than deleting means putting it
+    # back is one file operation from any live image.
+    if (( ESP_REUSED )) && [[ -f "${esp}/EFI/BOOT/BOOTX64.EFI" ]] \
+       && [[ ! -f "${esp}/EFI/BOOT/BOOTX64.RAVENBAK.EFI" ]]; then
+        if cp "${esp}/EFI/BOOT/BOOTX64.EFI" "${esp}/EFI/BOOT/BOOTX64.RAVENBAK.EFI" 2>/dev/null; then
+            ok "Existing fallback loader kept as \\EFI\\BOOT\\BOOTX64.RAVENBAK.EFI"
+        else
+            warn "Could not back up the existing \\EFI\\BOOT\\BOOTX64.EFI; it will be replaced"
+        fi
+    fi
+
     cp "$SRC_EFI" "${esp}/EFI/raven/raven-boot.efi" || die "Cannot write RavenBoot to the ESP"
     # The fallback path. Firmware booting a disk with no matching NVRAM entry
     # looks here, which is what makes this work without touching NVRAM at all.
@@ -1806,6 +2652,110 @@ finish() {
 
 pk() { printf '%s=%s\n' "$1" "${2-}"; }
 
+# What installing alongside would look like on one disk.
+#
+# It answers the two questions a front-end has to put on screen -- can this be
+# done here, and which partition would give up the space -- with the same
+# functions that would do it, so a disk the wizard would accept is a disk the
+# front-end offers and no disk is judged twice by two rules.
+#
+# The per-partition rows are separate from the disk.part rows above rather than
+# an extension of them. Those describe what is on the disk; these describe what
+# could be done to it, they cost a resize2fs or ntfsresize probe each, and a
+# front-end that only draws a list should not have to pay for the ones it is
+# not going to offer.
+probe_alongside() {
+    local dev="$1" node start size type minb spare esp
+
+    # Told apart because they are three different problems and only one of
+    # them is about the disk. --probe is documented as harmless and is run by
+    # hand as often as it is run by the front-end, and a disk this user cannot
+    # open reported as "no GPT partition table" sends whoever reads it looking
+    # at the wrong thing entirely.
+    if [[ ! -r "$dev" ]]; then
+        pk disk.alongside 0
+        pk disk.alongside_why "cannot read ${dev}; run the probe as root"
+        return 0
+    fi
+    if ! read_disk_table "$dev" 2>/dev/null; then
+        pk disk.alongside 0
+        pk disk.alongside_why "no partition table on the disk"
+        return 0
+    fi
+    if [[ "${DISK_LABEL,,}" != "gpt" ]]; then
+        pk disk.alongside 0
+        pk disk.alongside_why "the disk is ${DISK_LABEL:-MBR}, not GPT"
+        return 0
+    fi
+
+    esp="$(find_esp)"
+    if [[ -z "$esp" ]]; then
+        pk disk.alongside 0
+        pk disk.alongside_why "no EFI System Partition, so no other UEFI OS to keep"
+        return 0
+    fi
+    pk disk.esp "$esp"
+
+    local gap gap_bytes=0
+    gap="$(largest_gap)"
+    [[ -n "$gap" ]] && gap_bytes=$(( $(echo "$gap" | cut -f3) * DISK_SECTOR ))
+    pk disk.free_bytes "$gap_bytes"
+    pk disk.min_root_bytes "$ALONGSIDE_MIN_ROOT"
+    pk disk.min_headroom_bytes "$ALONGSIDE_MIN_HEADROOM"
+
+    local candidates=0
+    while IFS=$'\t' read -r node start size type; do
+        [[ -z "$node" ]] && continue
+        [[ "${type^^}" == "$GUID_ESP" ]] && continue
+        [[ -b "$node" ]] || continue
+
+        pk part.begin "$node"
+        pk part.size_bytes "$(( size * DISK_SECTOR ))"
+        pk part.fstype "$(fs_type_of "$node")"
+        pk part.label "$(fs_label_of "$node")"
+        pk part.os "$(part_os_hint "$node")"
+
+        if findmnt -no TARGET --source "$node" >/dev/null 2>&1; then
+            pk part.shrinkable 0
+            pk part.why "mounted"
+        elif ! fs_shrinkable "$node"; then
+            local t; t=$(fs_type_of "$node")
+            # A partition with no filesystem on it -- Microsoft Reserved is one
+            # on every Windows disk -- has no name to put in this sentence, and
+            # "  cannot be shrunk here" is what leaving it empty produces.
+            pk part.shrinkable 0
+            if [[ -z "$t" ]]; then
+                pk part.why "it has no filesystem to shrink"
+            else
+                pk part.why "${t} cannot be shrunk here"
+            fi
+        elif ! minb=$(fs_min_bytes "$node"); then
+            pk part.shrinkable 0
+            pk part.why "the filesystem would not report its minimum size (dirty? hibernated?)"
+        else
+            spare=$(( size * DISK_SECTOR - minb - ALONGSIDE_MIN_HEADROOM ))
+            (( spare < 0 )) && spare=0
+            pk part.used_bytes "$minb"
+            pk part.spare_bytes "$spare"
+            if (( spare >= ALONGSIDE_MIN_ROOT )); then
+                pk part.shrinkable 1
+                candidates=$((candidates + 1))
+            else
+                pk part.shrinkable 0
+                pk part.why "only $(to_human $spare) to spare; RavenLinux needs $(to_human $ALONGSIDE_MIN_ROOT)"
+            fi
+        fi
+        pk part.end "$node"
+    done < <(table_rows)
+
+    if (( gap_bytes >= ALONGSIDE_MIN_ROOT )) || (( candidates > 0 )); then
+        pk disk.alongside 1
+    else
+        pk disk.alongside 0
+        pk disk.alongside_why "no free space and nothing that can give up $(to_human $ALONGSIDE_MIN_ROOT)"
+    fi
+}
+
 probe_disks() {
     local line name dev size model bytes rm existing
     while read -r line; do
@@ -1842,6 +2792,8 @@ probe_disks() {
         else
             pk disk.windows 0
         fi
+
+        probe_alongside "$dev"
         pk disk.end "$dev"
     done < <(list_disks)
 }
@@ -1901,6 +2853,12 @@ probe_report() {
     for fs in ext4 xfs btrfs; do
         have "mkfs.${fs}" && pk preflight.fs "$fs"
     done
+    # The two resizers, reported separately from the required tools because
+    # neither is required: they matter only for --alongside, and only for the
+    # filesystem each one handles. A front-end greys out "install alongside
+    # Windows" when ntfsresize is 0 rather than offering it and failing.
+    pk preflight.resize2fs  "$(have resize2fs  && have e2fsck && echo 1 || echo 0)"
+    pk preflight.ntfsresize "$(have ntfsresize && echo 1 || echo 0)"
     pk preflight.chpasswd   "$(have chpasswd   && echo 1 || echo 0)"
     pk preflight.mkswap     "$(have mkswap     && echo 1 || echo 0)"
     pk preflight.efibootmgr "$(have efibootmgr && echo 1 || echo 0)"
@@ -1998,7 +2956,7 @@ main() {
     choose_disk
     run_wizard
     confirm
-    partition_disk
+    partition_target
     format_partitions
     copy_system
     configure_system

@@ -137,6 +137,12 @@ copy_system_utils() {
         # them. raven-install offers whichever ones are present.
         mkfs.xfs mkfs.btrfs mkfs.ext2 mkfs.ext3 mkfs.fat fatlabel e2label tune2fs
         resize2fs dumpe2fs
+        # NTFS. ntfsresize is what raven-install --alongside uses to make room
+        # on a disk that already has Windows on it -- without it that install
+        # mode can offer the user nothing, because the partition it would need
+        # to shrink is always the NTFS one. mount.ntfs is the driver, so the
+        # installed system can also read the partition it moved next to.
+        ntfsresize ntfsfix ntfsinfo ntfslabel mkfs.ntfs ntfs-3g mount.ntfs mount.ntfs-3g
         # Coreutils the installer uses that the uutils set does not always cover.
         df du dd sync stat truncate od install chroot column split
         # Everything stage1 would have symlinked onto the uutils multicall
