@@ -75,10 +75,9 @@
 #   GUI_REF=<git-ref>          build a particular RavenGUI ref
 #
 # Every <NAME>_REF below overrides that component's manifest pin. With none
-# set, each repository is fetched at the [source] commit in its
-# packages/gui/<name>/package.toml, and one with no such pin tracks its default
-# branch -- which is what most of them still do. RAVEN_IGNORE_MANIFEST_PINS=1
-# ignores the manifests wholesale. See the Pins section of
+# set, each repository tracks its default branch: the [source] commit in
+# packages/gui/<name>/package.toml is only consulted when
+# RAVEN_USE_MANIFEST_PINS=1 asks for it. See the Pins section of
 # scripts/lib/components.sh.
 #   GUI_TARGET=<rust-target>   override the host target (rarely wanted)
 #   TERMINAL_SKIP=1            skip RavenTerminal; the desktop ships unusable

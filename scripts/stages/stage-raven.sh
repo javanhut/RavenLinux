@@ -34,6 +34,10 @@
 #   RAVEN_<KEY>_REF=<git-ref>     pin one component (e.g. RAVEN_IVALDI_REF=v0.1.2),
 #                                 overriding its manifest pin. A 40-character
 #                                 commit id works here as well as a tag.
+#   RAVEN_USE_MANIFEST_PINS=1     honour the packages/*/package.toml pins.
+#                                 Off by default: components track their
+#                                 default branch. See the Pins section of
+#                                 scripts/lib/components.sh.
 #   RAVEN_IGNORE_MANIFEST_PINS=1  ignore every packages/*/package.toml pin and
 #                                 build the default branch of everything
 #

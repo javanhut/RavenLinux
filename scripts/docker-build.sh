@@ -164,6 +164,8 @@ fi
 # documented invocations such as `RAVEN_ONLY=crow imlazy raven` actually work.
 BUILD_ENV_VARS=(
     RAVEN_ENABLE_SUDO
+    RAVEN_USE_MANIFEST_PINS
+    RAVEN_IGNORE_MANIFEST_PINS
     RAVEN_FORCE_SOURCE_BUILD
     RAVEN_FW_NVIDIA
     RAVEN_KEEP_BASH_DEFAULT

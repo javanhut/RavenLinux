@@ -256,8 +256,30 @@ raven_gui_app_vars() {
 # still means "track the branch" -- that is the honest reading of an absent
 # field, and it is what the unpinned GUI manifests currently say.
 #
-# Set RAVEN_IGNORE_MANIFEST_PINS=1 to skip step 2 for every component, which is
-# how you build the tip of everything without editing nine files.
+# Manifest pins are OPT-IN. By default every component tracks its default
+# branch, because that is what a tree of nine first-party repositories under
+# active development actually wants: a fix committed to CAW or RavenGUI reaches
+# the next ISO without anyone remembering to bump a hash. The pins stayed in
+# the manifests -- they still record the last commit known to build, and they
+# are still what `check-manifests.sh` reads -- but nothing consults them for a
+# checkout unless asked.
+#
+#   RAVEN_USE_MANIFEST_PINS=1     honour the [source] pins; reproducible build
+#   RAVEN_IGNORE_MANIFEST_PINS=1  force branch tracking even if the above is set
+#
+# The cost is real and worth stating: two ISOs built from an unchanged tree a
+# week apart can contain different software. That is the trade this default
+# makes -- current over reproducible. Set RAVEN_USE_MANIFEST_PINS=1 for a
+# release build, where it is the wrong way round.
+
+# Whether a checkout should come from the manifest pin rather than the branch.
+# Two variables rather than one so the older, negative spelling keeps working
+# and still wins: a script that set it to force the tip must not start
+# honouring pins because the default moved underneath it.
+raven_manifest_pins_enabled() {
+    [[ "${RAVEN_IGNORE_MANIFEST_PINS:-0}" == "1" ]] && return 1
+    [[ "${RAVEN_USE_MANIFEST_PINS:-0}" == "1" ]]
+}
 
 # Prints the [source] commit -- or tag, if there is no commit -- from a
 # component's manifest. Returns 1 when there is no manifest or no pin in it.
@@ -315,7 +337,7 @@ raven_resolve_ref() {
         return 0
     fi
 
-    if [[ "${RAVEN_IGNORE_MANIFEST_PINS:-0}" != "1" ]]; then
+    if raven_manifest_pins_enabled; then
         if ref="$(raven_manifest_ref "${manifest}")" && [[ -n "${ref}" ]]; then
             printf 'manifest\t%s\n' "${ref}"
             return 0
