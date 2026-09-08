@@ -411,6 +411,57 @@ cleanup_sysroot() {
 }
 
 # =============================================================================
+# Activate service templates for daemons the image ships
+# =============================================================================
+# stage2 copies every configs/raven/services/*.toml into
+# /usr/share/raven/services as an inert template and leaves /etc/raven/init.d
+# empty, on the principle that the base image runs nothing it does not ship.
+# The principle is right and the mechanism did not honour it: the image DOES
+# ship raven-powerd, raven-timed and raven-controlsd, and with no drop-in for
+# them a fresh install had no power management and no time sync until the
+# first `rvn install` of anything -- rvn's activate_service_templates noticed
+# the binaries and copied the drop-ins in. That is how installing a browser
+# came to print "service 'powerd' is now available".
+#
+# This is the same rule rvn applies at runtime, applied once at build time: a
+# template whose `exec` exists in the sysroot becomes a drop-in. Templates for
+# daemons the image lacks (sshd, ssh-agent) stay inert, and a drop-in that
+# already exists is never touched. Each template's own `enabled` decides
+# whether it runs at boot; this only makes it visible to raven-init.
+#
+# Runs after install_packages_to_sysroot, the last thing that puts binaries in
+# the tree, so a daemon from packages/ counts too.
+activate_service_templates() {
+    local templates="${SYSROOT_DIR}/usr/share/raven/services"
+    local dropins="${SYSROOT_DIR}/etc/raven/init.d"
+    [[ -d "${templates}" ]] || return 0
+
+    log_step "Activating service templates for shipped daemons..."
+    mkdir -p "${dropins}"
+
+    local tmpl base name binary
+    for tmpl in "${templates}"/*.toml; do
+        [[ -f "${tmpl}" ]] || continue
+        base="$(basename "${tmpl}")"
+        [[ -e "${dropins}/${base}" ]] && continue
+
+        # The templates are Raven's own files with a known shape; two fields
+        # do not justify a TOML parser here any more than they do in rvn.
+        name="$(sed -nE 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' "${tmpl}" | head -n1)"
+        binary="$(sed -nE 's/^[[:space:]]*exec[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' "${tmpl}" | head -n1)"
+        [[ -n "${name}" && -n "${binary}" ]] || continue
+
+        if [[ -e "${SYSROOT_DIR}/${binary#/}" ]]; then
+            cp "${tmpl}" "${dropins}/${base}"
+            chmod 0644 "${dropins}/${base}"
+            log_info "  + ${name} (${binary})"
+        else
+            log_info "  - ${name}: ${binary} not in the image; template stays inert"
+        fi
+    done
+}
+
+# =============================================================================
 # Create squashfs filesystem
 # =============================================================================
 create_squashfs() {
@@ -421,6 +472,9 @@ create_squashfs() {
 
     # Install packages to sysroot before creating squashfs
     install_packages_to_sysroot
+
+    # Give every daemon the image ships its raven-init drop-in.
+    activate_service_templates
 
     # Clean up to reduce size
     cleanup_sysroot
