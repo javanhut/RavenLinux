@@ -2179,8 +2179,27 @@ grant_sudo() {
     elif [[ -d "${TARGET}/etc/sudoers.d" ]] || mkdir -p "${TARGET}/etc/sudoers.d" 2>/dev/null; then
         echo '%wheel ALL=(ALL:ALL) ALL' > "${TARGET}/etc/sudoers.d/10-wheel"
         chmod 0440 "${TARGET}/etc/sudoers.d/10-wheel"
-        # sudoers.d is only read if sudoers includes it.
-        if [[ -f "$sudoers" ]] && ! grep -qE '^[[:space:]]*@?include(dir)?[[:space:]]+/etc/sudoers\.d' "$sudoers"; then
+        # sudoers.d is only read if sudoers includes it -- and if there is no
+        # /etc/sudoers at all, sudo reads nothing, the drop-in above is inert,
+        # and the first `sudo` answers "user is not in the sudoers file" on a
+        # machine this function just reported it had granted sudo on. The old
+        # code only ever appended to a sudoers that already existed, so the
+        # one case that needed help was the one it skipped.
+        if [[ ! -f "$sudoers" ]]; then
+            cat > "$sudoers" << 'SUDOERS_EOF'
+# /etc/sudoers - written by raven-install because the image shipped none.
+Defaults env_reset
+Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+root ALL=(ALL:ALL) ALL
+%wheel ALL=(ALL:ALL) ALL
+
+@includedir /etc/sudoers.d
+SUDOERS_EOF
+            chmod 0440 "$sudoers"
+            chown 0:0 "$sudoers" 2>/dev/null || true
+            warn "the image shipped no /etc/sudoers; wrote one"
+        elif ! grep -qE '^[[:space:]]*@?include(dir)?[[:space:]]+/etc/sudoers\.d' "$sudoers"; then
             echo '@includedir /etc/sudoers.d' >> "$sudoers"
         fi
     fi
@@ -2215,11 +2234,20 @@ set_passwords() {
     fi
 
     local failed=0
+    # chpasswd's stderr is the only thing that ever says WHY a password did not
+    # get set, and it used to go to /dev/null -- so the failure mode was an
+    # install that reported success and a disk whose root account had no
+    # working password, with nothing anywhere to explain it. `-R` chroots into
+    # the target, so every reason lives in there: a missing /etc/pam.d/chpasswd
+    # falls through to pam_deny and fails with "pam_start failure 26", and a
+    # missing PAM module or /etc/shadow fails just as quietly. Keep it.
+    local err=""
     if [[ -n "$ROOT_PASSWORD" ]]; then
-        if printf 'root:%s\n' "$ROOT_PASSWORD" | chpasswd -R "$TARGET" 2>/dev/null; then
+        if err=$(printf 'root:%s\n' "$ROOT_PASSWORD" | chpasswd -R "$TARGET" 2>&1); then
             ok "root password set"
         else
             failed=1
+            [[ -n "$err" ]] && echo "        chpasswd: ${err}"
         fi
     else
         # An empty password field means "no password required", which is worse
@@ -2229,10 +2257,11 @@ set_passwords() {
     fi
 
     if [[ -n "$USER_PASSWORD" ]]; then
-        if printf '%s:%s\n' "$USERNAME" "$USER_PASSWORD" | chpasswd -R "$TARGET" 2>/dev/null; then
+        if err=$(printf '%s:%s\n' "$USERNAME" "$USER_PASSWORD" | chpasswd -R "$TARGET" 2>&1); then
             ok "${USERNAME} password set"
         else
             failed=1
+            [[ -n "$err" ]] && echo "        chpasswd: ${err}"
         fi
     else
         # add_user() created the account with '!' in shadow, so it is locked
