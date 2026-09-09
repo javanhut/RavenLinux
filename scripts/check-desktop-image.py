@@ -129,9 +129,28 @@ def validate(root, binaries, desktop=True, sources=()):
                 errors.append(f'Missing daemon account: {name}')
     # Inspect ELF metadata only: do not execute programs or resolve libraries
     # against the builder's root. Check plugins as well as launchable programs.
+    #
+    # /usr/lib/firmware is skipped: some blobs there (the ath10k WCN3990
+    # wlanmdsp.mbn images, for one) are ELF files for the device's own DSP,
+    # with NEEDED entries naming that firmware's libraries. Nothing on the
+    # host loads them, so their link graph says nothing about the image.
+    firmware = root / 'usr/lib/firmware'
+    walked = set()
     for directory in ['usr/bin', 'usr/lib', 'usr/lib64']:
-        for path in (root / directory).rglob('*'):
+        top = root / directory
+        # /usr/lib64 is a symlink onto /usr/lib under the usr-merge; walking it
+        # again would report every problem twice under a second name.
+        try:
+            real = top.resolve(strict=True)
+        except OSError:
+            continue
+        if real in walked:
+            continue
+        walked.add(real)
+        for path in top.rglob('*'):
             if path.is_symlink() or not path.is_file():
+                continue
+            if firmware in path.parents:
                 continue
             with path.open('rb') as stream:
                 if stream.read(4) != b'\x7fELF':

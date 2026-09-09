@@ -111,6 +111,33 @@ class ImageContract(unittest.TestCase):
         errors = contract.validate(self.root, ['demo'], False)
         self.assertTrue(any('missing library libraven-audit.so' in e for e in errors))
 
+    def test_firmware_elf_and_merged_lib64_are_not_checked(self):
+        if not shutil.which('cc'):
+            self.skipTest('cc unavailable')
+        self.desktop()
+        # A dependency that exists only outside the image, as a DSP firmware
+        # image's NEEDED entries do: link against it here, ship it nowhere.
+        stub = self.put('stub.c', 'int stub(void) { return 1; }\n')
+        outside = self.root / 'outside'  # not under usr/, so neither walked nor searched
+        outside.mkdir(exist_ok=True)
+        subprocess.run(['cc', '-shared', '-fPIC', str(stub), '-Wl,-soname,CORE_USER.so',
+                        '-o', str(outside / 'libcore_user.so')], check=True)
+        source = self.put('fw.c', 'extern int stub(void); int fw(void) { return stub(); }\n')
+        blob = self.root / 'usr/lib/firmware/ath10k/WCN3990/hw1.0/wlanmdsp.mbn'
+        blob.parent.mkdir(parents=True)
+        subprocess.run(['cc', '-shared', '-fPIC', str(source), '-L' + str(outside), '-lcore_user',
+                        '-o', str(blob)], check=True)
+        # /usr/lib64 -> lib, as the usr-merge ships it.
+        (self.root / 'usr/lib64').symlink_to('lib')
+        errors = contract.validate(self.root, ['huginn', 'raven-output'])
+        self.assertEqual([e for e in errors if 'missing library' in e], [])
+        # A real problem in /usr/lib is reported once, not once per name.
+        broken = self.root / 'usr/lib/libbroken.so'
+        subprocess.run(['cc', '-shared', '-fPIC', str(source), '-L' + str(outside), '-lcore_user',
+                        '-o', str(broken)], check=True)
+        errors = [e for e in contract.validate(self.root, ['huginn', 'raven-output']) if 'CORE_USER' in e]
+        self.assertEqual(errors, ['usr/lib/libbroken.so: missing library CORE_USER.so'])
+
     def test_strict_cli_rejects_incomplete_tree(self):
         result = subprocess.run(['python3', str(PROJECT / 'scripts/check-desktop-image.py'), str(self.root), '--binary', 'huginn'], capture_output=True)
         self.assertNotEqual(result.returncode, 0)

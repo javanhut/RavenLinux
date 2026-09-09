@@ -193,7 +193,11 @@ RUN pacman -Syu --noconfirm --needed \
         #                              settings apply for the life of the
         #                              process and are forgotten on exit.
         gsettings-desktop-schemas shared-mime-info desktop-file-utils \
-        glycin glycin-gtk4 bubblewrap librsvg dconf \
+        # libheif is not a dependency of glycin, but glycin-heif -- one of the
+        # loaders the package installs -- links it. stage-gui.sh resolves each
+        # loader with ldd, so with libheif absent the loader is staged with a
+        # dangling NEEDED and check-desktop-image.py rejects the image.
+        glycin glycin-gtk4 bubblewrap librsvg dconf libheif \
         # The terminal needs no packages of its own. stage-gui.sh builds
         # RavenTerminal from source with `go build -tags wayland`, whose GLFW
         # compiles from vendored C against wayland-client/cursor/egl and

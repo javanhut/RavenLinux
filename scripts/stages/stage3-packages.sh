@@ -739,9 +739,17 @@ install_essential_libs() {
     # Essential library patterns to search for on the host system
     # These cover terminal apps, GUI apps, audio, crypto, compression, etc.
     local -a LIB_PATTERNS=(
-        # Terminal/ncurses
+        # Terminal/ncurses. "libncurses*" also matches libncurses++w, the
+        # C++ binding the build host's ncurses package ships (ours is built
+        # --without-cxx-binding, so it only ever comes from the host), and
+        # that library links the form, menu and panel libraries. Take them
+        # too, or check-desktop-image.py rejects the image for a dangling
+        # NEEDED on a library nothing in the image calls.
         "libncurses*"
         "libncursesw*"
+        "libform*"
+        "libmenu*"
+        "libpanel*"
         "libtinfo*"
         "libreadline*"
         "libhistory*"

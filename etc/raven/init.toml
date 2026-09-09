@@ -268,6 +268,22 @@ restart = true
 enabled = true
 critical = false
 
+# PolicyKit authorization daemon. The polkit package is staged by the GUI
+# stage (scripts/lib/stage-desktop-runtime.py) together with its polkitd
+# account, and every graphical privilege prompt on the desktop goes through
+# it. This block mirrors init/config/init.toml: check-desktop-image.py
+# requires an enabled polkitd definition, and the test suite validates that
+# file while the image ships this one, so the two must not drift apart again.
+[[services]]
+name = "polkitd"
+description = "PolicyKit authorization daemon"
+exec = "/usr/lib/polkit-1/polkitd"
+args = ["--no-debug"]
+after = ["dbus"]
+restart = true
+enabled = true
+critical = false
+
 # No ssh services here: OpenSSH is not part of the base image.
 # `rvn install openssh` installs the daemon, creates any accounts it declares,
 # seeds its default config, and drops its service definition into
