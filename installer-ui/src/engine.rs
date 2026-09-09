@@ -52,9 +52,10 @@ pub const PHASES: &[(&str, &str, u32)] = &[
     ("confirm", "Confirming the plan", 1),
     ("partition", "Partitioning", 4),
     ("format", "Creating filesystems", 6),
-    ("copy", "Copying the system", 65),
+    ("copy", "Copying the system", 58),
     ("configure", "Configuring the new system", 8),
     ("boot", "Installing the bootloader", 7),
+    ("packages", "Installing the package profile", 7),
     ("finish", "Finishing up", 2),
 ];
 

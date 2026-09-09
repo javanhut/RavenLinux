@@ -184,6 +184,7 @@ OPT_NVRAM=0
 OPT_DRY_RUN=0
 OPT_YES=0
 OPT_PROFILE=""
+OPT_POSTINSTALL=""   # now | later | auto; empty until the answers file or the default fills it
 OPT_ANSWERS=""
 OPT_NONINTERACTIVE=0
 OPT_PROBE=0
@@ -219,9 +220,15 @@ Options:
                      efibootmgr. Off by default: the fallback bootloader path
                      boots without it, and writing NVRAM can reorder the
                      firmware's existing entries.
-  --profile NAME      Post-install package template: minimal (default), desktop,
-                     or developer. Packages are installed later with
-                     raven-postinstall, after networking is available.
+  --profile NAME     Post-install package template: minimal (default), desktop,
+                     or developer.
+  --postinstall MODE When the profile's packages are installed. "now" runs
+                     raven-postinstall inside the new system before the
+                     installer finishes, over the live session's network;
+                     "later" leaves it to the postinstall service, which runs
+                     at first boot once there is a network; "auto" (the
+                     default) does it now when the live session has a network
+                     and asks first when the wizard is interactive.
   --dry-run          Run every check and print the plan, then stop before the
                      first write. Nothing is partitioned, formatted, or copied.
   -y, --yes          Skip the final typed confirmation. THIS DESTROYS THE DISK
@@ -275,6 +282,7 @@ while [[ $# -gt 0 ]]; do
         --esp-size)  OPT_ESP_SIZE="${2:-}"; shift 2 ;;
         --efi-nvram) OPT_NVRAM=1; shift ;;
         --profile)   OPT_PROFILE="${2:-}"; shift 2 ;;
+        --postinstall) OPT_POSTINSTALL="${2:-}"; shift 2 ;;
         --dry-run)   OPT_DRY_RUN=1; shift ;;
         -y|--yes)    OPT_YES=1; shift ;;
         --answers)   OPT_ANSWERS="${2:-}"; shift 2 ;;
@@ -1235,7 +1243,7 @@ declare -A ANS=()
 ANSWER_KEYS=(
     disk mode shrink_part alongside_size
     fs esp_size swap hostname username fullname user_password user_sudo
-    root_password timezone locale keymap profile efi_nvram
+    root_password timezone locale keymap profile efi_nvram postinstall
 )
 ANSWER_REQUIRED=(disk hostname username)
 
@@ -1294,6 +1302,7 @@ load_answers() {
     # front-end send two keys that cannot disagree is two chances to disagree.
     [[ -n "$OPT_SHRINK_PART" ]] && OPT_MODE="alongside"
     [[ -z "$OPT_PROFILE" ]] && OPT_PROFILE="${ANS[profile]:-}"
+    [[ -z "$OPT_POSTINSTALL" ]] && OPT_POSTINSTALL="${ANS[postinstall]:-}"
     [[ -z "$OPT_SWAP"    ]] && OPT_SWAP="${ANS[swap]:-}"
     [[ "$OPT_FS" == "ext4" && -n "${ANS[fs]:-}" ]] && OPT_FS="${ANS[fs]}"
     [[ "$OPT_ESP_SIZE" == "${ESP_SIZE_DEFAULT}" && -n "${ANS[esp_size]:-}" ]] \
@@ -1380,6 +1389,51 @@ zoneinfo_dir() {
     [[ -d "$d" ]] && { echo "$d"; return 0; }
     [[ -d /usr/share/zoneinfo ]] && { echo /usr/share/zoneinfo; return 0; }
     return 1
+}
+
+# A default route in the kernel's table, which is what "has networking" means
+# here. No tool involved: /proc/net/route is enough, and the live image does
+# not promise ip(8).
+have_default_route() {
+    [[ -r /proc/net/route ]] || return 1
+    awk 'NR > 1 && $2 == "00000000" { found = 1 } END { exit !found }' /proc/net/route
+}
+
+# Settle whether the profile's packages go in now or at first boot, and say so
+# in the plan. Sets POSTINSTALL_NOW. Asked here, with the other questions,
+# rather than in the middle of the install: the answer changes how long the
+# install takes and whether it needs the network, both of which belong in the
+# plan the user confirms.
+decide_postinstall() {
+    POSTINSTALL_NOW=0
+    case "${OPT_POSTINSTALL:-auto}" in
+        now|later|auto) ;;
+        *) die "--postinstall takes now, later, or auto (got '${OPT_POSTINSTALL}')" ;;
+    esac
+    [[ "$INSTALL_PROFILE" == "minimal" ]] && return 0
+
+    case "${OPT_POSTINSTALL:-auto}" in
+        later) return 0 ;;
+        now)
+            have_default_route || warn "--postinstall now, but this session has no network; the postinstall service will do it at first boot."
+            POSTINSTALL_NOW=1
+            return 0
+            ;;
+    esac
+
+    # auto
+    if ! have_default_route; then
+        info "No network here, so the ${INSTALL_PROFILE} packages will be installed at first boot."
+        return 0
+    fi
+    if (( OPT_YES )) || (( OPT_NONINTERACTIVE )); then
+        POSTINSTALL_NOW=1
+        return 0
+    fi
+    echo
+    if ask_yn "Install the ${INSTALL_PROFILE} profile's packages now, over the network? (No: at first boot)" "Y"; then
+        POSTINSTALL_NOW=1
+    fi
 }
 
 run_wizard() {
@@ -1469,6 +1523,7 @@ run_wizard() {
         minimal|desktop|developer) ;;
         *) die "Unknown install profile: ${INSTALL_PROFILE}" ;;
     esac
+    decide_postinstall
 
     echo
     if [[ -z "${OPT_SWAP}" ]]; then
@@ -1538,6 +1593,7 @@ apply_answers() {
         minimal|desktop|developer) ;;
         *) die "answers: unknown install profile '${INSTALL_PROFILE}'" ;;
     esac
+    decide_postinstall
 
     # Same three cases as the prompt: unset means "decide for me", which here
     # is the same memory-sized default the wizard offers.
@@ -2422,6 +2478,98 @@ install_seat_service() {
     fi
 }
 
+# The service that installs the recorded profile at first boot. Its template
+# ships disabled (see configs/raven/services/postinstall.toml); the installed
+# system is the one place it is meant to run, so this is where it is enabled.
+# The drop-in is written even when the packages are installed before reboot:
+# the script is a no-op once /etc/raven/.postinstall-done exists, and a system
+# whose install-time attempt failed is exactly the one that needs the retry.
+install_postinstall_service() {
+    local src="${TARGET}/usr/share/raven/services/postinstall.toml"
+    local dest_dir="${TARGET}/etc/raven/init.d"
+
+    if [[ ! -x "${TARGET}/usr/bin/raven-postinstall" ]]; then
+        warn "No raven-postinstall in the image; the ${INSTALL_PROFILE} profile must be installed by hand."
+        return 0
+    fi
+
+    mkdir -p "${dest_dir}"
+    if [[ -f "${src}" ]]; then
+        sed 's/^enabled = false$/enabled = true/' "${src}" > "${dest_dir}/postinstall.toml"
+    else
+        # An image older than the template. The service is small enough to
+        # write here rather than leave the promise unkept.
+        cat > "${dest_dir}/postinstall.toml" <<'TOML'
+# Written by raven-install: installs the recorded package profile at first boot.
+[[services]]
+name = "postinstall"
+description = "Install the package profile chosen at install time"
+exec = "/usr/bin/raven-postinstall"
+args = ["--auto"]
+after = ["udev"]
+restart = false
+enabled = true
+critical = false
+TOML
+    fi
+    chmod 0644 "${dest_dir}/postinstall.toml"
+    ok "postinstall service enabled: the ${INSTALL_PROFILE} profile installs at first boot with a network"
+}
+
+# Install the profile's packages into the new system now, from the live
+# session, so the machine is complete at its first boot. rvn runs inside a
+# chroot of the target with the live session's network. After the bootloader:
+# a failure here must never be able to leave a disk that does not boot, and
+# it cannot, because the first-boot service retries anyway.
+apply_profile_now() {
+    phase packages "Installing the ${INSTALL_PROFILE} package profile"
+
+    if [[ "$INSTALL_PROFILE" == "minimal" ]]; then
+        info "The minimal profile has no packages to install."
+        return 0
+    fi
+    if (( ! ${POSTINSTALL_NOW:-0} )); then
+        info "Deferred: the postinstall service installs it at first boot once there is a network."
+        return 0
+    fi
+    if [[ ! -x "${TARGET}/usr/bin/raven-postinstall" || ! -x "${TARGET}/usr/bin/rvn" ]]; then
+        warn "The image lacks raven-postinstall or rvn; nothing to run."
+        return 0
+    fi
+    if ! have_default_route; then
+        warn "No network now; the postinstall service will do it at first boot."
+        return 0
+    fi
+
+    local d rc=0
+    for d in proc sys dev dev/pts; do
+        mkdir -p "${TARGET}/${d}"
+        mount --bind "/${d}" "${TARGET}/${d}" || { warn "Cannot bind /${d} into the target; deferred to first boot."; rc=1; break; }
+    done
+    if (( rc == 0 )); then
+        # A tmpfs, so the script's own /run markers do not land on the disk.
+        mkdir -p "${TARGET}/run"
+        mount -t tmpfs tmpfs "${TARGET}/run" 2>/dev/null || true
+        # The live session's resolver, whatever it is a symlink to.
+        if [[ -e /etc/resolv.conf ]]; then
+            cp -L /etc/resolv.conf "${TARGET}/etc/resolv.conf" 2>/dev/null || true
+        fi
+
+        info "Running raven-postinstall in the new system (this needs the network and can take a while)"
+        if chroot "$TARGET" /usr/bin/raven-postinstall -y --profile "${INSTALL_PROFILE}"; then
+            ok "${INSTALL_PROFILE} profile installed"
+            PROFILE_INSTALLED_NOW=1
+        else
+            warn "raven-postinstall failed; the postinstall service will retry at first boot."
+        fi
+        umount "${TARGET}/run" 2>/dev/null || true
+    fi
+    for d in dev/pts dev sys proc; do
+        umount "${TARGET}/${d}" 2>/dev/null || true
+    done
+    sync
+}
+
 configure_system() {
     phase configure "Configuring the installed system"
 
@@ -2435,6 +2583,7 @@ configure_system() {
     switch_to_raven_init
     remove_live_credentials
     install_seat_service
+    install_postinstall_service
     {
         echo "profile=${INSTALL_PROFILE}"
         echo "configured_by=raven-install"
@@ -2643,6 +2792,15 @@ finish() {
     echo "${GREEN}==========================================${NC}"
     echo
     echo "  Log in as ${WHITE}${USERNAME}${NC} on tty1."
+    if [[ "$INSTALL_PROFILE" != "minimal" ]]; then
+        if (( ${PROFILE_INSTALLED_NOW:-0} )); then
+            echo "  The ${INSTALL_PROFILE} package profile is installed."
+        else
+            echo "  The ${INSTALL_PROFILE} package profile installs itself at first boot once"
+            echo "  there is a network. The login screen says so until it has; to run it"
+            echo "  by hand: ${WHITE}sudo raven-postinstall${NC}"
+        fi
+    fi
     if [[ ${NEEDS_PASSWORD_ON_FIRST_BOOT:-0} -eq 1 ]]; then
         echo "  ${YELLOW}No password was set, and the login screen cannot be passed without one.${NC}"
         echo "  ${YELLOW}Boot 'RavenLinux (rescue shell)' and run passwd ${USERNAME} first.${NC}"
@@ -2990,6 +3148,7 @@ main() {
     copy_system
     configure_system
     install_bootloader
+    apply_profile_now
     finish
 
     trap - EXIT

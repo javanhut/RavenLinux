@@ -41,6 +41,10 @@ pub struct Answers {
     pub locale: String,
     pub keymap: String,
     pub profile: String,
+    /// When the profile's packages go in: "auto" (now if the live session has
+    /// a network, else at first boot), "now", or "later". The installer's
+    /// --postinstall; "auto" is what it does when the key is absent.
+    pub postinstall: String,
     pub efi_nvram: bool,
 }
 
@@ -65,6 +69,7 @@ impl Default for Answers {
             locale: "en_US.UTF-8".into(),
             keymap: "us".into(),
             profile: "minimal".into(),
+            postinstall: "auto".into(),
             efi_nvram: false,
         }
     }
@@ -198,6 +203,7 @@ impl Answers {
         put("locale", &self.locale);
         put("keymap", &self.keymap);
         put("profile", &self.profile);
+        put("postinstall", &self.postinstall);
         put("efi_nvram", if self.efi_nvram { "1" } else { "0" });
         s
     }
@@ -318,7 +324,7 @@ mod tests {
         for k in [
             "disk", "mode", "fs", "esp_size", "swap", "hostname", "username", "fullname",
             "user_password", "user_sudo", "root_password", "timezone", "locale",
-            "keymap", "profile", "efi_nvram",
+            "keymap", "profile", "postinstall", "efi_nvram",
         ] {
             let n = f.lines().filter(|l| l.starts_with(&format!("{k}="))).count();
             assert_eq!(n, 1, "{k} written {n} times");

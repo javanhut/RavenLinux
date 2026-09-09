@@ -2,15 +2,44 @@
 # Install an optional RavenLinux package profile after the small base system is
 # online. Profiles are plain package lists under /etc/raven/install-profiles;
 # copy one to create a local template without modifying this script.
+#
+# Three ways in:
+#
+#   raven-postinstall [--profile NAME]   ask, then install (needs root)
+#   raven-postinstall -y                 install without asking
+#   raven-postinstall --auto             boot mode, run by raven-init
+#
+# --auto is what makes the installer's promise true. raven-install records the
+# chosen profile in /etc/raven/install-profile and tells the user the packages
+# arrive "later, once the system has networking". This is the later: the
+# `postinstall` service runs it at every boot, and it does nothing at all
+# unless a profile is recorded and not yet applied. When there is work it
+# waits for a default route, runs rvn, and on success writes
+# /etc/raven/.postinstall-done so it never runs again. While it is pending or
+# has failed it says so in /etc/motd, which login(1) prints on the console.
 set -eu
 
 PROFILE_DIR="${RAVEN_PROFILE_DIR:-/etc/raven/install-profiles}"
+STATE_FILE="${RAVEN_INSTALL_PROFILE_FILE:-/etc/raven/install-profile}"
+DONE_MARKER="${RAVEN_POSTINSTALL_DONE:-/etc/raven/.postinstall-done}"
+PENDING_MARKER="${RAVEN_POSTINSTALL_PENDING:-/run/raven-postinstall.pending}"
+FAILED_MARKER="${RAVEN_POSTINSTALL_FAILED:-/run/raven-postinstall.failed}"
+MOTD="${RAVEN_MOTD:-/etc/motd}"
+
 profile="${RAVEN_INSTALL_PROFILE:-}"
 assume_yes=0
 dry_run=0
+auto=0
+wait_secs=600
+attempts=3
+# For tests only: how long between rvn attempts, and whether to insist on
+# root. A real run never sets either.
+retry_delay="${RAVEN_POSTINSTALL_RETRY_DELAY:-60}"
+require_root="${RAVEN_POSTINSTALL_REQUIRE_ROOT:-1}"
 
 usage() {
     echo "Usage: raven-postinstall [--profile NAME] [--dry-run] [-y]"
+    echo "       raven-postinstall --auto [--wait SECONDS]"
     echo "Profiles available in ${PROFILE_DIR}:"
     for file in "${PROFILE_DIR}"/*.packages; do
         [ -f "$file" ] && echo "  $(basename "$file" .packages)"
@@ -22,14 +51,74 @@ while [ "$#" -gt 0 ]; do
         --profile) profile="${2:-}"; shift 2 ;;
         --dry-run) dry_run=1; shift ;;
         -y|--yes) assume_yes=1; shift ;;
+        --auto) auto=1; assume_yes=1; shift ;;
+        --wait) wait_secs="${2:-0}"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
 
-if [ -z "$profile" ] && [ -r /etc/raven/install-profile ]; then
-    profile=$(sed -n 's/^profile=//p' /etc/raven/install-profile | head -n1)
+# --------------------------------------------------------------- state files
+# The block in /etc/motd is bracketed so it can be replaced or removed without
+# touching anything an administrator wrote there.
+motd_clear() {
+    [ -f "$MOTD" ] || return 0
+    awk '/^# raven-postinstall: begin$/{skip=1; next} /^# raven-postinstall: end$/{skip=0; next} !skip' \
+        "$MOTD" > "${MOTD}.new" && mv "${MOTD}.new" "$MOTD"
+    [ -s "$MOTD" ] || rm -f "$MOTD"
+}
+
+motd_set() { # motd_set LINE...
+    motd_clear
+    {
+        [ -f "$MOTD" ] && cat "$MOTD"
+        echo "# raven-postinstall: begin"
+        for line in "$@"; do echo "$line"; done
+        echo "# raven-postinstall: end"
+    } > "${MOTD}.new" && mv "${MOTD}.new" "$MOTD"
+}
+
+mark_pending() {
+    echo "$profile" > "$PENDING_MARKER" 2>/dev/null || true
+    rm -f "$FAILED_MARKER"
+    motd_set "The \"${profile}\" package profile is not installed yet." \
+             "raven-postinstall installs it once the network is up; to run it now: sudo raven-postinstall"
+}
+
+mark_failed() { # mark_failed REASON
+    printf '%s\n' "$1" > "$FAILED_MARKER" 2>/dev/null || true
+    rm -f "$PENDING_MARKER"
+    motd_set "The \"${profile}\" package profile could not be installed: $1" \
+             "Run: sudo raven-postinstall      (details: /var/log/raven/postinstall.log)"
+}
+
+mark_done() {
+    {
+        echo "profile=${profile}"
+        echo "date=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
+    } > "$DONE_MARKER"
+    rm -f "$PENDING_MARKER" "$FAILED_MARKER"
+    motd_clear
+}
+
+have_default_route() {
+    # A destination of 0.0.0.0 in the kernel's routing table. No tools needed.
+    [ -r /proc/net/route ] && awk 'NR > 1 && $2 == "00000000" { found = 1 } END { exit !found }' /proc/net/route
+}
+
+# --------------------------------------------------------------- the profile
+if [ -z "$profile" ] && [ -r "$STATE_FILE" ]; then
+    profile=$(sed -n 's/^profile=//p' "$STATE_FILE" | head -n1)
 fi
+
+if [ "$auto" -eq 1 ]; then
+    # Boot mode: silent no-op on a system with nothing recorded (the live
+    # image, or a system that never went through the installer) and on one
+    # that has already been done.
+    [ -n "$profile" ] || exit 0
+    [ -f "$DONE_MARKER" ] && exit 0
+fi
+
 profile="${profile:-minimal}"
 file="${PROFILE_DIR}/${profile}.packages"
 [ -f "$file" ] || { echo "Unknown profile: ${profile}" >&2; usage >&2; exit 1; }
@@ -38,6 +127,7 @@ packages=$(sed 's/#.*//' "$file" | awk 'NF { printf "%s ", $0 }')
 echo "RavenLinux post-install profile: ${profile}"
 if [ -z "$packages" ]; then
     echo "The minimal profile needs no additional packages."
+    [ "$auto" -eq 1 ] && mark_done
     exit 0
 fi
 echo "Packages: ${packages}"
@@ -49,11 +139,15 @@ command -v rvn >/dev/null 2>&1 || {
 
 # --dry-run belongs to the install subcommand, not to rvn itself. As
 # `rvn --dry-run install` it never ran: rvn exits with "unexpected argument
-# '--dry-run' found" and the tip "'install --dry-run' exists", so the one flag
-# whose entire job is to change nothing was the only one that could not run.
+# '--dry-run'" before it reads the package list.
 if [ "$dry_run" -eq 1 ]; then
     # shellcheck disable=SC2086 -- profile words intentionally become argv
     exec rvn install --dry-run $packages
+fi
+
+if [ "$require_root" = 1 ] && [ "$(id -u)" -ne 0 ]; then
+    echo "rvn installs into /usr; run this as root." >&2
+    exit 1
 fi
 
 if [ "$assume_yes" -ne 1 ]; then
@@ -62,14 +156,53 @@ if [ "$assume_yes" -ne 1 ]; then
     case "$answer" in [Yy]*) ;; *) echo "No changes made."; exit 0 ;; esac
 fi
 
+# --------------------------------------------------------------- boot mode
+if [ "$auto" -eq 1 ]; then
+    mark_pending
+
+    waited=0
+    while ! have_default_route; do
+        if [ "$waited" -ge "$wait_secs" ]; then
+            echo "No network after ${wait_secs}s; giving up until the next boot."
+            mark_failed "no network"
+            exit 1
+        fi
+        [ "$waited" -eq 0 ] && echo "Waiting for a network (up to ${wait_secs}s)..."
+        sleep 5
+        waited=$((waited + 5))
+    done
+    echo "Network is up; installing."
+
+    n=1
+    while :; do
+        # shellcheck disable=SC2086 -- profile words intentionally become argv
+        if rvn install -y $packages; then
+            mark_done
+            echo "Profile ${profile} installed."
+            exit 0
+        fi
+        if [ "$n" -ge "$attempts" ]; then
+            echo "rvn failed ${attempts} times; giving up until the next boot."
+            mark_failed "rvn install failed"
+            exit 1
+        fi
+        echo "rvn failed (attempt ${n} of ${attempts}); retrying in ${retry_delay}s."
+        n=$((n + 1))
+        sleep "$retry_delay"
+    done
+fi
+
+# --------------------------------------------------------------- by hand
 # -y is forwarded rather than only consumed here. Answering this script's own
 # prompt still left rvn free to ask its own, so `raven-postinstall -y` blocked
 # on a second question -- which is exactly the case that has nobody at the
 # keyboard.
-# shellcheck disable=SC2086 -- profile words intentionally become argv
 if [ "$assume_yes" -eq 1 ]; then
-    exec rvn install -y $packages
+    # shellcheck disable=SC2086 -- profile words intentionally become argv
+    rvn install -y $packages
+else
+    # shellcheck disable=SC2086 -- profile words intentionally become argv
+    rvn install $packages
 fi
-
-# shellcheck disable=SC2086 -- profile words intentionally become argv
-exec rvn install $packages
+# Only reached on success: set -e ends the script on a failing rvn.
+mark_done

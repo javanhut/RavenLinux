@@ -452,9 +452,12 @@ not.
 `part.shrinkable`, `part.used_bytes` and `part.spare_bytes`. The graphical
 installer draws its "install alongside" page from exactly those records.
 
-The base installation stays small. After the installed system has networking,
-run `sudo raven-postinstall` to preview and apply the selected package profile,
-or `sudo raven-postinstall --profile developer`. Profiles are editable package
+The base installation stays small, and the selected package profile installs
+itself afterwards: with a network in the live session the installer does it
+before it finishes, and otherwise the `postinstall` service does it at first
+boot once there is a network, saying so on the login screen until it has. To
+run it by hand, or to switch profiles, run `sudo raven-postinstall` or
+`sudo raven-postinstall --profile developer`. Profiles are editable package
 lists in `/etc/raven/install-profiles`, following archinstall's separation of
 disk installation from a reusable system profile.
 

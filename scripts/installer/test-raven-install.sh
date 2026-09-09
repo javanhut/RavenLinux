@@ -85,6 +85,7 @@ step() { :; }
 have() { command -v "$1" >/dev/null 2>&1; }
 die()  { echo "unexpected die: $*" >&2; exit 9; }
 
+import_fn install_postinstall_service decide_postinstall have_default_route
 import_fn partdev valid_username valid_hostname \
           ensure_group add_group_member remove_group_member next_free_uid \
           create_user grant_sudo set_hostname set_locale_and_time \
@@ -186,6 +187,12 @@ EOF
     touch "$t/bin/login" "$t/bin/bash" "$t/usr/bin/ravenshell"
     chmod +x "$t/bin/login" "$t/bin/bash" "$t/usr/bin/ravenshell"
     touch "$t/usr/share/zoneinfo/America/New_York"
+    # The postinstall service template, as stage2 ships it, and the script
+    # raven-install checks for before enabling it.
+    mkdir -p "$t/usr/share/raven/services"
+    printf '[[services]]\nname = "postinstall"\nexec = "/usr/bin/raven-postinstall"\nargs = ["--auto"]\nrestart = false\nenabled = false\n' \
+        > "$t/usr/share/raven/services/postinstall.toml"
+    touch "$t/usr/bin/raven-postinstall" && chmod +x "$t/usr/bin/raven-postinstall"
 }
 
 # =============================================================================
@@ -203,6 +210,8 @@ set_hostname
 create_user
 set_locale_and_time
 switch_to_raven_init
+INSTALL_PROFILE="desktop"
+install_postinstall_service
 
 eq      "/etc/hostname"                   "$(cat "$TARGET/etc/hostname")" "zephyrus"
 matches "/etc/hosts carries the hostname" '127\.0\.1\.1[[:space:]]+zephyrus' "$TARGET/etc/hosts"
@@ -257,6 +266,40 @@ matches "tty1 asks for a login"           '^args = \["--noclear", "tty1", "linux
 lacks   "no skip-login left on tty1"      'skip-login' "$TARGET/etc/raven/init.toml"
 matches "serial getty args untouched"     '"--autologin", "root"' "$TARGET/etc/raven/init.toml"
 exists  "first-boot marked done"          "$TARGET/etc/.raven-first-boot-done"
+
+# The installer's promise that the profile installs "later, once there is a
+# network" is kept by this drop-in, which the template ships disabled.
+exists  "postinstall drop-in written"     "$TARGET/etc/raven/init.d/postinstall.toml"
+matches "postinstall drop-in enabled"     '^enabled = true$' "$TARGET/etc/raven/init.d/postinstall.toml"
+matches "postinstall runs --auto"         '^args = \["--auto"\]$' "$TARGET/etc/raven/init.d/postinstall.toml"
+lacks   "postinstall drop-in not disabled" '^enabled = false$' "$TARGET/etc/raven/init.d/postinstall.toml"
+
+# With no script in the image the drop-in is not written and the install goes on.
+rm "$TARGET/usr/bin/raven-postinstall" "$TARGET/etc/raven/init.d/postinstall.toml"
+install_postinstall_service
+absent  "no drop-in without the script"   "$TARGET/etc/raven/init.d/postinstall.toml"
+
+# --postinstall: minimal never installs; later defers; a bad word dies.
+section "decide_postinstall"
+OPT_YES=0; OPT_NONINTERACTIVE=0
+INSTALL_PROFILE="minimal"; OPT_POSTINSTALL="now"; decide_postinstall
+eq      "minimal profile: nothing to install now" "$POSTINSTALL_NOW" "0"
+INSTALL_PROFILE="desktop"; OPT_POSTINSTALL="later"; decide_postinstall
+eq      "later defers to first boot"      "$POSTINSTALL_NOW" "0"
+INSTALL_PROFILE="desktop"; OPT_POSTINSTALL="now"; decide_postinstall
+eq      "now installs now"                "$POSTINSTALL_NOW" "1"
+INSTALL_PROFILE="desktop"; OPT_POSTINSTALL="auto"; OPT_YES=1; decide_postinstall
+if have_default_route; then
+    eq  "auto + -y with a network: now"   "$POSTINSTALL_NOW" "1"
+else
+    eq  "auto without a network: later"   "$POSTINSTALL_NOW" "0"
+fi
+OPT_YES=0
+if (OPT_POSTINSTALL="sometimes"; INSTALL_PROFILE="desktop"; decide_postinstall) 2>/dev/null; then
+    failed "an unknown --postinstall word is accepted"
+else
+    pass "an unknown --postinstall word dies"
+fi
 
 # =============================================================================
 # Configuring a target for the placeholder's own name

@@ -876,8 +876,9 @@ fn profile(app: &Rc<App>) {
     let group = adw::PreferencesGroup::builder()
         .title("Package profile")
         .description(
-            "Chosen now, applied later: the installed system runs raven-postinstall \
-             once it has networking, and that is what installs the packages.",
+            "Chosen now, installed over the network: before the installer finishes \
+             when this session has a network, otherwise at the new system's first \
+             boot once it has one.",
         )
         .build();
 

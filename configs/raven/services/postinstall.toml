@@ -1,0 +1,27 @@
+# raven-postinstall -- the package profile chosen at install time.
+#
+# raven-install records the profile (minimal, desktop, developer) in
+# /etc/raven/install-profile and promises that "the installed system runs
+# raven-postinstall once it has networking". This service is that run. The
+# script is a silent no-op on the live image and on any system that has been
+# done already (/etc/raven/.postinstall-done), so it costs nothing where there
+# is nothing to do. Where there is, it waits for a default route, installs the
+# profile with rvn, and records completion; until then /etc/motd says the
+# profile is pending, and how to run it by hand.
+#
+# Ships disabled: the template is activated on the ISO like every other, and
+# raven-install enables it in the system it installs. Nothing else should.
+#
+# No `after = ["network"]`, for the reason timed.toml gives: raven-init treats
+# `after` as a dependency it must start, and a system whose network comes from
+# something other than raven-dhcp would then never get its packages. The
+# script waits for the route itself.
+[[services]]
+name = "postinstall"
+description = "Install the package profile chosen at install time"
+exec = "/usr/bin/raven-postinstall"
+args = ["--auto"]
+after = ["udev"]
+restart = false
+enabled = false
+critical = false

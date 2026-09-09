@@ -99,6 +99,7 @@ run = [
   "cargo test --manifest-path init/Cargo.toml",
   "cargo test --manifest-path installer-ui/Cargo.toml",
   "./scripts/installer/test-raven-install.sh",
+  "./scripts/installer/test-raven-postinstall.sh",
   "./scripts/test-console-font.sh",
 ]
 

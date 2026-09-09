@@ -741,6 +741,22 @@ check_extra_packages() {
         fi
     done
 
+    # On RavenLinux itself the unowned case means the opposite. The ISO
+    # ships seatd, libinput and the rest of the graphics stack as bare files
+    # copied off the build host, and an installed system keeps them until
+    # raven-postinstall puts the packages in. A bare binary on the PATH is
+    # not the package: it carries no headers and no .pc file, so a build
+    # that finds `seatd` and skips the package then dies in libseat-sys with
+    # "Package libseat was not found". rvn installs over those files, which
+    # is exactly what the install profiles exist to do, so here they are
+    # missing, and said to be.
+    local -a raven_unowned=()
+    if [[ "$distro" == "raven" && ${#unowned[@]} -gt 0 ]]; then
+        raven_unowned=("${unowned[@]}")
+        absent+=("${unowned[@]}")
+        unowned=()
+    fi
+
     MISSING_EXTRA_PACKAGES=("${absent[@]}")
     missing=("${absent[@]}")
 
@@ -771,6 +787,18 @@ check_extra_packages() {
         log_info "  [~~] is fine: the build calls these by name and will find them."
         log_info "  They are left out of the command below on purpose -- installing"
         log_info "  a package over unowned files on disk is a file conflict."
+        echo ""
+    fi
+
+    if (( ${#raven_unowned[@]} > 0 )); then
+        log_info "  On RavenLinux ${raven_unowned[*]} exist only as files the ISO copied in;"
+        log_info "  the packages (and their headers) are not installed. rvn installs over them."
+        echo ""
+    fi
+    if [[ "$distro" == "raven" && ${#missing[@]} -gt 0 ]]; then
+        log_info "  The whole build set is the developer profile:"
+        echo ""
+        echo -e "    ${CYAN}sudo raven-postinstall --profile developer${NC}"
         echo ""
     fi
 
