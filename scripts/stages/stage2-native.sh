@@ -926,6 +926,59 @@ install_raven_dhcp() {
 }
 
 # =============================================================================
+# raven-udev and raven-console-font -- the other two init.toml entry points
+# =============================================================================
+# Both are shell scripts in configs/ that /etc/raven/init.toml runs at boot:
+# raven-udev starts udevd and coldplugs attached hardware, raven-console-font
+# picks a PSF by framebuffer size and hands it to setfont. Each needs only
+# /bin/sh plus a program copy_system_utils() staged just above (udevd, setfont),
+# so they are stage2's the same way raven-dhcp is.
+#
+# They used to be installed by stage4 -- inside create_squashfs, after
+# check_sysroot_layers had already run and reported them missing. The check
+# looks for every RAVEN_BASE_BINARIES entry before stage4 touches the sysroot,
+# and its warning says "fix in stage2", so this is where they go. stage4 still
+# rasterises the fonts the loader chooses between; that is data, not an exec.
+install_raven_udev() {
+    local src="${PROJECT_ROOT}/configs/raven-udev"
+
+    if [[ ! -f "${src}" ]]; then
+        log_warn "  configs/raven-udev is missing; hardware will not be coldplugged"
+        return 0
+    fi
+
+    # init.toml's exec = "/usr/sbin/raven-udev" resolves here: /usr/sbin is a
+    # symlink onto bin under the merge (scripts/lib/usrmerge.sh).
+    install -D -m 0755 "${src}" "${SYSROOT_DIR}/usr/bin/raven-udev"
+    log_info "  Installed raven-udev"
+
+    if [[ ! -x "${SYSROOT_DIR}/usr/bin/udevd" ]]; then
+        log_warn "  udevd is not in the sysroot; modules will not autoload"
+        log_warn "  It comes from systemd/eudev on the build host"
+    fi
+}
+
+install_raven_console_font() {
+    local src="${PROJECT_ROOT}/configs/raven-console-font"
+
+    if [[ ! -f "${src}" ]]; then
+        log_warn "  configs/raven-console-font is missing; console stays on the kernel font"
+        return 0
+    fi
+
+    # init.toml names /usr/sbin/raven-console-font; same merge, same file.
+    install -D -m 0755 "${src}" "${SYSROOT_DIR}/usr/bin/raven-console-font"
+    log_info "  Installed raven-console-font"
+
+    # Without setfont the loader is a no-op that exits 0, which is the right
+    # behaviour on a build that could not supply one -- but say so here.
+    if [[ ! -x "${SYSROOT_DIR}/usr/bin/setfont" ]]; then
+        log_warn "  setfont is not in the sysroot, so the font cannot be loaded at boot"
+        log_warn "  It comes from kbd; install it on the build host"
+    fi
+}
+
+# =============================================================================
 # Ensure dhcpcd is available (DHCP client)
 # =============================================================================
 ensure_dhcpcd() {
@@ -3465,6 +3518,9 @@ main() {
 
     copy_shells
     copy_system_utils
+    # The init.toml entry points that ride on what copy_system_utils staged.
+    install_raven_udev
+    install_raven_console_font
     copy_networking
     setup_pam_and_nss
     if [[ "${RAVEN_ENABLE_SUDO}" == "1" ]]; then

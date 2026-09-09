@@ -74,7 +74,7 @@ declare -a RAVEN_COMPONENTS=(
 RAVEN_INIT_BINARIES="raven-init,raven-rc,raven-powerd,raven-ports,raven-timed"
 
 # =============================================================================
-# The base layer -- scripts/stages/stage2-native.sh and stage4-iso.sh
+# The base layer -- scripts/stages/stage2-native.sh
 # =============================================================================
 # Not a component table: these are not built from repositories and most of them
 # are not ours. They are here because they are the programs /etc/raven/init.toml
@@ -89,6 +89,12 @@ RAVEN_INIT_BINARIES="raven-init,raven-rc,raven-powerd,raven-ports,raven-timed"
 # any image this repository has ever produced, and every wired machine booted
 # with no address and no complaint. It is a shell script in configs/ now, and
 # stage2's install_raven_dhcp puts it in place.
+#
+# raven-udev and raven-console-font are why the list says stage2 and nothing
+# else. stage4 used to install them itself -- from create_squashfs, after
+# check_sysroot_layers had already looked for them -- so every build reported
+# them missing and refused the ISO. Everything here must be in place before
+# stage4 starts; stage2's install_raven_udev and install_raven_console_font.
 #
 # syslogd and klogd are deliberately absent: their services ship
 # `enabled = false`, so an image without them is the intended image.

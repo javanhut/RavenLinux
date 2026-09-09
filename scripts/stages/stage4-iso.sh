@@ -345,8 +345,9 @@ install_packages_to_sysroot() {
         log_info "  fc-cache not on the build host; skipping the font cache"
     fi
 
+    # raven-udev and raven-console-font themselves are installed by stage2;
+    # see install_raven_udev there. Only the font data is built here.
     install_console_font
-    install_udev_helper
 
     # Ensure shared library dependencies for newly installed binaries are present.
     log_info "Copying runtime libraries for sysroot binaries..."
@@ -1093,46 +1094,15 @@ install_console_font() {
         return 0
     fi
 
-    # The loader. Without setfont in the sysroot it is a no-op that exits 0,
-    # which is the right behaviour on a build that could not supply one.
-    if [[ -f "${PROJECT_ROOT}/configs/raven-console-font" ]]; then
-        mkdir -p "${SYSROOT_DIR}/usr/bin"
-        cp "${PROJECT_ROOT}/configs/raven-console-font" "${SYSROOT_DIR}/usr/bin/raven-console-font"
-        chmod 0755 "${SYSROOT_DIR}/usr/bin/raven-console-font"
-        # init.toml names /usr/sbin/raven-console-font; that still resolves,
-        # because /usr/sbin is a symlink onto bin. The compat link that used to
-        # be here deleted the script and left a dangler -- and it was wrapped in
-        # `2>/dev/null || true`, so it could not even report the damage.
-        log_info "  Installed raven-console-font"
-    fi
-
-    if [[ ! -x "${SYSROOT_DIR}/usr/bin/setfont" ]]; then
-        log_warn "  setfont is not in the sysroot, so the font cannot be loaded at boot"
-        log_warn "  It comes from kbd; stage2 copies it when the build host has it"
+    # The loader, /usr/bin/raven-console-font, is stage2's (install_raven_
+    # console_font) -- it is one of the RAVEN_BASE_BINARIES check_sysroot_layers
+    # verified before this stage touched the sysroot, so it cannot be installed
+    # here without the check reporting it missing on every build.
+    if [[ ! -x "${SYSROOT_DIR}/usr/bin/raven-console-font" ]]; then
+        log_warn "  raven-console-font is not in the sysroot; the fonts will never be loaded"
     fi
 
     log_success "Console font built (${built} sizes)"
-}
-
-# raven-udev starts the device manager and coldplugs attached hardware. It has
-# to ship in the sysroot rather than early userspace, because graphics and
-# wireless drivers are modules and nothing binds them without a coldplug.
-install_udev_helper() {
-    if [[ ! -f "${PROJECT_ROOT}/configs/raven-udev" ]]; then
-        log_warn "  configs/raven-udev not found; hardware will not be coldplugged"
-        return 0
-    fi
-
-    mkdir -p "${SYSROOT_DIR}/usr/bin"
-    cp "${PROJECT_ROOT}/configs/raven-udev" "${SYSROOT_DIR}/usr/bin/raven-udev"
-    chmod 0755 "${SYSROOT_DIR}/usr/bin/raven-udev"
-    # init.toml's exec = "/usr/sbin/raven-udev" resolves here via /usr/sbin -> bin.
-    log_info "  Installed raven-udev"
-
-    if [[ ! -x "${SYSROOT_DIR}/usr/bin/udevd" ]]; then
-        log_warn "  udevd is not in the sysroot; modules will not autoload"
-        log_warn "  It comes from eudev; stage2 copies it when the build host has it"
-    fi
 }
 
 # =============================================================================
