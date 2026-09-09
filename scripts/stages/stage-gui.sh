@@ -2,6 +2,10 @@
 # =============================================================================
 # RavenLinux GUI Stage: Compositor and Desktop Shell
 # =============================================================================
+# Stage4 requires the complete desktop by default. Individual build failures
+# are logged here so the final check can report all missing components.
+# RAVEN_ALLOW_INCOMPLETE=1 explicitly permits diagnostic partial images.
+#
 # Builds the desktop: RavenGUI's Huginn, the Wayland compositor and the shell it
 # draws, plus RavenTerminal, from its own
 # repository, because huginn names `raven-terminal` in two compiled-in places
@@ -1511,29 +1515,35 @@ stage_roostbar() {
     log_success "  ${ROOSTBAR_BIN} installed and enabled for every graphical session"
 }
 
-# The machine's wallpaper library, and the one entry that says which image is
-# on.
-#
-# Both are created empty and nothing is shipped into them: an image with no
-# wallpaper draws the compositor's flat background and the greeter's backdrop,
-# which is a desktop, and a photograph committed to a distribution repository
-# is a licence question nobody asked for.
-#
-# The directories exist anyway because every reader is compiled to look here:
-# huginn draws /usr/share/wallpaper/set/wallpaper.<ext> behind the desktop,
-# raven-greeter draws the same file behind the login prompt, and ravencanvasd
-# draws it over huginn's on the background layer -- which is what makes the
-# three look like one machine. A directory that is already there is also the
-# difference between "drop a file in" and "work out where it goes".
-#
-# ravencanvasd is the only one of the three that watches it, so on a running
-# desktop the picture changes within a moment of `raven-set-wallpaper`; the
-# other two read it once, at their own start.
+# Distribution-owned wallpaper and new-user defaults. These inputs travel
+# with the RavenLinux repository, including when built on another machine.
 install_wallpaper_dirs() {
-    install -d -m 0755 "${SYSROOT_DIR}/usr/share/wallpaper"
-    install -d -m 0755 "${SYSROOT_DIR}/usr/share/wallpaper/set"
-    log_info "  + /usr/share/wallpaper and set/ (empty; drop an image in to use one)"
+    install -Dm 0644 "${PROJECT_ROOT}/configs/desktop/wallpaper.jpg" \
+        "${SYSROOT_DIR}/usr/share/wallpaper/set/wallpaper.jpg"
 }
+
+install_desktop_defaults() {
+    local home
+    for home in "${SYSROOT_DIR}/etc/skel" "${SYSROOT_DIR}/home/raven"; do
+        install -Dm 0644 "${PROJECT_ROOT}/configs/desktop/desktop.toml" \
+            "${home}/.config/raven/desktop.toml"
+        install -Dm 0644 "${PROJECT_ROOT}/configs/desktop/files.toml" \
+            "${home}/.config/raven/config.toml"
+        install -Dm 0644 "${PROJECT_ROOT}/configs/desktop/roostbar.toml" \
+            "${home}/.config/roostbar/config.toml"
+    done
+    # The live user must be able to save settings; the installer chowns its
+    # own newly created user's skeleton separately.
+    chown -R 1000:1000 "${SYSROOT_DIR}/home/raven/.config"
+    install_wallpaper_dirs
+}
+
+stage_desktop_runtime() {
+    python3 "${PROJECT_ROOT}/scripts/lib/stage-desktop-runtime.py" "${SYSROOT_DIR}" || return 1
+    install -Dm 0644 "${PROJECT_ROOT}/configs/raven/services/bluetoothd.toml" \
+        "${SYSROOT_DIR}/etc/raven/init.d/bluetoothd.toml"
+}
+
 
 # =============================================================================
 # Raven Settings
@@ -2259,6 +2269,14 @@ if command -v pipewire >/dev/null 2>&1; then
     # Huginn detects its mixer once, during construction. Wait until
     # WirePlumber has selected a real output so that a normal startup cannot
     # permanently turn its volume slider into the disconnected in-memory stub.
+    if [ -S "${XDG_RUNTIME_DIR}/pipewire-0" ] \
+            && command -v pipewire-pulse >/dev/null 2>&1 \
+            && [ ! -S "${XDG_RUNTIME_DIR}/pulse/native" ] \
+            && ! pid_is_alive "${audio_runtime}/pipewire-pulse.pid"; then
+        pipewire-pulse </dev/null &
+        echo $! > "${audio_runtime}/pipewire-pulse.pid"
+    fi
+
     if command -v wpctl >/dev/null 2>&1; then
         i=0
         while [ $i -lt 50 ] \
@@ -2646,6 +2664,19 @@ main() {
         return 0
     fi
 
+    # Invalidate previous component output before a full GUI rebuild. A failed
+    # fetch/build must not leave an older executable looking successful.
+    local stale_binary
+    while IFS= read -r stale_binary; do
+        rm -f "${SYSROOT_DIR}/usr/bin/${stale_binary}"
+    done < <(raven_gui_binaries)
+    local source_spec source_key source_repo
+    rm -f "${SYSROOT_DIR}/usr/share/raven/build/sources/RavenGUI.tsv"
+    for source_spec in "${GUI_APPS[@]}"; do
+        IFS='|' read -r source_key source_repo _ <<< "$source_spec"
+        rm -f "${SYSROOT_DIR}/usr/share/raven/build/sources/${source_repo}.tsv"
+    done
+
     if [[ -z "${GUI_TARGET}" ]]; then
         log_warn "Cannot determine the host Rust target, skipping the GUI stage"
         return 0
@@ -2706,6 +2737,9 @@ main() {
 
     log_step "Staging XWayland..."
     stage_xwayland
+
+    stage_desktop_runtime || return 1
+    install_desktop_defaults
 
     # Once, and before the six functions that each repeat this check: a missing
     # toolkit is one fact about the host, not six facts about six applications.

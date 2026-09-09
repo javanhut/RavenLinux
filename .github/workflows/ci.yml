@@ -119,3 +119,6 @@ jobs:
         run: |
           find scripts -name "*.sh" -type f | xargs shellcheck -S warning || true
         continue-on-error: true
+
+      - name: Test desktop build contract (offline)
+        run: python3 scripts/test-desktop-build.py

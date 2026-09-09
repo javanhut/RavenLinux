@@ -275,6 +275,10 @@ install_packages_to_sysroot() {
             [[ -f "$pkg" ]] || continue
             local name
             name="$(basename "$pkg")"
+            if [[ -x "${SYSROOT_DIR}/usr/bin/${name}" ]]; then
+                log_info "  Keeping staged ${name} (not replacing it from packages/bin)"
+                continue
+            fi
             cp "$pkg" "${SYSROOT_DIR}/usr/bin/"
             chmod +x "${SYSROOT_DIR}/usr/bin/${name}"
             log_info "  Installed ${name}"
@@ -501,6 +505,7 @@ create_squashfs() {
     # reads. Checking before those ran verified a layout that no longer
     # existed by the time it was sealed.
     check_usrmerge_layout || return 1
+    check_desktop_contract || return 1
 
     local pseudo="${LOGS_DIR}/squashfs.pseudo"
     : > "${pseudo}"
@@ -516,7 +521,7 @@ create_squashfs() {
         -comp zstd -Xcompression-level 15 \
         -pf "${pseudo}" -pseudo-override \
         -b 1M -no-duplicates -quiet \
-        2>&1 | tee "${LOGS_DIR}/squashfs.log"
+        2>&1 | tee "${LOGS_DIR}/squashfs.log" || return 1
 
     local size
     size=$(du -h "${ISO_ROOT}/raven/filesystem.squashfs" | cut -f1)
@@ -1315,7 +1320,7 @@ check_usrmerge_layout() {
 check_sysroot_layers() {
     if ! declare -F raven_layer_binaries >/dev/null 2>&1; then
         log_warn "scripts/lib/components.sh not loaded; cannot check the sysroot layers"
-        return 0
+        return 1
     fi
 
     local -a base_expected=() raven_expected=() gui_expected=()
@@ -1336,17 +1341,17 @@ check_sysroot_layers() {
     # can arrive as a symlink beside the real file, and a symlink that resolves
     # is a program init can exec.
     for b in "${base_expected[@]}"; do
-        find "${SYSROOT_DIR}" -name "${b}" -print -quit 2>/dev/null | grep -q . \
+        [[ -x "${SYSROOT_DIR}/usr/bin/${b}" || -x "${SYSROOT_DIR}/usr/sbin/${b}" ]] \
             || base_missing+=("${b}")
     done
 
     for b in "${raven_expected[@]}"; do
-        find "${SYSROOT_DIR}" -name "${b}" -type f -print -quit 2>/dev/null | grep -q . \
+        [[ -x "${SYSROOT_DIR}/usr/bin/${b}" ]] \
             || raven_missing+=("${b}")
     done
 
     for b in "${gui_expected[@]}"; do
-        find "${SYSROOT_DIR}" -name "${b}" -type f -print -quit 2>/dev/null | grep -q . \
+        [[ -x "${SYSROOT_DIR}/usr/bin/${b}" ]] \
             || gui_missing+=("${b}")
     done
 
@@ -1408,6 +1413,29 @@ check_sysroot_layers() {
     log_warn "  be rebuilt too. 'imlazy build' runs every layer in order."
     log_warn "=============================================================="
     echo ""
+    if [[ "${RAVEN_ALLOW_INCOMPLETE:-0}" != "1" ]]; then
+        log_error "Refusing an incomplete desktop ISO. Run all stages; see missing components above."
+        return 1
+    fi
+}
+
+check_desktop_contract() {
+    local -a args=()
+    local binary
+    while IFS= read -r binary; do args+=(--binary "$binary"); done < <(
+        raven_base_binaries
+        raven_layer_binaries
+        raven_gui_binaries
+    )
+    local spec repo
+    args+=(--source RavenGUI)
+    for spec in "${RAVEN_COMPONENTS[@]}" "${GUI_APPS[@]}"; do
+        IFS='|' read -r _ repo _ <<< "$spec"
+        args+=(--source "$repo")
+    done
+    [[ "${RAVEN_ALLOW_INCOMPLETE:-0}" == "1" ]] && args+=(--allow-incomplete)
+    python3 "${PROJECT_ROOT}/scripts/check-desktop-image.py" "${SYSROOT_DIR}" \
+        --project "${PROJECT_ROOT}" "${args[@]}"
 }
 
 # =============================================================================
@@ -1528,20 +1556,22 @@ main() {
 
     mkdir -p "${LOGS_DIR}"
 
-    check_deps
-    check_sysroot_layers
+    check_deps || return 1
+    check_sysroot_layers || return 1
     setup_iso_structure
     create_managed_live_init
     install_shutdown_commands
     install_installer
     copy_boot_files
     copy_kernel_modules
-    create_squashfs
+    create_squashfs || return 1
     setup_ravenboot || true  # Continue even if RavenBoot not available
     setup_grub  # GRUB as fallback for BIOS
     create_efi_image
     create_iso_info
-    generate_iso
+    generate_iso || return 1
+    cp "${SYSROOT_DIR}/usr/share/raven/build/manifest.json" "${ISO_OUTPUT}.manifest.json"
+    cp "${SYSROOT_DIR}/usr/share/raven/build/sources.tsv" "${ISO_OUTPUT}.sources.tsv"
     print_summary
 
     log_success "Stage 4 complete!"

@@ -1,0 +1,27 @@
+# Raven desktop settings. Written by raven-settings; read by the desktop.
+
+[appearance]
+theme_mode = "dark"
+accent = "#22C5DD"
+scale = 0.9
+transparency = true
+shadows = true
+blur = true
+smooth_animations = true
+animation_speed = "normal"
+wallpaper = ""
+
+[general]
+terminal = "raven-terminal"
+lock_after_minutes = 10
+clock_24h = true
+show_date = true
+
+[personalization]
+dock_position = "centre"
+dock_layout = "grid"
+bar_position = "top"
+
+[privacy]
+remember_app_usage = true
+bluetooth_discoverable = false

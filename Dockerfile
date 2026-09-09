@@ -134,6 +134,9 @@ RUN pacman -Syu --noconfirm --needed \
         # binary and its libraries into the sysroot; without it in the image the
         # stage warns and moves on, and the ISO ships with no X11 support at all.
         xorg-xwayland \
+        # Full live-desktop audio, Bluetooth, and authorization runtime.
+        pipewire pipewire-audio pipewire-pulse wireplumber bluez bluez-utils \
+        alsa-ucm-conf alsa-topology-conf sof-firmware polkit \
         # The GTK4 stack -- SIX of the image's applications, and every one of
         # its graphical *applications* as opposed to its shell, is a GTK4 +
         # libadwaita client: Files, Settings, Store, Power, Controls and the

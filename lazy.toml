@@ -95,6 +95,7 @@ run = ["{{run}} {{flags}} initramfs"]
 desc = "Run manifest, init, installer, and console-font tests"
 run = [
   "./scripts/check-manifests.sh",
+  "python3 ./scripts/test-desktop-build.py",
   "cargo test --manifest-path init/Cargo.toml",
   "cargo test --manifest-path installer-ui/Cargo.toml",
   "./scripts/installer/test-raven-install.sh",

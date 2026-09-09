@@ -428,6 +428,11 @@ component_selected() {
 # and the lid mean anything, and it asks init for the suspend over raven-rc's
 # control socket rather than writing /sys/power/state itself.
 build_raven_init() {
+    local old_init
+    for old_init in ${RAVEN_INIT_BINARIES//,/ }; do
+        rm -f "${SYSROOT_DIR}/usr/bin/${old_init}"
+    done
+
     local src="${PROJECT_ROOT}/init"
 
     [[ -f "${src}/Cargo.toml" ]] || {
@@ -517,6 +522,10 @@ build_all_components() {
             RAVEN_SKIPPED+=("${bins[@]}")
             continue
         fi
+
+        local old_bin
+        for old_bin in "${bins[@]}"; do rm -f "${SYSROOT_DIR}/usr/bin/${old_bin}"; done
+        rm -f "${SYSROOT_DIR}/usr/share/raven/build/sources/${repo}.tsv"
 
         if [[ "${lang}" == "go" ]] && (( go_ok == 0 )); then
             RAVEN_SKIPPED+=("${bins[@]}")

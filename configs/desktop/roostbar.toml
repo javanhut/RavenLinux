@@ -1,0 +1,41 @@
+# ~/.config/roostbar/config.toml — every key is optional; these are the defaults.
+
+position = "top"          # "top" or "bottom"
+height = 26
+exclusive = true          # reserve the strip so windows never sit under it
+font = "/usr/share/fonts/JetBrainsMonoNerdFontMono-Regular.ttf"
+font_size = 13.0
+
+# #RRGGBB or #AARRGGBB. Default background is 85% opaque Raven dark.
+background = "#D916161F"
+foreground = "#C0CAF5"
+accent = "#22C5DD"
+muted = "#565F89"
+warning = "#F7768E"
+charging = ""             # battery reading while plugged in; empty = accent
+
+padding = 12              # px at either end of the bar
+gap = 18                  # px between modules
+
+clock_format = "%H:%M"
+date_format = "%a %d %b"
+show_date = true
+
+# Start pipewire (+ wireplumber, pipewire-pulse) at launch if installed and not
+# already running. Raven has no systemd user session, so nothing else will.
+start_pipewire = true
+
+# ALSA fallback, used only when PipeWire is not running. Empty = auto-detect
+# (first card with the mixer and a Speaker/Headphone element).
+alsa_card = ""
+alsa_mixer = "Master"
+volume_step = 5           # percent per scroll notch / `roostbar vol up`
+
+# Bluetooth device to connect on click, as a MAC. Paired on the first click
+# if it never has been (put it in pairing mode first). Empty = a trusted
+# paired device, else any paired device, else the click opens Huginn's quick
+# settings where devices can be picked.
+bluetooth_device = ""
+
+battery = "BAT0"
+battery_low = 15          # percent at or below which the battery turns `warning`

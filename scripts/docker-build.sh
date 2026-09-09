@@ -163,6 +163,12 @@ fi
 # builds depend on unrelated host settings and credentials.  This also makes
 # documented invocations such as `RAVEN_ONLY=crow imlazy raven` actually work.
 BUILD_ENV_VARS=(
+    RAVEN_ALLOW_INCOMPLETE
+    RAVEN_GITHUB_OWNER
+    GUI_SKIP
+    GUI_REF
+    GUI_OFFLINE
+    GUI_TARGET
     RAVEN_ENABLE_SUDO
     RAVEN_USE_MANIFEST_PINS
     RAVEN_IGNORE_MANIFEST_PINS
@@ -180,6 +186,21 @@ BUILD_ENV_VARS=(
     ROOSTBAR_OFFLINE
     ROOSTBAR_REF
 )
+# Derive per-component controls from the same table used by the build.
+source "${RAVEN_ROOT}/scripts/lib/components.sh"
+for spec in "${GUI_APPS[@]}"; do
+    IFS='|' read -r key _ <<< "$spec"
+    BUILD_ENV_VARS+=("${key}_REF" "${key}_OFFLINE" "${key}_SKIP")
+done
+for spec in "${RAVEN_COMPONENTS[@]}"; do
+    IFS='|' read -r key _ <<< "$spec"
+    BUILD_ENV_VARS+=("RAVEN_${key^^}_REF")
+done
+if [[ -n "${RAVEN_SOURCE_LOCK:-}" ]]; then
+    lock_path="$(realpath "${RAVEN_SOURCE_LOCK}")"
+    [[ -f "$lock_path" ]] || { echo "Source lock not found: $lock_path" >&2; exit 1; }
+    RUN_FLAGS+=(-v "${lock_path}:/raven-source-lock.tsv:ro" -e RAVEN_SOURCE_LOCK=/raven-source-lock.tsv)
+fi
 for env_name in "${BUILD_ENV_VARS[@]}"; do
     if [[ -v "$env_name" ]]; then
         RUN_FLAGS+=(-e "${env_name}=${!env_name}")

@@ -5,7 +5,7 @@
 name = "bluetoothd"
 description = "Bluetooth service"
 exec = "/usr/lib/bluetooth/bluetoothd"
-args = []
+args = ["--nodetach"]
 after = ["dbus"]
 restart = true
 enabled = true

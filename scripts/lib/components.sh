@@ -101,6 +101,7 @@ RAVEN_BASE_BINARIES="raven-udev,raven-console-font,agetty,dbus-daemon,raven-dhcp
 # of the RavenGUI tree produces every row.
 declare -a GUI_COMPONENTS=(
     "huginn-comp|huginn-comp|huginn|Huginn - Wayland compositor, and the shell it draws"
+    "raven-output|raven-output|raven-output|Display layout and scaling utility"
 )
 
 # The rest of the desktop: one row per repository the GUI stage clones and
@@ -358,15 +359,27 @@ raven_resolve_ref() {
 #   raven_fetch_repo <name> <url> <dest> <ref> <offline> [origin-label]
 #
 # Returns 0 when <dest> holds a usable checkout, 1 when it does not. Callers
-# treat 1 as "skip this component", never as a reason to fail the build.
+# may continue to collect failures; stage4 rejects missing required components.
 raven_fetch_repo() {
     local name="$1" url="$2" dest="$3" ref="$4" offline="$5" origin="${6:-}"
+    if [[ -n "${RAVEN_SOURCE_LOCK:-}" ]]; then
+        [[ -r "${RAVEN_SOURCE_LOCK}" ]] || { log_warn "Source lock is unreadable"; return 1; }
+        local locked
+        locked="$(awk -F '\t' -v name="${name}" '$1 == name {print $3}' "${RAVEN_SOURCE_LOCK}")"
+        raven_ref_is_sha "${locked}" || { log_warn "${name}: missing or invalid source lock entry"; return 1; }
+        if [[ -n "${ref}" && "${ref}" != "${locked}" ]]; then
+            log_warn "${name}: source lock conflicts with requested ref ${ref}"
+            return 1
+        fi
+        ref="${locked}"
+    fi
     local parent; parent="$(dirname "${dest}")"
 
     if [[ "${offline}" == "1" ]]; then
         if [[ -d "${dest}/.git" ]]; then
             log_info "  offline: using existing clone of ${name}"
-            return 0
+            raven_verify_source "${name}" "${url}" "${dest}" "${ref}"
+            return $?
         fi
         log_warn "  offline: no clone of ${name} in ${parent}"
         return 1
@@ -398,9 +411,11 @@ raven_fetch_repo() {
         # commit id works here where it does not for --branch, because this is
         # a fetch of an object rather than a ref by name.
         if ! ( cd "${dest}" \
+               && git remote set-url origin "${url}" \
                && git fetch --tags --depth 1 origin "${ref:-HEAD}" 2>/dev/null \
                && git reset --hard FETCH_HEAD >/dev/null 2>&1 ); then
-            log_warn "  could not update ${name}, using the existing checkout"
+            log_warn "  could not update ${name}; refusing stale source"
+            return 1
         fi
     else
         log_info "  cloning ${name}..."
@@ -419,27 +434,43 @@ raven_fetch_repo() {
                 return 1
             fi
         elif [[ -n "${ref}" ]]; then
-            git clone --depth 1 --branch "${ref}" -q "${url}" "${dest}" 2>/dev/null \
-                || git clone --depth 1 -q "${url}" "${dest}" || return 1
+            git clone --depth 1 --branch "${ref}" -q "${url}" "${dest}" || return 1
         else
             git clone --depth 1 -q "${url}" "${dest}" || return 1
         fi
     fi
 
-    local rev
-    rev="$(cd "${dest}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-    log_info "  ${name} @ ${rev}"
-
-    # A pin that did not take is worth more than a log line: the build is not
-    # the build that was asked for. It is still not fatal -- the component
-    # compiles and the ISO is usable -- so this warns rather than returning 1.
     if raven_ref_is_sha "${ref}"; then
-        local head
-        head="$(cd "${dest}" && git rev-parse HEAD 2>/dev/null || echo unknown)"
-        if [[ "${head,,}" != "${ref,,}" ]]; then
-            log_warn "  ${name}: pinned at ${ref} but the checkout is ${head}"
+        raven_verify_source "${name}" "${url}" "${dest}" "${ref}"
+    else
+        # An explicit branch/tag was selected by the successful fetch/clone;
+        # a local branch name can still point at the previous checkout.
+        raven_verify_source "${name}" "${url}" "${dest}" HEAD
+    fi
+}
+
+# Record the exact source used; never claim that a failed pin was honored.
+raven_verify_source() {
+    local name="$1" url="$2" dest="$3" ref="$4" head wanted
+    head="$(git -C "${dest}" rev-parse HEAD)" || return 1
+    if [[ -n "${ref}" ]]; then
+        wanted="$(git -C "${dest}" rev-parse "${ref}^{commit}" 2>/dev/null)" || {
+            log_warn "${name}: requested ref ${ref} is unavailable"
+            return 1
+        }
+        if [[ "${wanted}" != "${head}" ]]; then
+            log_warn "${name}: requested ${ref} (${wanted}), found ${head}"
+            return 1
         fi
     fi
-
-    return 0
+    # Cargo protocol regeneration may touch timestamps, but source edits must
+    # not be silently folded into a supposedly pinned build.
+    if [[ -n "$(git -C "${dest}" status --porcelain --untracked-files=no)" ]]; then
+        log_warn "${name}: source checkout has tracked modifications"
+        return 1
+    fi
+    log_info "  ${name} @ ${head}"
+    local records="${SYSROOT_DIR}/usr/share/raven/build/sources"
+    mkdir -p "${records}"
+    printf '%s\t%s\t%s\n' "${name}" "${url}" "${head}" > "${records}/${name}.tsv"
 }

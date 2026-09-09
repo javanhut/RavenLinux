@@ -30,7 +30,7 @@ system = "cargo"
 # The sysroot carries the host's glibc and dynamic linker already, which is how
 # the Xorg and Mesa binaries stage2 copies work.
 target = "x86_64-unknown-linux-gnu"
-build_flags = ["--release", "--locked", "-p", "huginn-comp"]
+build_flags = ["--release", "--locked", "-p", "huginn-comp", "-p", "raven-output"]
 
 [dependencies]
 # Build dependencies are the development side of what it links. The runtime
@@ -63,6 +63,7 @@ build = ["rust", "cargo", "pkg-config", "libdrm", "libinput", "libudev", "mesa"]
 
 [install]
 files = [
+    { src = "target/x86_64-unknown-linux-gnu/release/raven-output", dest = "/usr/bin/raven-output", mode = 755 },
     { src = "target/x86_64-unknown-linux-gnu/release/huginn",      dest = "/usr/bin/huginn",      mode = 755 },
 ]
 

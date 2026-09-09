@@ -2707,6 +2707,8 @@ EOF
 # RTL8821CE/8822CE fail "mac power on" with PCIe ASPM enabled on some laptops.
 # rtw88 is built in; raven-init applies this line at boot (modprobe never sees it).
 options rtw88_pci disable_aspm=1
+# Keep the working system's deep-power-save workaround on fresh installs.
+options rtw88_core disable_lps_deep=Y
 EOF
 
     # Host side of the same link. rtw88_pci.disable_aspm only stops the chip

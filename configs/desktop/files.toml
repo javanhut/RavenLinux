@@ -1,0 +1,152 @@
+[general]
+show_hidden_files = false
+confirm_delete = true
+confirm_trash = false
+single_click_open = false
+default_terminal = "raven-terminal"
+
+[appearance]
+icon_size = 24
+font_size = 13
+show_path_bar = true
+show_status_bar = true
+show_sidebar = true
+sidebar_width = 200
+preview_panel_width = 300
+theme = "Frost"
+view_mode = "List"
+
+[navigation]
+default_sort_column = "Name"
+default_sort_direction = "Ascending"
+directories_first = true
+
+[operations]
+max_concurrent_operations = 4
+copy_buffer_size = 65536
+default_conflict_strategy = "ask"
+
+[preview]
+max_text_size = 1048576
+max_image_size = 52428800
+cache_size_mb = 256
+enabled = true
+
+[search]
+max_results = 10000
+respect_gitignore = true
+follow_symlinks = false
+
+[automation]
+enabled = true
+
+[plugins]
+enabled = true
+plugin_dirs = []
+enabled_plugins = []
+
+[dbus]
+enabled = true
+bus_name = "com.ravenfilemanager.Raven"
+file_manager1 = true
+
+[[keybindings.bindings]]
+action = "navigate_back"
+key = "Left"
+modifiers = ["Alt"]
+
+[[keybindings.bindings]]
+action = "navigate_forward"
+key = "Right"
+modifiers = ["Alt"]
+
+[[keybindings.bindings]]
+action = "navigate_up"
+key = "Up"
+modifiers = ["Alt"]
+
+[[keybindings.bindings]]
+action = "new_tab"
+key = "t"
+modifiers = ["Ctrl"]
+
+[[keybindings.bindings]]
+action = "close_tab"
+key = "w"
+modifiers = ["Ctrl"]
+
+[[keybindings.bindings]]
+action = "toggle_hidden"
+key = "h"
+modifiers = ["Ctrl"]
+
+[[keybindings.bindings]]
+action = "toggle_search"
+key = "f"
+modifiers = ["Ctrl"]
+
+[[keybindings.bindings]]
+action = "edit_path"
+key = "l"
+modifiers = ["Ctrl"]
+
+[[keybindings.bindings]]
+action = "refresh"
+key = "r"
+modifiers = ["Ctrl"]
+
+[[keybindings.bindings]]
+action = "undo"
+key = "z"
+modifiers = ["Ctrl"]
+
+[[keybindings.bindings]]
+action = "toggle_preview"
+key = "space"
+modifiers = []
+
+[[keybindings.bindings]]
+action = "properties"
+key = "i"
+modifiers = ["Ctrl"]
+
+[[keybindings.bindings]]
+action = "rename"
+key = "F2"
+modifiers = []
+
+[[keybindings.bindings]]
+action = "trash"
+key = "Delete"
+modifiers = []
+
+[[keybindings.bindings]]
+action = "copy"
+key = "c"
+modifiers = ["Ctrl"]
+
+[[keybindings.bindings]]
+action = "cut"
+key = "x"
+modifiers = ["Ctrl"]
+
+[[keybindings.bindings]]
+action = "paste"
+key = "v"
+modifiers = ["Ctrl"]
+
+[[keybindings.bindings]]
+action = "select_all"
+key = "a"
+modifiers = ["Ctrl"]
+
+[[keybindings.bindings]]
+action = "open_settings"
+key = "comma"
+modifiers = ["Ctrl"]
+
+[[file_associations]]
+mime_pattern = ""
+extensions = []
+application = ""
+label = ""

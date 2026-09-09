@@ -257,8 +257,9 @@ rebuild behind the kernel — useful because its init script, the thing that
 decides between the live squashfs and a `root=` on disk, changes far more often
 than the kernel does.
 
-The Raven layer is fail-soft: a component that will not clone or compile is
-logged and skipped, and the ISO still builds. Narrow it while iterating:
+Component stages log individual fetch/build failures so you can see every
+missing component. ISO packaging now rejects incomplete desktops by default.
+Narrow a stage while iterating:
 
 ```bash
 ./scripts/build.sh raven                  # all eight components
@@ -271,16 +272,16 @@ RAVEN_KEEP_BASH_DEFAULT=1 imlazy raven      # install ravenshell, keep bash defa
 RAVEN_PACMAN_FROM_HOST=1 imlazy raven       # give rvn the host's pacman.conf
 ```
 
-The GUI stage is fail-soft the same way, and skips itself when the build host
-lacks the libraries huginn links. The terminal is fail-soft *within* it, so a
-build host that can compile the compositor but not the terminal still produces a
-desktop — one that cannot launch anything, which the stage summary says outright
-rather than leaving to be discovered at boot:
+The GUI stage reports component failures, and stage4 refuses to package missing
+applications, daemons, runtime libraries, or desktop defaults. A full build
+stages audio and Bluetooth support in the live image as well as the installed
+system. See [desktop build contract](docs/desktop-build.md) for source locks,
+provenance files, and rebuilding on another PC.
 
 ```bash
 ./scripts/build.sh gui                    # huginn, raven-terminal, raven-lock
 imlazy session                            # session scripts only; no compilation
-GUI_SKIP=1 imlazy build                     # console-only ISO
+GUI_SKIP=1 RAVEN_ALLOW_INCOMPLETE=1 imlazy build  # diagnostic partial ISO
 GUI_REF=v0.1.0 imlazy gui                   # pin RavenGUI to a git ref
 GUI_OFFLINE=1 imlazy gui                    # reuse the existing clones
 TERMINAL_SKIP=1 imlazy gui                  # compositor only, no terminal
