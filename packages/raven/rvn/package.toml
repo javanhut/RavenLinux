@@ -28,7 +28,8 @@ build = ["rust", "cargo"]
 
 [install]
 files = [
-    { src = "target/x86_64-unknown-linux-musl/release/rvn", dest = "/usr/bin/rvn", mode = 755 }
+    { src = "target/x86_64-unknown-linux-musl/release/rvn", dest = "/usr/bin/rvn", mode = 755 },
+    { src = "target/x86_64-unknown-linux-musl/release/rvnd", dest = "/usr/bin/rvnd", mode = 755 }
 ]
 
 # No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS

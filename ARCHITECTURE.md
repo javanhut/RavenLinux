@@ -167,6 +167,15 @@ mode 0644, rewriting a file only when its text changes, and `raven-rc` reads
 those files instead of the socket when it is not root. The files are output
 only. Nothing an unprivileged process writes reaches PID 1.
 
+Packages follow the same shape as sleep: a verb granted by a group on a
+socket. `rvnd` (in RavenPackageManager) runs as root under raven-init and
+listens on `/run/rvn/ctl`, group `wheel`, mode 0660. An unprivileged `rvn
+install` sends one validated request over it and the daemon runs the ordinary
+rvn on the caller's behalf, with the caller as the build identity for AUR
+packages. Installing is root-equivalent, so the group is the administrators';
+what the socket buys is one door and no password per install, and a store
+that no longer has to spawn sudo.
+
 Waking is nobody's code: the power button and the lid are ACPI wakeup sources,
 and `raven-powerd` arms them at start so that a machine which sleeps can also
 be woken. Keyboards are deliberately not armed -- a laptop keyboard claims to

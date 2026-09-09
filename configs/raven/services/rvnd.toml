@@ -1,0 +1,21 @@
+# rvnd -- the package manager's privileged worker.
+#
+# Members of `wheel` install, remove and update packages without sudo: rvn
+# sends the request to this daemon over /run/rvn/ctl, a socket only that
+# group can open, and the daemon runs the ordinary rvn as root with the
+# client's connection as its output. The socket file's mode is the whole of
+# the access control. See RavenPackageManager's README, "Installing without
+# sudo".
+#
+# Ships enabled: the live image and an installed system both want it, and
+# with nobody in wheel (the installer adds the user when sudo is chosen) it
+# simply has no callers.
+[[services]]
+name = "rvnd"
+description = "Package installs for members of wheel, without sudo"
+exec = "/usr/bin/rvnd"
+args = []
+after = ["udev"]
+restart = true
+enabled = true
+critical = false
