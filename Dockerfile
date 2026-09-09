@@ -135,7 +135,10 @@ RUN pacman -Syu --noconfirm --needed \
         # stage warns and moves on, and the ISO ships with no X11 support at all.
         xorg-xwayland \
         # Full live-desktop audio, Bluetooth, and authorization runtime.
-        pipewire pipewire-audio pipewire-pulse wireplumber bluez bluez-utils \
+        # ell is only an optdepend of bluez-utils, but its btpclient links
+        # against libell and stage-desktop-runtime.py refuses any binary with
+        # an unresolved library rather than shipping something that cannot run.
+        pipewire pipewire-audio pipewire-pulse wireplumber bluez bluez-utils ell \
         alsa-ucm-conf alsa-topology-conf sof-firmware polkit \
         # The GTK4 stack -- SIX of the image's applications, and every one of
         # its graphical *applications* as opposed to its shell, is a GTK4 +
