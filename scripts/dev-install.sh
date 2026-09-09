@@ -218,6 +218,7 @@ do_installer_ui() {
 do_tools() {
     log_section "repo-sourced tools"
     install_file "${RAVEN_ROOT}/configs/raven-console-font" /usr/bin/raven-console-font 0755
+    install_file "${RAVEN_ROOT}/configs/raven-fstrim"       /usr/bin/raven-fstrim       0755
     install_file "${RAVEN_ROOT}/configs/raven-udev"         /usr/bin/raven-udev         0755
     install_file "${RAVEN_ROOT}/configs/raven-dhcp"         /usr/bin/raven-dhcp         0755
     install_file "${RAVEN_ROOT}/etc/raven/raven-shell"      /usr/bin/raven-shell        0755

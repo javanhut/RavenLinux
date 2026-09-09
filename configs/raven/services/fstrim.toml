@@ -1,0 +1,19 @@
+# raven-fstrim -- periodic TRIM for flash storage.
+#
+# The root is mounted without `discard`, deliberately: inline discards are
+# latency on the write path. So the free blocks get reported to the SSD
+# periodically instead, by this daemon, which sleeps nearly all the time and
+# runs fstrim at low priority once the stamp file is a week old. With no
+# cron on Raven this is what "weekly" looks like. Exits at once on the live
+# image, where there is nothing to trim.
+#
+# Policy is /etc/raven/fstrim.conf: INTERVAL_DAYS, ENABLED, BOOT_DELAY_SECS.
+[[services]]
+name = "fstrim"
+description = "Periodic TRIM for flash storage"
+exec = "/usr/bin/raven-fstrim"
+args = []
+after = ["udev"]
+restart = true
+enabled = true
+critical = false

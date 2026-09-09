@@ -1,0 +1,118 @@
+#!/bin/sh
+# =============================================================================
+# raven-fstrim -- periodic TRIM for the filesystems on flash storage
+# =============================================================================
+#
+# Ships at /usr/bin/raven-fstrim and runs as the `fstrim` raven-init service.
+#
+# An SSD that is never told which blocks are free fills up from its own point
+# of view, and once it has no spare blocks every write becomes a
+# read-modify-write. It happens over months, and nothing in a boot log
+# points at it. The root filesystem is mounted without `discard` on purpose
+# -- inline discards are latency spikes on the write path, which is the
+# wrong trade for a desktop -- so the free blocks have to be reported
+# periodically instead. That is this.
+#
+# There is no cron on Raven, and the machine may run for weeks without a
+# reboot, so this is a small daemon rather than a boot one-shot: it checks
+# whether a trim is due, does it if so, then sleeps and checks again. One
+# process, asleep nearly all the time, no timer to wire up. A trim is due
+# when the stamp file is older than the interval (default seven days).
+#
+#   raven-fstrim            daemon: wait a little after boot, trim when due, repeat
+#   raven-fstrim --once     trim if due, then exit (for scripts and tests)
+#   raven-fstrim --now      trim regardless of the stamp, then exit
+#
+# Configuration, all optional, in /etc/raven/fstrim.conf:
+#   INTERVAL_DAYS=7         days between trims
+#   ENABLED=yes             "no" disables the service without unwiring it
+#   BOOT_DELAY_SECS=300     how long after start to wait before the first check
+#
+# On the live image the root is a squashfs under an overlay and there is
+# nothing to trim, so the daemon exits at once with a note.
+
+CONF="${RAVEN_FSTRIM_CONF:-/etc/raven/fstrim.conf}"
+STAMP="${RAVEN_FSTRIM_STAMP:-/var/lib/raven/fstrim.stamp}"
+INTERVAL_DAYS=7
+ENABLED=yes
+BOOT_DELAY_SECS=300
+# How long the daemon sleeps between checks. An hour: a suspend that spans
+# the due moment is caught within an hour of resume, and 24 wakeups a day
+# is nothing.
+CHECK_SECS="${RAVEN_FSTRIM_CHECK_SECS:-3600}"
+
+# shellcheck disable=SC1090 -- the conf is the user's, in shell syntax
+[ -r "$CONF" ] && . "$CONF"
+
+mode=daemon
+case "${1:-}" in
+    --once) mode=once ;;
+    --now) mode=now ;;
+    "") ;;
+    -h|--help)
+        sed -n '/^# raven-fstrim/,/^$/p;/^#   raven-fstrim/,/^#$/p' "$0" | sed 's/^# \{0,1\}//'
+        exit 0
+        ;;
+    *) echo "raven-fstrim: unknown option $1" >&2; exit 2 ;;
+esac
+
+case "$ENABLED" in
+    [Nn]*|0|false|off)
+        echo "raven-fstrim: disabled by ${CONF}; not trimming."
+        exit 0
+        ;;
+esac
+
+# A live root is squashfs/overlay: nothing behind it takes a discard.
+rootfs="$(findmnt -no FSTYPE / 2>/dev/null || true)"
+case "$rootfs" in
+    overlay|squashfs|tmpfs)
+        echo "raven-fstrim: root is ${rootfs} (live media); nothing to trim."
+        exit 0
+        ;;
+esac
+
+command -v fstrim >/dev/null 2>&1 || {
+    echo "raven-fstrim: fstrim is not installed; nothing to do." >&2
+    exit 0
+}
+
+due() {
+    last=0
+    [ -e "$STAMP" ] && last="$(stat -c %Y "$STAMP" 2>/dev/null || echo 0)"
+    now="$(date +%s)"
+    [ $((now - last)) -ge $((INTERVAL_DAYS * 86400)) ]
+}
+
+# Low priority on both CPU and I/O: this must never be what makes the desktop
+# stutter. `fstrim -a` trims every mounted filesystem that supports it and
+# quietly skips the ones that do not, which is what makes it safe to run
+# without a list of mounts.
+trim() {
+    echo "raven-fstrim: trimming ($(date '+%Y-%m-%d %H:%M'))"
+    if ionice -c 3 nice -n 19 fstrim -av; then
+        mkdir -p "$(dirname "$STAMP")"
+        touch "$STAMP"
+        echo "raven-fstrim: done; next in ${INTERVAL_DAYS} days"
+        return 0
+    fi
+    echo "raven-fstrim: fstrim failed; will try again at the next check" >&2
+    return 1
+}
+
+case "$mode" in
+    now) trim; exit $? ;;
+    once)
+        if due; then trim; exit $?; fi
+        echo "raven-fstrim: not due (last trim under ${INTERVAL_DAYS} days ago)"
+        exit 0
+        ;;
+esac
+
+# Daemon. The first check waits so a trim never competes with the session
+# starting up.
+sleep "$BOOT_DELAY_SECS"
+while :; do
+    if due; then trim || true; fi
+    sleep "$CHECK_SECS"
+done

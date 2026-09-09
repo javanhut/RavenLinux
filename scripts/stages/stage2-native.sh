@@ -132,6 +132,9 @@ copy_system_utils() {
         # make the kernel reread the table, findmnt identifies the boot media,
         # and losetup mounts the squashfs it copies from.
         sfdisk sgdisk wipefs partx partprobe blockdev losetup findmnt
+        # raven-fstrim: report free blocks to flash storage once a week, at
+        # idle I/O and CPU priority.
+        fstrim ionice
         mkswap swapon swapoff
         # Filesystem creation beyond the ext4/vfat pair above, when the host has
         # them. raven-install offers whichever ones are present.
@@ -955,6 +958,24 @@ install_raven_udev() {
     if [[ ! -x "${SYSROOT_DIR}/usr/bin/udevd" ]]; then
         log_warn "  udevd is not in the sysroot; modules will not autoload"
         log_warn "  It comes from systemd/eudev on the build host"
+    fi
+}
+
+install_raven_fstrim() {
+    local src="${PROJECT_ROOT}/configs/raven-fstrim"
+
+    if [[ ! -f "${src}" ]]; then
+        log_warn "  configs/raven-fstrim is missing; flash storage will never be trimmed"
+        return 0
+    fi
+
+    # The fstrim service template names /usr/bin/raven-fstrim; stage4's
+    # activate_service_templates turns it into a drop-in once this exists.
+    install -D -m 0755 "${src}" "${SYSROOT_DIR}/usr/bin/raven-fstrim"
+    log_info "  Installed raven-fstrim"
+
+    if [[ ! -x "${SYSROOT_DIR}/usr/bin/fstrim" ]]; then
+        log_warn "  fstrim is not in the sysroot; raven-fstrim will find nothing to run"
     fi
 }
 
@@ -3527,6 +3548,7 @@ main() {
     # The init.toml entry points that ride on what copy_system_utils staged.
     install_raven_udev
     install_raven_console_font
+    install_raven_fstrim
     copy_networking
     setup_pam_and_nss
     if [[ "${RAVEN_ENABLE_SUDO}" == "1" ]]; then

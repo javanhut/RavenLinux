@@ -43,3 +43,24 @@ in the script.
 
 `vm.swappiness` stays at the kernel default. With zswap in front of the
 partition the old advice to lower it no longer applies.
+
+## SSD trim
+
+The root filesystem is mounted without `discard`, on purpose: an inline
+discard is latency on the write path, which is the wrong trade for a desktop.
+Free blocks are reported to the drive periodically instead, by the `fstrim`
+service (`configs/raven-fstrim`, template `configs/raven/services/fstrim.toml`).
+It is a small daemon rather than a cron entry, because Raven has no cron and a
+laptop may run for weeks without a reboot: it waits five minutes after start,
+then runs `fstrim -av` at idle I/O and lowest CPU priority whenever the stamp
+file `/var/lib/raven/fstrim.stamp` is older than seven days, and sleeps an
+hour between checks. On the live image it exits at once; there is nothing
+behind a squashfs to trim.
+
+```
+raven-rc status fstrim                 # running; the log says when it last trimmed
+cat /var/log/raven/fstrim.log
+sudo raven-fstrim --now                # trim right now, regardless of the stamp
+```
+
+Policy in `/etc/raven/fstrim.conf`: `INTERVAL_DAYS`, `ENABLED`, `BOOT_DELAY_SECS`.
