@@ -27,6 +27,7 @@ mod overrides;
 mod power;
 mod reexec;
 mod service;
+mod timeline;
 mod user;
 
 use config::{InitConfig, ServiceConfig};
@@ -56,6 +57,7 @@ fn main() {
     // Initialize logging
     init_logging();
 
+    timeline::mark("init started");
     log::info!("RavenInit starting...");
 
     // Run the init sequence
@@ -84,7 +86,14 @@ impl log::Log for DualLogger {
         if !self.enabled(record.metadata()) {
             return;
         }
-        let line = format!("[raven-init] {}: {}\n", record.level(), record.args());
+        // Stamped with seconds since the kernel started, dmesg's clock, so
+        // a slow boot can be read off the log instead of guessed at.
+        let line = format!(
+            "[raven-init] [{:9.3}] {}: {}\n",
+            timeline::monotonic_secs(),
+            record.level(),
+            record.args()
+        );
         // The console shows only what needs a human: WARN and ERROR. INFO
         // lines -- every "Started service", every clean exit -- go to the log
         // file alone, because after the gettys are up the console belongs to
@@ -344,6 +353,7 @@ fn run_init() -> Result<()> {
         None => {
             log::info!("Phase 5: Starting services");
             let services = start_services(&config)?;
+            timeline::mark("services started");
 
             // seatd and the compositor are started back to back, and the
             // compositor connects to /run/seatd.sock the moment it starts.
@@ -364,6 +374,7 @@ fn run_init() -> Result<()> {
 
     // Phase 6: Main loop - reap zombies and handle signals
     log::info!("Phase 6: Entering main loop");
+    timeline::mark("main loop");
     loop {
         match main_loop(&mut services, &mut config)? {
             LoopExit::Shutdown => break,
@@ -575,6 +586,7 @@ fn mount_essential_filesystems() -> Result<()> {
     }
 
     log::info!("Essential filesystems mounted");
+    timeline::mark("filesystems mounted");
     Ok(())
 }
 
@@ -893,7 +905,7 @@ fn setup_signal_handlers() -> Result<()> {
 }
 
 fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
-    let mut services = HashMap::new();
+    let mut services: HashMap<String, Service> = HashMap::new();
     let mut pending: Vec<&ServiceConfig> = config.services.iter().filter(|s| s.enabled).collect();
     let mut unavailable: Vec<String> = Vec::new();
 
@@ -924,7 +936,13 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
             for dependency in &svc_config.after {
                 if let Some(dep_cfg) = config.services.iter().find(|s| &s.name == dependency) {
                     if let Some(path) = dep_cfg.ready_path.as_deref() {
-                        if !wait_for_ready_path(path, dep_cfg.ready_timeout) {
+                        let ready = wait_for_ready_path(path, dep_cfg.ready_timeout);
+                        if ready {
+                            if let Some(dep) = services.get_mut(dependency) {
+                                dep.mark_ready();
+                            }
+                        }
+                        if !ready {
                             log::error!(
                                 "Service {} skipped: {} did not become ready at {}",
                                 svc_config.name,
@@ -1163,6 +1181,9 @@ fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -
                 }
             }
         }
+
+        // Ready paths nobody waited on still get a time in `blame`.
+        control::observe_readiness(services);
 
         // After poll, so a start or stop just requested is visible at once.
         status.publish(services, config);

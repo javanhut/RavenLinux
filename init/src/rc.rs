@@ -3,6 +3,7 @@
 //! Commands:
 //!   list             - List every service and its state
 //!   status [NAME]    - System status, or one service in detail
+//!   blame            - Boot timeline: when each service started and was ready, slowest first
 //!   start NAME       - Start a stopped service
 //!   stop NAME        - Stop a running service, and keep it stopped
 //!   restart NAME     - Stop then start a service
@@ -33,8 +34,9 @@ use std::time::Duration;
 /// Where raven-init listens. Must match control::SOCKET_PATH.
 const SOCKET_PATH: &str = "/run/raven-init.sock";
 
-/// Where raven-init publishes the text of `list` (`status`) and `status NAME`
-/// (`services/NAME`), mode 0644. Must match control::STATUS_DIR.
+/// Where raven-init publishes the text of `list` (`status`), `status NAME`
+/// (`services/NAME`) and `blame` (`blame`), mode 0644. Must match
+/// control::STATUS_DIR.
 const STATUS_DIR: &str = "/run/raven-init";
 
 /// Connection and write operations should fail quickly when PID 1 is absent.
@@ -70,6 +72,11 @@ const SERVICE_VERBS: &[(&str, Arity, &str)] = &[
         "status",
         Arity::Optional,
         "System status, or one service in detail",
+    ),
+    (
+        "blame",
+        Arity::None,
+        "Boot timeline: service start and ready times, slowest first",
     ),
     ("start", Arity::Required, "Start a stopped service"),
     (
@@ -258,6 +265,7 @@ fn read_published(request: &str) -> Option<String> {
     let mut parts = request.split_whitespace();
     let path = match (parts.next(), parts.next(), parts.next()) {
         (Some("list"), None, _) | (Some("status"), None, _) => format!("{}/status", STATUS_DIR),
+        (Some("blame"), None, _) => format!("{}/blame", STATUS_DIR),
         (Some("status"), Some(name), None) => {
             if name.contains('/') || name.starts_with('.') {
                 return Some(format!("error: no such service '{}'\n", name));

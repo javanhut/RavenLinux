@@ -234,6 +234,7 @@ mod tests {
             uptime_secs: 42,
             restart_count: 3,
             manually_stopped: pid.is_none(),
+            ready_secs_ago: None,
         }
     }
 

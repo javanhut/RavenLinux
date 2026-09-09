@@ -26,6 +26,9 @@ mod overrides;
 // test binary the crate root is this file, so those paths resolve here.
 use config as _config_for_control;
 use service as _service_for_control;
+// `blame` reads the boot clock and milestones through `crate::timeline`.
+#[path = "../src/timeline.rs"]
+mod timeline;
 // The `reexec` verb checks its target through `crate::reexec` before replying.
 #[path = "../src/reexec.rs"]
 mod reexec;
@@ -1641,5 +1644,112 @@ fn published_status_tracks_service_state_without_the_socket() {
         "file for a removed service should be gone"
     );
 
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn blame_reports_start_and_ready_times_slowest_first() {
+    let dir = format!(
+        "{}/raven-init-test-blame-{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // One service with a ready path, one without.
+    let ready_file = format!("{dir}/ready.sock");
+    let mut with_path = sleeper("blame-ready");
+    with_path.ready_path = Some(ready_file.clone());
+    let plain = sleeper("blame-plain");
+    let mut cfg = config_with(vec![with_path.clone(), plain.clone()]);
+
+    let mut services = HashMap::new();
+    services.insert(
+        "blame-ready".to_string(),
+        Service::start(&with_path).expect("starts"),
+    );
+    services.insert(
+        "blame-plain".to_string(),
+        Service::start(&plain).expect("starts"),
+    );
+
+    // Nothing is ready yet: the path does not exist. A milestone recorded
+    // before the request shows up above the table.
+    timeline::mark("test milestone");
+    control::observe_readiness(&mut services);
+    let (reply, _) = control::dispatch("blame", &mut services, &mut cfg);
+    assert!(reply.contains("SERVICE"), "{reply}");
+    assert!(reply.contains("test milestone"), "{reply}");
+    assert!(reply.contains("not ready yet"), "{reply}");
+    assert!(reply.contains("no ready path"), "{reply}");
+
+    // The daemon "creates its socket"; the next tick notices.
+    std::thread::sleep(Duration::from_millis(30));
+    std::fs::write(&ready_file, b"").unwrap();
+    control::observe_readiness(&mut services);
+    let (reply, _) = control::dispatch("blame", &mut services, &mut cfg);
+    let ready_line = reply
+        .lines()
+        .find(|l| l.starts_with("blame-ready"))
+        .expect("a row for the ready service");
+    let cols: Vec<&str> = ready_line.split_whitespace().collect();
+    // name, started, ready, took
+    assert!(cols.len() >= 4, "{ready_line}");
+    let started: f64 = cols[1].parse().expect("started is a number");
+    let ready: f64 = cols[2].parse().expect("ready is a number");
+    let took: f64 = cols[3].parse().expect("took is a number");
+    assert!(ready >= started, "{ready_line}");
+    assert!(
+        took >= 0.03 && took < 5.0,
+        "took should be about the sleep: {ready_line}"
+    );
+    // Slowest-to-ready first: the row with a took precedes the one without.
+    let pos_ready = reply.find("blame-ready").unwrap();
+    let pos_plain = reply.find("blame-plain").unwrap();
+    assert!(pos_ready < pos_plain, "{reply}");
+    assert!(reply.contains("span"), "{reply}");
+
+    // Published for readers without root, alongside status.
+    let mut publisher = control::StatusPublisher::at(format!("{dir}/pub"));
+    publisher.publish(&services, &cfg);
+    let published =
+        std::fs::read_to_string(format!("{dir}/pub/blame")).expect("blame published");
+    assert!(published.contains("blame-ready"), "{published}");
+
+    for svc in services.values_mut() {
+        svc.kill();
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn ready_time_survives_a_snapshot() {
+    let dir = format!(
+        "{}/raven-init-test-snap-{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    let ready_file = format!("{dir}/ready.sock");
+    let mut cfg_svc = sleeper("snap-ready");
+    cfg_svc.ready_path = Some(ready_file.clone());
+    let mut svc = Service::start(&cfg_svc).expect("starts");
+    std::fs::write(&ready_file, b"").unwrap();
+    assert!(svc.note_ready_if_present());
+    assert!(
+        !svc.note_ready_if_present(),
+        "second look must not reset the first time"
+    );
+    let first = svc.ready_at();
+    std::thread::sleep(Duration::from_millis(5));
+    svc.mark_ready();
+    assert_eq!(svc.ready_at(), first, "mark_ready must keep the first time");
+    let snap = svc.snapshot();
+    assert!(snap.ready_secs_ago.is_some());
+    let adopted = Service::adopt(snap, cfg_svc);
+    assert!(adopted.ready_at().is_some(), "ready time lost across adopt");
+    svc.kill();
     std::fs::remove_dir_all(&dir).ok();
 }

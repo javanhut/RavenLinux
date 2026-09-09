@@ -185,6 +185,10 @@ pub struct ServiceSnapshot {
     pub restart_count: u32,
     #[serde(default)]
     pub manually_stopped: bool,
+    /// Seconds since the service's ready path was first seen, if it has one
+    /// and it has appeared. Carried across so `blame` keeps its numbers.
+    #[serde(default)]
+    pub ready_secs_ago: Option<u64>,
 }
 
 /// A managed service
@@ -207,6 +211,9 @@ pub struct Service {
     last_restart: Option<Instant>,
     /// When the current run was started, for measuring how long it lasted.
     started_at: Option<Instant>,
+    /// When `config.ready_path` was first seen to exist for this run, if
+    /// ever. What `raven-rc blame` reports as the service's ready time.
+    ready_at: Option<Instant>,
     /// When the current run died, for the same measurement.
     exited_at: Option<Instant>,
     /// When the pending restart is due, once the backoff has been decided.
@@ -240,6 +247,7 @@ impl Service {
             restart_count: 0,
             last_restart: None,
             started_at: None,
+            ready_at: None,
             exited_at: None,
             retry_at: None,
             manually_stopped: false,
@@ -264,6 +272,7 @@ impl Service {
                 .unwrap_or(0),
             restart_count: self.restart_count,
             manually_stopped: self.manually_stopped,
+            ready_secs_ago: self.ready_at.map(|t| t.elapsed().as_secs()),
         }
     }
 
@@ -288,6 +297,9 @@ impl Service {
             .filter(|pid| signal::kill(*pid, None).is_ok());
 
         let started_at = now.checked_sub(Duration::from_secs(snapshot.uptime_secs));
+        let ready_at = snapshot
+            .ready_secs_ago
+            .and_then(|s| now.checked_sub(Duration::from_secs(s)));
 
         match alive {
             Some(pid) => Self {
@@ -300,6 +312,7 @@ impl Service {
                 restart_count: snapshot.restart_count,
                 last_restart: None,
                 started_at,
+                ready_at,
                 exited_at: None,
                 retry_at: None,
                 manually_stopped: false,
@@ -318,6 +331,7 @@ impl Service {
                 restart_count: snapshot.restart_count,
                 last_restart: None,
                 started_at,
+                ready_at: None,
                 exited_at: if snapshot.pid.is_some() { Some(now) } else { None },
                 retry_at: None,
                 manually_stopped: snapshot.manually_stopped,
@@ -455,6 +469,7 @@ impl Service {
         self.pid = Some(pid);
         self.state = ServiceState::Running;
         self.started_at = Some(Instant::now());
+        self.ready_at = None;
         self.exited_at = None;
         self.exit_status = None;
         self.exit_signal = None;
@@ -514,6 +529,7 @@ impl Service {
                 // Parent process - just record the child PID
                 self.pid = Some(child);
                 self.started_at = Some(Instant::now());
+                self.ready_at = None;
                 self.exited_at = None;
                 self.child = None; // We don't have a Child handle when using fork directly
                 self.state = ServiceState::Running;
@@ -944,6 +960,45 @@ impl Service {
     }
 
     /// Human-readable description from the service's config.
+    /// When the current run was started.
+    pub fn started_at(&self) -> Option<Instant> {
+        self.started_at
+    }
+
+    /// The path that proves this service ready, if its definition names one.
+    pub fn ready_path(&self) -> Option<&str> {
+        self.config.ready_path.as_deref()
+    }
+
+    /// When the ready path was first seen for this run, if it has been.
+    pub fn ready_at(&self) -> Option<Instant> {
+        self.ready_at
+    }
+
+    /// Record that the ready path has been seen. Idempotent: the first time
+    /// wins, because that is the number a boot timeline wants.
+    pub fn mark_ready(&mut self) {
+        if self.ready_at.is_none() {
+            self.ready_at = Some(Instant::now());
+        }
+    }
+
+    /// Check the ready path once, without waiting, and record it if present.
+    /// Returns true the first time it is seen. Cheap enough for the main
+    /// loop: one stat per service that has a path and is not yet ready.
+    pub fn note_ready_if_present(&mut self) -> bool {
+        if self.ready_at.is_some() || !self.is_running() {
+            return false;
+        }
+        match self.config.ready_path.as_deref() {
+            Some(path) if std::path::Path::new(path).exists() => {
+                self.ready_at = Some(Instant::now());
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn description(&self) -> &str {
         &self.config.description
     }

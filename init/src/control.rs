@@ -54,7 +54,8 @@ use crate::service::{Service, ServiceState};
 pub const SOCKET_PATH: &str = "/run/raven-init.sock";
 
 /// Where init publishes the text of `list` and `status NAME` for readers
-/// without root: `status` holds the list, `services/NAME` one service each.
+/// without root: `status` holds the list, `services/NAME` one service each,
+/// `blame` the boot timeline.
 /// Must match the constant of the same name in rc.rs.
 pub const STATUS_DIR: &str = "/run/raven-init";
 
@@ -206,6 +207,8 @@ pub fn dispatch(
         "enable" => with_target(target, verb, |name| set_enabled(name, true, config)),
         "disable" => with_target(target, verb, |name| set_enabled(name, false, config)),
 
+        "blame" => (blame_services(services, config), Action::None),
+
         "reload" => (reload_config(services, config), Action::None),
 
         "start" => with_target(target, verb, |name| start_service(name, services, config)),
@@ -235,7 +238,7 @@ pub fn dispatch(
         other => (
             format!(
                 "error: unknown command '{}'\n\
-                 commands: list, status [NAME], start NAME, stop NAME, restart NAME, \
+                 commands: list, status [NAME], blame, start NAME, stop NAME, restart NAME, \
                  enable NAME, disable NAME, reload, reexec, suspend, poweroff, reboot, halt\n",
                 other
             ),
@@ -328,6 +331,123 @@ fn list_services(services: &HashMap<String, Service>, config: &InitConfig) -> St
         ));
     }
 
+    out
+}
+
+/// Look at every running service's ready path once and record the ones that
+/// have appeared. Called once per main-loop tick, so a service nobody waits
+/// on (nothing lists it in `after`) still gets a ready time.
+pub fn observe_readiness(services: &mut HashMap<String, Service>) {
+    for (name, svc) in services.iter_mut() {
+        if svc.note_ready_if_present() {
+            log::info!(
+                "Service {} is ready at {}",
+                name,
+                svc.ready_path().unwrap_or("?")
+            );
+        }
+    }
+}
+
+/// The boot timeline: when init got where, and when each service started
+/// and became ready, slowest first. Seconds since the kernel started, so
+/// the numbers line up with dmesg.
+fn blame_services(services: &HashMap<String, Service>, config: &InitConfig) -> String {
+    let mut out = String::new();
+    out.push_str("Seconds since the kernel started. Milestones are this raven-init's; a\n");
+    out.push_str("re-exec restarts them, service times carry across.\n\n");
+
+    for (name, at) in crate::timeline::milestones() {
+        out.push_str(&format!("  {:<22} {:>9.3}\n", name, at));
+    }
+    out.push('\n');
+
+    struct Row {
+        name: String,
+        started: Option<f64>,
+        ready: Option<f64>,
+        took: Option<f64>,
+        note: &'static str,
+    }
+
+    let mut rows: Vec<Row> = Vec::new();
+    // Config order for the base set, then anything running the config does
+    // not mention, the same set `list` shows.
+    let mut names: Vec<String> = config.services.iter().map(|c| c.name.clone()).collect();
+    for name in services.keys() {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    for name in names {
+        let Some(svc) = services.get(&name) else {
+            continue;
+        };
+        let started = svc.started_at().map(crate::timeline::instant_secs);
+        let ready = svc.ready_at().map(crate::timeline::instant_secs);
+        let took = match (started, ready) {
+            (Some(s), Some(r)) => Some((r - s).max(0.0)),
+            _ => None,
+        };
+        let note = match (svc.ready_path(), ready, svc.is_running()) {
+            (None, _, _) => "no ready path",
+            (Some(_), Some(_), _) => "",
+            (Some(_), None, true) => "not ready yet",
+            (Some(_), None, false) => "exited before ready",
+        };
+        rows.push(Row {
+            name,
+            started,
+            ready,
+            took,
+            note,
+        });
+    }
+
+    // Slowest to become ready first; then the ones still waiting; then the
+    // rest in start order. The top line is the culprit.
+    rows.sort_by(|a, b| match (a.took, b.took) {
+        (Some(x), Some(y)) => y.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a
+            .started
+            .partial_cmp(&b.started)
+            .unwrap_or(std::cmp::Ordering::Equal),
+    });
+
+    out.push_str("SERVICE              STARTED    READY      TOOK       NOTE\n");
+    let fmt = |v: Option<f64>| {
+        v.map(|x| format!("{:.3}", x))
+            .unwrap_or_else(|| "-".to_string())
+    };
+    for r in &rows {
+        out.push_str(&format!(
+            "{:<20} {:>9}  {:>9}  {:>9}  {}\n",
+            r.name,
+            fmt(r.started),
+            fmt(r.ready),
+            fmt(r.took),
+            r.note
+        ));
+    }
+
+    let first = rows
+        .iter()
+        .filter_map(|r| r.started)
+        .fold(f64::INFINITY, f64::min);
+    let last = rows
+        .iter()
+        .filter_map(|r| r.ready.or(r.started))
+        .fold(f64::NEG_INFINITY, f64::max);
+    if first.is_finite() && last.is_finite() {
+        out.push_str(&format!(
+            "\nservices: first start {:.3}, last ready {:.3}, span {:.3}s\n",
+            first,
+            last,
+            last - first
+        ));
+    }
     out
 }
 
@@ -951,6 +1071,7 @@ fn write_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> 
 pub struct StatusPublisher {
     dir: PathBuf,
     list: Option<String>,
+    blame: Option<String>,
     services: HashMap<String, String>,
     warned: bool,
 }
@@ -967,6 +1088,7 @@ impl StatusPublisher {
         StatusPublisher {
             dir: dir.into(),
             list: None,
+            blame: None,
             services: HashMap::new(),
             warned: false,
         }
@@ -1000,6 +1122,12 @@ impl StatusPublisher {
         if self.list.as_deref() != Some(list.as_str()) {
             write_published(&self.dir.join("status"), &list)?;
             self.list = Some(list);
+        }
+
+        let blame = blame_services(services, config);
+        if self.blame.as_deref() != Some(blame.as_str()) {
+            write_published(&self.dir.join("blame"), &blame)?;
+            self.blame = Some(blame);
         }
 
         // Config order first, then anything running that the config does not
