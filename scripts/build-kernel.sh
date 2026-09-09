@@ -550,6 +550,11 @@ generate_config() {
     $config_script --enable SMP
     $config_script --set-val NR_CPUS 256
 
+    # Pressure accounting, compressed swap, hugepages on request, and the
+    # PCIe ASPM policy. In their own script so the restore path below can
+    # apply the same floor to a saved config.
+    bash "${SCRIPT_DIR}/kernel-performance.sh" "$KERNEL_BUILD_DIR"
+
     # Update config with defaults for new options
     make olddefconfig
 
@@ -772,6 +777,7 @@ main() {
             # not drop below, whatever menuconfig or a kernel bump did to it.
             # Idempotent: on a config that already has it this is a no-op.
             bash "${SCRIPT_DIR}/kernel-ports.sh" "$KERNEL_BUILD_DIR"
+            bash "${SCRIPT_DIR}/kernel-performance.sh" "$KERNEL_BUILD_DIR"
             make olddefconfig
             log_success "Kernel config restored from ${CONFIG_DIR}/config-${KERNEL_VERSION}-raven"
         else

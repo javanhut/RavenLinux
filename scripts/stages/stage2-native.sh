@@ -2766,17 +2766,23 @@ EOF
 
     # Host side of the same link. rtw88_pci.disable_aspm only stops the chip
     # from requesting L1; the root port still parks the link in L1 on its own
-    # (CONFIG_PCIEASPM_DEFAULT keeps whatever the BIOS programmed). On the ASUS
-    # ROG test laptop the RTL8821CE powers on once at probe, and every power-on
-    # after its first power-off then fails "power ready" (poll offset=0x6) --
-    # with the chip-side knob already off. "performance" disables ASPM on every
-    # link, the runtime equivalent of pcie_aspm=off on the command line.
-    # Applied by raven-init before the card is probed (pcie_aspm is built in).
+    # unless the kernel's ASPM policy says otherwise. On the ASUS ROG test
+    # laptop the RTL8821CE powers on once at probe, and every power-on after
+    # its first power-off then fails "power ready" (poll offset=0x6) -- with
+    # the chip-side knob already off. "performance" disables ASPM on every
+    # link. That policy is now compiled in (CONFIG_PCIEASPM_PERFORMANCE, see
+    # scripts/kernel-performance.sh): the modprobe.d line that used to carry
+    # it was written into a read-only parameter by raven-init at every boot,
+    # which could only ever warn. The file stays, as the place to look, and
+    # as the place to be told where a different policy goes.
     cat > "${SYSROOT_DIR}/etc/modprobe.d/pcie-aspm.conf" << 'EOF'
 # RavenLinux: PCIe ASPM policy
-# Realtek RTL8821CE fails to power on again behind a link the host holds in L1.
-# pcie_aspm is built in; raven-init applies this line at boot (modprobe never sees it).
-options pcie_aspm policy=performance
+# Realtek RTL8821CE fails to power on again behind a link the host holds in L1,
+# so the kernel is built with CONFIG_PCIEASPM_PERFORMANCE (ASPM off on every
+# link). pcie_aspm.policy is read-only once the kernel is up; to choose another
+# policy, pass pcie_aspm.policy=default (or powersave) on the kernel command
+# line. There is deliberately no `options` line here: raven-init would try to
+# apply it and could only warn.
 EOF
 
     # asus-wmi / asus-nb-wmi were not in the kernel config of the last build
