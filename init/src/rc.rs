@@ -17,6 +17,10 @@
 //! Service commands go over the control socket at /run/raven-init.sock and
 //! need raven-init to be PID 1. Shutdown commands fall back to the command
 //! file and then to the reboot syscall, so they still work when it is not.
+//!
+//! The socket is root-only. `list` and `status` do not need it: raven-init
+//! publishes their text under /run/raven-init, world-readable, and this tool
+//! reads that when it is not running as root. Everything else needs sudo.
 
 use std::env;
 use std::fs;
@@ -28,6 +32,10 @@ use std::time::Duration;
 
 /// Where raven-init listens. Must match control::SOCKET_PATH.
 const SOCKET_PATH: &str = "/run/raven-init.sock";
+
+/// Where raven-init publishes the text of `list` (`status`) and `status NAME`
+/// (`services/NAME`), mode 0644. Must match control::STATUS_DIR.
+const STATUS_DIR: &str = "/run/raven-init";
 
 /// Connection and write operations should fail quickly when PID 1 is absent.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -180,6 +188,16 @@ fn main() {
 
 /// Send one request to init and return its reply.
 fn ask(request: &str) -> Result<String, String> {
+    // A question from an unprivileged user is answered from what init has
+    // published, never from the socket. Root keeps the live path, and so does
+    // anyone on a raven-init too old to publish, who then gets the socket's
+    // own permission-denied diagnosis below.
+    if !is_root() {
+        if let Some(reply) = read_published(request) {
+            return Ok(reply);
+        }
+    }
+
     let mut stream = UnixStream::connect(SOCKET_PATH).map_err(|e| {
         // These two failures look alike and mean opposite things, so name
         // them. ECONNREFUSED in particular says the socket file is still
@@ -202,8 +220,9 @@ fn ask(request: &str) -> Result<String, String> {
             ),
             ErrorKind::PermissionDenied => format!(
                 "permission denied on {}. The control socket is root-only;\n\
-                 try again with sudo.",
-                SOCKET_PATH
+                 try again with sudo. (`list` and `status` work without root once\n\
+                 raven-init publishes {}; this one has not.)",
+                SOCKET_PATH, STATUS_DIR
             ),
             _ => format!("cannot reach raven-init on {}: {}", SOCKET_PATH, e),
         };
@@ -224,6 +243,36 @@ fn ask(request: &str) -> Result<String, String> {
         .map_err(|e| format!("cannot read from raven-init: {}", e))?;
 
     Ok(reply)
+}
+
+fn is_root() -> bool {
+    nix::unistd::geteuid().is_root()
+}
+
+/// The published answer to a read-only request, or None when the request is
+/// not one (`start`, `stop`, ...) or nothing has been published.
+///
+/// A missing `services/NAME` under a present directory is reported the way
+/// init would report it over the socket, so scripts see the same text.
+fn read_published(request: &str) -> Option<String> {
+    let mut parts = request.split_whitespace();
+    let path = match (parts.next(), parts.next(), parts.next()) {
+        (Some("list"), None, _) | (Some("status"), None, _) => format!("{}/status", STATUS_DIR),
+        (Some("status"), Some(name), None) => {
+            if name.contains('/') || name.starts_with('.') {
+                return Some(format!("error: no such service '{}'\n", name));
+            }
+            match fs::read_to_string(format!("{}/services/{}", STATUS_DIR, name)) {
+                Ok(text) => return Some(text),
+                Err(e) if e.kind() == ErrorKind::NotFound && Path::new(STATUS_DIR).is_dir() => {
+                    return Some(format!("error: no such service '{}'\n", name));
+                }
+                Err(_) => return None,
+            }
+        }
+        _ => return None,
+    };
+    fs::read_to_string(path).ok()
 }
 
 /// Send a request, print the reply, and exit non-zero if init reported an error.

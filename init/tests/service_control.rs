@@ -1584,3 +1584,62 @@ fn a_manually_stopped_service_stays_stopped_across_adoption() {
     assert!(adopted.is_manually_stopped());
     assert_eq!(adopted.state(), service::ServiceState::Stopped);
 }
+
+#[test]
+fn published_status_tracks_service_state_without_the_socket() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = format!(
+        "{}/raven-init-test-status-{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+
+    let cfg_svc = sleeper("pub-svc");
+    let mut cfg = config_with(vec![cfg_svc.clone()]);
+    let mut services = HashMap::new();
+    services.insert(
+        "pub-svc".to_string(),
+        Service::start(&cfg_svc).expect("starts"),
+    );
+
+    let mut publisher = control::StatusPublisher::at(&dir);
+    publisher.publish(&services, &cfg);
+
+    let list = std::fs::read_to_string(format!("{dir}/status")).expect("list published");
+    assert!(list.contains("pub-svc"), "{list}");
+    assert!(list.contains("running"), "{list}");
+    let one = std::fs::read_to_string(format!("{dir}/services/pub-svc")).expect("service published");
+    assert!(one.contains("state        running"), "{one}");
+
+    // World-readable, which is the point.
+    let mode = std::fs::metadata(format!("{dir}/status")).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o644, "status file mode");
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o755, "status dir mode");
+
+    // A change over the socket path shows up on the next publish, once the
+    // main loop has reaped the exit (poll_exit stands in for the reaper here).
+    let pid = services["pub-svc"].pid().expect("has a pid").as_raw();
+    let (reply, _) = control::dispatch("stop pub-svc", &mut services, &mut cfg);
+    assert!(!reply.starts_with("error:"), "{reply}");
+    assert!(wait_gone(pid, Duration::from_secs(5)), "process should exit");
+    services.get_mut("pub-svc").unwrap().poll_exit();
+    publisher.publish(&services, &cfg);
+    let one = std::fs::read_to_string(format!("{dir}/services/pub-svc")).expect("service published");
+    assert!(one.contains("stopped (by request)"), "{one}");
+    let list = std::fs::read_to_string(format!("{dir}/status")).expect("list published");
+    assert!(list.contains("stopped (by request)"), "{list}");
+
+    // A service that leaves the configuration loses its file.
+    services.remove("pub-svc");
+    cfg.services.clear();
+    publisher.publish(&services, &cfg);
+    assert!(
+        !std::path::Path::new(&format!("{dir}/services/pub-svc")).exists(),
+        "file for a removed service should be gone"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

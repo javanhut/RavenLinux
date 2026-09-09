@@ -160,6 +160,13 @@ because the session already holds that group for the DRM device, so the right
 to sleep the machine follows the right to draw on it without a group invented
 for the purpose.
 
+What an unprivileged user *can* do with init is read. `raven-rc list` and
+`raven-rc status` need no root: init publishes the text those would return to
+`/run/raven-init/` (`status` for the list, `services/NAME` for one service),
+mode 0644, rewriting a file only when its text changes, and `raven-rc` reads
+those files instead of the socket when it is not root. The files are output
+only. Nothing an unprivileged process writes reaches PID 1.
+
 Waking is nobody's code: the power button and the lid are ACPI wakeup sources,
 and `raven-powerd` arms them at start so that a machine which sleeps can also
 be woken. Keyboards are deliberately not armed -- a laptop keyboard claims to

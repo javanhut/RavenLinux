@@ -1106,6 +1106,11 @@ fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -
     // The sleep marker, before anything can watch it. See power.rs.
     power::publish_at_boot();
 
+    // What `raven-rc list` and `status` say, published for readers without
+    // root. See control::StatusPublisher.
+    let mut status = control::StatusPublisher::new();
+    status.publish(services, config);
+
     log::info!("Entering main loop");
 
     loop {
@@ -1158,6 +1163,9 @@ fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -
                 }
             }
         }
+
+        // After poll, so a start or stop just requested is visible at once.
+        status.publish(services, config);
 
         // Kept alongside the socket: one word in a file needs no client at all,
         // which is worth having when the socket is what is broken.

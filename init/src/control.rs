@@ -23,13 +23,26 @@
 //!   * requests are length-capped before they are parsed.
 //!
 //! The socket is mode 0600. It starts and stops services, so it is root-only.
+//!
+//! # Reading without root
+//!
+//! `list` and `status NAME` are questions, not orders, and an operator with
+//! a plain shell should not need sudo to ask them. Rather than open the
+//! socket to everyone and sort callers by uid -- which would still hand an
+//! unprivileged session a socket into PID 1, the thing ARCHITECTURE.md says
+//! it must never hold -- init publishes the *answers*: [`StatusPublisher`]
+//! writes the text `list` and `status NAME` would return to files under
+//! [`STATUS_DIR`], mode 0644, and rewrites each one only when its text
+//! changes. raven-rc reads those when it is not root. Nothing flows the other
+//! way: the files are output, the socket is the only input, and it stays
+//! root-only.
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -39,6 +52,11 @@ use crate::service::{Service, ServiceState};
 
 /// Where raven-rc looks for us.
 pub const SOCKET_PATH: &str = "/run/raven-init.sock";
+
+/// Where init publishes the text of `list` and `status NAME` for readers
+/// without root: `status` holds the list, `services/NAME` one service each.
+/// Must match the constant of the same name in rc.rs.
+pub const STATUS_DIR: &str = "/run/raven-init";
 
 /// Longest request we will read. Generous for `restart some-service-name`.
 const MAX_REQUEST: usize = 1024;
@@ -920,4 +938,118 @@ fn write_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> 
     }
 
     result
+}
+
+/// Publishes what `list` and `status NAME` would say to [`STATUS_DIR`].
+///
+/// Called once per main-loop tick. Renders the same text the socket would
+/// return and writes a file only when its text differs from what was last
+/// written, so a quiet system costs a few string comparisons per tick and no
+/// I/O. Files are written whole and installed by rename, so a reader never
+/// sees a partial one. A service that leaves the configuration has its file
+/// removed.
+pub struct StatusPublisher {
+    dir: PathBuf,
+    list: Option<String>,
+    services: HashMap<String, String>,
+    warned: bool,
+}
+
+impl StatusPublisher {
+    /// A publisher for [`STATUS_DIR`].
+    pub fn new() -> Self {
+        Self::at(STATUS_DIR)
+    }
+
+    /// A publisher for an arbitrary directory, so tests can use a temporary
+    /// one; PID 1 always uses [`StatusPublisher::new`].
+    pub fn at(dir: impl Into<PathBuf>) -> Self {
+        StatusPublisher {
+            dir: dir.into(),
+            list: None,
+            services: HashMap::new(),
+            warned: false,
+        }
+    }
+
+    /// Bring the published files up to date with `services`.
+    ///
+    /// Never fails the caller: a /run that cannot be written is logged once
+    /// and the supervisor carries on, the same policy as an unbindable
+    /// control socket.
+    pub fn publish(&mut self, services: &HashMap<String, Service>, config: &InitConfig) {
+        if let Err(e) = self.publish_inner(services, config) {
+            if !self.warned {
+                log::warn!("Cannot publish service status under {}: {:#}", self.dir.display(), e);
+                log::warn!("  `raven-rc list` and `status` will need root this boot");
+                self.warned = true;
+            }
+        }
+    }
+
+    fn publish_inner(&mut self, services: &HashMap<String, Service>, config: &InitConfig) -> Result<()> {
+        let services_dir = self.dir.join("services");
+        if !services_dir.is_dir() {
+            std::fs::create_dir_all(&services_dir)
+                .with_context(|| format!("Cannot create {}", services_dir.display()))?;
+            std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o755)).ok();
+            std::fs::set_permissions(&services_dir, std::fs::Permissions::from_mode(0o755)).ok();
+        }
+
+        let list = list_services(services, config);
+        if self.list.as_deref() != Some(list.as_str()) {
+            write_published(&self.dir.join("status"), &list)?;
+            self.list = Some(list);
+        }
+
+        // Config order first, then anything running that the config does not
+        // mention, the same set `list` shows.
+        let mut names: Vec<String> = config.services.iter().map(|c| c.name.clone()).collect();
+        for name in services.keys() {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+
+        for name in &names {
+            // A name is a file name here; anything that could leave the
+            // directory is not published rather than trusted.
+            if name.is_empty() || name.contains('/') || name.starts_with('.') {
+                continue;
+            }
+            let text = status_one(name, services, config);
+            if self.services.get(name) != Some(&text) {
+                write_published(&services_dir.join(name), &text)?;
+                self.services.insert(name.clone(), text);
+            }
+        }
+
+        let gone: Vec<String> = self
+            .services
+            .keys()
+            .filter(|name| !names.contains(name))
+            .cloned()
+            .collect();
+        for name in gone {
+            std::fs::remove_file(services_dir.join(&name)).ok();
+            self.services.remove(&name);
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for StatusPublisher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Write `text` to `path` whole, world-readable, installed by rename.
+fn write_published(path: &Path, text: &str) -> Result<()> {
+    let tmp = path.with_extension("new");
+    std::fs::write(&tmp, text).with_context(|| format!("Cannot write {}", tmp.display()))?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).ok();
+    std::fs::rename(&tmp, path).with_context(|| format!("Cannot install {}", path.display()))?;
+    Ok(())
 }
