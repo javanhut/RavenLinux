@@ -64,3 +64,17 @@ sudo raven-fstrim --now                # trim right now, regardless of the stamp
 ```
 
 Policy in `/etc/raven/fstrim.conf`: `INTERVAL_DAYS`, `ENABLED`, `BOOT_DELAY_SECS`.
+
+## Initramfs
+
+The early userspace image is packed with zstd (`build-initramfs.sh`). It used
+to be `gzip -9`, which is the slow choice on both ends: slowest to make and no
+faster to unpack. The kernel is built with `RD_ZSTD`, zstd unpacks several
+times faster than gzip on a small core, and the image is unpacked on every
+boot and packed once. The installer reads gzip, zstd and xz images alike, by
+magic bytes, so an ISO built before the switch still installs.
+
+The same script now maps every library to its runtime path before copying it,
+and refuses to pack an image that contains a build-tree path. Earlier images
+carried a `libc.so.6` under `raven/build/sysroot/usr/lib/` that nothing could
+load.

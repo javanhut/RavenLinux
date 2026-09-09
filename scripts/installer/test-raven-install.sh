@@ -86,6 +86,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 die()  { echo "unexpected die: $*" >&2; exit 9; }
 
 import_fn install_postinstall_service decide_postinstall have_default_route
+import_fn initrd_cat initrd_root_support
 import_fn partdev valid_username valid_hostname \
           ensure_group add_group_member remove_group_member next_free_uid \
           create_user grant_sudo set_hostname set_locale_and_time \
@@ -300,6 +301,41 @@ if (OPT_POSTINSTALL="sometimes"; INSTALL_PROFILE="desktop"; decide_postinstall) 
 else
     pass "an unknown --postinstall word dies"
 fi
+
+# =============================================================================
+# Reading the initramfs, whichever way it was packed
+# =============================================================================
+# The build switched from gzip -9 to zstd; older images are gzip; xz is the
+# third format the kernel reads. The installer decides by magic bytes, and a
+# format it cannot unpack here is "unknown", never a false "no".
+section "initramfs format detection"
+
+INITRD_W="${WORKDIR}/initrd"
+mkdir -p "$INITRD_W/tree"
+echo 'raven_root_from_cmdline() { :; }' > "$INITRD_W/tree/init"
+(cd "$INITRD_W/tree" && find . | cpio -o -H newc 2>/dev/null) > "$INITRD_W/new.cpio"
+echo 'no such function here' > "$INITRD_W/old.cpio"
+gzip -9 -c "$INITRD_W/new.cpio" > "$INITRD_W/new-gz.img"
+gzip -9 -c "$INITRD_W/old.cpio" > "$INITRD_W/old-gz.img"
+eq "gzip image with root support"        "$(initrd_root_support "$INITRD_W/new-gz.img")" "yes"
+eq "gzip image without root support"     "$(initrd_root_support "$INITRD_W/old-gz.img")" "no"
+if command -v zstd >/dev/null 2>&1; then
+    zstd -19 -q -f "$INITRD_W/new.cpio" -o "$INITRD_W/new-zst.img"
+    eq "zstd image with root support"    "$(initrd_root_support "$INITRD_W/new-zst.img")" "yes"
+    # Without zstd available the answer must be unknown, not no. Only zstd
+    # is hidden: the installer's `have` is what finds tools, so it is what
+    # the test overrides.
+    eq "zstd image, no zstd tool: unknown" \
+       "$(have() { [[ "$1" != zstd ]] && command -v "$1" >/dev/null 2>&1; }; initrd_root_support "$INITRD_W/new-zst.img" 2>/dev/null)" "unknown"
+else
+    pass "zstd not installed here; zstd initramfs cases not exercised"
+fi
+if command -v xz >/dev/null 2>&1; then
+    xz -c "$INITRD_W/new.cpio" > "$INITRD_W/new-xz.img"
+    eq "xz image with root support"      "$(initrd_root_support "$INITRD_W/new-xz.img")" "yes"
+fi
+cp "$INITRD_W/new.cpio" "$INITRD_W/plain.img"
+eq "uncompressed cpio"                   "$(initrd_root_support "$INITRD_W/plain.img")" "yes"
 
 # =============================================================================
 # Configuring a target for the placeholder's own name

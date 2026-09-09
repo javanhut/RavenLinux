@@ -57,7 +57,7 @@ done
 check_dependencies() {
     local missing=()
     
-    for cmd in cpio gzip find; do
+    for cmd in cpio zstd find; do
         if ! command -v "$cmd" &>/dev/null; then
             missing+=("$cmd")
         fi
@@ -67,7 +67,7 @@ check_dependencies() {
         echo "ERROR: Missing required tools: ${missing[*]}"
         echo ""
         echo "On Arch Linux, install with:"
-        echo "  sudo pacman -S cpio gzip findutils"
+        echo "  sudo pacman -S cpio zstd findutils"
         echo ""
         exit 1
     fi
@@ -381,6 +381,19 @@ EOF
     log_success "Binaries copied"
 }
 
+# The path a library has on the booted system, given the path ldd resolved
+# on the build host. Anything under a sysroot -- this build's, or one the
+# linker found by RPATH -- is reported relative to that sysroot; everything
+# else is already a runtime path.
+runtime_lib_path() {
+    local lib="$1"
+    case "$lib" in
+        "${RAVEN_BUILD}/sysroot"/*) printf '%s\n' "${lib#"${RAVEN_BUILD}/sysroot"}" ;;
+        */sysroot/*) printf '/%s\n' "${lib#*/sysroot/}" ;;
+        *) printf '%s\n' "$lib" ;;
+    esac
+}
+
 copy_libraries() {
     log_step "Copying required libraries..."
 
@@ -408,13 +421,19 @@ copy_libraries() {
         # Copy resolved library paths. Use process substitution to avoid pipefail subshell issues.
         while read -r lib; do
             [[ -z "$lib" || ! -f "$lib" ]] && continue
-            local dest="${INITRAMFS_DIR}${lib}"
+            # Where the library lives at run time. A binary linked against the
+            # sysroot resolves to /raven/build/sysroot/usr/lib/libc.so.6, and
+            # copying that verbatim put the build tree's layout into the boot
+            # image: a libc under raven/build/... that nothing could ever load.
+            local rt
+            rt="$(runtime_lib_path "$lib")"
+            local dest="${INITRAMFS_DIR}${rt}"
             # Check if we should copy from sysroot instead of host path
-            if [[ -f "${RAVEN_BUILD}/sysroot${lib}" ]]; then
+            if [[ -f "${RAVEN_BUILD}/sysroot${rt}" ]]; then
                  # Prefer sysroot lib if we have a matching path
                  if [[ ! -f "$dest" ]]; then
                     mkdir -p "$(dirname "$dest")"
-                    cp -L "${RAVEN_BUILD}/sysroot${lib}" "$dest" 2>/dev/null || true
+                    cp -L "${RAVEN_BUILD}/sysroot${rt}" "$dest" 2>/dev/null || true
                  fi
             else
                 if [[ ! -f "$dest" ]]; then
@@ -1311,12 +1330,25 @@ create_initramfs() {
 
     cd "${INITRAMFS_DIR}"
 
+    # A build-host path inside the image is a bug, not a warning: a library
+    # at raven/build/sysroot/usr/lib/... is one the loader never finds, and
+    # the boot that follows fails somewhere far from here. Refuse to pack it.
+    local leaked
+    leaked="$(find . \( -path './raven' -o -path '*/sysroot' \) -prune -print 2>/dev/null | head -n 5)"
+    if [[ -n "$leaked" ]]; then
+        log_fatal "Build-tree paths inside the initramfs: ${leaked//$'\n'/ } -- see runtime_lib_path()"
+    fi
+
     # Create uncompressed cpio archive first
     find . | cpio -o -H newc > "${RAVEN_BUILD}/initramfs.cpio" 2>/dev/null
 
-    # Then compress it
-    gzip -9 -f "${RAVEN_BUILD}/initramfs.cpio"
-    mv "${RAVEN_BUILD}/initramfs.cpio.gz" "${OUTPUT}"
+    # zstd, not gzip. The kernel is built with RD_ZSTD, and zstd unpacks
+    # several times faster than gzip on a small core -- which is what an
+    # initramfs is measured by, since it is unpacked on every boot and
+    # packed once. Level 19 buys the smaller image at build time; the
+    # decompression speed is the same at any level.
+    zstd -19 -T0 -q -f "${RAVEN_BUILD}/initramfs.cpio" -o "${OUTPUT}"
+    rm -f "${RAVEN_BUILD}/initramfs.cpio"
 
     # Verify it worked
     local size

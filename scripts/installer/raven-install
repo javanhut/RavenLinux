@@ -362,6 +362,39 @@ trap 'die "Interrupted."' INT TERM
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Stream an initramfs decompressed, whichever way it was packed. The image is
+# zstd since the build switched from gzip -9; older images are gzip, and xz
+# is the other format the kernel is built to read. Decided by the magic
+# bytes, not the file name, because the name is initramfs.img either way.
+initrd_cat() {
+    local img="$1" magic
+    magic="$(od -An -N4 -tx1 "$img" 2>/dev/null | tr -d ' \n')"
+    case "$magic" in
+        28b52ffd) have zstd && zstd -dc "$img" 2>/dev/null ;;
+        1f8b*)    have zcat && zcat -f "$img" 2>/dev/null ;;
+        fd377a58) have xz && xz -dc "$img" 2>/dev/null ;;
+        *)        cat "$img" 2>/dev/null ;;
+    esac
+}
+
+# yes, no, or unknown: whether the initramfs handles root= on the kernel
+# command line. "unknown" when the format cannot be read here, so a missing
+# tool never turns into a false warning about the image.
+initrd_root_support() {
+    local img="$1" magic
+    magic="$(od -An -N4 -tx1 "$img" 2>/dev/null | tr -d ' \n')"
+    case "$magic" in
+        28b52ffd) have zstd || { echo unknown; return; } ;;
+        1f8b*)    have zcat || { echo unknown; return; } ;;
+        fd377a58) have xz || { echo unknown; return; } ;;
+    esac
+    if initrd_cat "$img" | grep -aq 'raven_root_from_cmdline'; then
+        echo yes
+    else
+        echo no
+    fi
+}
+
 preflight() {
     phase preflight "Preflight checks"
 
@@ -539,7 +572,7 @@ locate_source() {
     # An initramfs that predates root= support will mount the squashfs and
     # ignore the disk entirely, which looks like the installer failed when it
     # did not. Cheap to detect: the string only exists in the newer script.
-    if have zcat && ! zcat -f "$SRC_INITRD" 2>/dev/null | grep -aq 'raven_root_from_cmdline'; then
+    if [[ "$(initrd_root_support "$SRC_INITRD")" == "no" ]]; then
         warn "This initramfs may not support booting from a disk"
         echo "        It was built before root= handling was added, and will look for"
         echo "        the live squashfs instead of your new root partition."
@@ -3066,13 +3099,7 @@ probe_report() {
     pk source.size_mb "$total_mb"
 
     local rootsupport=unknown
-    if [[ -n "${SRC_INITRD}" ]] && have zcat; then
-        if zcat -f "$SRC_INITRD" 2>/dev/null | grep -aq 'raven_root_from_cmdline'; then
-            rootsupport=yes
-        else
-            rootsupport=no
-        fi
-    fi
+    [[ -n "${SRC_INITRD}" ]] && rootsupport="$(initrd_root_support "$SRC_INITRD")"
     pk source.initrd_root_support "$rootsupport"
 
     # Whether the tree being installed carries a compositor. install_bootloader
