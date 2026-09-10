@@ -35,7 +35,41 @@ What is still intentionally left out: hosted Rust/Go toolchains.
 - **Core Utilities**: uutils coreutils (Rust)
 - **Shells**: ravenshell (default), bash, fish
 - **Networking**: OpenSSH client and server
-- **Privilege escalation**: sudo-rs
+- **Privilege escalation**: sudo-rs, and for most day-to-day work none at all
+  -- `/usr/local` belongs to `wheel` (see below), so locally built software
+  installs without root
+
+#### Root, and when it is not needed
+
+`/usr/local` and every directory under it are group `wheel`, mode `2775`:
+setgid so that anything created inside inherits the group, group-writable so
+that a `wheel` member can `imlazy install` a freshly built binary at their own
+prompt. The skeleton (`scripts/lib/skeleton.sh`) ships it that way and
+`raven-install` re-applies it on the target, recursively, so directories left
+by earlier root installs open up too. imlazy's `writes = [...]` on a command
+tells it what the command touches; when all of it is writable it skips the
+privilege tool entirely.
+
+The group is `wheel` and must stay `wheel`: `/usr/local/bin` leads root's
+`secure_path` and holds `rvnd`, which runs as root, so writing there is
+root. That is what `wheel` already has through sudoers. Handing the directory
+to any other group would be a privilege escalation.
+
+Packages installed by `rvn` keep the ownership recorded in the package
+(`root:root`), so this changes nothing about what the package manager does.
+
+#### PAM
+
+Raven's service files are LFS-style: `system-auth`, `system-account`,
+`system-session` and `system-password` each hold one stack, and a service
+includes what it needs. Service files that arrive with Arch packages (sudo,
+polkit, sshd) are written for Arch's pambase, which includes `system-auth` for
+every stack. So `system-auth` carries all four; a Raven file that includes two
+of them runs `pam_unix` twice, which is harmless. `/etc/pam.d/sudo` and
+`/etc/pam.d/polkit-1` are written by stage2 for every build, sudo binary or
+not, so a later `rvn install sudo` keeps Raven's file and gets a `.pacnew`.
+Without them sudo answered "account validation failure" and pkexec fell back
+to `other`, which denies everything.
 
 ### The Raven Layer
 

@@ -1095,10 +1095,28 @@ setup_pam_and_nss() {
     # ==========================================================================
 
     # system-auth: Base authentication stack
+    #
+    # Raven's own service files are LFS-style: each pulls the one stack it
+    # needs from system-auth, system-account, system-session or
+    # system-password. Service files that arrive with Arch packages (sudo,
+    # polkit, sshd, ...) are written for Arch's pambase, where system-auth
+    # carries ALL FOUR stacks and is included for every one of them. Against
+    # an auth-only system-auth those services get an empty account stack, and
+    # PAM treats an empty stack as a refusal: `rvn install sudo` on an
+    # installed system answered every password with "account validation
+    # failure, is your account locked?" for an account that was fine. So
+    # system-auth carries every stack. A Raven file that includes both
+    # system-auth and system-account runs pam_unix's account check twice,
+    # which is harmless.
     cat > "${SYSROOT_DIR}/etc/pam.d/system-auth" << 'EOF'
 #%PAM-1.0
 # Begin /etc/pam.d/system-auth - RavenLinux (LFS-based)
+# Every stack lives here so that Arch-style service files, which include
+# system-auth for auth, account, password and session alike, work too.
 auth      required    pam_unix.so
+account   required    pam_unix.so
+password  required    pam_unix.so sha512 shadow try_first_pass
+session   required    pam_unix.so
 # End /etc/pam.d/system-auth
 EOF
 
@@ -1124,6 +1142,38 @@ EOF
 # Begin /etc/pam.d/system-password - RavenLinux (LFS-based)
 password  required    pam_unix.so sha512 shadow try_first_pass
 # End /etc/pam.d/system-password
+EOF
+
+    # sudo: written here unconditionally, in Raven's own style, not only when
+    # RAVEN_ENABLE_SUDO ships the binary. The Arch sudo package carries its
+    # own /etc/pam.d/sudo; a package install keeps a config file that already
+    # exists and leaves the package's copy beside it as .pacnew, so having
+    # ours in place is what stops `rvn install sudo` from replacing it with
+    # one written against Arch's pambase. Costs nothing when sudo is absent.
+    cat > "${SYSROOT_DIR}/etc/pam.d/sudo" << 'EOF'
+#%PAM-1.0
+# Begin /etc/pam.d/sudo - RavenLinux
+auth       sufficient   pam_rootok.so
+auth       required     pam_unix.so nullok try_first_pass
+account    sufficient   pam_rootok.so
+account    required     pam_unix.so
+session    required     pam_unix.so
+password   required     pam_unix.so nullok sha512
+# End /etc/pam.d/sudo
+EOF
+
+    # polkit-1: what pkexec and polkitd's agent helper authenticate against.
+    # With no file of this name PAM falls back to `other`, which is pam_deny
+    # in every stack, so pkexec refused every password on the installed
+    # system even though polkit's rules grant wheel admin rights.
+    cat > "${SYSROOT_DIR}/etc/pam.d/polkit-1" << 'EOF'
+#%PAM-1.0
+# Begin /etc/pam.d/polkit-1 - RavenLinux
+auth       required     pam_unix.so try_first_pass
+account    required     pam_unix.so
+password   required     pam_unix.so sha512 shadow try_first_pass
+session    required     pam_unix.so
+# End /etc/pam.d/polkit-1
 EOF
 
     # login: Console login (simple config that works)
@@ -1501,20 +1551,8 @@ EOF
     chmod 0440 "${SYSROOT_DIR}/etc/sudoers"
     chown root:root "${SYSROOT_DIR}/etc/sudoers" 2>/dev/null || true
 
-    # ==========================================================================
-    # Create PAM config for sudo (LFS-based with proper authentication)
-    # ==========================================================================
-    cat > "${SYSROOT_DIR}/etc/pam.d/sudo" << 'EOF'
-#%PAM-1.0
-# Begin /etc/pam.d/sudo - RavenLinux
-auth       sufficient   pam_rootok.so
-auth       required     pam_unix.so nullok try_first_pass
-account    sufficient   pam_rootok.so
-account    required     pam_unix.so
-session    required     pam_unix.so
-password   required     pam_unix.so nullok sha512
-# End /etc/pam.d/sudo
-EOF
+    # /etc/pam.d/sudo is written by setup_pam_and_nss for every build, sudo
+    # binary or not, so that a later `rvn install sudo` finds it in place.
 
     log_success "sudo setup complete (GNU sudo)"
 }

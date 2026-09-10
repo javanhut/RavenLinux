@@ -117,16 +117,25 @@ RAVEN_SKELETON_DIRS_USR=(
     "usr/share:755"
     "usr/share/misc:755"
     "usr/src:755"
-    "usr/local:755"
-    "usr/local/bin:755"
-    "usr/local/etc:755"
-    "usr/local/games:755"
-    "usr/local/include:755"
-    "usr/local/lib:755"
-    "usr/local/man:755"
-    "usr/local/sbin:755"
-    "usr/local/share:755"
-    "usr/local/src:755"
+    # /usr/local is where `imlazy install` and friends put locally built
+    # software. It belongs to wheel, setgid and group-writable, so a wheel
+    # member installs there at their own prompt instead of through sudo, and
+    # a directory created under it inherits the group. The group has to be
+    # wheel and nothing else: /usr/local/bin leads root's secure_path and
+    # holds rvnd, which runs as root, so write access here IS root. That is
+    # no more than wheel already has through sudoers; for any other group it
+    # would be a privilege escalation. Files installed by rvn carry their own
+    # ownership from the package (root:root) exactly as before.
+    "usr/local:2775:10"
+    "usr/local/bin:2775:10"
+    "usr/local/etc:2775:10"
+    "usr/local/games:2775:10"
+    "usr/local/include:2775:10"
+    "usr/local/lib:2775:10"
+    "usr/local/man:2775:10"
+    "usr/local/sbin:2775:10"
+    "usr/local/share:2775:10"
+    "usr/local/src:2775:10"
     # All eight sections pre-created, as `filesystem` ships them. Also deleted
     # by cleanup_sysroot, which is why this runs again in stage4.
     "usr/share/man:755"

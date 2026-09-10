@@ -2313,6 +2313,36 @@ SUDOERS_EOF
     done
 
     ok "${USERNAME} added to wheel (sudo) and the hardware groups"
+
+    open_local_prefix
+}
+
+# /usr/local belongs to wheel, setgid and group-writable, so a wheel member
+# can `imlazy install` into it at their own prompt; nothing there needs sudo.
+# The image's skeleton ships it that way (scripts/lib/skeleton.sh,
+# RAVEN_SKELETON_DIRS_USR), and this re-applies it on the target because an
+# image built before the skeleton carried it, or a system being reconfigured
+# in place, has root-only 755 directories there. It is recursive on purpose:
+# subdirectories that earlier root installs created (share/applications,
+# share/icons, ...) open up too. Files keep their owner; only the group and
+# the group-write bit change.
+#
+# Only wheel may hold this. /usr/local/bin leads root's secure_path and holds
+# rvnd, which runs as root, so write access here is root -- exactly what
+# wheel already has through sudoers, and a privilege escalation for any other
+# group. The gid is numeric (10, pinned in the skeleton) because the target's
+# /etc/group is not the host's.
+open_local_prefix() {
+    local local_dir="${TARGET}/usr/local"
+    [[ -d "$local_dir" ]] || return 0
+
+    if ! chgrp -R 10 "$local_dir" 2>/dev/null; then
+        warn "could not hand /usr/local to wheel; installing there will need sudo"
+        return 0
+    fi
+    find "$local_dir" -type d -exec chmod g+ws {} + 2>/dev/null || true
+    find "$local_dir" -type f -exec chmod g+w {} + 2>/dev/null || true
+    ok "/usr/local is writable by wheel; imlazy install needs no sudo"
 }
 
 set_passwords() {

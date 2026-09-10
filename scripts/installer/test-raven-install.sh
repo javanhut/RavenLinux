@@ -89,7 +89,7 @@ import_fn install_postinstall_service decide_postinstall have_default_route
 import_fn initrd_cat initrd_root_support
 import_fn partdev valid_username valid_hostname \
           ensure_group add_group_member remove_group_member next_free_uid \
-          create_user grant_sudo set_hostname set_locale_and_time \
+          create_user grant_sudo open_local_prefix set_hostname set_locale_and_time \
           switch_to_raven_init remove_live_credentials
 
 # =============================================================================
@@ -130,6 +130,10 @@ build_mock_target() {
     local t="$1"
     rm -rf "$t"
     mkdir -p "$t"/{etc/raven,etc/skel,etc/sudoers.d,sbin,bin,usr/bin,home,usr/share/zoneinfo/America}
+    # /usr/local as an older image ships it: root-only, with a subdirectory
+    # a previous root install left behind. grant_sudo has to open both.
+    mkdir -p "$t/usr/local/bin" "$t/usr/local/share/applications"
+    chmod 755 "$t/usr/local" "$t/usr/local/bin" "$t/usr/local/share" "$t/usr/local/share/applications"
 
     cat > "$t/etc/passwd" <<'EOF'
 root:x:0:0:root:/root:/bin/bash
@@ -254,6 +258,12 @@ matches "seat group created"              '^seat:x:[0-9]+:javan$' "$TARGET/etc/g
 matches "added to caw"                    '^caw:x:970:javan$' "$TARGET/etc/group"
 matches "sudoers.d grants wheel"          '^%wheel ALL=\(ALL:ALL\) ALL$' "$TARGET/etc/sudoers.d/10-wheel"
 matches "sudoers reads sudoers.d"         '@includedir /etc/sudoers\.d' "$TARGET/etc/sudoers"
+# /usr/local is wheel's, setgid and group-writable, so `imlazy install` into
+# it never needs sudo. The gid is pinned at 10 like the others above, and the
+# sweep is recursive so a subdirectory left by an earlier root install opens
+# up as well. Only wheel may own it: /usr/local/bin is on root's secure_path.
+eq      "/usr/local/bin is wheel's, setgid, group-writable" "$(stat -c '%a:%g' "$TARGET/usr/local/bin")" "2775:10"
+eq      "/usr/local subdirs opened recursively"          "$(stat -c '%a:%g' "$TARGET/usr/local/share/applications")" "2775:10"
 
 eq      "localtime points at the zone"    "$(readlink "$TARGET/etc/localtime")" "/usr/share/zoneinfo/America/New_York"
 eq      "/etc/timezone"                   "$(cat "$TARGET/etc/timezone")" "America/New_York"
