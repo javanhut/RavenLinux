@@ -80,7 +80,8 @@ files = [
 
 # PREFIX=/usr, not the Makefile's /usr/local default. Its `make install` is
 # right for a development machine and wrong for the image: /usr/local there is
-# an empty tree nothing owns. The stage does not call `make install` either --
+# wheel's tree for software built on the machine itself, and the image ships
+# it empty. The stage does not call `make install` either --
 # it would run update-desktop-database and gtk-update-icon-cache against the
 # build host's own live tree.
 #

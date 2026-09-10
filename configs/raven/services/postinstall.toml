@@ -9,6 +9,10 @@
 # profile with rvn, and records completion; until then /etc/motd says the
 # profile is pending, and how to run it by hand.
 #
+# Before the profile, every run also hands /usr/local to wheel (setgid,
+# group-writable) when it is not already, which is how a system installed
+# before the skeleton shipped it that way catches up. A no-op otherwise.
+#
 # Ships disabled: the template is activated on the ISO like every other, and
 # raven-install enables it in the system it installs. Nothing else should.
 #

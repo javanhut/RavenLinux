@@ -44,11 +44,15 @@ What is still intentionally left out: hosted Rust/Go toolchains.
 `/usr/local` and every directory under it are group `wheel`, mode `2775`:
 setgid so that anything created inside inherits the group, group-writable so
 that a `wheel` member can `imlazy install` a freshly built binary at their own
-prompt. The skeleton (`scripts/lib/skeleton.sh`) ships it that way and
-`raven-install` re-applies it on the target, recursively, so directories left
-by earlier root installs open up too. imlazy's `writes = [...]` on a command
-tells it what the command touches; when all of it is writable it skips the
-privilege tool entirely.
+prompt. The skeleton (`scripts/lib/skeleton.sh`) ships it that way,
+`raven-install` re-applies it on a fresh target, and `raven-postinstall`
+re-applies it on an installed system -- at every boot through the
+`postinstall` service, and on every `sudo raven-postinstall` -- so a system
+installed before the skeleton carried it catches up without a reinstall. All
+three are recursive, so directories left by earlier root installs open up
+too, and the postinstall step is a no-op once nothing is left to open.
+imlazy's `writes = [...]` on a command tells it what the command touches; when
+all of it is writable it skips the privilege tool entirely.
 
 The group is `wheel` and must stay `wheel`: `/usr/local/bin` leads root's
 `secure_path` and holds `rvnd`, which runs as root, so writing there is

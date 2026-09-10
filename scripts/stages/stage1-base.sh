@@ -303,10 +303,18 @@ setup_sysroot() {
         log_warn "uutils coreutils not built; /usr/bin gets only stage2's host copies"
     fi
 
-    # Install sudo-rs bits (su/visudo). We intentionally do not ship sudo by default.
-    # Set RAVEN_ENABLE_SUDO=1 to include sudo in the sysroot.
+    # sudo-rs (sudo, su, visudo), built by build.sh's build_sudo_rs into
+    # build/bin. Shipped by default: ARCHITECTURE.md names sudo-rs as the
+    # privilege tool, and raven-install writes a wheel sudoers rule on the
+    # assumption that a sudo exists. This used to default to 0 while stage2
+    # defaulted to 1, so what the image got depended on which stage ran last
+    # and on whether the build host had GNU sudo -- an installed system could
+    # end up answering "sudo: command not found" at the first prompt.
+    # RAVEN_ENABLE_SUDO=0 leaves the image with su only, in both stages.
+    # stage2 keeps sudo-rs when it is here and falls back to the host's GNU
+    # sudo only when it was not built.
     rm -f "${SYSROOT_DIR}/usr/bin/sudo" 2>/dev/null || true
-    if [[ "${RAVEN_ENABLE_SUDO:-0}" == "1" ]] && [[ -f "${BUILD_DIR}/bin/sudo" ]]; then
+    if [[ "${RAVEN_ENABLE_SUDO:-1}" == "1" ]] && [[ -f "${BUILD_DIR}/bin/sudo" ]]; then
         cp "${BUILD_DIR}/bin/sudo" "${SYSROOT_DIR}/usr/bin/sudo"
         chmod 4755 "${SYSROOT_DIR}/usr/bin/sudo" 2>/dev/null || chmod 755 "${SYSROOT_DIR}/usr/bin/sudo"
     fi

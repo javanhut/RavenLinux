@@ -56,12 +56,33 @@ export RAVEN_POSTINSTALL_FAILED="$W/failed"
 export RAVEN_MOTD="$W/motd"
 export RAVEN_POSTINSTALL_RETRY_DELAY=0
 export RAVEN_POSTINSTALL_REQUIRE_ROOT=0
+# The /usr/local step works on a private tree, never the host's. reset()
+# removes it, so the profile tests below see the step as a silent no-op; the
+# "/usr/local" section builds it closed on purpose. The group is one this user
+# is in but not their primary one, so the chgrp actually changes something
+# without root; a user with no supplementary group gets the primary and the
+# gid assertions still hold.
+export RAVEN_LOCAL_PREFIX="$W/local"
+alt_gid=$(id -G | tr ' ' '\n' | awk -v p="$(id -g)" '$1 != p { print; exit }')
+export RAVEN_LOCAL_GROUP="${alt_gid:-$(id -g)}"
 
 reset() {
     rm -f "$W/rvn.log" "$W/done" "$W/pending" "$W/failed" "$W/motd" "$W/install-profile"
+    rm -rf "$W/local"
     echo 0 > "$W/rvn.exit"
     : > "$W/rvn.log"
 }
+# A /usr/local as an image built before the skeleton opened it: root-style
+# 755 directories, 644 and 755 files, primary group throughout.
+closed_local() {
+    rm -rf "$W/local"
+    mkdir -p "$W/local/bin" "$W/local/share/applications"
+    printf 'bin\n' > "$W/local/bin/tool"; chmod 755 "$W/local/bin/tool"
+    printf 'desktop\n' > "$W/local/share/applications/x.desktop"; chmod 644 "$W/local/share/applications/x.desktop"
+    chmod 755 "$W/local" "$W/local/bin" "$W/local/share" "$W/local/share/applications"
+    chgrp -R "$(id -g)" "$W/local"
+}
+mode_gid() { stat -c '%a:%g' "$1"; }
 rvn_calls() { awk '/^rvn/ { n++ } END { print n + 0 }' "$W/rvn.log" 2>/dev/null; }
 
 # Does this machine have a route? The success paths need one, since the script
@@ -124,6 +145,40 @@ if have_route; then
 else
     echo "  (no default route on this host; skipping the network paths)"
 fi
+
+section "/usr/local handed to wheel"
+G="$RAVEN_LOCAL_GROUP"
+reset; closed_local
+out="$("$POSTINSTALL" --auto 2>&1)"; rc=$?
+eq      "boot, closed prefix: exit 0"            "$rc" "0"
+matches "boot, closed prefix: says so"           'writable by wheel' <(printf '%s\n' "$out")
+eq      "boot: prefix is wheel's, setgid, g+w"   "$(mode_gid "$W/local")" "2775:$G"
+eq      "boot: bin opened"                       "$(mode_gid "$W/local/bin")" "2775:$G"
+eq      "boot: nested dir opened"                "$(mode_gid "$W/local/share/applications")" "2775:$G"
+eq      "boot: executable now g+w"               "$(mode_gid "$W/local/bin/tool")" "775:$G"
+eq      "boot: data file now g+w"                "$(mode_gid "$W/local/share/applications/x.desktop")" "664:$G"
+eq      "boot: rvn not run"                      "$(rvn_calls)" "0"
+
+out="$("$POSTINSTALL" --auto 2>&1)"; rc=$?
+eq      "boot, open prefix: exit 0"              "$rc" "0"
+eq      "boot, open prefix: silent"              "$out" ""
+
+reset; closed_local
+out="$("$POSTINSTALL" --dry-run --profile minimal 2>&1)"; rc=$?
+eq      "dry-run: exit 0"                        "$rc" "0"
+matches "dry-run: says what it would do"         'Would hand' <(printf '%s\n' "$out")
+eq      "dry-run: prefix untouched"              "$(mode_gid "$W/local/bin")" "755:$(id -g)"
+
+reset; closed_local
+out="$(RAVEN_POSTINSTALL_REQUIRE_ROOT=1 "$POSTINSTALL" --profile minimal 2>&1)"; rc=$?
+eq      "unprivileged: exit 0"                   "$rc" "0"
+matches "unprivileged: asks for root"            'run this as root' <(printf '%s\n' "$out")
+eq      "unprivileged: prefix untouched"         "$(mode_gid "$W/local/bin")" "755:$(id -g)"
+
+reset; closed_local
+out="$(RAVEN_LOCAL_PREFIX= "$POSTINSTALL" --auto 2>&1)"; rc=$?
+eq      "empty prefix: skipped"                  "$(mode_gid "$W/local/bin")" "755:$(id -g)"
+eq      "empty prefix: silent"                   "$out" ""
 
 section "by hand"
 reset

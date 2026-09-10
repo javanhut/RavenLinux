@@ -34,6 +34,8 @@ LOGS_DIR="${LOGS_DIR:-${BUILD_DIR}/logs}"
 # Source build configuration (set RAVEN_FORCE_SOURCE_BUILD=1 to always build from source)
 : "${RAVEN_FORCE_SOURCE_BUILD:=0}"
 : "${RAVEN_JOBS:=$(nproc 2>/dev/null || echo 4)}"
+# Same default as stage1: the image ships a sudo unless told not to. setup_sudo
+# keeps the sudo-rs stage1 placed and falls back to the host's GNU sudo.
 : "${RAVEN_ENABLE_SUDO:=1}"
 
 # =============================================================================
@@ -1461,66 +1463,74 @@ EOF
 # Setup sudo using GNU sudo from host system
 # =============================================================================
 setup_sudo() {
-    log_info "Setting up sudo (GNU sudo from host)..."
-
-    # Create target directories
-    mkdir -p "${SYSROOT_DIR}/usr/bin"
-
-    # Copy sudo from host
-    if [[ -x "/usr/bin/sudo" ]]; then
-        cp -L "/usr/bin/sudo" "${SYSROOT_DIR}/usr/bin/sudo"
-        chmod 4755 "${SYSROOT_DIR}/usr/bin/sudo"  # SUID root
-        # There used to be `ln -sf /usr/bin/sudo "${SYSROOT_DIR}/bin/sudo"`
-        # here. Post-merge ${SYSROOT}/bin/sudo IS ${SYSROOT}/usr/bin/sudo, so
-        # that unlinked the SUID binary and replaced it with a link to itself.
-        # Worse, during the build the absolute target escaped the sysroot and
-        # resolved against the BUILD HOST's /usr/bin/sudo, so every build-time
-        # check passed while the ISO shipped nothing.
-        log_info "  Installed sudo binary (SUID)"
+    # sudo-rs when build_sudo_rs produced it (stage1 already put the binary
+    # in the sysroot; this adds its libraries and visudo), otherwise the
+    # host's GNU sudo with its plugin directory. Before this the function
+    # always took the host's sudo, overwriting the sudo-rs stage1 had placed,
+    # and failed the stage when the host had none.
+    local src="" kind=""
+    if [[ -x "${BUILD_DIR}/bin/sudo" ]]; then
+        src="${BUILD_DIR}/bin/sudo"; kind="sudo-rs"
+    elif [[ -x /usr/bin/sudo ]]; then
+        src="/usr/bin/sudo"; kind="GNU sudo from host"
     else
-        log_error "sudo not found on host system"
+        log_error "no sudo to ship: sudo-rs was not built and the host has no /usr/bin/sudo"
         return 1
     fi
+    log_info "Setting up sudo (${kind})..."
 
-    # Copy visudo, sudoedit, sudoreplay if available
-    for bin in visudo sudoedit sudoreplay; do
-        if [[ -x "/usr/bin/${bin}" ]]; then
-            cp -L "/usr/bin/${bin}" "${SYSROOT_DIR}/usr/bin/${bin}"
-            chmod 755 "${SYSROOT_DIR}/usr/bin/${bin}"
-            log_info "  Installed ${bin}"
-        fi
-    done
+    mkdir -p "${SYSROOT_DIR}/usr/bin"
+    cp -L "$src" "${SYSROOT_DIR}/usr/bin/sudo"
+    chmod 4755 "${SYSROOT_DIR}/usr/bin/sudo"  # SUID root
+    # There used to be `ln -sf /usr/bin/sudo "${SYSROOT_DIR}/bin/sudo"`
+    # here. Post-merge ${SYSROOT}/bin/sudo IS ${SYSROOT}/usr/bin/sudo, so
+    # that unlinked the SUID binary and replaced it with a link to itself.
+    # Worse, during the build the absolute target escaped the sysroot and
+    # resolved against the BUILD HOST's /usr/bin/sudo, so every build-time
+    # check passed while the ISO shipped nothing.
+    log_info "  Installed sudo binary (SUID)"
 
-    # Copy sudo plugin libraries (required for GNU sudo)
-    mkdir -p "${SYSROOT_DIR}/usr/lib/sudo"
-    if [[ -d "/usr/lib/sudo" ]]; then
-        cp -a /usr/lib/sudo/. "${SYSROOT_DIR}/usr/lib/sudo/" 2>/dev/null || true
-        log_info "  Copied /usr/lib/sudo/ plugins"
-    fi
-
-    # Copy sudo's library dependencies
-    for lib in $(ldd /usr/bin/sudo 2>/dev/null | grep -o '/[^ ]*' | sort -u); do
-        [[ -f "$lib" ]] || continue
-        local dest="${SYSROOT_DIR}${lib}"
-        if [[ ! -f "$dest" ]]; then
-            mkdir -p "$(dirname "$dest")"
-            cp -L "$lib" "$dest" 2>/dev/null || true
-        fi
-    done
-
-    # Also copy dependencies from sudo plugins
-    if [[ -d "/usr/lib/sudo" ]]; then
-        for so in /usr/lib/sudo/*.so; do
-            [[ -f "$so" ]] || continue
-            for lib in $(ldd "$so" 2>/dev/null | grep -o '/[^ ]*' | sort -u); do
-                [[ -f "$lib" ]] || continue
-                local dest="${SYSROOT_DIR}${lib}"
-                if [[ ! -f "$dest" ]]; then
-                    mkdir -p "$(dirname "$dest")"
-                    cp -L "$lib" "$dest" 2>/dev/null || true
-                fi
-            done
+    # copy_deps SRC: the shared libraries SRC needs, where the sysroot lacks them.
+    copy_deps() {
+        local lib dest
+        for lib in $(ldd "$1" 2>/dev/null | grep -o '/[^ ]*' | sort -u); do
+            [[ -f "$lib" ]] || continue
+            dest="${SYSROOT_DIR}${lib}"
+            if [[ ! -f "$dest" ]]; then
+                mkdir -p "$(dirname "$dest")"
+                cp -L "$lib" "$dest" 2>/dev/null || true
+            fi
         done
+    }
+    copy_deps "$src"
+
+    if [[ "$kind" == "sudo-rs" ]]; then
+        # sudo-rs has no plugins and no sudoedit/sudoreplay; visudo is its own.
+        if [[ -x "${BUILD_DIR}/bin/visudo" ]]; then
+            cp -L "${BUILD_DIR}/bin/visudo" "${SYSROOT_DIR}/usr/bin/visudo"
+            chmod 755 "${SYSROOT_DIR}/usr/bin/visudo"
+            copy_deps "${BUILD_DIR}/bin/visudo"
+            log_info "  Installed visudo"
+        fi
+    else
+        # Copy visudo, sudoedit, sudoreplay if available
+        for bin in visudo sudoedit sudoreplay; do
+            if [[ -x "/usr/bin/${bin}" ]]; then
+                cp -L "/usr/bin/${bin}" "${SYSROOT_DIR}/usr/bin/${bin}"
+                chmod 755 "${SYSROOT_DIR}/usr/bin/${bin}"
+                log_info "  Installed ${bin}"
+            fi
+        done
+
+        # Copy sudo plugin libraries (required for GNU sudo) and what they need
+        mkdir -p "${SYSROOT_DIR}/usr/lib/sudo"
+        if [[ -d "/usr/lib/sudo" ]]; then
+            cp -a /usr/lib/sudo/. "${SYSROOT_DIR}/usr/lib/sudo/" 2>/dev/null || true
+            log_info "  Copied /usr/lib/sudo/ plugins"
+            for so in /usr/lib/sudo/*.so; do
+                [[ -f "$so" ]] && copy_deps "$so"
+            done
+        fi
     fi
     log_info "  Copied library dependencies"
 
@@ -1554,7 +1564,7 @@ EOF
     # /etc/pam.d/sudo is written by setup_pam_and_nss for every build, sudo
     # binary or not, so that a later `rvn install sudo` finds it in place.
 
-    log_success "sudo setup complete (GNU sudo)"
+    log_success "sudo setup complete (${kind})"
 }
 
 # =============================================================================

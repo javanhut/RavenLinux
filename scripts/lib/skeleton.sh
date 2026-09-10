@@ -48,6 +48,13 @@
 # (/media, /etc/opt), and are noted per entry below where they are the only
 # source.
 #
+# One deliberate departure: /usr/local and everything under it is group
+# wheel, mode 2775, where Arch has root 755. Arch packages do not install
+# there (an `rvn install` never touches it), so nothing disagrees with the
+# image about it, and it is what lets a wheel member `imlazy install` a
+# locally built binary without sudo. See the entries for why the group must
+# be wheel and no other.
+#
 # -----------------------------------------------------------------------------
 # THE RULE FOR CALLERS
 # -----------------------------------------------------------------------------

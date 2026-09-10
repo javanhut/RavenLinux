@@ -17,6 +17,13 @@
 # waits for a default route, runs rvn, and on success writes
 # /etc/raven/.postinstall-done so it never runs again. While it is pending or
 # has failed it says so in /etc/motd, which login(1) prints on the console.
+#
+# One more thing, every run, before the profile: /usr/local is handed to
+# wheel, setgid and group-writable, when it is not already. That is the
+# layout the skeleton ships and raven-install applies to a fresh target; this
+# is how a system installed before either carried it catches up, at the next
+# boot or the next `sudo raven-postinstall`. It is a no-op once nothing under
+# the prefix is left to open.
 set -eu
 
 PROFILE_DIR="${RAVEN_PROFILE_DIR:-/etc/raven/install-profiles}"
@@ -25,6 +32,10 @@ DONE_MARKER="${RAVEN_POSTINSTALL_DONE:-/etc/raven/.postinstall-done}"
 PENDING_MARKER="${RAVEN_POSTINSTALL_PENDING:-/run/raven-postinstall.pending}"
 FAILED_MARKER="${RAVEN_POSTINSTALL_FAILED:-/run/raven-postinstall.failed}"
 MOTD="${RAVEN_MOTD:-/etc/motd}"
+# The prefix wheel gets to write to. Empty skips the step; the tests point it
+# at a private tree. The group defaults to wheel's gid from /etc/group.
+LOCAL_PREFIX="${RAVEN_LOCAL_PREFIX-/usr/local}"
+LOCAL_GROUP="${RAVEN_LOCAL_GROUP:-}"
 
 profile="${RAVEN_INSTALL_PROFILE:-}"
 assume_yes=0
@@ -106,10 +117,68 @@ have_default_route() {
     [ -r /proc/net/route ] && awk 'NR > 1 && $2 == "00000000" { found = 1 } END { exit !found }' /proc/net/route
 }
 
+# --------------------------------------------------------------- /usr/local
+# /usr/local belongs to wheel, mode 2775: setgid so that anything created
+# inside inherits the group, group-writable so that a wheel member can
+# `imlazy install` a freshly built binary at their own prompt (ARCHITECTURE.md,
+# "Root, and when it is not needed"). The skeleton ships it that way and
+# raven-install re-applies it on a fresh target, but neither reaches a system
+# that was installed before the skeleton carried it. This does, recursively,
+# so directories left by earlier root installs open up too. Files keep their
+# owner; only the group and the group-write bit change.
+#
+# Only wheel may hold the prefix. /usr/local/bin leads root's secure_path and
+# holds rvnd, which runs as root, so write access here is root -- exactly what
+# wheel already has through sudoers, and a privilege escalation for anyone
+# else. The gid is read from this system's own /etc/group, with the
+# skeleton's pinned 10 as the fallback.
+wheel_gid() {
+    if [ -n "$LOCAL_GROUP" ]; then
+        echo "$LOCAL_GROUP"
+        return 0
+    fi
+    gid=$(awk -F: '$1 == "wheel" { print $3; exit }' /etc/group 2>/dev/null)
+    echo "${gid:-10}"
+}
+
+# Prints the first path under the prefix that is not yet wheel's or not
+# group-writable (directories: setgid as well). No output means nothing to do.
+local_prefix_closed() { # local_prefix_closed GID
+    find "$LOCAL_PREFIX" \
+        \( -type d ! \( -gid "$1" -perm -2020 \) \) -o \
+        \( -type f ! \( -gid "$1" -perm -020 \) \) 2>/dev/null | head -n 1
+}
+
+open_local_prefix() {
+    [ -n "$LOCAL_PREFIX" ] && [ -d "$LOCAL_PREFIX" ] || return 0
+    gid=$(wheel_gid)
+    [ -n "$(local_prefix_closed "$gid")" ] || return 0
+
+    if [ "$dry_run" -eq 1 ]; then
+        echo "Would hand ${LOCAL_PREFIX} to wheel (gid ${gid}), setgid and group-writable."
+        return 0
+    fi
+    if [ "$require_root" = 1 ] && [ "$(id -u)" -ne 0 ]; then
+        echo "${LOCAL_PREFIX} is not yet writable by wheel; run this as root to open it." >&2
+        return 0
+    fi
+    if ! chgrp -R "$gid" "$LOCAL_PREFIX" 2>/dev/null; then
+        echo "Could not hand ${LOCAL_PREFIX} to wheel; installing there will need sudo." >&2
+        return 0
+    fi
+    find "$LOCAL_PREFIX" -type d -exec chmod g+ws {} + 2>/dev/null || true
+    find "$LOCAL_PREFIX" -type f -exec chmod g+w {} + 2>/dev/null || true
+    echo "${LOCAL_PREFIX} is writable by wheel; imlazy install needs no sudo."
+}
+
 # --------------------------------------------------------------- the profile
 if [ -z "$profile" ] && [ -r "$STATE_FILE" ]; then
     profile=$(sed -n 's/^profile=//p' "$STATE_FILE" | head -n1)
 fi
+
+# Before any of the early exits below: this is owed to every installed
+# system, whether or not a profile is recorded or already applied.
+open_local_prefix
 
 if [ "$auto" -eq 1 ]; then
     # Boot mode: silent no-op on a system with nothing recorded (the live
