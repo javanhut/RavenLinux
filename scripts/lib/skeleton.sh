@@ -226,7 +226,11 @@ RAVEN_SKELETON_DIRS_SYSTEMD=(
     # persistent state these subsystems expect to own
     "var/lib/systemd:755"
     "var/lib/dbus:755"
-    "var/log/journal:755"
+    # Not /var/log/journal. It is not a drop-in directory anything enumerates;
+    # it is journald's persistent store, and journald never runs here -- Raven
+    # logs go to /var/log/raven. It was listed once, and because this table is
+    # the last writer before the squashfs is sealed, that put an empty systemd
+    # directory in every image regardless of what cleanup_sysroot removed.
     # D-Bus: policy and service activation, vendor + admin
     "usr/share/dbus-1:755"
     "usr/share/dbus-1/system.d:755"

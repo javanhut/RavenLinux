@@ -386,7 +386,24 @@ cleanup_sysroot() {
     rm -rf "${SYSROOT_DIR}/usr/include" 2>/dev/null || true
     rm -rf "${SYSROOT_DIR}/usr/share/gtk-doc" 2>/dev/null || true
     rm -rf "${SYSROOT_DIR}/usr/share/help" 2>/dev/null || true
-    
+
+    # Log directories of daemons Raven does not run. journald, auditd and
+    # systemd's DynamicUser= machinery own these on a systemd system; here
+    # PID 1 is raven-init and everything logs to /var/log/raven. The build
+    # itself does not produce them today: /var/log/journal used to come from
+    # an entry in scripts/lib/skeleton.sh (since removed), and audit/private
+    # were never in the image at all -- on an installed system they appear
+    # later, when rvn installs Arch's `systemd` or `audit` and applies the
+    # `d ... 0700` lines from their tmpfiles fragments. This rm is a guard
+    # for any stage that starts extracting those packages into the sysroot,
+    # since an always-empty root-only directory reads as a log that was lost
+    # rather than one that never existed. The skeleton re-applied after this
+    # must not list them, or they are back before the squashfs is sealed.
+    # /var/log/raven stays.
+    rm -rf "${SYSROOT_DIR}/var/log/journal" \
+           "${SYSROOT_DIR}/var/log/audit" \
+           "${SYSROOT_DIR}/var/log/private" 2>/dev/null || true
+
     # Remove static libraries
     find "${SYSROOT_DIR}" -name "*.a" -delete 2>/dev/null || true
     
