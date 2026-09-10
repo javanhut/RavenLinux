@@ -45,6 +45,9 @@ description = "Keyboard backlight and fan control"
 exec = "/usr/bin/raven-controlsd"
 args = []
 after = ["udev"]
+# Same for controlsd: the socket is the proof it is serving.
+ready_path = "/run/raven-controls/ctl"
+ready_timeout = 5
 restart = true
 enabled = true
 critical = false

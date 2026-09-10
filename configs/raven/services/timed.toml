@@ -33,6 +33,9 @@ exec = "/usr/bin/raven-timed"
 args = []
 after = []
 runtime_dirs = ["/run/raven-time"]
+# timed listens here before its first sync attempt, so ready is quick.
+ready_path = "/run/raven-time/ctl"
+ready_timeout = 5
 restart = true
 enabled = true
 critical = false

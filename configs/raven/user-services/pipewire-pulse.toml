@@ -1,0 +1,13 @@
+# pipewire-pulse -- the PulseAudio socket, for everything that still speaks
+# it (browsers, most games).
+[[services]]
+name = "pipewire-pulse"
+description = "PulseAudio compatibility for pipewire"
+exec = "/usr/bin/pipewire-pulse"
+args = []
+after = ["pipewire"]
+ready_path = "${XDG_RUNTIME_DIR}/pulse/native"
+ready_timeout = 5
+restart = true
+enabled = true
+critical = false

@@ -14,7 +14,7 @@ import sys
 PACKAGES = (
     'pipewire', 'libpipewire', 'pipewire-audio', 'pipewire-pulse',
     'wireplumber', 'libwireplumber', 'bluez', 'bluez-utils', 'alsa-lib',
-    'alsa-card-profiles', 'alsa-ucm-conf', 'alsa-topology-conf', 'polkit',
+    'alsa-card-profiles', 'alsa-ucm-conf', 'alsa-topology-conf',
 )
 
 
@@ -65,30 +65,8 @@ def stage(root):
     record = root / 'usr/share/raven/build/desktop-packages.txt'
     record.parent.mkdir(parents=True, exist_ok=True)
     record.write_text(versions)
-    # polkit drops privilege to this account. Do not import the builder's users.
-    passwd = root / 'etc/passwd'
-    group = root / 'etc/group'
-    rows = [line.split(':') for line in passwd.read_text().splitlines()]
-    groups = [line.split(':') for line in group.read_text().splitlines()]
-    existing = next((r for r in rows if r[0] == 'polkitd'), None)
-    if existing:
-        uid, gid = int(existing[2]), int(existing[3])
-    else:
-        used = {int(r[2]) for r in rows + groups}
-        uid = next(i for i in range(900, 970) if i not in used)
-        gid = next((int(r[2]) for r in groups if r[0] == 'polkitd'), uid)
-        with passwd.open('a') as stream:
-            stream.write(f'polkitd:x:{uid}:{gid}:PolicyKit:/:/usr/bin/nologin\n')
-        if not any(r[0] == 'polkitd' for r in groups):
-            with group.open('a') as stream:
-                stream.write(f'polkitd:x:{gid}:\n')
-        with (root / 'etc/shadow').open('a') as stream:
-            stream.write('polkitd:!:19000:0:99999:7:::\n')
-    for directory in ['etc/polkit-1/rules.d', 'usr/share/polkit-1/rules.d']:
-        path = root / directory
-        path.mkdir(parents=True, exist_ok=True)
-        os.chmod(path, 0o750)
-        os.chown(path, uid, gid)
+    # polkit is not staged (see the polkitd note in etc/raven/init.toml), so
+    # neither is its account nor its rules directories.
     print(f'Staged desktop runtime: {len(seen)} files and shared libraries')
 
 

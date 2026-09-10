@@ -1,0 +1,11 @@
+# wireplumber -- pipewire's session manager: which device is the default,
+# what a new stream connects to. Nothing plays without it.
+[[services]]
+name = "wireplumber"
+description = "Audio session policy"
+exec = "/usr/bin/wireplumber"
+args = []
+after = ["pipewire"]
+restart = true
+enabled = true
+critical = false

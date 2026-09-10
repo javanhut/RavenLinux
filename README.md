@@ -223,6 +223,31 @@ restarted; a `raven-rc` that connects during the swap gets ECONNREFUSED once
 and can retry. (`init/src/reexec.rs` has the details, including why it does
 not exec `/proc/self/exe`.) One thing it will not do for you:
 
+### Session services
+
+Each login runs `raven-init --user`, started by `raven-wayland-session`, to
+supervise the daemons that belong to the session: pipewire, wireplumber,
+pipewire-pulse, the wallpaper daemon, an ssh-agent if enabled. The launcher
+used to start those by hand with pid files and no restarts; now they are
+services like any other, restarted when they die and visible to
+`raven-rc --user`:
+
+```sh
+raven-rc --user list                 # what the session is running
+raven-rc --user status pipewire
+raven-rc --user blame                # when each came up
+raven-rc --user start ssh-agent      # SSH_AUTH_SOCK is already exported
+```
+
+Definitions ship in `/usr/share/raven/user-services/*.toml` and are taken
+when their program exists. Your own `~/.config/raven/services/*.toml` win by
+name: copy a shipped file there and edit it, or set `enabled = false` in it to
+opt out of a shipped one. `${XDG_RUNTIME_DIR}` and any other variable of the
+session's environment expand in `exec`, `args`, `environment`, `pre_exec`,
+`ready_path` and `runtime_dirs`. Logs go to `~/.local/state/raven/log`, one
+file per service plus `init.log`.
+
+
 - **Configs under `/etc/raven` are diff-only by default.** An installed system
   carries machine-local edits in `init.toml` (hostname, agetty arguments,
   drop-ins moved to `init.d/`) that a blind copy would erase, so the `configs`

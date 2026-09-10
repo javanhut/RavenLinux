@@ -88,4 +88,13 @@ fi
 # hung. Anything still arriving after this lands as an ordinary hotplug.
 "${UDEVADM}" settle --timeout=30 2>/dev/null || true
 
+# Coldplug is done, or timed out: say so where a service definition can wait
+# for it. Nothing waits by default -- `after = ["udev"]` means udevd is up,
+# not that every device has been probed, and making dbus, cawd and powerd
+# wait out a settle would move the whole boot behind the slowest driver.
+# A service that genuinely needs the hardware to exist before it starts can
+# declare `ready_path = "/run/raven-udev/ready"` on udev instead of guessing;
+# `raven-rc blame` shows what that costs.
+mkdir -p /run/raven-udev && : > /run/raven-udev/ready
+
 exit 0

@@ -2230,87 +2230,106 @@ fi
 # the compositor reuses the audio session instead of starting a second policy
 # manager. PipeWire is also probed directly because somebody may have started
 # it by hand without Raven's pid file.
-audio_runtime="${XDG_RUNTIME_DIR}/raven-audio"
-mkdir -p "${audio_runtime}"
-
-pid_is_alive() {
-    [ -r "$1" ] || return 1
-    IFS= read -r audio_pid < "$1" || return 1
-    case "${audio_pid}" in
-        ''|*[!0-9]*) return 1 ;;
-    esac
-    kill -0 "${audio_pid}" 2>/dev/null
-}
-
-if command -v pipewire >/dev/null 2>&1; then
-    if ! command -v pw-cli >/dev/null 2>&1 || ! pw-cli info 0 >/dev/null 2>&1; then
-        if ! pid_is_alive "${audio_runtime}/pipewire.pid"; then
-            pipewire </dev/null &
-            echo $! > "${audio_runtime}/pipewire.pid"
-        fi
-    fi
-
-    # Do not start the policy manager before the media server has bound its
-    # socket. Usually this is one pass; the bound keeps a failed daemon from
-    # delaying the desktop indefinitely.
+# The session's own daemons -- pipewire, wireplumber, pipewire-pulse, the
+# wallpaper daemon, an ssh-agent if wanted -- are supervised by a second
+# raven-init running as this user, from /usr/share/raven/user-services and
+# ~/.config/raven/services. It restarts what dies, answers `raven-rc --user
+# list`, and stops everything when the session ends. The block below it is
+# the older hand-rolled start, kept for an image whose raven-init predates
+# user mode (`--user --check` says which this is).
+export SSH_AUTH_SOCK="${XDG_RUNTIME_DIR}/ssh-agent.sock"
+user_init_ctl="${XDG_RUNTIME_DIR}/raven-init/ctl"
+if command -v raven-init >/dev/null 2>&1 && raven-init --user --check >/dev/null 2>&1; then
+    raven-init --user </dev/null >/dev/null 2>&1 &
     i=0
-    while [ $i -lt 50 ] && [ ! -S "${XDG_RUNTIME_DIR}/pipewire-0" ]; do
+    while [ $i -lt 50 ] && [ ! -S "${user_init_ctl}" ]; do
         i=$((i + 1))
         sleep 0.1
     done
+fi
+if [ ! -S "${user_init_ctl}" ]; then
+    audio_runtime="${XDG_RUNTIME_DIR}/raven-audio"
+    mkdir -p "${audio_runtime}"
 
-    if [ -S "${XDG_RUNTIME_DIR}/pipewire-0" ] \
-            && command -v wireplumber >/dev/null 2>&1 \
-            && ! pid_is_alive "${audio_runtime}/wireplumber.pid"; then
-        wireplumber </dev/null &
-        echo $! > "${audio_runtime}/wireplumber.pid"
-    fi
+    pid_is_alive() {
+        [ -r "$1" ] || return 1
+        IFS= read -r audio_pid < "$1" || return 1
+        case "${audio_pid}" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        kill -0 "${audio_pid}" 2>/dev/null
+    }
 
-    # Huginn detects its mixer once, during construction. Wait until
-    # WirePlumber has selected a real output so that a normal startup cannot
-    # permanently turn its volume slider into the disconnected in-memory stub.
-    if [ -S "${XDG_RUNTIME_DIR}/pipewire-0" ] \
-            && command -v pipewire-pulse >/dev/null 2>&1 \
-            && [ ! -S "${XDG_RUNTIME_DIR}/pulse/native" ] \
-            && ! pid_is_alive "${audio_runtime}/pipewire-pulse.pid"; then
-        pipewire-pulse </dev/null &
-        echo $! > "${audio_runtime}/pipewire-pulse.pid"
-    fi
+    if command -v pipewire >/dev/null 2>&1; then
+        if ! command -v pw-cli >/dev/null 2>&1 || ! pw-cli info 0 >/dev/null 2>&1; then
+            if ! pid_is_alive "${audio_runtime}/pipewire.pid"; then
+                pipewire </dev/null &
+                echo $! > "${audio_runtime}/pipewire.pid"
+            fi
+        fi
 
-    if command -v wpctl >/dev/null 2>&1; then
+        # Do not start the policy manager before the media server has bound its
+        # socket. Usually this is one pass; the bound keeps a failed daemon from
+        # delaying the desktop indefinitely.
         i=0
-        while [ $i -lt 50 ] \
-                && ! wpctl get-volume '@DEFAULT_AUDIO_SINK@' >/dev/null 2>&1; do
+        while [ $i -lt 50 ] && [ ! -S "${XDG_RUNTIME_DIR}/pipewire-0" ]; do
             i=$((i + 1))
             sleep 0.1
         done
-    fi
-fi
 
-# The wallpaper. Backgrounded ahead of the exec below, exactly like the session
-# bus above it and for a stronger version of the same reason: ravencanvasd is a
-# layer-shell client of the compositor this script is about to *become*, so
-# there is no line after the exec on which to start it. It starts first and
-# waits -- connect() retries for ten seconds, and finds the socket by searching
-# $XDG_RUNTIME_DIR rather than reading a $WAYLAND_DISPLAY that nothing has set
-# yet, because the compositor binds the first free number and a stale lock puts
-# it on wayland-1.
-#
-# Guarded rather than written conditionally: this launcher is one file that
-# stage-gui.sh writes whole, and `command -v` is the whole of the difference
-# between an image built with the wallpaper daemon and one built with
-# CANVAS_SKIP=1.
-#
-# Not a service in /etc/raven/init.toml, where every other daemon on this image
-# lives. Init's services are system services started as root before anybody has
-# logged in; this is an ordinary unprivileged client that has to run as the
-# session's own user and share its runtime directory.
-#
-# Its death costs a picture and nothing else -- huginn paints its own
-# background under everything on the background layer -- which is why nothing
-# here checks that it came up.
-if command -v ravencanvasd >/dev/null 2>&1; then
-    ravencanvasd &
+        if [ -S "${XDG_RUNTIME_DIR}/pipewire-0" ] \
+                && command -v wireplumber >/dev/null 2>&1 \
+                && ! pid_is_alive "${audio_runtime}/wireplumber.pid"; then
+            wireplumber </dev/null &
+            echo $! > "${audio_runtime}/wireplumber.pid"
+        fi
+
+        # Huginn detects its mixer once, during construction. Wait until
+        # WirePlumber has selected a real output so that a normal startup cannot
+        # permanently turn its volume slider into the disconnected in-memory stub.
+        if [ -S "${XDG_RUNTIME_DIR}/pipewire-0" ] \
+                && command -v pipewire-pulse >/dev/null 2>&1 \
+                && [ ! -S "${XDG_RUNTIME_DIR}/pulse/native" ] \
+                && ! pid_is_alive "${audio_runtime}/pipewire-pulse.pid"; then
+            pipewire-pulse </dev/null &
+            echo $! > "${audio_runtime}/pipewire-pulse.pid"
+        fi
+
+        if command -v wpctl >/dev/null 2>&1; then
+            i=0
+            while [ $i -lt 50 ] \
+                    && ! wpctl get-volume '@DEFAULT_AUDIO_SINK@' >/dev/null 2>&1; do
+                i=$((i + 1))
+                sleep 0.1
+            done
+        fi
+    fi
+
+    # The wallpaper. Backgrounded ahead of the exec below, exactly like the session
+    # bus above it and for a stronger version of the same reason: ravencanvasd is a
+    # layer-shell client of the compositor this script is about to *become*, so
+    # there is no line after the exec on which to start it. It starts first and
+    # waits -- connect() retries for ten seconds, and finds the socket by searching
+    # $XDG_RUNTIME_DIR rather than reading a $WAYLAND_DISPLAY that nothing has set
+    # yet, because the compositor binds the first free number and a stale lock puts
+    # it on wayland-1.
+    #
+    # Guarded rather than written conditionally: this launcher is one file that
+    # stage-gui.sh writes whole, and `command -v` is the whole of the difference
+    # between an image built with the wallpaper daemon and one built with
+    # CANVAS_SKIP=1.
+    #
+    # Not a service in /etc/raven/init.toml, where every other daemon on this image
+    # lives. Init's services are system services started as root before anybody has
+    # logged in; this is an ordinary unprivileged client that has to run as the
+    # session's own user and share its runtime directory.
+    #
+    # Its death costs a picture and nothing else -- huginn paints its own
+    # background under everything on the background layer -- which is why nothing
+    # here checks that it came up.
+    if command -v ravencanvasd >/dev/null 2>&1; then
+        ravencanvasd &
+    fi
 fi
 
 # Per-user session programs -- the nearest thing this system has to a user

@@ -1647,6 +1647,34 @@ fn published_status_tracks_service_state_without_the_socket() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A session's raven-init refuses the verbs that act on the machine, and
+/// says which raven-rc to use instead. Everything about its own services
+/// works as before.
+#[test]
+fn user_mode_refuses_machine_verbs_and_keeps_service_verbs() {
+    let cfg_svc = sleeper("user-mode-svc");
+    let mut cfg = config_with(vec![cfg_svc.clone()]);
+    let mut services = HashMap::new();
+    services.insert(
+        "user-mode-svc".to_string(),
+        Service::start(&cfg_svc).expect("starts"),
+    );
+    control::set_user_mode(true);
+    for verb in ["poweroff", "halt", "reboot", "suspend", "sleep", "reexec"] {
+        let (reply, action) = control::dispatch(verb, &mut services, &mut cfg);
+        assert_eq!(action, Action::None, "{verb} must not act");
+        assert!(reply.starts_with("error:") && reply.contains("--user"), "{verb}: {reply}");
+    }
+    let (reply, _) = control::dispatch("list", &mut services, &mut cfg);
+    assert!(reply.contains("user-mode-svc"), "{reply}");
+    let (reply, _) = control::dispatch("stop user-mode-svc", &mut services, &mut cfg);
+    assert!(!reply.starts_with("error:"), "{reply}");
+    control::set_user_mode(false);
+    for svc in services.values_mut() {
+        svc.kill();
+    }
+}
+
 #[test]
 fn blame_reports_start_and_ready_times_slowest_first() {
     let dir = format!(

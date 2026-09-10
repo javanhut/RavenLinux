@@ -40,6 +40,22 @@ pub struct InitConfig {
     pub source_path: Option<std::path::PathBuf>,
 }
 
+impl InitConfig {
+    /// No services and no system settings: the starting point for a session
+    /// supervisor, which must not inherit the getty the system default has.
+    pub fn default_empty() -> Self {
+        Self {
+            system: SystemConfig {
+                hostname: String::new(),
+                ..SystemConfig::default()
+            },
+            services: Vec::new(),
+            mounts: Vec::new(),
+            source_path: None,
+        }
+    }
+}
+
 impl Default for InitConfig {
     fn default() -> Self {
         Self {

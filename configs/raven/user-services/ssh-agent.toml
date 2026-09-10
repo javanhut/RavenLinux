@@ -1,0 +1,19 @@
+# ssh-agent -- one per session, not one for the machine.
+#
+# This used to be a system service template, which was the wrong layer: an
+# agent holds one person's keys and must die with their login. The launcher
+# exports SSH_AUTH_SOCK to the socket named here, so a terminal opened in
+# the session finds the agent without a line in any shell rc. Off by
+# default, as the system one was: `raven-rc --user start ssh-agent`, or a
+# copy of this file in ~/.config/raven/services with enabled = true.
+[[services]]
+name = "ssh-agent"
+description = "SSH authentication agent"
+exec = "/usr/bin/ssh-agent"
+args = ["-D", "-a", "${XDG_RUNTIME_DIR}/ssh-agent.sock"]
+after = []
+ready_path = "${XDG_RUNTIME_DIR}/ssh-agent.sock"
+ready_timeout = 5
+restart = true
+enabled = false
+critical = false

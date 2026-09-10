@@ -29,6 +29,9 @@ description = "Power button, sleep button and lid switch"
 exec = "/usr/bin/raven-powerd"
 args = []
 after = ["udev"]
+# The desktop and raven-rc talk to powerd here; up means listening.
+ready_path = "/run/raven-power/ctl"
+ready_timeout = 5
 restart = true
 enabled = true
 critical = false

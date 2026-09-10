@@ -15,6 +15,11 @@
 //!   reboot           - Reboot the system
 //!   halt             - Halt the system
 //!
+//! `raven-rc --user <command>` talks to the session's own raven-init (see
+//! usermode.rs) at $XDG_RUNTIME_DIR/raven-init/ctl instead: the daemons that
+//! belong to the person logged in rather than to the machine. The power
+//! verbs are not available there.
+//!
 //! Service commands go over the control socket at /run/raven-init.sock and
 //! need raven-init to be PID 1. Shutdown commands fall back to the command
 //! file and then to the reboot syscall, so they still work when it is not.
@@ -33,6 +38,35 @@ use std::time::Duration;
 
 /// Where raven-init listens. Must match control::SOCKET_PATH.
 const SOCKET_PATH: &str = "/run/raven-init.sock";
+
+/// Which raven-init this invocation talks to. Set once in main from
+/// `--user`; the system one until then.
+struct Target {
+    socket: String,
+    status_dir: String,
+    user: bool,
+}
+
+static TARGET: std::sync::OnceLock<Target> = std::sync::OnceLock::new();
+
+fn rc_target() -> &'static Target {
+    TARGET.get_or_init(|| Target {
+        socket: SOCKET_PATH.to_string(),
+        status_dir: STATUS_DIR.to_string(),
+        user: false,
+    })
+}
+
+/// The session supervisor's socket: under XDG_RUNTIME_DIR, or nowhere.
+fn user_target() -> Result<Target, String> {
+    let runtime = env::var("XDG_RUNTIME_DIR")
+        .map_err(|_| "XDG_RUNTIME_DIR is not set; there is no session raven-init to talk to".to_string())?;
+    Ok(Target {
+        socket: format!("{runtime}/raven-init/ctl"),
+        status_dir: format!("{runtime}/raven-init"),
+        user: true,
+    })
+}
 
 /// Where raven-init publishes the text of `list` (`status`), `status NAME`
 /// (`services/NAME`) and `blame` (`blame`), mode 0644. Must match
@@ -115,7 +149,21 @@ fn arity_of(verb: &str) -> Option<Arity> {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let mut args: Vec<String> = env::args().collect();
+    // `--user` selects the session's raven-init. Removed from argv so the
+    // rest of the parsing sees the same shape it always has.
+    if args.get(1).is_some_and(|a| a == "--user") {
+        args.remove(1);
+        match user_target() {
+            Ok(t) => {
+                let _ = TARGET.set(t);
+            }
+            Err(e) => {
+                eprintln!("raven-rc: {e}");
+                process::exit(1);
+            }
+        }
+    }
     let program = Path::new(&args[0])
         .file_name()
         .and_then(|s| s.to_str())
@@ -156,6 +204,11 @@ fn main() {
     } else {
         args.get(1).map(|s| s.as_str())
     };
+
+    if rc_target().user && matches!(command, "poweroff" | "halt" | "reboot" | "suspend" | "sleep" | "reexec") {
+        eprintln!("raven-rc --user: '{command}' acts on the machine; run it without --user");
+        process::exit(1);
+    }
 
     match command {
         "poweroff" | "halt" => do_poweroff(),
@@ -199,39 +252,45 @@ fn ask(request: &str) -> Result<String, String> {
     // published, never from the socket. Root keeps the live path, and so does
     // anyone on a raven-init too old to publish, who then gets the socket's
     // own permission-denied diagnosis below.
-    if !is_root() {
+    // The session's socket is the user's own, so it is always the live path.
+    if !is_root() && !rc_target().user {
         if let Some(reply) = read_published(request) {
             return Ok(reply);
         }
     }
 
-    let mut stream = UnixStream::connect(SOCKET_PATH).map_err(|e| {
+    let mut stream = UnixStream::connect(&rc_target().socket).map_err(|e| {
         // These two failures look alike and mean opposite things, so name
         // them. ECONNREFUSED in particular says the socket file is still
         // there while nothing is listening -- a raven-init that died without
         // cleaning up -- which reads like a broken service manager rather
         // than an absent one.
         let diagnosis = match e.kind() {
+            ErrorKind::NotFound if rc_target().user => format!(
+                "there is no socket at {}, so no raven-init is supervising this session.\n\
+                 The session launcher starts one; `raven-init --user &` does by hand.",
+                rc_target().socket
+            ),
             ErrorKind::NotFound => format!(
                 "there is no socket at {}, so raven-init is not running.\n\
                  PID 1 is '{}', not raven-init, so service commands are not available.",
-                SOCKET_PATH,
+                rc_target().socket,
                 pid1_name()
             ),
             ErrorKind::ConnectionRefused => format!(
                 "the socket at {} exists but nothing is listening: raven-init\n\
                  exited without cleaning up. PID 1 is '{}'.\n\
                  Remove the stale socket, or reboot.",
-                SOCKET_PATH,
+                rc_target().socket,
                 pid1_name()
             ),
             ErrorKind::PermissionDenied => format!(
                 "permission denied on {}. The control socket is root-only;\n\
                  try again with sudo. (`list` and `status` work without root once\n\
                  raven-init publishes {}; this one has not.)",
-                SOCKET_PATH, STATUS_DIR
+                rc_target().socket, rc_target().status_dir
             ),
-            _ => format!("cannot reach raven-init on {}: {}", SOCKET_PATH, e),
+            _ => format!("cannot reach raven-init on {}: {}", rc_target().socket, e),
         };
         format!("raven-rc: {}", diagnosis)
     })?;
@@ -302,7 +361,8 @@ fn do_ask(request: &str) {
 }
 
 fn print_usage(program: &str) {
-    eprintln!("Usage: {} <command> [SERVICE]", program);
+    eprintln!("Usage: {} [--user] <command> [SERVICE]", program);
+    eprintln!("  --user           - Talk to this session's raven-init (its own daemons, no power verbs)");
     eprintln!();
     eprintln!("Services:");
     for (verb, arity, help) in SERVICE_VERBS {
@@ -466,7 +526,9 @@ fn do_status(target: Option<&str>) {
         return;
     }
 
-    do_system_status();
+    if !rc_target().user {
+        do_system_status();
+    }
 
     // The service table is the part only init can answer. Absent init, say so
     // once and plainly rather than printing nothing and looking healthy.

@@ -2514,6 +2514,14 @@ EOF
 	        cp "${PROJECT_ROOT}/configs/raven/services/"*.toml \
 	            "${SYSROOT_DIR}/usr/share/raven/services/" 2>/dev/null || true
 	    fi
+	    # Session services, for the raven-init each login runs as itself. Read
+	    # straight from here by `raven-init --user`; no drop-in step, since a
+	    # template is taken whenever its program is installed.
+	    if [[ -d "${PROJECT_ROOT}/configs/raven/user-services" ]]; then
+	        mkdir -p "${SYSROOT_DIR}/usr/share/raven/user-services"
+	        cp "${PROJECT_ROOT}/configs/raven/user-services/"*.toml \
+	            "${SYSROOT_DIR}/usr/share/raven/user-services/" 2>/dev/null || true
+	    fi
     if [[ ! -f "${SYSROOT_DIR}/etc/raven/init.toml" ]]; then
         cat > "${SYSROOT_DIR}/etc/raven/init.toml" << 'EOF'
 # RavenLinux Init Configuration

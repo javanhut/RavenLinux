@@ -1,0 +1,11 @@
+# ravencanvasd -- the wallpaper daemon (RavenCanvas). Per session: it draws
+# into the session's compositor.
+[[services]]
+name = "ravencanvasd"
+description = "Wallpaper daemon"
+exec = "/usr/bin/ravencanvasd"
+args = []
+after = []
+restart = true
+enabled = true
+critical = false

@@ -119,12 +119,12 @@ def validate(root, binaries, desktop=True, sources=()):
                 for command in filter(None, commands):
                     if not exists(command, True):
                         errors.append(f'{name}: missing service executable {command}')
-        for name in ['cawd', 'powerd', 'controlsd', 'timed', 'ports', 'polkitd', 'bluetoothd']:
+        for name in ['cawd', 'powerd', 'controlsd', 'timed', 'ports', 'bluetoothd']:
             if name not in enabled:
                 errors.append(f'Missing enabled service definition: {name}')
         passwd = root / 'etc/passwd'
         names = {line.split(':')[0] for line in passwd.read_text().splitlines()} if passwd.exists() else set()
-        for name in ['dbus', 'polkitd', 'raven-greeter']:
+        for name in ['dbus', 'raven-greeter']:
             if name not in names:
                 errors.append(f'Missing daemon account: {name}')
     # Inspect ELF metadata only: do not execute programs or resolve libraries

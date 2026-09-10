@@ -167,6 +167,27 @@ mode 0644, rewriting a file only when its text changes, and `raven-rc` reads
 those files instead of the socket when it is not root. The files are output
 only. Nothing an unprivileged process writes reaches PID 1.
 
+The session has a supervisor of its own. `raven-init --user`, the same
+binary, is started by `raven-wayland-session` as the person logging in and
+supervises the daemons that belong to a login rather than to the machine:
+pipewire, wireplumber, pipewire-pulse, the wallpaper daemon, an ssh-agent if
+wanted. Their definitions ship in `/usr/share/raven/user-services`, are taken
+when their program is installed, and are overridden by name from
+`~/.config/raven/services`, with `${XDG_RUNTIME_DIR}` and friends expanded.
+Its socket, published status and logs live under the user's own directories,
+so `raven-rc --user list`, `status`, `blame`, `start` and `stop` need no
+privilege and the machine's raven-rc is untouched. The power verbs are refused
+there; a session supervises a session. It exits, stopping its services, when
+the session does.
+
+raven-init's main loop sleeps in `poll(2)` rather than on a timer: it wakes
+when a child exits (a SIGCHLD handler writes to a self-pipe the loop polls,
+chosen over a signalfd because a blocked signal is inherited by every service
+it spawns) or when a raven-rc client connects, and only ticks on a 100 ms
+timer while a service is waiting for its ready path or a restart is due.
+Idle, it wakes once every two seconds instead of ten times a second, which
+is what the command-file fallback and the published status are checked on.
+
 Packages follow the same shape as sleep: a verb granted by a group on a
 socket. `rvnd` (in RavenPackageManager) runs as root under raven-init and
 listens on `/run/rvn/ctl`, group `wheel`, mode 0660. An unprivileged `rvn

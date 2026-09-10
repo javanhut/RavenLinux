@@ -10,7 +10,7 @@ license = "MIT"
 # Unix/Linux system calls
 # "user" is what setgroups/setgid/setuid live behind -- see apply_credentials
 # in service.rs, which drops a service to its configured account.
-nix = { version = "0.28", features = ["signal", "process", "mount", "fs", "hostname", "reboot", "term", "ioctl", "user"] }
+nix = { version = "0.28", features = ["signal", "process", "mount", "fs", "hostname", "reboot", "term", "ioctl", "user", "poll"] }
 
 # Direct libc access for sync()
 libc = "0.2"

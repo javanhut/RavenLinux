@@ -1,0 +1,18 @@
+# pipewire -- the session's audio server.
+#
+# A session service, not a system one: it runs as the person logged in,
+# owns nothing outside their runtime directory, and dies with their
+# session. raven-init --user starts it once the launcher hands over, and
+# restarts it if it exits; wireplumber and pipewire-pulse wait for its
+# socket.
+[[services]]
+name = "pipewire"
+description = "Audio server"
+exec = "/usr/bin/pipewire"
+args = []
+after = []
+ready_path = "${XDG_RUNTIME_DIR}/pipewire-0"
+ready_timeout = 5
+restart = true
+enabled = true
+critical = false

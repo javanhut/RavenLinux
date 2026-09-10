@@ -239,6 +239,10 @@ do_configs() {
         [[ -e "$f" ]] || continue
         install_config "$f" "/etc/raven/init.d/$(basename "$f")"
     done
+    for f in "${RAVEN_ROOT}"/configs/raven/user-services/*.toml; do
+        [[ -e "$f" ]] || continue
+        install_file "$f" "/usr/share/raven/user-services/$(basename "$f")" 0644
+    done
     for f in "${RAVEN_ROOT}"/configs/raven/session.d/*; do
         [[ -e "$f" ]] || continue
         install_config "$f" "/etc/raven/session.d/$(basename "$f")" 0755

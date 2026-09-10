@@ -361,8 +361,12 @@ pub(crate) fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<
                 user: None,
                 runtime_dirs: Vec::new(),
                 after: vec!["udev".to_string(), "seatd".to_string()],
-                ready_path: None,
-                ready_timeout: 5,
+                // The greeter socket (raven-greet-proto's SOCKET_PATH). It is
+                // bound before the greeter compositor starts, so "ready" here
+                // means "asking for a password", which is what `raven-rc
+                // blame` should count as the login screen's arrival.
+                ready_path: Some("/run/raven-login/greet.sock".to_string()),
+                ready_timeout: 15,
                 stop_exec: None,
                 stop_args: Vec::new(),
                 // Longer than the session's: SIGTERM has to reach the greeter,

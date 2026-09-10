@@ -447,7 +447,7 @@ cleanup_sysroot() {
 #
 # This is the same rule rvn applies at runtime, applied once at build time: a
 # template whose `exec` exists in the sysroot becomes a drop-in. Templates for
-# daemons the image lacks (sshd, ssh-agent) stay inert, and a drop-in that
+# daemons the image lacks (sshd) stay inert, and a drop-in that
 # already exists is never touched. Each template's own `enabled` decides
 # whether it runs at boot; this only makes it visible to raven-init.
 #

@@ -12,10 +12,15 @@ mod config;
 /// are in a comment at the top of the file that no test reads.
 #[test]
 fn shipped_service_templates_parse() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../configs/raven/services");
+    for sub in ["services", "user-services"] {
+        templates_parse(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../configs/raven").join(sub));
+    }
+}
+
+fn templates_parse(dir: &Path) {
     let mut seen = 0;
 
-    for entry in std::fs::read_dir(&dir).expect("the template directory exists") {
+    for entry in std::fs::read_dir(dir).expect("the template directory exists") {
         let path = entry.expect("readable entry").path();
         if path.extension().is_none_or(|ext| ext != "toml") {
             continue;

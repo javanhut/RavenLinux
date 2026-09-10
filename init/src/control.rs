@@ -53,6 +53,19 @@ use crate::service::{Service, ServiceState};
 /// Where raven-rc looks for us.
 pub const SOCKET_PATH: &str = "/run/raven-init.sock";
 
+/// Set by `raven-init --user`: this supervisor owns a session, not the
+/// machine, so the verbs that act on the machine are refused with a pointer
+/// to the system raven-rc rather than answered with a lie.
+static USER_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_user_mode(on: bool) {
+    USER_MODE.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn user_mode() -> bool {
+    USER_MODE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Where init publishes the text of `list` and `status NAME` for readers
 /// without root: `status` holds the list, `services/NAME` one service each,
 /// `blame` the boot timeline.
@@ -91,11 +104,6 @@ pub enum Action {
     /// closes the control socket, and a client still waiting on it would see
     /// a hang where the operation had actually succeeded.
     Reexec,
-}
-
-/// Create the control socket at [`SOCKET_PATH`], replacing any stale one.
-pub fn listen() -> Result<UnixListener> {
-    listen_at(SOCKET_PATH)
 }
 
 /// Create the control socket at an arbitrary path.
@@ -193,6 +201,18 @@ pub fn dispatch(
     let mut parts = request.split_whitespace();
     let verb = parts.next().unwrap_or("");
     let target = parts.next();
+
+    if user_mode()
+        && matches!(
+            verb,
+            "poweroff" | "halt" | "reboot" | "suspend" | "sleep" | "reexec"
+        )
+    {
+        return (
+            format!("error: '{verb}' acts on the machine, and this raven-init supervises a session; use raven-rc without --user\n"),
+            Action::None,
+        );
+    }
 
     match verb {
         "list" => (list_services(services, config), Action::None),
@@ -332,6 +352,17 @@ fn list_services(services: &HashMap<String, Service>, config: &InitConfig) -> St
     }
 
     out
+}
+
+/// Whether the main loop has time-driven work pending: a running service
+/// whose ready path has not appeared yet, or a dead one with a restart due.
+/// When neither, the loop can sleep until a child exits or a client
+/// connects, instead of waking ten times a second to look.
+pub fn wants_quick_tick(services: &HashMap<String, Service>) -> bool {
+    services.values().any(|svc| {
+        (svc.is_running() && svc.ready_path().is_some() && svc.ready_at().is_none())
+            || (!svc.is_running() && svc.retry_at().is_some())
+    })
 }
 
 /// Look at every running service's ready path once and record the ones that

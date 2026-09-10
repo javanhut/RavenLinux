@@ -16,6 +16,10 @@ description = "Package installs for members of wheel, without sudo"
 exec = "/usr/bin/rvnd"
 args = []
 after = ["udev"]
+# Up means the socket exists; rvn probes it before every privileged request,
+# so a dependant (the store, a post-install run) should not race the bind.
+ready_path = "/run/rvn/ctl"
+ready_timeout = 5
 restart = true
 enabled = true
 critical = false

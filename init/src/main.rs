@@ -20,6 +20,7 @@ use nix::mount::{mount, MsFlags};
 use nix::sys::reboot::{reboot, RebootMode};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
+use std::os::fd::AsFd;
 
 mod config;
 mod control;
@@ -29,6 +30,7 @@ mod reexec;
 mod service;
 mod timeline;
 mod user;
+mod usermode;
 
 use config::{InitConfig, ServiceConfig};
 use service::{Service, ServiceState};
@@ -39,7 +41,65 @@ static REBOOT_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// Set by `raven-rc reexec`; the main loop returns `LoopExit::Reexec`.
 static REEXEC_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// The write end of the self-pipe the SIGCHLD handler pokes, so a child
+/// exiting wakes the main loop's poll. -1 until `child_wakeup` sets it up.
+static CHILD_WAKE_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+extern "C" fn on_sigchld(_: libc::c_int) {
+    let fd = CHILD_WAKE_FD.load(Ordering::SeqCst);
+    if fd >= 0 {
+        // SAFETY: write(2) is async-signal-safe; the fd is non-blocking, so a
+        // full pipe just drops the byte, and one byte is all a wake needs.
+        unsafe {
+            libc::write(fd, [1u8].as_ptr() as *const libc::c_void, 1);
+        }
+    }
+}
+
+/// The main loop used to sleep 100 ms between looks, ten wakeups a second
+/// for the life of the machine, and a raven-rc request waited up to a tick.
+/// Now it sleeps in poll(2) on the control socket and on this pipe, which a
+/// SIGCHLD handler writes to, so a child dying or a client connecting wakes
+/// it at once, and it only ticks on a timer while something is pending
+/// (see control::wants_quick_tick). A self-pipe rather than a signalfd
+/// because a signalfd needs SIGCHLD blocked, and a blocked signal is
+/// inherited by every service raven-init spawns.
+///
+/// Returns the read end. `None` means the loop keeps its old timer.
+fn child_wakeup() -> Option<std::os::fd::OwnedFd> {
+    use nix::fcntl::OFlag;
+    use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+    let (read, write) = nix::unistd::pipe2(OFlag::O_NONBLOCK | OFlag::O_CLOEXEC).ok()?;
+    let write_raw = std::os::fd::IntoRawFd::into_raw_fd(write);
+    CHILD_WAKE_FD.store(write_raw, Ordering::SeqCst);
+    let action = SigAction::new(
+        SigHandler::Handler(on_sigchld),
+        // No SA_RESTART: a blocked poll is exactly what should be interrupted.
+        SaFlags::SA_NOCLDSTOP,
+        SigSet::empty(),
+    );
+    // SAFETY: the handler only calls write(2) on a static fd.
+    unsafe { sigaction(Signal::SIGCHLD, &action) }.ok()?;
+    Some(read)
+}
+
 fn main() {
+    // `--user`: supervise a session, not the machine. See usermode.rs.
+    // `--user --check` answers "does this binary know user mode" with its
+    // exit status, so a launcher can tell a new raven-init from an old one
+    // that would refuse to run beside PID 1.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--user") {
+        if args.iter().any(|a| a == "--check") {
+            return;
+        }
+        if let Err(e) = run_user() {
+            eprintln!("raven-init --user: {:#}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Refuse to be a second supervisor before doing anything at all -- not
     // even logging setup. This used to be a warning followed by "continue
     // anyway for testing purposes", which is how a raven-init started from a
@@ -75,6 +135,7 @@ fn main() {
 /// 5.9, so a message that leaves the screen is otherwise simply gone.
 struct DualLogger {
     file: std::sync::Mutex<Option<std::fs::File>>,
+    path: std::path::PathBuf,
 }
 
 impl log::Log for DualLogger {
@@ -106,11 +167,13 @@ impl log::Log for DualLogger {
             // Opened lazily: /var/log may not be writable until the root is
             // mounted rw, and boot must not wait on it.
             if guard.is_none() {
-                std::fs::create_dir_all("/var/log/raven").ok();
+                if let Some(dir) = self.path.parent() {
+                    std::fs::create_dir_all(dir).ok();
+                }
                 *guard = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open("/var/log/raven/init.log")
+                    .open(&self.path)
                     .ok();
             }
             if let Some(ref mut f) = *guard {
@@ -124,8 +187,13 @@ impl log::Log for DualLogger {
 }
 
 fn init_logging() {
+    init_logging_at(std::path::PathBuf::from("/var/log/raven/init.log"));
+}
+
+fn init_logging_at(path: std::path::PathBuf) {
     let logger = Box::new(DualLogger {
         file: std::sync::Mutex::new(None),
+        path,
     });
     if log::set_boxed_logger(logger).is_ok() {
         log::set_max_level(log::LevelFilter::Info);
@@ -1107,12 +1175,93 @@ fn print_welcome() {
     println!();
 }
 
+/// Where a supervisor's socket and status live, and which machine-level
+/// duties it has. PID 1 has all of them; a session supervisor has none.
+struct LoopPaths {
+    socket: std::path::PathBuf,
+    status_dir: std::path::PathBuf,
+    machine: bool,
+}
+
+impl LoopPaths {
+    fn system() -> Self {
+        LoopPaths {
+            socket: std::path::PathBuf::from(control::SOCKET_PATH),
+            status_dir: std::path::PathBuf::from(control::STATUS_DIR),
+            machine: true,
+        }
+    }
+}
+
+/// `raven-init --user`: the session supervisor's whole life. Nothing here
+/// touches the machine; see usermode.rs for what is different from PID 1.
+fn run_user() -> Result<()> {
+    let paths = usermode::Paths::from_env()?;
+    paths.prepare()?;
+    // Service logs go beside init's own; service.rs reads this.
+    std::env::set_var("RAVEN_SERVICE_LOG_DIR", &paths.log_dir);
+    init_logging_at(paths.log_dir.join("init.log"));
+    timeline::mark("init started");
+    control::set_user_mode(true);
+    log::info!(
+        "RavenInit starting for a session (uid {}); socket {}",
+        nix::unistd::getuid(),
+        paths.socket.display()
+    );
+
+    // SIGTERM and SIGINT end the session's services and this process; the
+    // launcher, or a logout, is what sends them.
+    extern "C" fn on_term(_: libc::c_int) {
+        SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+    }
+    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+    unsafe {
+        use nix::sys::signal::{signal, SigHandler, Signal};
+        signal(Signal::SIGTERM, SigHandler::Handler(on_term)).context("SIGTERM handler")?;
+        signal(Signal::SIGINT, SigHandler::Handler(on_term)).context("SIGINT handler")?;
+        signal(Signal::SIGHUP, SigHandler::Handler(on_term)).context("SIGHUP handler")?;
+    }
+
+    let mut config = usermode::load_config(&paths);
+    log::info!("Starting {} session services", config.services.iter().filter(|s| s.enabled).count());
+    let mut services = start_services(&config)?;
+    timeline::mark("services started");
+    timeline::mark("main loop");
+
+    let loop_paths = LoopPaths {
+        socket: paths.socket.clone(),
+        status_dir: paths.runtime.clone(),
+        machine: false,
+    };
+    loop {
+        match main_loop_at(&mut services, &mut config, &loop_paths)? {
+            LoopExit::Shutdown => break,
+            // Refused at dispatch in user mode; never reaches here.
+            LoopExit::Reexec => {
+                REEXEC_REQUESTED.store(false, Ordering::SeqCst);
+            }
+        }
+    }
+    log::info!("Session supervisor stopping");
+    shutdown_services(&mut services)?;
+    fs::remove_file(&paths.socket).ok();
+    Ok(())
+}
+
 fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -> Result<LoopExit> {
+    main_loop_at(services, config, &LoopPaths::system())
+}
+
+fn main_loop_at(
+    services: &mut HashMap<String, Service>,
+    config: &mut InitConfig,
+    paths: &LoopPaths,
+) -> Result<LoopExit> {
     // The control socket is how raven-rc asks about services and starts or
     // stops them. A failure to bind it is not fatal: PID 1 supervising
     // services matters more than PID 1 being controllable, and the
     // /run/raven-init.cmd fallback below still works.
-    let control = match control::listen() {
+    let control = match control::listen_at(paths.socket.to_str().unwrap_or(control::SOCKET_PATH)) {
         Ok(listener) => Some(listener),
         Err(e) => {
             log::warn!("Control socket unavailable: {:#}", e);
@@ -1122,12 +1271,25 @@ fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -
     };
 
     // The sleep marker, before anything can watch it. See power.rs.
-    power::publish_at_boot();
+    if paths.machine {
+        power::publish_at_boot();
+    }
 
     // What `raven-rc list` and `status` say, published for readers without
     // root. See control::StatusPublisher.
-    let mut status = control::StatusPublisher::new();
+    let mut status = control::StatusPublisher::at(paths.status_dir.clone());
     status.publish(services, config);
+
+    let child_wake = child_wakeup();
+    if child_wake.is_none() {
+        log::warn!("Could not set up the SIGCHLD wakeup; the main loop will tick every 100 ms");
+    }
+    // How long to sleep with nothing pending. Bounded so a wake that was
+    // missed (a signal before the handler was installed, a client that raced
+    // the poll) costs at most this, and so the command-file fallback and the
+    // published status still get looked at on a laptop that is doing nothing.
+    const IDLE: Duration = Duration::from_secs(2);
+    const BUSY: Duration = Duration::from_millis(100);
 
     log::info!("Entering main loop");
 
@@ -1148,8 +1310,26 @@ fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -
         // Check service status and restart if needed
         check_services(services, config);
 
-        // Sleep briefly to avoid busy-waiting
-        std::thread::sleep(Duration::from_millis(100));
+        // Sleep until something happens, or until pending work is due.
+        let wait = if control::wants_quick_tick(services) { BUSY } else { IDLE };
+        match (&child_wake, &control) {
+            (Some(pipe), listener) => {
+                use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+                let mut fds = vec![PollFd::new(pipe.as_fd(), PollFlags::POLLIN)];
+                if let Some(l) = listener {
+                    fds.push(PollFd::new(l.as_fd(), PollFlags::POLLIN));
+                }
+                let timeout = PollTimeout::try_from(wait.as_millis() as u16).unwrap_or(PollTimeout::MAX);
+                match poll(&mut fds, timeout) {
+                    Ok(_) | Err(nix::errno::Errno::EINTR) => {}
+                    Err(e) => log::warn!("poll: {e}"),
+                }
+                // Drain whatever the handler wrote; the count is not the point.
+                let mut buf = [0u8; 64];
+                while nix::unistd::read(std::os::fd::AsRawFd::as_raw_fd(pipe), &mut buf).is_ok_and(|n| n == buf.len()) {}
+            }
+            (None, _) => std::thread::sleep(BUSY),
+        }
 
         // Serve any waiting raven-rc clients.
         if let Some(ref listener) = control {
@@ -1190,7 +1370,9 @@ fn main_loop(services: &mut HashMap<String, Service>, config: &mut InitConfig) -
 
         // Kept alongside the socket: one word in a file needs no client at all,
         // which is worth having when the socket is what is broken.
-        check_command_file()?;
+        if paths.machine {
+            check_command_file()?;
+        }
     }
 }
 

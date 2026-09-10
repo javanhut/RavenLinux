@@ -131,6 +131,10 @@ description = "CAW wireless daemon"
 exec = "/usr/bin/cawd"
 args = []
 after = ["udev"]
+# cawd answers on this socket once it is up; a client that connects earlier
+# gets ECONNREFUSED, which the Settings network page used to see at boot.
+ready_path = "/run/caw/caw.sock"
+ready_timeout = 5
 restart = true
 enabled = true
 critical = false
@@ -159,6 +163,9 @@ description = "Power button, sleep button and lid switch"
 exec = "/usr/bin/raven-powerd"
 args = []
 after = ["udev"]
+# The desktop and raven-rc talk to powerd here; up means listening.
+ready_path = "/run/raven-power/ctl"
+ready_timeout = 5
 restart = true
 enabled = true
 critical = false
@@ -182,6 +189,9 @@ description = "Keyboard backlight and fan control"
 exec = "/usr/bin/raven-controlsd"
 args = []
 after = ["udev"]
+# Same for controlsd: the socket is the proof it is serving.
+ready_path = "/run/raven-controls/ctl"
+ready_timeout = 5
 restart = true
 enabled = true
 critical = false
@@ -223,6 +233,9 @@ exec = "/usr/bin/raven-timed"
 args = []
 after = []
 runtime_dirs = ["/run/raven-time"]
+# timed listens here before its first sync attempt, so ready is quick.
+ready_path = "/run/raven-time/ctl"
+ready_timeout = 5
 restart = true
 enabled = true
 critical = false
@@ -243,34 +256,11 @@ restart = true
 enabled = true
 critical = false
 
-# PolicyKit authorization daemon (requires D-Bus)
-[[services]]
-name = "polkitd"
-description = "PolicyKit authorization daemon"
-exec = "/usr/lib/polkit-1/polkitd"
-args = ["--no-debug"]
-after = ["dbus"]
-restart = true
-enabled = true
-critical = false
-
-
-# =============================================================================
-# Additional mount points (beyond the essential ones)
-# =============================================================================
-
-# Example: Mount /home partition
-# [[mounts]]
-# source = "LABEL=HOME"
-# target = "/home"
-# fstype = "ext4"
-# options = "defaults,noatime"
-# mount_at_boot = true
-
-# Example: Mount NFS share
-# [[mounts]]
-# source = "server:/export/data"
-# target = "/mnt/data"
-# fstype = "nfs"
-# options = "rw,soft"
-# mount_at_boot = false
+# polkitd is no longer started. It ran for two years without a caller: no
+# Raven component asks PolicyKit for anything (the store and settings never
+# did, and now escalate through rvnd or a visible terminal), no installed
+# package depends on the polkit package, and no session runs an
+# authentication agent, so a prompt could not have been answered anyway. A
+# policy daemon nobody consults is a root process for nothing. The package is
+# no longer staged either; `rvn install polkit` and a drop-in bring it back
+# for a machine that wants pkexec.
