@@ -150,13 +150,12 @@ imlazy list     # list every command with a description
 imlazy -n qemu  # dry run: print what a command would execute
 ```
 
-**On a host where Podman runs rootless**, add `RAVEN_NO_DEVNODES=1`. The
-initramfs builder calls `mknod`, which a user namespace refuses whatever the
-capability set says, and stage1 dies with `mknod: Operation not permitted`:
-
-```bash
-RAVEN_NO_DEVNODES=1 imlazy build
-```
+**On a host where Podman (or Docker) runs rootless**, the build sets
+`RAVEN_NO_DEVNODES=1` for you. The initramfs builder calls `mknod`, which a user
+namespace refuses whatever the capability set says, so without it stage1 dies
+with `mknod: Operation not permitted`. `scripts/docker-build.sh` asks the engine
+whether it is rootless and defaults the variable on; set `RAVEN_NO_DEVNODES=0`
+to force the nodes anyway, or `=1` if detection misses your setup.
 
 That is safe here because the kernel config sets `CONFIG_DEVTMPFS_MOUNT=y`, so
 `/dev` is populated before init runs -- but the resulting ISO is not identical

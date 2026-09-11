@@ -124,6 +124,7 @@ The helper script honours these:
 | `RAVEN_ENGINE` | auto-detected | Force the container engine: `docker` or `podman`. |
 | `RAVEN_IMAGE` | `ravenlinux-build` | Image tag to build and run. |
 | `RAVEN_NO_BUILD` | `0` | Set to `1` to skip the image build and reuse an existing image. |
+| `RAVEN_NO_DEVNODES` | `1` if the engine is rootless, else unset | Skip `mknod` for the initramfs `/dev` nodes, which a user namespace refuses. Safe because the kernel sets `CONFIG_DEVTMPFS_MOUNT=y`. Set `0` to force the nodes. |
 | `RAVEN_PLATFORM` | `linux/amd64` | Container platform for `run`. RavenLinux is x86_64-only; on arm64 hosts it runs under emulation. Set empty to let the engine choose. |
 
 Example:
@@ -152,8 +153,10 @@ automatically — no extra flags needed:
 
 - **Rootful vs. rootless:** the build's `chroot`/`mount` steps expect to run as
   root inside the container. The helper uses `--privileged` with the container's
-  default root user, which works for both rootful Podman and Docker. On some
-  rootless Podman setups you may need `sudo podman` or a rootful machine.
+  default root user, which works for both rootful Podman and Docker. Rootless
+  Podman cannot `mknod`, so the helper detects it and sets
+  `RAVEN_NO_DEVNODES=1` (see the table above); `sudo podman` or a rootful
+  machine gives a build identical to Docker's.
 - **SELinux:** on SELinux-enabled Linux hosts, the helper adds the `:z` relabel
   flag to the bind mount automatically. (It is omitted on macOS, where it is
   unsupported.)

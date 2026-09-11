@@ -153,6 +153,18 @@ fi
 # device is denied inside a user namespace regardless of capabilities. The
 # kernel config sets CONFIG_DEVTMPFS_MOUNT=y, so /dev is populated before init
 # runs and the static nodes are redundant on this kernel.
+#
+# Default it on when the engine is rootless, so a plain `imlazy build` works
+# there; an explicit RAVEN_NO_DEVNODES (including 0) always wins.
+if [[ -z "${RAVEN_NO_DEVNODES+x}" ]]; then
+    case "$ENGINE" in
+        podman) [[ "$("$ENGINE" info --format '{{.Host.Security.Rootless}}' 2>/dev/null)" == "true" ]] \
+                    && RAVEN_NO_DEVNODES=1 ;;
+        docker) [[ "$("$ENGINE" info --format '{{.SecurityOptions}}' 2>/dev/null)" == *rootless* ]] \
+                    && RAVEN_NO_DEVNODES=1 ;;
+    esac
+    [[ -n "${RAVEN_NO_DEVNODES:-}" ]] && echo ">> Rootless ${ENGINE} detected: cannot mknod, defaulting RAVEN_NO_DEVNODES=1"
+fi
 if [[ -n "${RAVEN_NO_DEVNODES:-}" ]]; then
     RUN_FLAGS+=(-e "RAVEN_NO_DEVNODES=${RAVEN_NO_DEVNODES}")
     echo ">> RAVEN_NO_DEVNODES=${RAVEN_NO_DEVNODES} (initramfs will ship no static /dev nodes)"
