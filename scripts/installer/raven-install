@@ -2613,9 +2613,22 @@ apply_profile_now() {
         # A tmpfs, so the script's own /run markers do not land on the disk.
         mkdir -p "${TARGET}/run"
         mount -t tmpfs tmpfs "${TARGET}/run" 2>/dev/null || true
-        # The live session's resolver, whatever it is a symlink to.
+        # The live session's resolver, whatever it is a symlink to. The
+        # target's /etc/resolv.conf is a link to /run/caw/resolv.conf (see
+        # stage2), and /run in there is the empty tmpfs mounted just above,
+        # so the link dangles inside the chroot until the file it names is
+        # written there. Copying onto the link itself would follow it out to
+        # the live system's /run instead.
         if [[ -e /etc/resolv.conf ]]; then
-            cp -L /etc/resolv.conf "${TARGET}/etc/resolv.conf" 2>/dev/null || true
+            local resolver="${TARGET}/etc/resolv.conf"
+            if [[ -L "${resolver}" ]]; then
+                local link
+                link="$(readlink "${resolver}")"
+                [[ "${link}" == /* ]] || link="/etc/${link}"
+                resolver="${TARGET}${link}"
+                mkdir -p "$(dirname "${resolver}")"
+            fi
+            cp -L /etc/resolv.conf "${resolver}" 2>/dev/null || true
         fi
 
         info "Running raven-postinstall in the new system (this needs the network and can take a while)"

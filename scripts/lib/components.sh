@@ -58,7 +58,7 @@ RAVEN_GITHUB_OWNER="${RAVEN_GITHUB_OWNER:-javanhut}"
 # GUI_COMPONENTS and GUI_APPS below.
 declare -a RAVEN_COMPONENTS=(
     "ravenshell|RavenShell|go|ravenshell|.|Raven Shell - interactive shell and scripting language"
-    "rvn|RavenPackageManager|rust|rvn|.|Raven Package Manager"
+    "rvn|RavenPackageManager|rust|rvn,rvnd|.|Raven Package Manager, and the daemon that installs for wheel without sudo"
     "poxy|Poxy|go|poxy|./cmd|Poxy - universal package manager"
     "ivaldi|Ivaldi|rust|ivaldi|.|Ivaldi - version control system"
     "crow|CrowTextEditor|rust|crow|.|Crow - text editor"

@@ -208,8 +208,10 @@ enter_chroot() {
     sudo mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
     sudo mount -t tmpfs tmpfs "${target}/tmp" 2>/dev/null || true
 
-    # Copy resolv.conf for networking
-    sudo cp /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || true
+    # Copy resolv.conf for networking. The target's is a link into /run
+    # (stage2), and copying onto it would follow the link to the host's own
+    # resolver; replace the link with a file the chroot can read.
+    sudo cp -L --remove-destination /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || true
 
     log_success "Entering chroot. Type 'exit' to leave."
     echo ""

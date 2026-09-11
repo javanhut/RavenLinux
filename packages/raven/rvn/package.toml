@@ -13,7 +13,7 @@ categories = ["raven", "package-management"]
 [source]
 type = "git"
 url = "https://github.com/javanhut/RavenPackageManager.git"
-commit = "006ec8abed4550ac4d0d1a6013513bb60c2b18a7"
+commit = "debc97f298563778fc62dbf6e5bffbf47e42e385"
 
 [build]
 system = "cargo"

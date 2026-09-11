@@ -480,9 +480,29 @@ copy_networking() {
         fi
     done
 
-    # DNS config
-    echo "nameserver 8.8.8.8" > "${SYSROOT_DIR}/etc/resolv.conf"
-    echo "nameserver 1.1.1.1" >> "${SYSROOT_DIR}/etc/resolv.conf"
+    # The resolver. /etc/resolv.conf is a link to /run/caw/resolv.conf, not a
+    # file. cawd writes the DNS servers of a wireless lease there and warns
+    # when /etc/resolv.conf is not a link to it; dhcpcd's 20-resolv.conf hook
+    # writes a wired lease's servers with `cat > /etc/resolv.conf`, which
+    # follows the link. One link, and both clients land in the same place.
+    #
+    # It also puts the resolver on a tmpfs, which matters because the hook
+    # rewrites the file with no nameservers whenever its interface goes down
+    # -- at every shutdown. As a real file under /etc that empty resolver was
+    # what the next boot came up with: two comment lines saying resolv.conf.head
+    # could replace them, and nothing else, until someone wrote the file by
+    # hand. On /run it is gone with the boot.
+    #
+    # This used to be a file holding 8.8.8.8 and 1.1.1.1. That hid the hook
+    # staging being incomplete (copy_dhcpcd_hooks) and was wrong on any
+    # network with names of its own or a blocked public resolver.
+    #
+    # The link dangles until a lease. raven-dhcp makes /run/caw before it
+    # runs dhcpcd, so the hook has a directory to write into whether or not
+    # cawd (whose runtime_dirs also makes it) is up yet; raven-install writes
+    # the live resolver to the target's /run/caw for the postinstall chroot.
+    rm -f "${SYSROOT_DIR}/etc/resolv.conf"
+    ln -s /run/caw/resolv.conf "${SYSROOT_DIR}/etc/resolv.conf"
 
     log_success "Networking tools installed"
 }
@@ -899,6 +919,19 @@ copy_dhcpcd_hooks() {
     }
 
     log_info "  Staged dhcpcd hooks from ${src}"
+
+    # The hooks are run by dhcpcd-run-hooks, a script beside the hooks
+    # directory at a path compiled into the daemon. copy_from_host brought
+    # the binary alone, so a host-copy build had hooks and nothing to run
+    # them: a lease, a route, and a resolver nothing ever wrote. The
+    # source-build path installs it with everything else.
+    local runner="${src%/*}/dhcpcd-run-hooks"
+    if [[ -f "${runner}" ]]; then
+        install -D -m 0755 "${runner}" "${SYSROOT_DIR}${runner}"
+        log_info "  Staged ${runner}"
+    else
+        log_warn "  No dhcpcd-run-hooks beside ${src}; DHCP will set no DNS"
+    fi
 }
 
 # =============================================================================

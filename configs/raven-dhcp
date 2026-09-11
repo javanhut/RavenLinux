@@ -178,6 +178,15 @@ fi
 # ---------------------------------------------------------------------------
 # Ask for the leases
 # ---------------------------------------------------------------------------
+# dhcpcd's 20-resolv.conf hook writes the lease's DNS servers to
+# /etc/resolv.conf, which on Raven is a link to /run/caw/resolv.conf: the
+# file cawd writes for wireless leases, so wired and wireless land in one
+# place. The hook writes through the link with a plain redirect, which needs
+# the directory to exist. cawd makes it when it starts, but this can run
+# first (both services are `after = ["udev"]`), or on a machine with no cawd
+# at all, and then the hook fails and the lease has no resolver.
+mkdir -p /run/caw
+
 rc=0
 for iface in $ifaces; do
     # raven-ports runs this again on every carrier transition, and a cable
