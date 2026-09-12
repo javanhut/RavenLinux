@@ -142,6 +142,7 @@ GUI_STAGE_DIR="${PACKAGES_DIR}/gui"
 if [[ -f "${PROJECT_ROOT}/scripts/lib/components.sh" ]]; then
     # shellcheck disable=SC1091
     source "${PROJECT_ROOT}/scripts/lib/components.sh"
+    source "${PROJECT_ROOT}/scripts/lib/branding.sh"
 else
     echo "FATAL: scripts/lib/components.sh not found; nothing declares what to build" >&2
     exit 1
@@ -2084,6 +2085,10 @@ stage_gui_data() {
         cp -a "${dir}/." "${SYSROOT_DIR}${dir}/" 2>/dev/null || true
         log_info "  staged icon theme ${theme}"
     done
+
+    # The raven-logo icon every GUI app's masthead and About page asks for.
+    # stage2 installs it too; repeated here for the same reason the themes are.
+    install_raven_branding "${SYSROOT_DIR}"
 
     # Said plainly, because the symptom -- a desktop with no mouse pointer --
     # does not point at its cause on its own.

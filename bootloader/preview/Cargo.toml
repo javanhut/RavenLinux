@@ -22,6 +22,9 @@ flate2 = "1"
 
 [build-dependencies]
 ab_glyph = "0.2"
+# Decodes branding/raven-logo-light.png into the mark bitmap. Host-side only,
+# like ab_glyph: the .efi carries the decoded pixels, not a PNG decoder.
+png = "0.17"
 
 [profile.release]
 opt-level = 2

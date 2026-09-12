@@ -25,6 +25,9 @@ mod gfx;
 #[path = "../../src/font.rs"]
 mod font;
 
+#[path = "../../src/mark.rs"]
+mod mark;
+
 #[path = "../../src/menu.rs"]
 mod menu;
 

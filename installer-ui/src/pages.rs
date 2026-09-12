@@ -88,6 +88,19 @@ fn welcome(app: &Rc<App>) {
 
     let page = adw::PreferencesPage::new();
 
+    // The Raven mark above the first words. The live ISO installs it into
+    // hicolor as `raven-logo`; on a system without it the group stands alone
+    // rather than showing a placeholder glyph.
+    let display = gtk::gdk::Display::default().expect("display");
+    if gtk::IconTheme::for_display(&display).has_icon("raven-logo") {
+        let mark = gtk::Image::from_icon_name("raven-logo");
+        mark.set_pixel_size(96);
+        mark.set_margin_bottom(8);
+        let group = adw::PreferencesGroup::new();
+        group.add(&mark);
+        page.add(&group);
+    }
+
     let intro = adw::PreferencesGroup::builder()
         .title("Install RavenLinux")
         .description(

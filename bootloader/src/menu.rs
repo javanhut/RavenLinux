@@ -495,90 +495,19 @@ fn draw_chevron(canvas: &mut Canvas, cx: f32, cy: f32, size: f32, dir: Dir) {
 
 /// The raven, centred on `(cx, cy)` and `size` pixels across.
 ///
-/// A silhouette rather than an outline, and a polygon rather than a glyph,
-/// because there is no raven in the atlas and there is no raven in any font the
-/// image ships. The points are a stylised bird in flight, normalised to a unit
-/// box so the shape is resolution-independent and the same at every scale.
+/// The Raven Linux logo -- `branding/raven-logo-light.png`, the same artwork
+/// the greeter, the desktop and the icon theme show -- scaled to `size` from
+/// the bitmap `build.rs` decoded into [`crate::mark::MARK`]. It carries its
+/// own colours: the body in `theme::TEXT`'s light, the wing in the purple the
+/// artwork was drawn with, and the eye punched through to whatever is behind.
 ///
-/// Drawn in the accent, which makes it the one saturated thing on the screen —
-/// it is also the only element that never changes, so it can carry the colour
-/// that everything else borrows for focus.
+/// Until 2026-09 this was a polygon traced by hand, because there was no
+/// artwork to show. Now there is, and a boot menu that draws a different
+/// raven from the login screen that follows it is two brands, not one.
 pub fn draw_mark(canvas: &mut Canvas, cx: f32, cy: f32, size: f32) {
-    /// The silhouette, in a unit box with y down.
-    ///
-    /// A raven perched in profile, facing left: heavy straight bill, high
-    /// crown, the folded wing running down the back, and the long wedge tail
-    /// that is the easiest way to tell a corvid from a generic bird at this
-    /// size. Traced clockwise from the tip of the bill.
-    // These are coordinates in a unit box, and one of them is close enough to
-    // 1/PI for clippy's `approx_constant` -- which is deny-by-default -- to
-    // decide it is a mistyped constant. Moving the point to appease the lint
-    // would be changing a drawing to satisfy a linter.
-    #[allow(clippy::approx_constant)]
-    #[rustfmt::skip]
-    const RAVEN: &[(f32, f32)] = &[
-        // The bill, upper mandible, base to tip. Roughly half the skull's
-        // length and nearly as deep at the base as it is long: stubby, heavy,
-        // carried level, closing to a small hook. A bill that is longer,
-        // shallower or angled down is a kingfisher, and several drafts of this
-        // mark were.
-        (0.400, 0.330),
-        (0.318, 0.362),
-        (0.232, 0.400),
-        (0.160, 0.440),
-        (0.126, 0.468), // tip
-        (0.148, 0.492), // the hook
-        // Lower mandible, tip back to the gape.
-        (0.240, 0.520),
-        (0.330, 0.540),
-        (0.404, 0.556), // the gape, at the corner of the mouth
-        // The throat hackles: the shaggy beard a raven has and a crow does not.
-        // One shallow step -- at 56 pixels a sawtooth becomes mush, and a deep
-        // step reads as a rendering fault rather than as feathers.
-        (0.420, 0.626),
-        (0.455, 0.682),
-        (0.448, 0.718),
-        (0.478, 0.790),
-        // The neck, cut square at the bottom. A head mark needs an edge to end
-        // on; a neck that tapers to nothing reads as a severed one.
-        (0.566, 0.858),
-        (0.734, 0.898),
-        (0.940, 0.852),
-        (0.928, 0.696),
-        (0.912, 0.554), // nape
-        // The skull: tall, and flat across the crown rather than domed.
-        (0.902, 0.434),
-        (0.876, 0.328),
-        (0.818, 0.244),
-        (0.724, 0.188),
-        (0.616, 0.174), // crown
-        (0.514, 0.206),
-        (0.438, 0.262), // the forehead break, back down to the bill
-    ];
-
-    /// The eye, as a fraction of the same unit box: centre and radius.
-    ///
-    /// Punched out of the silhouette rather than drawn on top of it, in the
-    /// backdrop's own darker edge colour so it reads as a hole. This is the
-    /// single change that made the mark legible: a filled bird's head with no
-    /// eye is a wedge, and every early draft of this shape was mistaken for
-    /// waterfowl until the eye went in.
-    const EYE: (f32, f32, f32) = (0.556, 0.352, 0.058);
-
-    let left = cx - size / 2.0;
-    let top = cy - size / 2.0;
-    let mut points = [(0.0f32, 0.0f32); RAVEN.len()];
-    for (slot, &(x, y)) in points.iter_mut().zip(RAVEN) {
-        *slot = (left + x * size, top + y * size);
-    }
-    canvas.polygon(&points, theme::ACCENT);
-
-    let (ex, ey, er) = EYE;
-    canvas.circle(
-        left + ex * size,
-        top + ey * size,
-        er * size,
-        theme::BACKDROP_EDGE,
+    canvas.image(
+        &crate::mark::MARK,
+        Rect::new(cx - size / 2.0, cy - size / 2.0, size, size),
     );
 }
 

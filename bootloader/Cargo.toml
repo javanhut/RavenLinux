@@ -22,6 +22,9 @@ libm = "0.2"
 # Rasterizes the menu's font into an atlas at build time. Host-side only: it
 # never reaches the .efi, only the coverage bitmaps it produces do.
 ab_glyph = "0.2"
+# Decodes branding/raven-logo-light.png into the mark bitmap. Host-side only,
+# like ab_glyph: the .efi carries the decoded pixels, not a PNG decoder.
+png = "0.17"
 
 [profile.dev]
 panic = "abort"

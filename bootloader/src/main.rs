@@ -23,6 +23,7 @@ mod config;
 mod font;
 mod gfx;
 mod linux;
+mod mark;
 mod menu;
 mod screen;
 mod theme;

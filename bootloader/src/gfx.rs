@@ -73,6 +73,55 @@ impl Rect {
     }
 }
 
+/// A bitmap in `.rodata`: straight (not premultiplied) RGBA, row-major.
+///
+/// The only one RavenBoot has is the raven mark -- see `mark.rs` -- which is
+/// why this is a bare struct and not a decoder.
+pub struct Image {
+    pub width: usize,
+    pub height: usize,
+    pub rgba: &'static [u8],
+}
+
+impl Image {
+    /// Bilinear sample at `(u, v)`, in source pixels, as premultiplied RGBA
+    /// in 0..=1. Samples off the edge fall to transparent rather than
+    /// clamping, so a mark that fills its bitmap to the border still gets an
+    /// anti-aliased edge.
+    fn sample(&self, u: f32, v: f32) -> (f32, f32, f32, f32) {
+        let x = floor(u - 0.5);
+        let y = floor(v - 0.5);
+        let fx = u - 0.5 - x;
+        let fy = v - 0.5 - y;
+        let (x, y) = (x as i32, y as i32);
+
+        let texel = |x: i32, y: i32| -> (f32, f32, f32, f32) {
+            if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+                return (0.0, 0.0, 0.0, 0.0);
+            }
+            let o = (y as usize * self.width + x as usize) * 4;
+            let a = f32::from(self.rgba[o + 3]) / 255.0;
+            (
+                f32::from(self.rgba[o]) / 255.0 * a,
+                f32::from(self.rgba[o + 1]) / 255.0 * a,
+                f32::from(self.rgba[o + 2]) / 255.0 * a,
+                a,
+            )
+        };
+        let lerp4 = |p: (f32, f32, f32, f32), q: (f32, f32, f32, f32), t: f32| {
+            (
+                p.0 + (q.0 - p.0) * t,
+                p.1 + (q.1 - p.1) * t,
+                p.2 + (q.2 - p.2) * t,
+                p.3 + (q.3 - p.3) * t,
+            )
+        };
+        let top = lerp4(texel(x, y), texel(x + 1, y), fx);
+        let bottom = lerp4(texel(x, y + 1), texel(x + 1, y + 1), fx);
+        lerp4(top, bottom, fy)
+    }
+}
+
 /// An owned back buffer, with drawing operations on top.
 ///
 /// Every frame is composed here in full and then handed to the firmware in one
@@ -254,21 +303,54 @@ impl Canvas {
         }
     }
 
-    /// A filled circle.
-    pub fn circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color) {
-        for y in bounds(cy - radius - 1.0, cy + radius + 1.0, self.height) {
-            for x in bounds(cx - radius - 1.0, cx + radius + 1.0, self.width) {
-                let dx = x as f32 + 0.5 - cx;
-                let dy = y as f32 + 0.5 - cy;
-                let distance = sqrt(dx * dx + dy * dy) - radius;
-                self.blend(x, y, color, coverage_of(distance));
-            }
-        }
-    }
-
     /// A horizontal hairline.
     pub fn rule(&mut self, x: f32, y: f32, width: f32, thickness: f32, color: Color) {
         self.rounded_rect(Rect::new(x, y, width, thickness.max(1.0)), 0.0, color);
+    }
+
+    /// `image`, scaled to fill `rect`, composited source-over.
+    ///
+    /// Anti-aliased the way [`Self::polygon`] is: each destination pixel is
+    /// the mean of a 4x4 grid of bilinear samples. Sixteen taps cover a
+    /// shrink of up to about 4x without aliasing, which is more than the
+    /// mark's 128 pixels to a 56-pixel slot ever asks for, and on the way up
+    /// the bilinear filter takes over.
+    pub fn image(&mut self, image: &Image, rect: Rect) {
+        const GRID: i32 = 4;
+
+        if rect.width <= 0.0 || rect.height <= 0.0 || image.width == 0 || image.height == 0 {
+            return;
+        }
+        let sx = image.width as f32 / rect.width;
+        let sy = image.height as f32 / rect.height;
+
+        for y in bounds(rect.y - 1.0, rect.y + rect.height + 1.0, self.height) {
+            for x in bounds(rect.x - 1.0, rect.x + rect.width + 1.0, self.width) {
+                let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                for gy in 0..GRID {
+                    for gx in 0..GRID {
+                        let px = x as f32 + (gx as f32 + 0.5) / GRID as f32;
+                        let py = y as f32 + (gy as f32 + 0.5) / GRID as f32;
+                        let (sr, sg, sb, sa) = image.sample((px - rect.x) * sx, (py - rect.y) * sy);
+                        r += sr;
+                        g += sg;
+                        b += sb;
+                        a += sa;
+                    }
+                }
+                if a <= 0.0 {
+                    continue;
+                }
+                // Un-premultiply for `blend`, which takes a colour and a coverage.
+                let color = Color::from_argb(
+                    0xFF00_0000
+                        | ((clamp01(r / a) * 255.0 + 0.5) as u32) << 16
+                        | ((clamp01(g / a) * 255.0 + 0.5) as u32) << 8
+                        | ((clamp01(b / a) * 255.0 + 0.5) as u32),
+                );
+                self.blend(x, y, color, a / (GRID * GRID) as f32);
+            }
+        }
     }
 
     /// A filled polygon, non-zero winding.

@@ -57,6 +57,7 @@ fi
 if [[ -f "${PROJECT_ROOT}/scripts/lib/skeleton.sh" ]]; then
     # shellcheck disable=SC1091
     source "${PROJECT_ROOT}/scripts/lib/skeleton.sh"
+    source "${PROJECT_ROOT}/scripts/lib/branding.sh"
 fi
 
 if [[ -f "${PROJECT_ROOT}/scripts/lib/logging.sh" ]]; then
@@ -313,6 +314,10 @@ copy_system_utils() {
             fi
         done
     fi
+    # The distro's own mark, under the name /etc/os-release gives it. After
+    # the theme copy, so a host that happens to carry a stale raven-logo does
+    # not win over the one in branding/.
+    install_raven_branding "${SYSROOT_DIR}"
 
     # If weston is available on the build host, copy its runtime data/plugins.
     if [[ -x "${SYSROOT_DIR}/usr/bin/weston" ]]; then
