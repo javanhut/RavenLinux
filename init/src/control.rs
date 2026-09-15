@@ -106,14 +106,29 @@ pub enum Action {
     Reexec,
 }
 
+/// Whether a raven-init is answering on the control socket at `path`.
+///
+/// A connection is enough to tell: the server accepts it, reads an empty
+/// request and closes, all inside one poll tick, so asking costs it nothing.
+/// A leftover socket file with no listener behind it refuses the connection.
+pub fn is_live(path: &Path) -> bool {
+    UnixStream::connect(path).is_ok()
+}
+
 /// Create the control socket at an arbitrary path.
 ///
 /// Takes the path so tests can bind somewhere writable; PID 1 always uses
 /// [`listen`].
 pub fn listen_at(path: &str) -> Result<UnixListener> {
-    // A socket file left by a previous boot would make bind() fail with
-    // EADDRINUSE. Nothing else owns this path, so removing it is safe.
+    // A socket file left by a previous boot, or by a supervisor that has
+    // since exited, would make bind() fail with EADDRINUSE. Nothing answers
+    // on it, so removing it is safe. One that still answers is another
+    // raven-init's: taking the path would leave that one running but
+    // unreachable, so it is refused instead.
     if Path::new(path).exists() {
+        if is_live(Path::new(path)) {
+            anyhow::bail!("{} is held by a running raven-init", path);
+        }
         std::fs::remove_file(path).ok();
     }
 

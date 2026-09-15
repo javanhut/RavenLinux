@@ -1198,6 +1198,19 @@ impl LoopPaths {
 fn run_user() -> Result<()> {
     let paths = usermode::Paths::from_env()?;
     paths.prepare()?;
+    // One supervisor per session. A second finds every service already
+    // running and restart-loops against them, while the one it doubles —
+    // wireplumber — fights the first over the default device. Checked before
+    // anything starts, since failing to bind the socket later is not fatal.
+    // A compositor restart running the session script again is the usual way
+    // here.
+    if control::is_live(&paths.socket) {
+        eprintln!(
+            "raven-init --user: a supervisor is already running for this session ({})",
+            paths.socket.display()
+        );
+        return Ok(());
+    }
     // Service logs go beside init's own; service.rs reads this.
     std::env::set_var("RAVEN_SERVICE_LOG_DIR", &paths.log_dir);
     init_logging_at(paths.log_dir.join("init.log"));

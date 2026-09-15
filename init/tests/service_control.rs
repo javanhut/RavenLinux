@@ -511,6 +511,44 @@ fn a_silent_client_does_not_wedge_the_server() {
     std::fs::remove_file(&path).ok();
 }
 
+#[test]
+fn a_socket_another_supervisor_answers_on_is_not_taken() {
+    // Regression: listen_at removed whatever was at the path and bound its
+    // own, so a second `raven-init --user` — launched again when the
+    // compositor restarted — took the socket from the first and started a
+    // second copy of every session service. Two wireplumbers then fought
+    // over the default sink until nothing had one.
+    let path = temp_socket("held");
+    let first = control::listen_at(&path).expect("binds");
+    assert!(control::is_live(std::path::Path::new(&path)));
+
+    let second = control::listen_at(&path);
+    assert!(second.is_err(), "a second listener took a live socket");
+    assert!(
+        control::is_live(std::path::Path::new(&path)),
+        "the first supervisor must still be reachable"
+    );
+
+    drop(first);
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn a_stale_socket_file_is_replaced() {
+    // What the removal was always for: a socket left by a supervisor that is
+    // gone answers nothing, and must not stop the next one binding.
+    let path = temp_socket("stale");
+    drop(control::listen_at(&path).expect("binds"));
+    assert!(std::path::Path::new(&path).exists(), "the file outlives its listener");
+    assert!(!control::is_live(std::path::Path::new(&path)));
+
+    let listener = control::listen_at(&path).expect("rebinds over a stale file");
+    assert!(control::is_live(std::path::Path::new(&path)));
+
+    drop(listener);
+    std::fs::remove_file(&path).ok();
+}
+
 /// The supervisor's restart decision, mirroring main.rs::check_services.
 ///
 /// Duplicated rather than imported because main.rs is a binary root, not a
