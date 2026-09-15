@@ -2376,6 +2376,15 @@ fi
         sleep 0.1
     done
     [ -n "${WAYLAND_DISPLAY:-}" ] || exit 0
+    # The session bus above started before the compositor bound its socket, so
+    # anything it D-Bus-activates -- ravenfilemanager as FileManager1 and as
+    # the FileChooser portal -- inherits no WAYLAND_DISPLAY and dies with
+    # "Failed to open display": no browser download dialog, no "Show in
+    # folder". Hand the bus the display now that there is one.
+    if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+        dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP \
+            >/dev/null 2>&1 || true
+    fi
     user_d="${XDG_CONFIG_HOME:-$HOME/.config}/raven/session.d"
     for f in /etc/raven/session.d/* "$user_d"/*; do
         [ -e "$f" ] || continue
