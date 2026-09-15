@@ -1,0 +1,51 @@
+[package]
+name = "raven-viewer"
+version = "0.1.0"
+description = "RavenViewer - the PDF and DOCX reader"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/javanhut/RavenViewer"
+repository = "https://github.com/javanhut/RavenViewer"
+maintainers = ["RavenLinux Team"]
+categories = ["gui", "wayland", "application"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/RavenViewer.git"
+commit = "37e624efb3f290da4ca8fc1875a8473f9359d3a5"
+
+[build]
+system = "cargo"
+# The same glibc target as ravenfilemanager, for the same reason: GTK4 and
+# libadwaita have no musl build. The PDF and DOCX stack (hayro, lopdf, zip,
+# quick-xml) is pure Rust, so nothing beyond the GTK toolkit is linked.
+target = "x86_64-unknown-linux-gnu"
+build_flags = ["--release", "--locked"]
+
+[dependencies]
+# A strict subset of ravenfilemanager's runtime list: the same toolkit, without
+# the image decoders, GStreamer or appstream. Shared libraries are resolved
+# with ldd at build time -- see stage_gui_libraries() in stage-gui.sh.
+runtime = [
+    "gtk4", "libadwaita", "glib2", "gsettings-desktop-schemas",
+    "shared-mime-info", "desktop-file-utils", "hicolor-icon-theme",
+]
+build = ["rust", "cargo", "pkg-config", "gtk4", "libadwaita", "glib2"]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-gnu/release/raven-viewer", dest = "/usr/bin/raven-viewer", mode = 755 },
+    { src = "data/icons/hicolor/scalable/apps/com.ravenviewer.Raven.svg", dest = "/usr/share/icons/hicolor/scalable/apps/com.ravenviewer.Raven.svg", mode = 644 },
+    { src = "data/com.ravenviewer.Raven.metainfo.xml", dest = "/usr/share/metainfo/com.ravenviewer.Raven.metainfo.xml", mode = 644 }
+]
+
+# data/raven-glass*.css are deliberately absent: src/theme.rs include_str!s
+# both, so the stylesheets are inside the binary.
+#
+# The upstream data/com.ravenviewer.Raven.desktop is deliberately not in this
+# list either. install_desktop_entries() in scripts/stages/stage-gui.sh writes
+# every application entry on this image; the one it writes sets StartupWMClass
+# to the GTK application id rather than upstream's "raven-viewer", which is
+# not the app_id the window actually carries.
+
+# usr-merged root: no /bin aliases. See scripts/lib/usrmerge.sh.
+symlinks = []

@@ -485,3 +485,20 @@ rather than a hope. A still wallpaper is drawn once and then blocks on its four
 descriptors with no timer armed; an animated one stops on its own when it cannot
 be seen, because a compositor sends no frame callback for a surface it is not
 going to draw and nothing here renders until the previous callback arrives.
+
+## Document Viewer
+
+| Status | Binary | Repo |
+|--------|--------|------|
+| **wired** | `raven-viewer` | [javanhut/RavenViewer](https://github.com/javanhut/RavenViewer) |
+
+Built by `stage_viewer()` in `stage-gui.sh`, from its own repository, with the
+other GTK4 applications. `imlazy gui` builds it; `VIEWER_SKIP=1` leaves it out,
+and an image without it opens PDFs in the browser instead.
+
+A PDF and DOCX reader: continuous pages, outline, annotations, search. The PDF
+stack is pure Rust (hayro, lopdf), so it links nothing beyond the GTK toolkit
+the file manager already stages. Both stylesheets are compiled in, so the only
+data it ships is its icon and metainfo. `install_desktop_entries()` writes its
+entry and makes it the default for `application/pdf` and DOCX in
+`/usr/share/applications/mimeapps.list`.

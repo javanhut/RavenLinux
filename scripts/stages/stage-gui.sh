@@ -105,6 +105,9 @@
 #                              service finds nothing to start
 #   CONTROLS_OFFLINE=1         as GUI_OFFLINE, for Raven Controls alone
 #   CONTROLS_REF=<git-ref>     build a particular RavenControls ref
+#   VIEWER_SKIP=1              skip Raven Viewer; PDFs open in the browser
+#   VIEWER_OFFLINE=1           as GUI_OFFLINE, for the document viewer alone
+#   VIEWER_REF=<git-ref>       build a particular RavenViewer ref
 #
 #   LOGIN_OFFLINE=1            as GUI_OFFLINE, for the login screen alone
 #   LOGIN_REF=<git-ref>        build a particular RavenLogin ref
@@ -191,6 +194,13 @@ STORE_APPID="com.ravenstore.Raven"
 raven_gui_app_vars BATTERY
 BATTERY_BIN="${BATTERY_BINARIES}"
 BATTERY_APPID="org.raven.Power"
+
+# Raven Viewer: the PDF and DOCX reader. GTK4 + libadwaita like the rest, so it
+# rides on the same staged toolkit. Its application id is its .desktop stem,
+# its icon name and the app_id its window carries.
+raven_gui_app_vars VIEWER
+VIEWER_BIN="${VIEWER_BINARIES}"
+VIEWER_APPID="com.ravenviewer.Raven"
 
 # Raven Controls: the keyboard backlight, fan speeds and thermal profiles. A
 # GTK4 + libadwaita client like Settings, Store and Power.
@@ -1831,6 +1841,83 @@ stage_battery_management() {
     fi
 }
 
+# =============================================================================
+# Raven Viewer
+# =============================================================================
+# stage_settings' shape: GTK4, optional, and every failure warns and returns 0
+# -- an image without a document reader still opens a PDF in the browser.
+#
+# Environment:
+#   VIEWER_SKIP=1      skip it; the desktop is complete without it
+#   VIEWER_OFFLINE=1   never touch the network; use the existing clone
+#   VIEWER_REF=<ref>   build a particular ref instead of the default
+stage_viewer() {
+    if [[ "${VIEWER_SKIP:-0}" == "1" ]]; then
+        log_info "  VIEWER_SKIP=1: no document viewer on the image"
+        return 0
+    fi
+
+    command -v cargo &>/dev/null || {
+        log_warn "  cargo not found; Raven Viewer will not be built"
+        return 0
+    }
+
+    local -a missing=()
+    local mod
+    for mod in gtk4 libadwaita-1 glib-2.0 gio-2.0; do
+        pkg-config --exists "${mod}" 2>/dev/null || missing+=("${mod}")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        log_warn "  missing build dependencies for Raven Viewer: ${missing[*]}"
+        log_warn "  install them with: pacman -S --needed gtk4 libadwaita"
+        log_warn "  the desktop will ship without a document viewer"
+        return 0
+    fi
+
+    local dest="${GUI_SRC_DIR}/${VIEWER_REPO}"
+    if ! fetch_repo "${VIEWER_REPO}" "${VIEWER_URL}" "${dest}" \
+            "${VIEWER_REF:-}" "${VIEWER_OFFLINE:-${GUI_OFFLINE:-0}}" "${VIEWER_MANIFEST}"; then
+        log_warn "  RavenViewer source unavailable; no document viewer on the image"
+        return 0
+    fi
+
+    log_info "  building Raven Viewer for ${GUI_TARGET}..."
+    local -a cargo_args=(build --release --target "${GUI_TARGET}")
+    [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
+    if ! (
+        cd "${dest}"
+        unset CGO_ENABLED
+        cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}"
+    ); then
+        log_warn "  Raven Viewer build failed; no document viewer on the image"
+        return 0
+    fi
+
+    local out="${dest}/target/${GUI_TARGET}/release/${VIEWER_BIN}"
+    if [[ ! -x "${out}" ]]; then
+        log_warn "  Raven Viewer produced no binary; no document viewer on the image"
+        return 0
+    fi
+
+    install -Dm 0755 "${out}" "${SYSROOT_DIR}/usr/bin/${VIEWER_BIN}"
+    log_success "  ${VIEWER_BIN} installed ($(du -h "${out}" | cut -f1))"
+    stage_gui_libraries "${out}"
+
+    # data/raven-glass*.css are include_str!ed by src/theme.rs, so only the
+    # icon and metainfo ship; the entry is install_desktop_entries' job.
+    local appdata="${SYSROOT_DIR}/usr/share"
+    install -Dm 0644 "${dest}/data/icons/hicolor/scalable/apps/${VIEWER_APPID}.svg" \
+        "${appdata}/icons/hicolor/scalable/apps/${VIEWER_APPID}.svg" 2>/dev/null \
+        && log_info "    + ${VIEWER_APPID}.svg (hicolor/scalable)" \
+        || log_warn "    no icon in the checkout; the launcher entry will draw blank"
+    install -Dm 0644 "${dest}/data/${VIEWER_APPID}.metainfo.xml" \
+        "${appdata}/metainfo/${VIEWER_APPID}.metainfo.xml" 2>/dev/null || true
+
+    if declare -F stage_gtk_runtime &>/dev/null; then
+        stage_gtk_runtime
+    fi
+}
+
 install_desktop_entries() {
     local dir="${SYSROOT_DIR}/usr/share/applications"
     mkdir -p "${dir}"
@@ -1952,6 +2039,41 @@ ENTRY
         chmod 0644 "${dir}/${SETTINGS_APPID}.desktop"
         written=$((written + 1))
         log_info "    + ${SETTINGS_APPID}.desktop"
+    fi
+
+    # StartupWMClass is the application id, not upstream's "raven-viewer":
+    # adw::Application sets the window's app_id from its id, and dock::owns
+    # checks StartupWMClass first.
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${VIEWER_BIN}" ]]; then
+        cat > "${dir}/${VIEWER_APPID}.desktop" << ENTRY
+[Desktop Entry]
+Type=Application
+Name=Viewer
+GenericName=Document Viewer
+Comment=Read PDF and DOCX files
+Exec=${VIEWER_BIN} %U
+Icon=${VIEWER_APPID}
+Categories=Office;Viewer;GTK;
+Keywords=PDF;DOCX;document;reader;viewer;book;
+MimeType=application/pdf;application/x-pdf;application/vnd.openxmlformats-officedocument.wordprocessingml.document;
+StartupWMClass=${VIEWER_APPID}
+StartupNotify=true
+Terminal=false
+ENTRY
+        chmod 0644 "${dir}/${VIEWER_APPID}.desktop"
+        written=$((written + 1))
+        log_info "    + ${VIEWER_APPID}.desktop"
+
+        # Appended rather than written: the file manager's block above creates
+        # mimeapps.list for inode/directory, and may not have run.
+        local list="${dir}/mimeapps.list" mime
+        [[ -f "${list}" ]] || printf '[Default Applications]\n' > "${list}"
+        for mime in application/pdf application/x-pdf \
+                application/vnd.openxmlformats-officedocument.wordprocessingml.document; do
+            printf '%s=%s.desktop\n' "${mime}" "${VIEWER_APPID}" >> "${list}"
+        done
+        chmod 0644 "${list}"
+        log_info "    + mimeapps.list (PDF, DOCX)"
     fi
 
     # The one entry on this image that is copied rather than written here.
@@ -2802,6 +2924,11 @@ main() {
     # It must exist before install_desktop_entries decides what to advertise.
     log_step "Staging battery management..."
     stage_battery_management
+
+    # GTK4 and optional like the four above; before install_desktop_entries
+    # for the same reason, and that function also makes it the PDF default.
+    log_step "Staging the document viewer..."
+    stage_viewer
 
     # Before install_desktop_entries, like the rest: the entry is written only
     # if the binary is there to see. This one also stages a udev rule and the
