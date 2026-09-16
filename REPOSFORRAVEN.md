@@ -502,3 +502,32 @@ the file manager already stages. Both stylesheets are compiled in, so the only
 data it ships is its icon and metainfo. `install_desktop_entries()` writes its
 entry and makes it the default for `application/pdf` and DOCX in
 `/usr/share/applications/mimeapps.list`.
+
+## Image Viewer
+
+| Status | Binary | Repo |
+|--------|--------|------|
+| **wired** | `eagleeye` | [javanhut/EagleEye](https://github.com/javanhut/EagleEye) |
+
+Built by `stage_eagleeye()` in `stage-gui.sh`, from its own repository, with the
+other GTK4 applications. `imlazy gui` builds it; `EAGLEEYE_SKIP=1` leaves it
+out, and an image without it has no handler for `image/*` at all — a photograph
+in the file manager opens nothing and "Open With" lists nothing to pick, which
+is why this is the one optional application the GUI summary calls out by that
+consequence.
+
+Every common raster format plus SVG is decoded in pure Rust (`image`, `resvg`),
+so like Raven Viewer it links nothing beyond the GTK toolkit the file manager
+already stages. HEIC, AVIF and JPEG XL are the exception: those fall through to
+`gdk::Texture::from_filename`, which is GTK's out-of-process glycin loaders, and
+glycin refuses to decode outside a bwrap sandbox. `stage_gtk_runtime()` stages
+both, and `packages/gui/eagleeye/package.toml` lists `glycin` and `bubblewrap`
+as runtime dependencies for the same reason — without them those three formats
+fail to open and nothing else does.
+
+Both stylesheets are compiled in, so the only data it ships is its icon and
+metainfo. `install_desktop_entries()` writes its entry and makes it the default
+for all 27 image types in `/usr/share/applications/mimeapps.list`. That list
+lives in `EAGLEEYE_MIME_TYPES` in `stage-gui.sh` and mirrors `MIME_TYPES` in the
+application's `src/window.rs`; keep the two in step, because a type missing from
+it is a file that opens in nothing.

@@ -133,6 +133,7 @@ declare -a GUI_APPS=(
     "BATTERY|RavenBatteryManagement|raven-power|gui/raven-power|Raven Power - battery profiles and energy use"
     "CONTROLS|RavenControls|raven-controls,raven-controlsd|gui/raven-controls|Raven Controls - keyboard backlight, fans and thermals, with its daemon"
     "VIEWER|RavenViewer|raven-viewer|gui/raven-viewer|Raven Viewer - the PDF and DOCX reader"
+    "EAGLEEYE|EagleEye|eagleeye|gui/eagleeye|EagleEye - the image viewer"
     "LOGIN|RavenLogin|ravend,raven-greeter,raven-lock|gui/ravenlogin|Raven Login - the display manager, its greeter and the lock screen"
     "CANVAS|RavenCanvas|ravencanvasd,ravencanvas|gui/ravencanvas|Raven Canvas - the wallpaper daemon and its CLI"
     "ROOSTBAR|RoostBar|roostbar|gui/roostbar|RoostBar - the layer-shell status bar"

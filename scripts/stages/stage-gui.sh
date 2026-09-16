@@ -108,6 +108,10 @@
 #   VIEWER_SKIP=1              skip Raven Viewer; PDFs open in the browser
 #   VIEWER_OFFLINE=1           as GUI_OFFLINE, for the document viewer alone
 #   VIEWER_REF=<git-ref>       build a particular RavenViewer ref
+#   EAGLEEYE_SKIP=1            skip EagleEye; nothing on the image opens an
+#                              image, and no application claims image/* at all
+#   EAGLEEYE_OFFLINE=1         as GUI_OFFLINE, for the image viewer alone
+#   EAGLEEYE_REF=<git-ref>     build a particular EagleEye ref
 #
 #   LOGIN_OFFLINE=1            as GUI_OFFLINE, for the login screen alone
 #   LOGIN_REF=<git-ref>        build a particular RavenLogin ref
@@ -201,6 +205,32 @@ BATTERY_APPID="org.raven.Power"
 raven_gui_app_vars VIEWER
 VIEWER_BIN="${VIEWER_BINARIES}"
 VIEWER_APPID="com.ravenviewer.Raven"
+
+# EagleEye: the image viewer, and the default handler for every image type on
+# this image. GTK4 + libadwaita like the rest, so it rides on the same staged
+# toolkit. Its application id is its .desktop stem, its icon name and the
+# app_id its window carries.
+raven_gui_app_vars EAGLEEYE
+EAGLEEYE_BIN="${EAGLEEYE_BINARIES}"
+EAGLEEYE_APPID="com.eagleeye.Raven"
+
+# What it claims. This is src/window.rs's MIME_TYPES -- the same list the
+# application's own `eagleeye set-default` writes into a user's mimeapps.list
+# -- and it is written out here rather than read from the checkout because
+# install_desktop_entries() runs whether or not the clone is still around.
+#
+# Both halves of an association need it: MimeType= in the .desktop is what
+# makes EagleEye appear under "Open With", and the mimeapps.list lines are what
+# make it the one that opens on a double-click. Keep the two in step with
+# upstream; a type missing here is a file that opens in nothing.
+EAGLEEYE_MIME_TYPES=(
+    image/png image/apng image/jpeg image/pjpeg image/gif image/webp
+    image/bmp image/x-bmp image/tiff image/x-icon image/vnd.microsoft.icon
+    image/x-tga image/x-portable-anymap image/x-portable-bitmap
+    image/x-portable-graymap image/x-portable-pixmap image/qoi image/x-qoi
+    image/vnd.radiance image/x-exr image/x-dds image/svg+xml
+    image/svg+xml-compressed image/avif image/heif image/heic image/jxl
+)
 
 # Raven Controls: the keyboard backlight, fan speeds and thermal profiles. A
 # GTK4 + libadwaita client like Settings, Store and Power.
@@ -1918,6 +1948,91 @@ stage_viewer() {
     fi
 }
 
+# =============================================================================
+# EagleEye
+# =============================================================================
+# stage_viewer's shape, one step up in consequence. Optional like every GTK4
+# application here -- every failure path warns and returns 0 -- but it is the
+# only thing on this image that opens an image, so an image built without it
+# has no handler for image/* at all: a photograph in the file manager opens
+# nothing, and "Open With" lists nothing to pick.
+#
+# Environment:
+#   EAGLEEYE_SKIP=1      skip it; nothing on the image opens an image
+#   EAGLEEYE_OFFLINE=1   never touch the network; use the existing clone
+#   EAGLEEYE_REF=<ref>   build a particular ref instead of the default
+stage_eagleeye() {
+    if [[ "${EAGLEEYE_SKIP:-0}" == "1" ]]; then
+        log_info "  EAGLEEYE_SKIP=1: no image viewer on the image"
+        return 0
+    fi
+
+    command -v cargo &>/dev/null || {
+        log_warn "  cargo not found; EagleEye will not be built"
+        return 0
+    }
+
+    local -a missing=()
+    local mod
+    for mod in gtk4 libadwaita-1 glib-2.0 gio-2.0; do
+        pkg-config --exists "${mod}" 2>/dev/null || missing+=("${mod}")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        log_warn "  missing build dependencies for EagleEye: ${missing[*]}"
+        log_warn "  install them with: pacman -S --needed gtk4 libadwaita"
+        log_warn "  the desktop will ship without an image viewer"
+        return 0
+    fi
+
+    local dest="${GUI_SRC_DIR}/${EAGLEEYE_REPO}"
+    if ! fetch_repo "${EAGLEEYE_REPO}" "${EAGLEEYE_URL}" "${dest}" \
+            "${EAGLEEYE_REF:-}" "${EAGLEEYE_OFFLINE:-${GUI_OFFLINE:-0}}" "${EAGLEEYE_MANIFEST}"; then
+        log_warn "  EagleEye source unavailable; no image viewer on the image"
+        return 0
+    fi
+
+    log_info "  building EagleEye for ${GUI_TARGET}..."
+    local -a cargo_args=(build --release --target "${GUI_TARGET}")
+    [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
+    if ! (
+        cd "${dest}"
+        unset CGO_ENABLED
+        cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}"
+    ); then
+        log_warn "  EagleEye build failed; no image viewer on the image"
+        return 0
+    fi
+
+    local out="${dest}/target/${GUI_TARGET}/release/${EAGLEEYE_BIN}"
+    if [[ ! -x "${out}" ]]; then
+        log_warn "  EagleEye produced no binary; no image viewer on the image"
+        return 0
+    fi
+
+    install -Dm 0755 "${out}" "${SYSROOT_DIR}/usr/bin/${EAGLEEYE_BIN}"
+    log_success "  ${EAGLEEYE_BIN} installed ($(du -h "${out}" | cut -f1))"
+    stage_gui_libraries "${out}"
+
+    # As with Raven Viewer, data/raven-glass*.css are include_str!ed by
+    # src/theme.rs, so only the icon and metainfo ship; the entry is
+    # install_desktop_entries' job.
+    local appdata="${SYSROOT_DIR}/usr/share"
+    install -Dm 0644 "${dest}/data/icons/hicolor/scalable/apps/${EAGLEEYE_APPID}.svg" \
+        "${appdata}/icons/hicolor/scalable/apps/${EAGLEEYE_APPID}.svg" 2>/dev/null \
+        && log_info "    + ${EAGLEEYE_APPID}.svg (hicolor/scalable)" \
+        || log_warn "    no icon in the checkout; the launcher entry will draw blank"
+    install -Dm 0644 "${dest}/data/${EAGLEEYE_APPID}.metainfo.xml" \
+        "${appdata}/metainfo/${EAGLEEYE_APPID}.metainfo.xml" 2>/dev/null || true
+
+    # Not optional for this one the way it is for the others. HEIC, AVIF and
+    # JPEG XL are decoded by GTK's glycin loaders rather than in-process --
+    # loader.rs's `fallback` -- and glycin runs each decode inside bwrap. This
+    # is what stages both.
+    if declare -F stage_gtk_runtime &>/dev/null; then
+        stage_gtk_runtime
+    fi
+}
+
 install_desktop_entries() {
     local dir="${SYSROOT_DIR}/usr/share/applications"
     mkdir -p "${dir}"
@@ -2074,6 +2189,45 @@ ENTRY
         done
         chmod 0644 "${list}"
         log_info "    + mimeapps.list (PDF, DOCX)"
+    fi
+
+    # The image viewer, and the reason mimeapps.list exists in the form it
+    # does: before this, nothing on the image claimed a single image/* type.
+    #
+    # StartupWMClass is the application id rather than upstream's "eagleeye",
+    # for the same reason as Raven Viewer above: adw::Application sets the
+    # window's app_id from its id, and dock::owns checks StartupWMClass first.
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${EAGLEEYE_BIN}" ]]; then
+        local mimes
+        mimes="$(printf '%s;' "${EAGLEEYE_MIME_TYPES[@]}")"
+        cat > "${dir}/${EAGLEEYE_APPID}.desktop" << ENTRY
+[Desktop Entry]
+Type=Application
+Name=EagleEye
+GenericName=Image Viewer
+Comment=View every kind of image
+Exec=${EAGLEEYE_BIN} %U
+Icon=${EAGLEEYE_APPID}
+Categories=Graphics;Viewer;GTK;
+Keywords=image;picture;photo;viewer;png;jpeg;webp;gif;svg;
+MimeType=${mimes}
+StartupWMClass=${EAGLEEYE_APPID}
+StartupNotify=true
+Terminal=false
+ENTRY
+        chmod 0644 "${dir}/${EAGLEEYE_APPID}.desktop"
+        written=$((written + 1))
+        log_info "    + ${EAGLEEYE_APPID}.desktop"
+
+        # Appended, like the viewer's block above and for the same reason: the
+        # file manager writes the header, and may not have run.
+        local list="${dir}/mimeapps.list" mime
+        [[ -f "${list}" ]] || printf '[Default Applications]\n' > "${list}"
+        for mime in "${EAGLEEYE_MIME_TYPES[@]}"; do
+            printf '%s=%s.desktop\n' "${mime}" "${EAGLEEYE_APPID}" >> "${list}"
+        done
+        chmod 0644 "${list}"
+        log_info "    + mimeapps.list (${#EAGLEEYE_MIME_TYPES[@]} image types)"
     fi
 
     # The one entry on this image that is copied rather than written here.
@@ -2704,6 +2858,12 @@ print_gui_summary() {
         echo "  [--] software store      not built - rvn from a terminal"
     fi
 
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${EAGLEEYE_BIN}" ]]; then
+        echo "  [OK] image viewer        /usr/bin/${EAGLEEYE_BIN} (default for image/*)"
+    else
+        echo "  [--] image viewer        not built - nothing on the image opens an image"
+    fi
+
     if [[ -x "${SYSROOT_DIR}/usr/bin/${BATTERY_BIN}" ]]; then
         echo "  [OK] battery management  /usr/bin/${BATTERY_BIN} (Settings > General)"
     else
@@ -2929,6 +3089,12 @@ main() {
     # for the same reason, and that function also makes it the PDF default.
     log_step "Staging the document viewer..."
     stage_viewer
+
+    # Same rule, and directly after the document viewer because the two split
+    # the same job: that one claims PDF and DOCX, this one claims image/*.
+    # install_desktop_entries() makes it the default for every image type.
+    log_step "Staging the image viewer..."
+    stage_eagleeye
 
     # Before install_desktop_entries, like the rest: the entry is written only
     # if the binary is there to see. This one also stages a udev rule and the
