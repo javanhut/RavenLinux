@@ -181,6 +181,7 @@ OPT_FS="ext4"
 OPT_SWAP=""          # "", "none", or a size like 8G
 OPT_ESP_SIZE="${ESP_SIZE_DEFAULT}"
 OPT_NVRAM=0
+NVRAM_DECLINED=0     # 1 when an answers file said efi_nvram=0 outright
 OPT_DRY_RUN=0
 OPT_YES=0
 OPT_PROFILE=""
@@ -915,6 +916,53 @@ part_os_hint() {
     echo "${fstype:-unformatted}"
 }
 
+# Disks other than the target that carry an EFI System Partition -- which is
+# to say, the other operating systems on this machine.
+#
+# sfdisk is read directly rather than through read_disk_table because this is
+# asked about every disk in turn and read_disk_table caches one: calling it
+# here would leave DISK_TABLE describing the last disk looked at rather than
+# the one being installed to.
+disk_has_esp() {
+    sfdisk -d "$1" 2>/dev/null | grep -qi "type=${GUID_ESP}"
+}
+
+other_esp_disks() {
+    local line dev
+    while read -r line; do
+        [[ -z "$line" ]] && continue
+        dev="/dev/$(echo "$line" | awk '{print $1}')"
+        [[ "$dev" == "$DISK" ]] && continue
+        disk_has_esp "$dev" && echo "$dev"
+    done < <(list_disks)
+}
+
+# Whether to register a UEFI NVRAM boot entry, when nobody has said either way.
+#
+# Off is right on one disk: \EFI\BOOT\BOOTX64.EFI is what firmware runs when
+# no NVRAM entry matches, that file is RavenBoot after this install, and not
+# touching NVRAM leaves the firmware's existing entries in their existing
+# order.
+#
+# On two disks it is wrong, and wrong in a way that looks like a failed
+# install. The other disk has a fallback loader of its own and an NVRAM entry
+# pointing at it -- "Windows Boot Manager", ahead of ours in the boot order --
+# so the firmware goes on booting that. RavenBoot is never reached, and so the
+# menu it would have shown, with that other OS in it, is never reached either.
+decide_nvram() {
+    (( OPT_NVRAM ))      && return 0
+    (( NVRAM_DECLINED )) && return 0
+
+    local others
+    others="$(other_esp_disks)"
+    [[ -n "$others" ]] || return 0
+
+    OPT_NVRAM=1
+    info "Another operating system is on $(echo $others | tr '\n' ' ')and this install is going somewhere else."
+    info "Registering a UEFI boot entry, or the firmware would keep booting that disk."
+    info "Put efi_nvram=0 in an answers file to skip it."
+}
+
 # =============================================================================
 # Planning an install alongside what is already there
 # =============================================================================
@@ -1415,6 +1463,9 @@ load_answers() {
     [[ "$OPT_ESP_SIZE" == "${ESP_SIZE_DEFAULT}" && -n "${ANS[esp_size]:-}" ]] \
         && OPT_ESP_SIZE="${ANS[esp_size]}"
     [[ "${ANS[efi_nvram]:-0}" == "1" ]] && OPT_NVRAM=1
+    # Told apart from "absent": a front-end that writes the key every time is
+    # answering the question, and decide_nvram must not overrule it.
+    [[ "${ANS[efi_nvram]:-}" == "0" ]] && NVRAM_DECLINED=1
 
     ok "Answers loaded from ${file}"
 }
@@ -1754,6 +1805,7 @@ partition_target() {
 
 confirm() {
     plan_partitions
+    decide_nvram
 
     phase confirm "Installation plan"
 

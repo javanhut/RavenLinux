@@ -285,6 +285,20 @@ impl Probe {
         self.disks.iter().filter(|d| !d.live_media).collect()
     }
 
+    /// Disks other than `target` that carry an EFI System Partition -- which
+    /// is to say, the other operating systems on this machine.
+    ///
+    /// An ESP is the evidence because it is what a UEFI OS cannot be installed
+    /// without, and because the probe reports it for every disk it could read.
+    /// The live stick is excluded: it has an ESP too, and it is not something
+    /// anybody is dual-booting with.
+    pub fn other_os_disks(&self, target: &str) -> Vec<&Disk> {
+        self.disks
+            .iter()
+            .filter(|d| d.dev != target && !d.live_media && !d.esp.is_empty())
+            .collect()
+    }
+
     /// Is this disk big enough for the tree that would be copied onto it, plus
     /// the ESP and whatever swap was asked for? Answered in MB against the
     /// same `source_size_mb` the installer measures its progress with.
@@ -752,6 +766,49 @@ probe.end=1
         let offered = p.installable_disks();
         assert_eq!(offered.len(), 1);
         assert_eq!(offered[0].dev, "/dev/nvme0n1");
+    }
+
+    #[test]
+    fn the_other_disk_is_the_one_with_the_other_os_on_it() {
+        // Windows on sda, the install going to nvme0n1, and a live stick that
+        // is neither. Without a firmware boot entry this machine goes on
+        // booting sda and RavenBoot is never reached, so the disk page has to
+        // be able to tell that this is the case.
+        let p = parse(
+            "disk.begin=/dev/sda\n\
+             disk.windows=1\n\
+             disk.esp=/dev/sda1\n\
+             disk.end=/dev/sda\n\
+             disk.begin=/dev/nvme0n1\n\
+             disk.alongside=0\n\
+             disk.alongside_why=no partition table on the disk\n\
+             disk.end=/dev/nvme0n1\n\
+             disk.begin=/dev/sdb\n\
+             disk.live_media=1\n\
+             disk.esp=/dev/sdb1\n\
+             disk.end=/dev/sdb\n",
+        );
+
+        let others = p.other_os_disks("/dev/nvme0n1");
+        assert_eq!(others.len(), 1, "the live stick is not an OS to dual boot");
+        assert_eq!(others[0].dev, "/dev/sda");
+        assert!(others[0].windows);
+
+        // Installing onto the Windows disk itself is the one-disk case: the
+        // blank nvme has no ESP, so there is nothing else that boots and the
+        // fallback path is enough.
+        assert!(p.other_os_disks("/dev/sda").is_empty());
+    }
+
+    #[test]
+    fn a_disk_with_no_esp_is_not_another_os() {
+        let p = parse(
+            "disk.begin=/dev/sda\n\
+             disk.alongside=0\n\
+             disk.alongside_why=no partition table on the disk\n\
+             disk.end=/dev/sda\n",
+        );
+        assert!(p.other_os_disks("/dev/nvme0n1").is_empty());
     }
 
     #[test]

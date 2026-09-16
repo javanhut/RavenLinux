@@ -1175,6 +1175,51 @@ refuses "and names the swap it could not fit" \
         'DISK="$SMALL"; OPT_SHRINK_PART=""; OPT_ALONGSIDE_SIZE=""; SWAP_SIZE="16G"' \
         "16G of swap"
 
+# --- the two-disk dual boot --------------------------------------------------
+# Windows on one disk, RavenLinux going onto another. RavenBoot finds the other
+# OS by scanning every volume, but only if the firmware runs RavenBoot at all --
+# and the other disk already owns the boot order.
+import_fn disk_has_esp other_esp_disks decide_nvram
+OTHER="${WORKDIR}/other.img"
+truncate -s 32G "$OTHER"
+sfdisk -q "$OTHER" >/dev/null 2>&1 <<'PARTS'
+label: gpt
+size=260M, type=uefi, name="EFI system partition"
+size=16G,  type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name="Basic data partition"
+PARTS
+BLANK="${WORKDIR}/blank.img"
+truncate -s 32G "$BLANK"
+sfdisk -q "$BLANK" >/dev/null 2>&1 <<'PARTS'
+label: gpt
+type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="data"
+PARTS
+
+# The real predicate, against real partition tables. other_esp_disks itself is
+# a loop over list_disks that prefixes /dev/, and an image file cannot be put
+# there; what it decides with is this.
+eq "an ESP is what marks a disk as holding an OS" \
+   "$(disk_has_esp "$OTHER" && echo yes || echo no)" "yes"
+eq "a disk with no ESP holds no UEFI OS" \
+   "$(disk_has_esp "$BLANK" && echo yes || echo no)" "no"
+
+# decide_nvram asks other_esp_disks; here that answer is supplied directly, so
+# what is under test is the decision rather than the listing.
+other_esp_disks() { [[ "$DISK" == "$BLANK" ]] && echo "$OTHER"; return 0; }
+
+OPT_NVRAM=0; NVRAM_DECLINED=0; DISK="$BLANK"
+info() { :; }
+decide_nvram
+eq "installing elsewhere registers a boot entry" "$OPT_NVRAM" "1"
+
+OPT_NVRAM=0; NVRAM_DECLINED=0; DISK="$OTHER"
+decide_nvram
+eq "installing onto the only OS disk does not" "$OPT_NVRAM" "0"
+
+OPT_NVRAM=0; NVRAM_DECLINED=1; DISK="$BLANK"
+decide_nvram
+eq "and efi_nvram=0 is not overruled" "$OPT_NVRAM" "0"
+OPT_NVRAM=0; NVRAM_DECLINED=0
+
 # The same gap, with swap turned off, is enough.
 DISK="$SMALL"; OPT_SHRINK_PART=""; OPT_ALONGSIDE_SIZE=""; SWAP_SIZE=""
 unset -f die; die() { echo "unexpected die: $*" >&2; exit 9; }

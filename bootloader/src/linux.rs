@@ -6,8 +6,12 @@ use core::ptr;
 use uefi::prelude::*;
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::media::file::{File, FileAttribute, FileInfo, FileMode};
+use uefi::proto::device_path::build::{self, DevicePathBuilder};
+use uefi::proto::device_path::DevicePath;
 use uefi::proto::media::fs::SimpleFileSystem;
-use uefi::table::boot::{AllocateType, LoadImageSource, MemoryType};
+use uefi::table::boot::{
+    AllocateType, LoadImageSource, MemoryType, OpenProtocolAttributes, OpenProtocolParams,
+};
 use uefi::{guid, CString16, Guid};
 
 // Linux initrd protocol GUID - used by kernel to find initrd
@@ -401,46 +405,144 @@ fn read_file(
     Ok(buffer)
 }
 
+/// `volume`'s device path with `efi_path` appended, which is what
+/// `LoadImageSource::FromDevicePath` means by "the full device path".
+///
+/// The bytes are built into `buf`, which the caller owns for as long as the
+/// returned path is used.
+fn full_device_path<'a>(
+    boot_services: &BootServices,
+    volume: Handle,
+    efi_path: &str,
+    buf: &'a mut Vec<u8>,
+) -> Result<&'a DevicePath, KernelError> {
+    // The volume's own path: PciRoot(..)/Pci(..)/Sata(..)/HD(..). Opened with
+    // GetProtocol rather than exclusively -- this is a read of a static
+    // description, and the volume may belong to another disk entirely.
+    let params = OpenProtocolParams {
+        handle: volume,
+        agent: boot_services.image_handle(),
+        controller: None,
+    };
+    // SAFETY: GetProtocol reads an already-installed protocol without
+    // disturbing the driver that owns it.
+    let device_path = unsafe {
+        boot_services
+            .open_protocol::<DevicePath>(params, OpenProtocolAttributes::GetProtocol)
+            .map_err(|_| KernelError::FileSystemError)?
+    };
+
+    let path_name = CString16::try_from(efi_path).map_err(|_| KernelError::InvalidFormat)?;
+
+    let mut builder = DevicePathBuilder::with_vec(buf);
+    for node in device_path.node_iter() {
+        builder = builder
+            .push(&node)
+            .map_err(|_| KernelError::MemoryAllocation)?;
+    }
+    builder = builder
+        .push(&build::media::FilePath {
+            path_name: &path_name,
+        })
+        .map_err(|_| KernelError::MemoryAllocation)?;
+
+    builder.finalize().map_err(|_| KernelError::InvalidFormat)
+}
+
 /// Chainload another EFI application (e.g., Windows Boot Manager)
+///
+/// `volume` is the filesystem `efi_path` is on, or `None` for the one
+/// RavenBoot was loaded from.
+///
+/// The image is loaded by device path rather than from a buffer, and that is
+/// not a detail. An image loaded from a buffer inherits *our* device handle
+/// and has no file path of its own, so it looks to itself as though it were
+/// installed where RavenBoot is -- and Windows Boot Manager reads its BCD
+/// store from beside itself. On a single shared ESP the two are the same place
+/// and the lie is harmless; on a machine whose Windows is on another disk it
+/// sends bootmgfw.efi looking for a BCD on our ESP, where there is none.
 pub fn chainload_efi(
     boot_services: &BootServices,
     image_handle: Handle,
     efi_path: &str,
+    volume: Option<Handle>,
 ) -> Result<(), KernelError> {
-    // Get device handle from our loaded image
-    let loaded_image = boot_services
-        .open_protocol_exclusive::<LoadedImage>(image_handle)
-        .map_err(|_| KernelError::FileSystemError)?;
+    let device_handle = match volume {
+        Some(h) => h,
+        None => {
+            let loaded_image = boot_services
+                .open_protocol_exclusive::<LoadedImage>(image_handle)
+                .map_err(|_| KernelError::FileSystemError)?;
+            loaded_image.device().ok_or(KernelError::FileSystemError)?
+        }
+    };
 
-    let device_handle = loaded_image.device().ok_or(KernelError::FileSystemError)?;
+    // Checked before anything is loaded so that a missing loader is reported
+    // as one, rather than as whatever load_image makes of a path to nothing.
+    {
+        let params = OpenProtocolParams {
+            handle: device_handle,
+            agent: boot_services.image_handle(),
+            controller: None,
+        };
+        // SAFETY: as in full_device_path -- a read that leaves the owning
+        // driver alone, closed again when the ScopedProtocol drops.
+        let mut fs = unsafe {
+            boot_services
+                .open_protocol::<SimpleFileSystem>(params, OpenProtocolAttributes::GetProtocol)
+                .map_err(|_| KernelError::FileSystemError)?
+        };
+        let mut root = fs.open_volume().map_err(|_| KernelError::FileSystemError)?;
+        let path = CString16::try_from(efi_path).map_err(|_| KernelError::InvalidFormat)?;
+        root.open(&path, FileMode::Read, FileAttribute::empty())
+            .map_err(|_| KernelError::EfiAppNotFound)?;
+    }
 
-    // Open filesystem
-    let mut fs = boot_services
-        .open_protocol_exclusive::<SimpleFileSystem>(device_handle)
-        .map_err(|_| KernelError::FileSystemError)?;
-
-    let mut root = fs.open_volume().map_err(|_| KernelError::FileSystemError)?;
-
-    // Read the EFI application
-    let efi_data = read_file(&mut root, efi_path).map_err(|err| match err {
-        KernelError::NotFound => KernelError::EfiAppNotFound,
-        other => other,
-    })?;
-
-    // Drop handles before loading
-    drop(fs);
-    drop(loaded_image);
-
-    // Load and start the image
-    let chain_image = boot_services
-        .load_image(
-            image_handle,
-            LoadImageSource::FromBuffer {
-                buffer: &efi_data,
-                file_path: None,
-            },
-        )
-        .map_err(|_| KernelError::LoadImageFailed)?;
+    let mut buf = Vec::new();
+    let chain_image = match full_device_path(boot_services, device_handle, efi_path, &mut buf) {
+        Ok(path) => boot_services
+            .load_image(
+                image_handle,
+                LoadImageSource::FromDevicePath {
+                    device_path: path,
+                    from_boot_manager: false,
+                },
+            )
+            .map_err(|_| KernelError::LoadImageFailed)?,
+        Err(_) => {
+            // Firmware that will not describe the volume, or a path that will
+            // not build. Reading the file ourselves still boots anything that
+            // does not need to find itself again afterwards, which is every
+            // loader here except Windows -- so it is a worse answer than the
+            // one above and a better one than refusing.
+            let params = OpenProtocolParams {
+                handle: device_handle,
+                agent: boot_services.image_handle(),
+                controller: None,
+            };
+            // SAFETY: as above.
+            let mut fs = unsafe {
+                boot_services
+                    .open_protocol::<SimpleFileSystem>(params, OpenProtocolAttributes::GetProtocol)
+                    .map_err(|_| KernelError::FileSystemError)?
+            };
+            let mut root = fs.open_volume().map_err(|_| KernelError::FileSystemError)?;
+            let efi_data = read_file(&mut root, efi_path).map_err(|err| match err {
+                KernelError::NotFound => KernelError::EfiAppNotFound,
+                other => other,
+            })?;
+            drop(fs);
+            boot_services
+                .load_image(
+                    image_handle,
+                    LoadImageSource::FromBuffer {
+                        buffer: &efi_data,
+                        file_path: None,
+                    },
+                )
+                .map_err(|_| KernelError::LoadImageFailed)?
+        }
+    };
 
     boot_services
         .start_image(chain_image)

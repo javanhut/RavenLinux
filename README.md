@@ -55,24 +55,33 @@ And a graphical layer, built separately because it cannot be static:
 | Tool | What it is |
 |------|------------|
 | `huginn` | [RavenGUI](https://github.com/javanhut/RavenGUI)'s Wayland compositor, which also draws the desktop — dock, launcher, notifications |
+| `raven-output` | RavenGUI's display utility — layout and scaling for the screens huginn drives |
 | `raven-lock` | the session lock screen — from RavenLogin, and the same screen as the login prompt; on `Super`+`L`, after ten idle minutes, and on resume from suspend |
 | `raven-terminal` | [RavenTerminal](https://github.com/javanhut/RavenTerminal), the terminal the desktop opens — on the dock and on `Super`+`Shift`+`T` |
-| `ravenfilemanager` | [RavenFileManager](https://github.com/javanhut/RavenFileManager), the file manager — the other icon on the dock, and the image's only GTK client |
+| `ravenfilemanager` | [RavenFileManager](https://github.com/javanhut/RavenFileManager), the file manager — the other icon on the dock, and the first GTK client the image had |
+| `raven-settings` | [RavenSettingsUI](https://github.com/javanhut/RavenSettingsUI), the settings window — network, Bluetooth, sound, screens, appearance and updates; on `Super`+`Ctrl`+`P` |
 | `ravencanvasd`, `ravencanvas` | [RavenCanvas](https://github.com/javanhut/RavenCanvas), the wallpaper — a layer-shell client, started by the session script before the compositor it draws behind |
 | `roostbar` | [RoostBar](https://github.com/javanhut/RoostBar), the layer-shell status bar — date, Wi-Fi, Bluetooth, volume, battery and clock |
 | `raven-store` | [RavenStore](https://github.com/javanhut/RavenStore), the software store — a GTK front-end that runs `rvn --json` underneath; on `Super`+`Ctrl`+`I` |
 | `raven-power` | [RavenBatteryManagement](https://github.com/javanhut/RavenBatteryManagement), native battery profiles, energy diagnostics, application Eco mode and battery health — linked from Settings > General |
+| `raven-controls`, `raven-controlsd` | [RavenControls](https://github.com/javanhut/RavenControls), keyboard backlight, fan speeds and thermal profiles — and the daemon that owns the fan writes, which raven-init starts as the `controlsd` service |
+| `raven-viewer` | [RavenViewer](https://github.com/javanhut/RavenViewer), the document reader — PDF and DOCX, and the default for both |
+| `eagleeye` | [EagleEye](https://github.com/javanhut/EagleEye), the image viewer — the only thing on the image that opens a picture, and the default for all 27 image types |
+| `owl-player` | [OwlPlayer](https://github.com/javanhut/OwlPlayer), the media player — FFmpeg with its own GPU renderer in front of it, and the default for all 29 video and audio types |
+| `raven-installer-ui` | the graphical installer — `installer-ui/` in this repository rather than its own, because it is the front-end for `scripts/installer/raven-install` and a version skew between the two is a wizard that cannot drive the installer it is looking at |
 | `ravend`, `raven-greeter` | [RavenLogin](https://github.com/javanhut/RavenLogin), the login screen — and the root daemon behind it, which is not the process that draws |
 
 Boot the `Raven Desktop (Huginn)` entry, or add `raven.graphics=wayland` to the
 kernel cmdline, and raven-init starts the session instead of a getty — or, if
 `ravend` is on the image, the password prompt in front of it.
 
-Only the first three are load-bearing. Without huginn there is nothing to log
-into, and without `raven-terminal` nothing to launch — huginn names it in two
-compiled-in places — so both failing fails the stage. The rest are things a
-desktop can be missing: `FILEMANAGER_SKIP=1`, `CANVAS_SKIP=1` and `LOGIN_SKIP=1`
-each produce an image that still boots to a working session.
+Only `huginn` and `raven-terminal` are load-bearing. Without the compositor
+there is nothing to log into, and without the terminal nothing to launch —
+huginn names it in two compiled-in places — so either one failing fails the
+stage. Everything else is something a desktop can be missing, and each says so
+with a `<NAME>_SKIP=1` of its own: `FILEMANAGER_SKIP=1`, `CANVAS_SKIP=1`,
+`LOGIN_SKIP=1`, `EAGLEEYE_SKIP=1`, `PLAYER_SKIP=1` and the rest each produce an
+image that still boots to a working session.
 
 RavenCanvas is the one of those that is a separate process by choice rather than
 necessity. huginn draws its own dock, launcher and notifications inside its
@@ -81,10 +90,17 @@ not get to be a process that can die — and a wallpaper is exactly the case tha
 rule is not about, since huginn paints its own background underneath and the
 worst its death can do is leave a plain desktop.
 
-RavenFileManager is the first thing on the image that is simply an application,
-and the only GTK client on it. That is most of what makes it interesting to
-build: it links a hundred and thirty-four shared libraries against huginn's
-seventeen, and four of the things it needs are ones `ldd` cannot see — a
+RavenFileManager was the first thing on the image that is simply an
+application, and for a while the only GTK client on it. It is now one of nine:
+Settings, Store, Power, Controls, Viewer, EagleEye, Owl Player and the
+graphical installer are all GTK4 + libadwaita too, they all fail the same
+`pkg-config` check on a host without the toolkit, and whichever of them builds
+first stages the runtime the rest ride on.
+
+It is still the one worth describing, because everything that makes the group
+hard to build showed up here first: it links a hundred and thirty-four shared
+libraries against huginn's seventeen, and four of the things it needs are ones
+`ldd` cannot see — a
 compiled `gschemas.compiled`, without which every GTK application aborts at
 startup on a schema lookup; `gsettings-desktop-schemas`, without which
 libadwaita silently stays light; `mime.cache`, without which every file is
@@ -267,7 +283,7 @@ next `imlazy build` ships it.
 | `stage2` | `scripts/stages/stage2-native.sh` | Native rebuild of the sysroot: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | `stage3` | `scripts/stages/stage3-packages.sh` | Base packages: core libraries (zlib, ncurses, readline, attr, acl), shells, OpenSSH, RavenBoot |
 | `raven` | `scripts/stages/stage-raven.sh` | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw |
-| `gui` | `scripts/stages/stage-gui.sh` | The desktop: huginn, raven-terminal, ravenfilemanager, ravencanvasd, roostbar, ravend, raven-lock, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
+| `gui` | `scripts/stages/stage-gui.sh` | The desktop: huginn, raven-terminal, ravenfilemanager, the seven other GTK4 applications (Settings, Store, Power, Controls, Viewer, EagleEye, Owl Player) and the graphical installer, ravencanvasd, roostbar, ravend, raven-lock, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
 | `stage4` | `scripts/stages/stage4-iso.sh` | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
 
 The Raven layer is unnumbered on purpose. Stages 0–4 build a base system that
@@ -318,10 +334,19 @@ ROOSTBAR_SKIP=1 imlazy gui                  # no status bar
 ROOSTBAR_REF=v0.1.0 imlazy gui              # pin RoostBar to a git ref
 STORE_SKIP=1 imlazy gui                     # no software store; rvn from a terminal
 STORE_REF=v0.1.0 imlazy gui                 # pin RavenStore to a git ref
+SETTINGS_SKIP=1 imlazy gui                  # no settings window
+BATTERY_SKIP=1 imlazy gui                   # no battery UI; powerd policy stays
+CONTROLS_SKIP=1 imlazy gui                  # no backlight/fan UI, no controlsd
+VIEWER_SKIP=1 imlazy gui                    # no PDF/DOCX reader
+EAGLEEYE_SKIP=1 imlazy gui                  # nothing opens an image
+PLAYER_SKIP=1 imlazy gui                    # nothing plays a film or a song
 ```
 
-Each of those four also takes an `_OFFLINE=1`, which reuses that component's
-existing clone without falling back to the network.
+Every component in that list also takes a `<NAME>_REF=<git-ref>` and a
+`<NAME>_OFFLINE=1` — the first pins that one repository, the second reuses its
+existing clone without falling back to the network. The full set is documented
+at the top of `scripts/stages/stage-gui.sh`, and the components themselves are
+declared once in `scripts/lib/components.sh`.
 
 The stage ends with a **Desktop:** summary reporting the terminal, the file
 manager, the wallpaper, the application menu, the cursor theme, the icon theme
@@ -460,9 +485,20 @@ It never formats the EFI System Partition in this mode — it reuses the one the
 other OS boots from, which is the single action that would make that OS
 unbootable. An existing `\EFI\BOOT\BOOTX64.EFI` is kept as
 `BOOTX64.RAVENBAK.EFI` before RavenBoot takes that path. RavenBoot finds
-Windows, Ubuntu, Fedora, Debian and Arch on the shared ESP by itself and puts
-them in its menu, so there is nothing to configure for the other side of the
-dual boot.
+Windows, Ubuntu, Fedora, Debian and Arch by itself and puts them in its menu,
+so there is nothing to configure for the other side of the dual boot.
+
+**Two disks** work too, and are a different shape. RavenBoot scans every
+filesystem the firmware can see rather than only the partition it was loaded
+from, so a Windows on the machine's *other* disk is in the menu as well — and
+it is chainloaded by device path, which is what lets Windows Boot Manager find
+its own BCD store on its own ESP. There is nothing to install alongside on a
+blank second disk, so that install is an ordinary `--wipe`; what it does need
+is for the firmware to know RavenLinux is there, because the other disk already
+has a boot entry of its own and the fallback path will not beat it. The
+installer registers a UEFI boot entry by itself when it sees an ESP on a disk
+it is not installing to, and says so; `efi_nvram=0` in an answers file declines
+it.
 
 Two things it will not do, and says so rather than trying: it needs a GPT disk
 with an ESP already on it — that is what "another UEFI OS is here" means — and
@@ -641,7 +677,7 @@ docker run --rm -it --platform linux/amd64 ravenlinux
 │   ├── core/                 # musl, linux, openssl, openssh, sudo-rs, uutils
 │   ├── base/                 # bash, fish
 │   ├── raven/                # ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw
-│   └── gui/                  # ravengui: huginn; ravenlogin: ravend, greeter, lock
+│   └── gui/                  # ravengui: huginn; the GTK4 apps; ravenlogin; canvas; bar
 ├── configs/                  # shell, SSH, kernel, fontconfig configuration
 ├── etc/                      # files installed into the rootfs /etc
 ├── fonts/                    # JetBrains Mono Nerd Font (console and desktop)

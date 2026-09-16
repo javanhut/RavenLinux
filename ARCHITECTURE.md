@@ -101,9 +101,17 @@ line:
 | Binary | Source | Language | Role |
 |--------|--------|----------|------|
 | `huginn` | RavenGUI | Rust | Wayland compositor (Smithay, udev/DRM backend) |
+| `raven-output` | RavenGUI | Rust | Display layout and scaling for the outputs huginn drives |
 | `raven-lock` | RavenLogin | Rust | Session lock screen: the login screen's twin, on `ext-session-lock-v1` |
 | `raven-terminal` | RavenTerminal | Go + cgo | Terminal emulator (OpenGL 4.1 via GLFW, Wayland backend) |
-| `ravenfilemanager` | RavenFileManager | Rust | File manager (GTK4, libadwaita) — the image's only GTK client |
+| `ravenfilemanager` | RavenFileManager | Rust | File manager (GTK4, libadwaita) — the first GTK client the image had |
+| `raven-settings` | RavenSettingsUI | Rust | Settings (GTK4, libadwaita): network, Bluetooth, sound, screens, appearance and updates |
+| `raven-store` | RavenStore | Rust | Software store (GTK4, libadwaita): a front-end for `rvn --json`, which does the installing |
+| `raven-power` | RavenBatteryManagement | Rust | Battery profiles, per-application Eco mode, energy use and battery health (GTK4, libadwaita) |
+| `raven-controls`, `raven-controlsd` | RavenControls | Rust | Keyboard backlight, fans and thermals (GTK4, libadwaita), and the daemon that owns the fan writes — init's `controlsd` service |
+| `raven-viewer` | RavenViewer | Rust | PDF and DOCX reader (GTK4, libadwaita); the default for both |
+| `eagleeye` | EagleEye | Rust | Image viewer (GTK4, libadwaita); the default for every `image/*` on the image |
+| `owl-player` | OwlPlayer | Rust | Media player (GTK4, libadwaita) built on FFmpeg with its own GL renderer; the default for `video/*` and `audio/*` |
 | `ravencanvasd`, `ravencanvas` | RavenCanvas | Rust | The wallpaper: a wlr-layer-shell client, and its control CLI |
 | `roostbar` | RoostBar | Rust | Layer-shell status bar, started through the global session.d drop-in |
 | `ravend`, `raven-greeter` | RavenLogin | Rust | The login daemon, which reads `/etc/shadow`, and the login screen, which does not |
@@ -114,12 +122,15 @@ list of none of it. `huginn` links seventeen shared libraries — libdrm, libgbm
 libinput, libseat, libudev and the chain behind them — with Mesa's EGL/GLES
 drivers dlopened at run time. `ravenfilemanager` links a hundred and thirty-four:
 GTK4, libadwaita, pango, cairo, harfbuzz, GStreamer, appstream, krb5, gnutls and
-the desktop stack behind them. `ravend` and both RavenCanvas binaries link libc
-and next to nothing else. `stage_gui_libraries()` resolves the closure with `ldd`
-against the binaries it has just built and stages whatever stage2 did not already
-provide — because a list written here would be right on the day it was written
-and silently wrong the first time a dependency changed. libinput alone reaches
-libwacom, which reaches lua.
+the desktop stack behind them. `owl-player` links two hundred and twenty-six and
+is the widest thing on the image by a distance — all of the above plus the whole
+FFmpeg closure, which is every codec, container and colour library the build
+host's `ffmpeg` was itself built against. `ravend` and both RavenCanvas binaries
+link libc and next to nothing else. `stage_gui_libraries()` resolves the closure
+with `ldd` against the binaries it has just built and stages whatever stage2 did
+not already provide — because a list written here would be right on the day it
+was written and silently wrong the first time a dependency changed. libinput
+alone reaches libwacom, which reaches lua.
 
 `ldd` is necessary and not sufficient, which is why `stage_gtk_runtime()` exists.
 A toolkit reads *data* at run time that no linker mentions: the compiled
@@ -461,7 +472,7 @@ working shell; the Raven layer takes that over once `ravenshell` is installed.
 | **Stage 2** | Rebuild the sysroot natively: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | **Stage 3** | Base packages: core libraries, shells, OpenSSH, RavenBoot |
 | **Raven** | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw |
-| **GUI** | The desktop: huginn, raven-terminal, ravenfilemanager, ravencanvasd, roostbar, ravend, raven-lock, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
+| **GUI** | The desktop: huginn, raven-terminal, ravenfilemanager, the seven other GTK4 applications (Settings, Store, Power, Controls, Viewer, EagleEye, Owl Player) and the graphical installer, ravencanvasd, roostbar, ravend, raven-lock, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
 | **Stage 4** | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
 
 The Raven layer carries no stage number. Stages 0–4 are the base system and
@@ -533,9 +544,13 @@ Sets:
 - `packages/core/` — musl, linux, openssl, openssh, libssh, sudo-rs, uutils-coreutils
 - `packages/base/` — bash, fish
 - `packages/raven/` — ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw
-- `packages/gui/` — ravengui (huginn), ravenfilemanager,
-  ravenlogin, ravencanvas. raven-terminal is built by the same stage from its
-  own repository and has no manifest here yet
+- `packages/gui/` — ravengui (huginn), ravenfilemanager, raven-settings,
+  raven-store, raven-power, raven-controls, raven-viewer, eagleeye, owl-player,
+  ravenlogin, ravencanvas, roostbar. raven-terminal is built by the same stage
+  from its own repository and is the one GUI component with no manifest here
+  yet, which is why its row in `scripts/lib/components.sh` has an empty
+  manifest field and `fetch` reports it as unpinned rather than pretending
+  otherwise
 
 ## Extending the System
 

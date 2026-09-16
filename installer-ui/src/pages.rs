@@ -6,6 +6,7 @@
 //! password typed twice, for instance, which is not an answer -- it is a
 //! check on one).
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -193,6 +194,60 @@ fn swap_bytes_for(a: &Answers, probe_swap: u64) -> u64 {
         "" => probe_swap,
         other => probe::size_to_mb(other).unwrap_or(0).saturating_mul(1024 * 1024),
     }
+}
+
+/// What the UEFI boot entry switch should say when another disk on this
+/// machine has an operating system on it, or None when none has.
+///
+/// This is the two-disk dual boot, and the case the fallback bootloader path
+/// does not cover. RavenBoot itself handles the rest of it -- it scans every
+/// disk the firmware can see, so the other OS is in its menu -- but none of
+/// that happens if the firmware never runs RavenBoot, and on a machine whose
+/// other disk already owns the boot order that is exactly what happens.
+fn other_disk_note(p: &Probe, target: &str) -> Option<String> {
+    let others = p.other_os_disks(target);
+    if others.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = others
+        .iter()
+        .map(|d| {
+            if d.windows {
+                format!("{} (Windows)", d.dev)
+            } else {
+                d.dev.clone()
+            }
+        })
+        .collect();
+    Some(format!(
+        "On by default: another operating system is on {}, and this install is \
+         going somewhere else. Without an entry the firmware goes on booting that \
+         disk, so RavenBoot — and the menu with that OS in it — never appears.",
+        names.join(", ")
+    ))
+}
+
+/// Point the boot-entry switch at the disk now selected. Called again whenever
+/// that selection changes, which resets the switch the same way changing disks
+/// already resets the erase-or-alongside choice above it.
+fn apply_nvram_default(app: &Rc<App>, row: &adw::SwitchRow, target: &str) {
+    if !app.probe.efibootmgr {
+        return;
+    }
+    match other_disk_note(&app.probe, target) {
+        Some(note) => {
+            row.set_subtitle(&note);
+            row.set_active(true);
+        }
+        None => {
+            row.set_subtitle(
+                "Off by default: the fallback bootloader path boots without one, and \
+                 writing NVRAM can reorder the firmware's existing entries",
+            );
+            row.set_active(false);
+        }
+    }
+    app.answers.borrow_mut().efi_nvram = row.is_active();
 }
 
 fn install_mode(app: &Rc<App>, page: &adw::PreferencesPage, disks: &[Disk]) {
@@ -462,6 +517,12 @@ fn disk(app: &Rc<App>) {
     let page = adw::PreferencesPage::new();
     let installable: Vec<Disk> = app.probe.installable_disks().into_iter().cloned().collect();
 
+    // The boot-entry switch is built at the bottom of this function and has to
+    // be reachable from the disk radios at the top of it, because what it
+    // should default to is a fact about which disk was picked. Same problem as
+    // App::mode_groups, small enough to solve locally.
+    let nvram_cell: Rc<RefCell<Option<adw::SwitchRow>>> = Rc::new(RefCell::new(None));
+
     let group = adw::PreferencesGroup::builder()
         .title("Target disk")
         .description(
@@ -524,6 +585,7 @@ fn disk(app: &Rc<App>) {
         check.connect_toggled({
             let app = app.clone();
             let dev = d.dev.clone();
+            let nvram_cell = nvram_cell.clone();
             move |c| {
                 if !c.is_active() {
                     return;
@@ -546,6 +608,13 @@ fn disk(app: &Rc<App>) {
                     // this is the reset above made visible rather than a second
                     // way of doing it.
                     erase.set_active(true);
+                }
+                // Whether a firmware boot entry is needed is a fact about the
+                // disk that was just picked: it is needed when the other OS is
+                // on a different one.
+                let row = nvram_cell.borrow().clone();
+                if let Some(row) = row {
+                    apply_nvram_default(&app, &row, &dev);
                 }
                 app.revalidate();
             }
@@ -669,12 +738,9 @@ fn disk(app: &Rc<App>) {
 
     let nvram_row = adw::SwitchRow::builder()
         .title("Register a UEFI boot entry")
-        .subtitle(
-            "Off by default: the fallback bootloader path boots without one, and \
-             writing NVRAM can reorder the firmware's existing entries",
-        )
         .active(false)
         .build();
+    nvram_row.set_subtitle_lines(0);
     if !app.probe.efibootmgr {
         nvram_row.set_sensitive(false);
         nvram_row.set_subtitle("efibootmgr is not installed; the fallback path is used");
@@ -684,6 +750,13 @@ fn disk(app: &Rc<App>) {
         move |r| app.answers.borrow_mut().efi_nvram = r.is_active()
     });
     advanced.add(&nvram_row);
+    // Seeded for the disk that starts selected, and re-seeded by the radios
+    // above whenever that changes.
+    {
+        let target = app.answers.borrow().disk.clone();
+        apply_nvram_default(app, &nvram_row, &target);
+        *nvram_cell.borrow_mut() = Some(nvram_row.clone());
+    }
     page.add(&advanced);
 
     push(

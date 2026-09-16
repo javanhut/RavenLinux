@@ -15,7 +15,7 @@ use uefi::proto::console::text::{Color, Key, ScanCode};
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::media::file::{File, FileAttribute, FileMode};
 use uefi::proto::media::fs::SimpleFileSystem;
-use uefi::table::boot::SearchType;
+use uefi::table::boot::{OpenProtocolAttributes, OpenProtocolParams, SearchType};
 use uefi::table::runtime::{VariableAttributes, VariableVendor};
 use uefi::CString16;
 
@@ -443,7 +443,7 @@ fn launch_uefi_shell(
     ];
 
     for path in shell_paths {
-        if let Ok(()) = chainload_efi(boot_services, image_handle, path) {
+        if let Ok(()) = chainload_efi(boot_services, image_handle, path, None) {
             return Ok(());
         }
     }
@@ -837,8 +837,14 @@ fn load_config(boot_services: &BootServices, image_handle: Handle) -> Result<Boo
         }
     }
 
+    // Our own volume is scanned by the sweep below like any other, so the
+    // handle is what is needed here, not the open filesystem.
+    drop(root);
+    drop(fs);
+    drop(loaded_image);
+
     // Try to detect other operating systems and add them to the config
-    detect_other_os(&mut root, &mut config);
+    detect_other_os(boot_services, device_handle, &mut config);
 
     Ok(config)
 }
@@ -894,22 +900,95 @@ fn file_exists(root: &mut uefi::proto::media::file::Directory, path: &str) -> bo
     }
 }
 
-/// Detect other operating systems on the EFI System Partition
-fn detect_other_os(root: &mut uefi::proto::media::file::Directory, config: &mut BootConfig) {
-    // Check for known bootloaders
-    for bootloader in KNOWN_BOOTLOADERS {
-        if file_exists(root, bootloader.path) {
-            // Found another OS, add it to the config
-            if config.entries.len() < config::MAX_ENTRIES {
-                config.entries.push(BootEntry {
-                    name: bootloader.name.into(),
-                    kernel: bootloader.path.into(),
-                    initrd: None,
-                    cmdline: String::new(),
-                    entry_type: bootloader.entry_type,
-                    children: Vec::new(),
-                });
+/// Detect other operating systems, on every disk rather than only on ours.
+///
+/// This used to scan the volume RavenBoot was loaded from and nothing else,
+/// which found a Windows sharing our EFI System Partition and missed the
+/// commonest dual-boot layout there is: Windows on the machine's first disk,
+/// RavenLinux on its second. That machine has two ESPs, ours holds no trace of
+/// the other OS, and the menu offered no way to reach it -- the firmware's own
+/// boot menu was the only route back to Windows.
+///
+/// `find_handles` returns every filesystem the firmware has a driver for,
+/// which on a UEFI machine is every FAT partition on every disk it can see.
+/// Each is opened read-only (`GetProtocol`, never `Exclusive`: these are other
+/// people's volumes and disconnecting the driver holding one is not ours to
+/// do) and checked for the loaders in `KNOWN_BOOTLOADERS`.
+///
+/// `own_device` is the handle our own volume is behind. Entries found there
+/// keep `volume: None` so they boot exactly as they did before; everything
+/// else carries the handle it was found on.
+fn detect_other_os(boot_services: &BootServices, own_device: Handle, config: &mut BootConfig) {
+    let Ok(handles) = boot_services.find_handles::<SimpleFileSystem>() else {
+        return;
+    };
+
+    for handle in handles {
+        if config.entries.len() >= config::MAX_ENTRIES {
+            break;
+        }
+
+        // SAFETY: GetProtocol takes a reference to an already-installed
+        // protocol without disturbing whatever driver owns it. The
+        // ScopedProtocol closes it again at the end of the iteration.
+        let params = OpenProtocolParams {
+            handle,
+            agent: boot_services.image_handle(),
+            controller: None,
+        };
+        let Ok(mut fs) = (unsafe {
+            boot_services.open_protocol::<SimpleFileSystem>(
+                params,
+                OpenProtocolAttributes::GetProtocol,
+            )
+        }) else {
+            continue;
+        };
+        let Ok(mut root) = fs.open_volume() else {
+            continue;
+        };
+
+        // One entry per operating system per volume, not one per file. An
+        // Ubuntu ESP carries both shimx64.efi and grubx64.efi and the table
+        // lists both, because either can be the one that is there; finding
+        // both used to put "Ubuntu" in the menu twice.
+        let mut found_here: Vec<&str> = Vec::new();
+
+        for bootloader in KNOWN_BOOTLOADERS {
+            if config.entries.len() >= config::MAX_ENTRIES {
+                break;
             }
+            if found_here.contains(&bootloader.name) {
+                continue;
+            }
+            if !file_exists(&mut root, bootloader.path) {
+                continue;
+            }
+            // A hand-written boot.cfg may already name this loader. Skipping
+            // it stops the same Windows appearing in the menu twice -- but
+            // only on our own volume, because the same path on another disk
+            // is a different installation and both belong there.
+            if handle == own_device
+                && config
+                    .entries
+                    .iter()
+                    .any(|e| e.volume.is_none() && e.kernel.eq_ignore_ascii_case(bootloader.path))
+            {
+                continue;
+            }
+            found_here.push(bootloader.name);
+
+            config.entries.push(BootEntry {
+                name: bootloader.name.into(),
+                kernel: bootloader.path.into(),
+                initrd: None,
+                cmdline: String::new(),
+                entry_type: bootloader.entry_type,
+                // Ours stays None: an entry on our own volume is one boot.cfg
+                // could have described, and it is booted the way it always was.
+                volume: (handle != own_device).then_some(handle),
+                children: Vec::new(),
+            });
         }
     }
 }
@@ -932,7 +1011,12 @@ fn boot_entry(
         }
         EntryType::Windows | EntryType::Chainload | EntryType::EfiApp => {
             // Chainload another EFI application
-            chainload_efi(boot_services, image_handle, entry.kernel.as_str())
+            chainload_efi(
+                boot_services,
+                image_handle,
+                entry.kernel.as_str(),
+                entry.volume,
+            )
         }
         EntryType::LinuxLegacy => {
             // Traditional Linux boot - not implemented

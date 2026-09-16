@@ -3,6 +3,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::str;
+use uefi::Handle;
 
 extern crate alloc;
 
@@ -20,6 +21,19 @@ pub struct BootEntry {
     pub initrd: Option<String>,
     pub cmdline: String,
     pub entry_type: EntryType,
+    /// Which filesystem `kernel` is a path on.
+    ///
+    /// `None` means the volume RavenBoot was itself loaded from. Every entry
+    /// boot.cfg can describe is one of those -- boot.cfg lives on that volume
+    /// and its paths are relative to it -- so the parser never sets this.
+    ///
+    /// `Some(h)` comes from the scan for other operating systems, which looks
+    /// at every filesystem the firmware can see rather than only at ours. A
+    /// Windows on the machine's second disk has its own ESP, and booting it
+    /// means reading from that ESP and handing the firmware a device path
+    /// that points into it: Windows Boot Manager finds its BCD store next to
+    /// itself, so a loader started against the wrong volume does not boot.
+    pub volume: Option<Handle>,
     /// Child entries for submenu type
     pub children: Vec<BootEntry>,
 }
@@ -66,6 +80,7 @@ impl Default for BootEntry {
             initrd: None,
             cmdline: String::new(),
             entry_type: EntryType::LinuxEfi,
+            volume: None,
             children: Vec::new(),
         }
     }
@@ -80,6 +95,7 @@ impl BootEntry {
             initrd: None,
             cmdline: String::new(),
             entry_type: EntryType::Submenu,
+            volume: None,
             children,
         }
     }
@@ -92,6 +108,7 @@ impl BootEntry {
             initrd: None,
             cmdline: String::new(),
             entry_type: EntryType::Back,
+            volume: None,
             children: Vec::new(),
         }
     }
@@ -104,6 +121,7 @@ impl BootEntry {
             initrd: None,
             cmdline: String::new(),
             entry_type: EntryType::Reboot,
+            volume: None,
             children: Vec::new(),
         }
     }
@@ -116,6 +134,7 @@ impl BootEntry {
             initrd: None,
             cmdline: String::new(),
             entry_type: EntryType::Shutdown,
+            volume: None,
             children: Vec::new(),
         }
     }
@@ -128,6 +147,7 @@ impl BootEntry {
             initrd: None,
             cmdline: String::new(),
             entry_type: EntryType::UefiShell,
+            volume: None,
             children: Vec::new(),
         }
     }
@@ -140,6 +160,7 @@ impl BootEntry {
             initrd: None,
             cmdline: String::new(),
             entry_type: EntryType::FirmwareSetup,
+            volume: None,
             children: Vec::new(),
         }
     }
@@ -160,6 +181,7 @@ impl Default for BootConfig {
                 "rdinit=/init quiet loglevel=3 console=ttyS0,115200 console=tty0",
             ),
             entry_type: EntryType::LinuxEfi,
+            volume: None,
             children: Vec::new(),
         });
         let mut serial_entries: Vec<BootEntry> = Vec::new();
@@ -173,6 +195,7 @@ impl Default for BootConfig {
                 "rdinit=/init quiet loglevel=3 raven.console=serial console=tty0 console=ttyS0,115200",
             ),
             entry_type: EntryType::LinuxEfi,
+            volume: None,
             children: Vec::new(),
         });
 
@@ -184,6 +207,7 @@ impl Default for BootConfig {
                 "rdinit=/init loglevel=7 raven.console=serial console=tty0 console=ttyS0,115200",
             ),
             entry_type: EntryType::LinuxEfi,
+            volume: None,
             children: Vec::new(),
         });
         serial_entries.push(BootEntry::back());
@@ -212,6 +236,7 @@ impl Default for BootConfig {
             // entries that installer generated, which carry no raven.user.
             cmdline: String::from("rdinit=/init quiet loglevel=3 raven.graphics=wayland raven.wayland=huginn raven.user=root console=ttyS0,115200 console=tty0"),
             entry_type: EntryType::LinuxEfi,
+            volume: None,
             children: Vec::new(),
         });
 
@@ -221,6 +246,7 @@ impl Default for BootConfig {
             initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
             cmdline: String::from("rdinit=/init quiet loglevel=3 raven.graphics=x11 console=ttyS0,115200 console=tty0"),
             entry_type: EntryType::LinuxEfi,
+            volume: None,
             children: Vec::new(),
         });
 
@@ -239,6 +265,7 @@ impl Default for BootConfig {
             initrd: Some(String::from("\\EFI\\raven\\initrd.img")),
             cmdline: String::from("rdinit=/init single console=ttyS0,115200 console=tty0"),
             entry_type: EntryType::LinuxEfi,
+            volume: None,
             children: Vec::new(),
         });
 
@@ -250,6 +277,7 @@ impl Default for BootConfig {
                 "rdinit=/init single raven.console=serial console=tty0 console=ttyS0,115200",
             ),
             entry_type: EntryType::LinuxEfi,
+            volume: None,
             children: Vec::new(),
         });
         recovery_entries.push(BootEntry::back());
@@ -327,6 +355,7 @@ impl BootConfig {
                     initrd: None,
                     cmdline: String::new(),
                     entry_type: EntryType::LinuxEfi,
+                    volume: None,
                     children: Vec::new(),
                 });
                 continue;
