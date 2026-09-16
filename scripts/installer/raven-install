@@ -782,6 +782,56 @@ ALONGSIDE_MIN_ROOT="$(( 12 * 1024 * 1024 * 1024 ))"
 # slider.
 ALONGSIDE_MIN_HEADROOM="$(( 4 * 1024 * 1024 * 1024 ))"
 
+# The swap the installer would create if nothing more is said, as a size string
+# ("16G") or empty for none.
+#
+# run_wizard and apply_answers both resolve OPT_SWAP by these same three cases,
+# but both of them run *after* the disk has been chosen -- and the alongside
+# planner, the wizard's shrink prompt and --probe all have to know how much
+# room swap is going to want before SWAP_SIZE has been set by either. This is
+# that rule, asked early. It is an estimate only for an interactive run that
+# has not reached the swap prompt yet; everywhere else OPT_SWAP is already
+# final and this is exactly what will be created.
+resolve_swap_size() {
+    if [[ -z "${OPT_SWAP}" ]]; then
+        suggested_swap
+    elif [[ "${OPT_SWAP}" == "none" ]]; then
+        echo ""
+    else
+        echo "${OPT_SWAP}"
+    fi
+}
+
+# What an alongside install actually needs from the disk: a root, plus the swap
+# partition that is going into the same gap next to it.
+#
+# ALONGSIDE_MIN_ROOT on its own is the number this file used to check
+# everywhere, and it is the wrong one for every check made before the gap is
+# split: plan_alongside_partitions puts swap in that gap too, so a gap that
+# clears 12 GiB and nothing more leaves a root of whatever is left after swap
+# has taken its share. On a machine with 16 GB of memory that is a root of
+# zero. Asking one function means the probe, the wizard and the planner cannot
+# answer it differently.
+alongside_min_total() {
+    local swap; swap="$(resolve_swap_size)"
+    if [[ -n "$swap" ]]; then
+        echo $(( ALONGSIDE_MIN_ROOT + $(to_bytes "$swap") ))
+    else
+        echo "$ALONGSIDE_MIN_ROOT"
+    fi
+}
+
+# How a total that nobody typed breaks down, for the refusals that quote one.
+# "28.0 GiB" on a machine with 16 GB of memory is a number the person cannot
+# account for until they are told that 16 of it is a swap partition they were
+# never asked about. Empty when swap is off and the total is only the root.
+swap_share_note() {
+    local swap="$1"
+    [[ -n "$swap" ]] || return 0
+    printf ' (%s for the root plus %s of swap; --swap none drops it)' \
+        "$(to_human $ALONGSIDE_MIN_ROOT)" "$swap"
+}
+
 fs_type_of() { blkid -o value -s TYPE "$1" 2>/dev/null; }
 fs_label_of() { blkid -o value -s LABEL "$1" 2>/dev/null; }
 
@@ -925,8 +975,15 @@ plan_alongside() {
     local want_bytes=0
     [[ -n "$OPT_ALONGSIDE_SIZE" ]] && want_bytes=$(to_bytes "$OPT_ALONGSIDE_SIZE")
 
+    # What the gap has to hold. SWAP_SIZE rather than resolve_swap_size here:
+    # by the time anything is planned the wizard has asked, so this is the
+    # answer rather than the estimate the probe had to work from.
+    local need=$ALONGSIDE_MIN_ROOT
+    [[ -n "$SWAP_SIZE" ]] && need=$(( need + $(to_bytes "$SWAP_SIZE") ))
+    local need_detail; need_detail="$(swap_share_note "$SWAP_SIZE")"
+
     if [[ -n "$OPT_SHRINK_PART" ]]; then
-        plan_shrink "$want_bytes"
+        plan_shrink "$want_bytes" "$need"
     else
         # No partition named: take the largest hole already on the disk. This
         # is the case where somebody has left space unallocated on purpose,
@@ -953,19 +1010,17 @@ plan_alongside() {
         # room, and the generic size check below would report that as "0 B is
         # not enough" -- true, and no help at all to somebody who has not been
         # told that taking space from a partition is the other option.
-        if (( GAP_SECTORS * DISK_SECTOR < ALONGSIDE_MIN_ROOT )); then
-            die "${DISK} has only $(to_human $(( GAP_SECTORS * DISK_SECTOR ))) unallocated, and RavenLinux needs $(to_human $ALONGSIDE_MIN_ROOT).
+        if (( GAP_SECTORS * DISK_SECTOR < need )); then
+            die "${DISK} has only $(to_human $(( GAP_SECTORS * DISK_SECTOR ))) unallocated, and this install needs $(to_human $need)${need_detail}.
        Pass --shrink <partition> to take the space from one of the partitions
        that is already there, or --wipe to erase the disk."
         fi
     fi
 
     local gap_bytes=$(( GAP_SECTORS * DISK_SECTOR ))
-    local need=$ALONGSIDE_MIN_ROOT
-    [[ -n "$SWAP_SIZE" ]] && need=$(( need + $(to_bytes "$SWAP_SIZE") ))
 
     (( gap_bytes >= need )) || die "$(to_human $gap_bytes) is not enough for RavenLinux.
-       It needs at least $(to_human $need)${SWAP_SIZE:+ (including ${SWAP_SIZE} of swap)}."
+       It needs at least $(to_human $need)${need_detail}."
 
     plan_alongside_partitions
 }
@@ -973,7 +1028,7 @@ plan_alongside() {
 # Works out how far the chosen partition can be pulled back, and refuses rather
 # than guessing when the answer is "not that far".
 plan_shrink() {
-    local want_bytes="$1"
+    local want_bytes="$1" need="${2:-$ALONGSIDE_MIN_ROOT}"
 
     SHRINK_DEV="$OPT_SHRINK_PART"
     [[ -b "$SHRINK_DEV" ]] || die "${SHRINK_DEV} is not a block device."
@@ -1019,7 +1074,15 @@ plan_shrink() {
     local floor=$(( SHRINK_MIN_BYTES + ALONGSIDE_MIN_HEADROOM ))
     local old_bytes=$(( SHRINK_OLD_SECTORS * DISK_SECTOR ))
 
-    (( want_bytes > 0 )) || want_bytes=$(( (old_bytes - floor) / 2 ))
+    # Half of what it can spare, but never less than the install actually
+    # needs. Half is a good default only because it splits the disk evenly; on
+    # a partition that can spare 30 GiB it is 15 GiB, and 15 GiB is a root of
+    # nothing once a memory-sized swap has come out of the same gap. The
+    # new_bytes check below is what refuses when even `need` will not fit.
+    if (( want_bytes <= 0 )); then
+        want_bytes=$(( (old_bytes - floor) / 2 ))
+        (( want_bytes < need )) && want_bytes=$need
+    fi
     (( want_bytes > 0 )) || die "${SHRINK_DEV} has no room to give.
        It holds $(to_human $SHRINK_MIN_BYTES) and is $(to_human $old_bytes)."
 
@@ -1185,11 +1248,18 @@ choose_install_mode() {
 choose_shrink_target() {
     read_disk_table "$DISK" 2>/dev/null || return 0
 
+    # Root plus the swap that is going into the same gap. This runs before
+    # run_wizard has asked about swap, so it is resolve_swap_size's estimate --
+    # which is what will be created unless the person changes it at the prompt,
+    # and erring towards asking for too much beats offering a partition that
+    # plan_alongside then refuses.
+    local need; need="$(alongside_min_total)"
+
     local gap gap_bytes=0
     gap="$(largest_gap)"
     [[ -n "$gap" ]] && gap_bytes=$(( $(echo "$gap" | cut -f3) * DISK_SECTOR ))
 
-    if [[ -z "$OPT_SHRINK_PART" ]] && (( gap_bytes >= ALONGSIDE_MIN_ROOT )); then
+    if [[ -z "$OPT_SHRINK_PART" ]] && (( gap_bytes >= need )); then
         info "Using the $(to_human $gap_bytes) of unallocated space already on ${DISK}."
         return 0
     fi
@@ -1205,8 +1275,8 @@ choose_shrink_target() {
         findmnt -no TARGET --source "$node" >/dev/null 2>&1 && continue
         fs_shrinkable "$node" || continue
         minb=$(fs_min_bytes "$node") || continue
-        # Nothing to offer if it cannot spare a root plus the headroom.
-        (( size * DISK_SECTOR - minb - ALONGSIDE_MIN_HEADROOM >= ALONGSIDE_MIN_ROOT )) || continue
+        # Nothing to offer if it cannot spare root and swap plus the headroom.
+        (( size * DISK_SECTOR - minb - ALONGSIDE_MIN_HEADROOM >= need )) || continue
         cand+=("$node"); cand_min+=("$minb"); cand_size+=("$(( size * DISK_SECTOR ))")
     done < <(table_rows)
 
@@ -1215,7 +1285,7 @@ choose_shrink_target() {
     fi
 
     if (( ${#cand[@]} == 0 )); then
-        die "Nothing on ${DISK} can give up $(to_human $ALONGSIDE_MIN_ROOT) for RavenLinux.
+        die "Nothing on ${DISK} can give up $(to_human $need) for RavenLinux$(swap_share_note "$(resolve_swap_size)").
        Free space inside the other OS first, or erase the disk with --wipe.
        ext2/3/4 and NTFS can be shrunk; XFS and btrfs cannot be, here."
     fi
@@ -1244,15 +1314,19 @@ choose_shrink_target() {
 
     local idx=$((choice - 1))
     local spare=$(( cand_size[idx] - cand_min[idx] - ALONGSIDE_MIN_HEADROOM ))
+    # The floor is the whole gap, not just the root: swap comes out of the
+    # space taken here before the root gets any of it.
+    local suggest=$(( spare / 2 ))
+    (( suggest < need )) && suggest=$need
     echo
-    echo "  ${OPT_SHRINK_PART} can give RavenLinux between $(to_human $ALONGSIDE_MIN_ROOT) and $(to_human $spare)."
+    echo "  ${OPT_SHRINK_PART} can give RavenLinux between $(to_human $need) and $(to_human $spare)$(swap_share_note "$(resolve_swap_size)")."
     while true; do
-        ask OPT_ALONGSIDE_SIZE "How much for RavenLinux" "$(to_human $(( spare / 2 )) | tr -d ' ' | sed 's/iB$//')"
+        ask OPT_ALONGSIDE_SIZE "How much for RavenLinux" "$(to_human $suggest | tr -d ' ' | sed 's/iB$//')"
         local want; want=$(to_bytes "$OPT_ALONGSIDE_SIZE")
-        if (( want >= ALONGSIDE_MIN_ROOT && want <= spare )); then
+        if (( want >= need && want <= spare )); then
             break
         fi
-        warn "Between $(to_human $ALONGSIDE_MIN_ROOT) and $(to_human $spare), e.g. 120G."
+        warn "Between $(to_human $need) and $(to_human $spare), e.g. 120G."
     done
 }
 
@@ -1629,14 +1703,9 @@ apply_answers() {
     decide_postinstall
 
     # Same three cases as the prompt: unset means "decide for me", which here
-    # is the same memory-sized default the wizard offers.
-    if [[ -z "${OPT_SWAP}" ]]; then
-        SWAP_SIZE="$(suggested_swap)"
-    elif [[ "${OPT_SWAP}" == "none" ]]; then
-        SWAP_SIZE=""
-    else
-        SWAP_SIZE="${OPT_SWAP}"
-    fi
+    # is the same memory-sized default the wizard offers -- and the same rule
+    # the alongside planner had to apply before this ran.
+    SWAP_SIZE="$(resolve_swap_size)"
 
     ok "Hostname: ${HOSTNAME}"
     ok "User: ${USERNAME}${FULLNAME:+ (${FULLNAME})}"
@@ -2966,6 +3035,19 @@ probe_alongside() {
     pk disk.min_root_bytes "$ALONGSIDE_MIN_ROOT"
     pk disk.min_headroom_bytes "$ALONGSIDE_MIN_HEADROOM"
 
+    # Swap goes into the same gap as the root -- plan_alongside_partitions
+    # splits one hole between the two -- so every "is there room" answer below
+    # is about root plus swap, not about the root alone. Reporting the two
+    # separately as well as the total is what lets a front-end recompute when
+    # somebody turns swap off on a later page, instead of being stuck with the
+    # answer the probe happened to be run with.
+    local swap_size swap_bytes=0 min_total
+    swap_size="$(resolve_swap_size)"
+    [[ -n "$swap_size" ]] && swap_bytes=$(to_bytes "$swap_size")
+    min_total=$(( ALONGSIDE_MIN_ROOT + swap_bytes ))
+    pk disk.swap_bytes "$swap_bytes"
+    pk disk.min_total_bytes "$min_total"
+
     local candidates=0
     while IFS=$'\t' read -r node start size type; do
         [[ -z "$node" ]] && continue
@@ -2978,7 +3060,15 @@ probe_alongside() {
         pk part.label "$(fs_label_of "$node")"
         pk part.os "$(part_os_hint "$node")"
 
+        # part.resizable and part.shrinkable are two different questions and a
+        # front-end needs both. The first is about the filesystem -- can it be
+        # made smaller at all, by this image, right now -- and nothing the
+        # person clicks will change the answer. The second adds "by enough",
+        # and that one moves: swap comes out of the same space, so turning it
+        # off lowers the bar. Reporting only the second is what left a
+        # front-end no way to re-judge a partition it had greyed out.
         if findmnt -no TARGET --source "$node" >/dev/null 2>&1; then
+            pk part.resizable 0
             pk part.shrinkable 0
             pk part.why "mounted"
         elif ! fs_shrinkable "$node"; then
@@ -2986,6 +3076,7 @@ probe_alongside() {
             # A partition with no filesystem on it -- Microsoft Reserved is one
             # on every Windows disk -- has no name to put in this sentence, and
             # "  cannot be shrunk here" is what leaving it empty produces.
+            pk part.resizable 0
             pk part.shrinkable 0
             if [[ -z "$t" ]]; then
                 pk part.why "it has no filesystem to shrink"
@@ -2993,29 +3084,31 @@ probe_alongside() {
                 pk part.why "${t} cannot be shrunk here"
             fi
         elif ! minb=$(fs_min_bytes "$node"); then
+            pk part.resizable 0
             pk part.shrinkable 0
             pk part.why "the filesystem would not report its minimum size (dirty? hibernated?)"
         else
             spare=$(( size * DISK_SECTOR - minb - ALONGSIDE_MIN_HEADROOM ))
             (( spare < 0 )) && spare=0
+            pk part.resizable 1
             pk part.used_bytes "$minb"
             pk part.spare_bytes "$spare"
-            if (( spare >= ALONGSIDE_MIN_ROOT )); then
+            if (( spare >= min_total )); then
                 pk part.shrinkable 1
                 candidates=$((candidates + 1))
             else
                 pk part.shrinkable 0
-                pk part.why "only $(to_human $spare) to spare; RavenLinux needs $(to_human $ALONGSIDE_MIN_ROOT)"
+                pk part.why "only $(to_human $spare) to spare; this install needs $(to_human $min_total)$(swap_share_note "$swap_size")"
             fi
         fi
         pk part.end "$node"
     done < <(table_rows)
 
-    if (( gap_bytes >= ALONGSIDE_MIN_ROOT )) || (( candidates > 0 )); then
+    if (( gap_bytes >= min_total )) || (( candidates > 0 )); then
         pk disk.alongside 1
     else
         pk disk.alongside 0
-        pk disk.alongside_why "no free space and nothing that can give up $(to_human $ALONGSIDE_MIN_ROOT)"
+        pk disk.alongside_why "no free space and nothing that can give up $(to_human $min_total)$(swap_share_note "$swap_size")"
     fi
 }
 

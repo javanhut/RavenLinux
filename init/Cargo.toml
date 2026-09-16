@@ -72,3 +72,12 @@ path = "src/ports.rs"
 [[bin]]
 name = "raven-timed"
 path = "src/timed.rs"
+
+# Removable storage: the daemon that turns a plugged-in drive into a directory
+# under /media. In this crate because it is the other half of init's mount
+# work -- init mounts what init.toml names, this mounts what arrives later --
+# and because it resolves the session account with the same `user` module
+# overrides.rs uses, so the two cannot disagree about who owns a FAT volume.
+[[bin]]
+name = "raven-mount"
+path = "src/mount.rs"

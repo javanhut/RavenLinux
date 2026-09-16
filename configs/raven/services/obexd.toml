@@ -1,0 +1,15 @@
+# BlueZ's OBEX server: the receiving half of "send a file to this device".
+# Pairing and audio work without it; a phone trying to send a photo does not.
+#
+# Session-scoped in BlueZ's own units, but there is no systemd --user here, and
+# a system-wide instance is what makes the transfer land somewhere the desktop
+# can see.
+[[services]]
+name = "obexd"
+description = "Bluetooth file transfer"
+exec = "/usr/lib/bluetooth/obexd"
+args = ["--nodetach", "--root", "/var/spool/bluetooth"]
+after = ["dbus", "bluetoothd"]
+restart = true
+enabled = true
+critical = false

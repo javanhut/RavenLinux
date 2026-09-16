@@ -1,0 +1,21 @@
+# ipp-usb: the piece that makes a USB printer driverless.
+#
+# A modern printer speaks IPP over its USB cable exactly as it does over the
+# network, but nothing in CUPS reaches that interface directly. ipp-usb binds
+# the USB IPP-over-USB interface and re-exports it on localhost, so the printer
+# appears as an ordinary network IPP device and needs no PPD and no vendor
+# driver. Without it, the same printer falls back to the raw USB backend and
+# wants a driver the image deliberately does not carry.
+#
+# `standalone` rather than the udev-activated mode: there is no systemd here to
+# do the activating, and the daemon idles at nothing when no printer is
+# attached.
+[[services]]
+name = "ipp-usb"
+description = "Printing: expose a USB printer's IPP interface to CUPS"
+exec = "/usr/bin/ipp-usb"
+args = ["standalone"]
+after = ["udev", "avahi-daemon"]
+restart = true
+enabled = true
+critical = false

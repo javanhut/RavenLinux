@@ -240,6 +240,28 @@ restart = true
 enabled = true
 critical = false
 
+# Removable storage: a drive that arrives after boot.
+#
+# Everything below the device node was already there -- USB storage, vfat,
+# exfat, ntfs3 -- and nothing turned it into a directory, so plugging in a
+# stick produced a /dev/sdb1 and a file manager showing nothing. This watches
+# the same uevent socket raven-ports does and mounts what it recognises under
+# /media, nosuid and nodev, owned by whoever the session runs as. It is also
+# `raven-mount list` and `raven-mount unmount`, when run by hand.
+#
+# Not udisks2: that answers to polkit, which this system does not run (see the
+# note further down). The decision -- is this removable, and is the system
+# using the disk it is on -- is the whole of what was missing.
+[[services]]
+name = "mount"
+description = "Removable storage: mount USB drives and cards under /media as they arrive"
+exec = "/usr/bin/raven-mount"
+args = ["watch", "--automount"]
+after = ["udev"]
+restart = true
+enabled = true
+critical = false
+
 # Ports: hotplug after boot.
 #
 # The network service above is a one-shot, so a cable plugged in later -- or

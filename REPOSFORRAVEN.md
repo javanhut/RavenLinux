@@ -531,3 +531,65 @@ for all 27 image types in `/usr/share/applications/mimeapps.list`. That list
 lives in `EAGLEEYE_MIME_TYPES` in `stage-gui.sh` and mirrors `MIME_TYPES` in the
 application's `src/window.rs`; keep the two in step, because a type missing from
 it is a file that opens in nothing.
+
+## Media Player
+
+| Status | Binary | Repo |
+|--------|--------|------|
+| **wired** | `owl-player` | [javanhut/OwlPlayer](https://github.com/javanhut/OwlPlayer) |
+
+Built by `stage_player()` in `stage-gui.sh`, from its own repository, with the
+other GTK4 applications. `imlazy gui` builds it; `PLAYER_SKIP=1` leaves it out,
+and an image without it has no handler for `video/*` or `audio/*` at all — the
+same consequence EagleEye's absence has for images, and the GUI summary calls
+it out the same way.
+
+A media player built straight on the FFmpeg libraries — `libavformat`,
+`libavcodec`, `libswscale`, `libswresample` — with its own GPU renderer. Three
+crates enforcing one rule: the decode threads never touch GTK and the GTK
+thread never blocks on a decoder. Audio is the master clock, frames are never
+copied between the decoder and the texture upload, and colour conversion, 10-
+and 12-bit formats and HDR tone mapping all happen in a shader. Sound goes out
+through cpal, which reaches PipeWire through its ALSA PCM — the same route
+everything else on this desktop takes.
+
+**It is the one application here whose build needs something beyond the GTK4
+toolkit, and both halves fail with a message that names neither a media player
+nor a package.** `ffmpeg-sys-next` probes pkg-config for the FFmpeg modules, so
+the shared libraries alone are not enough — the headers and `.pc` files have to
+be there too; and it then reads those headers with bindgen, which loads
+`libclang.so`. `stage_player()` checks for both before it fetches anything and
+skips the application with a sentence naming the package, rather than letting
+the build die inside a `-sys` crate. The container installs `ffmpeg`, `clang`
+and `lld`; `check-deps.sh` carries the equivalents for the other
+distributions.
+
+The checkout's own `.cargo/config.toml` is written for the machine it was
+developed on, and the stage reconciles two entries in it. Its `[env]` table
+points `LIBCLANG_PATH` at a per-user `rvn` prefix — Raven ships `llvm-libs` and
+not clang, so `rvn --user -i clang` installs one under a single account rather
+than into `/usr` — and because a cargo `[env]` entry without `force` yields to
+the environment, the stage exports whatever `libclang_dir()` actually found.
+That function searches the same per-user prefix alongside the system ones, so
+on the machine the config was written for it exports the directory the config
+already names rather than replacing a working path with a broken one; the
+companion `BINDGEN_EXTRA_CLANG_ARGS` is left alone, because it is required when
+libclang does come from that prefix and ignored when it does not. Its
+`[target.x86_64-unknown-linux-gnu]` asks for `lld`, which is a link-speed
+choice rather than a correctness one, so on a host without it the stage sets
+`RUSTFLAGS` empty to withdraw the request instead of failing.
+
+All three stylesheets and all six GL shaders are compiled in, so the only data
+it ships is its icon and metainfo. `install_desktop_entries()` writes its entry
+and makes it the default for all 29 media types in
+`/usr/share/applications/mimeapps.list`. That list lives in `PLAYER_MIME_TYPES`
+in `stage-gui.sh` and mirrors `MIME_TYPES` in the application's
+`crates/owl-player/src/main.rs`; keep the two in step, because a type missing
+from it is a file that opens in nothing. It is deliberately shorter than what
+libavformat can probe — FFmpeg opens very nearly anything, and a MIME list is a
+claim about what the player is *for*.
+
+Its link graph is the widest on the image by a distance: the FFmpeg closure is
+every codec, container and colour library the build host's `ffmpeg` was built
+against. None of it is listed anywhere — `stage_gui_libraries()` resolves the
+whole of it with `ldd`, which is the point of doing it that way.

@@ -1,0 +1,27 @@
+# The fwupd daemon. SHIPPED DISABLED, and read this before enabling it.
+#
+# Raven's firmware path is /usr/bin/raven-firmware, which drives `fwupdtool`:
+# the same engine, in-process, run as root, with no daemon and no D-Bus. That
+# needs nothing here, and it is what the documentation points at.
+#
+# This drop-in is for the other case -- someone who wants `fwupdmgr`, or a
+# graphical updater, both of which talk to this daemon over D-Bus. The daemon
+# authorises every call through polkit, and Raven does not run polkitd (see the
+# note at the end of /etc/raven/init.toml). Enabling this alone therefore gets
+# a daemon that refuses everything it is asked. The full sequence is:
+#
+#   rvn install polkit
+#   # add a polkitd service drop-in, then
+#   raven-rc start fwupd
+#
+# Left disabled rather than removed because that is a legitimate thing to want
+# and rebuilding the drop-in from memory is not.
+[[services]]
+name = "fwupd"
+description = "Firmware update daemon (needs polkit; raven-firmware does not need this)"
+exec = "/usr/lib/fwupd/fwupd"
+args = []
+after = ["dbus"]
+restart = true
+enabled = false
+critical = false

@@ -112,6 +112,11 @@
 #                              image, and no application claims image/* at all
 #   EAGLEEYE_OFFLINE=1         as GUI_OFFLINE, for the image viewer alone
 #   EAGLEEYE_REF=<git-ref>     build a particular EagleEye ref
+#   PLAYER_SKIP=1              skip Owl Player; nothing on the image opens a
+#                              film or a song, and no application claims
+#                              video/* or audio/* at all
+#   PLAYER_OFFLINE=1           as GUI_OFFLINE, for the media player alone
+#   PLAYER_REF=<git-ref>       build a particular OwlPlayer ref
 #
 #   LOGIN_OFFLINE=1            as GUI_OFFLINE, for the login screen alone
 #   LOGIN_REF=<git-ref>        build a particular RavenLogin ref
@@ -230,6 +235,39 @@ EAGLEEYE_MIME_TYPES=(
     image/x-portable-graymap image/x-portable-pixmap image/qoi image/x-qoi
     image/vnd.radiance image/x-exr image/x-dds image/svg+xml
     image/svg+xml-compressed image/avif image/heif image/heic image/jxl
+)
+
+# Owl Player: the media player, and the default handler for every video and
+# audio type on this image. GTK4 + libadwaita like the three above, so it rides
+# on the same staged toolkit -- but it is the only application here that is not
+# only GTK: it is a front end for FFmpeg with a GL video plane behind it, and
+# what that costs the build is spelled out at stage_player() below.
+#
+# Its application id is its .desktop stem, its icon name and the app_id its
+# window carries.
+raven_gui_app_vars PLAYER
+PLAYER_BIN="${PLAYER_BINARIES}"
+PLAYER_APPID="com.owlplayer.Raven"
+
+# What it claims. This is crates/owl-player/src/main.rs's MIME_TYPES -- the
+# same list the application's own `owl-player set-default` writes into a user's
+# mimeapps.list -- written out here rather than read from the checkout for the
+# same reason EagleEye's is: install_desktop_entries() runs whether or not the
+# clone is still around.
+#
+# It is deliberately shorter than the set libavformat can probe. FFmpeg opens
+# very nearly anything; a MIME list is a claim about what the player is *for*,
+# and every type named here is one this image will hand it on a double-click.
+# Keep it in step with upstream; a type missing here is a file that opens in
+# nothing.
+PLAYER_MIME_TYPES=(
+    video/mp4 video/x-matroska video/webm video/quicktime video/x-msvideo
+    video/mpeg video/x-ms-wmv video/x-flv video/3gpp video/ogg
+    video/x-ogm+ogg video/mp2t video/x-theora+ogg video/dv video/x-m4v
+    application/x-matroska
+    audio/mpeg audio/flac audio/x-vorbis+ogg audio/ogg audio/opus
+    audio/x-wav audio/mp4 audio/aac audio/x-aiff audio/x-ms-wma
+    audio/x-musepack audio/x-ape audio/x-wavpack
 )
 
 # Raven Controls: the keyboard backlight, fan speeds and thermal profiles. A
@@ -1583,6 +1621,46 @@ stage_desktop_runtime() {
     python3 "${PROJECT_ROOT}/scripts/lib/stage-desktop-runtime.py" "${SYSROOT_DIR}" || return 1
     install -Dm 0644 "${PROJECT_ROOT}/configs/raven/services/bluetoothd.toml" \
         "${SYSROOT_DIR}/etc/raven/init.d/bluetoothd.toml"
+    install_peripheral_services
+}
+
+# A service drop-in is only installed when the binary it names is actually in
+# the sysroot. The optional half of stage-desktop-runtime.py can skip a package
+# whose name moved upstream, and `critical = false` means a service pointing at
+# a path that does not exist fails silently at every boot -- the failure mode
+# scripts/lib/components.sh was written to stop happening again.
+install_peripheral_services() {
+    local -a wanted=(
+        "cupsd:/usr/bin/cupsd:printing"
+        "avahi-daemon:/usr/bin/avahi-daemon:network printer and scanner discovery"
+        "ipp-usb:/usr/bin/ipp-usb:driverless printing over USB"
+        "obexd:/usr/lib/bluetooth/obexd:Bluetooth file transfer"
+    )
+    local entry name binary what
+    for entry in "${wanted[@]}"; do
+        IFS=':' read -r name binary what <<< "${entry}"
+        if [[ -x "${SYSROOT_DIR}${binary}" ]]; then
+            install -Dm 0644 "${PROJECT_ROOT}/configs/raven/services/${name}.toml" \
+                "${SYSROOT_DIR}/etc/raven/init.d/${name}.toml"
+            log_success "  ${name} enabled (${what})"
+        else
+            log_warn "  ${binary} is not in the sysroot; no ${what} on this image"
+        fi
+    done
+
+    # fwupd's drop-in ships `enabled = false` and is installed anyway, so a
+    # machine that wants the daemon has it to flip rather than to reconstruct.
+    # Raven's own firmware path -- /usr/bin/raven-firmware, installed by stage2
+    # -- drives fwupdtool and needs neither this service nor polkit.
+    if [[ -x "${SYSROOT_DIR}/usr/lib/fwupd/fwupd" ]]; then
+        install -Dm 0644 "${PROJECT_ROOT}/configs/raven/services/fwupd.toml" \
+            "${SYSROOT_DIR}/etc/raven/init.d/fwupd.toml"
+        log_info "  fwupd staged; raven-firmware drives it, the daemon stays off"
+    elif [[ -x "${SYSROOT_DIR}/usr/bin/fwupdtool" ]]; then
+        log_info "  fwupdtool staged; raven-firmware will use it"
+    else
+        log_warn "  fwupd is not in the sysroot; raven-firmware will say so when run"
+    fi
 }
 
 
@@ -2033,6 +2111,223 @@ stage_eagleeye() {
     fi
 }
 
+# =============================================================================
+# Owl Player
+# =============================================================================
+# The media player. stage_eagleeye's shape again -- optional like every GTK4
+# application here, every failure path warns and returns 0 -- with one
+# difference that matters to whoever reads a build log where it did not
+# appear: this is the only application on the image whose build needs
+# something beyond the GTK4 toolkit, and both of the things it needs fail with
+# a message that names neither a media player nor a package.
+#
+#   FFmpeg's .pc files   ffmpeg-sys-next probes pkg-config for libavformat and
+#                        the rest. The shared libraries alone are not enough,
+#                        which is why the check below is pkg-config and not a
+#                        test for an .so: this host carries FFmpeg for other
+#                        reasons, and on a distribution that splits the headers
+#                        into a -dev package the probe still fails.
+#   libclang             that same crate then runs bindgen over those headers,
+#                        and bindgen dlopens libclang.so to parse them. Absent,
+#                        the build stops inside a build script with "Unable to
+#                        find libclang", which reads as a broken dependency
+#                        rather than as a compiler this host does not have.
+#
+# THE CHECKOUT'S OWN CARGO CONFIG
+#
+# OwlPlayer's .cargo/config.toml carries an [env] table pointing LIBCLANG_PATH
+# at a per-user rvn prefix -- a development machine where clang was installed
+# for one account with `rvn --user -i clang` rather than system-wide. Neither
+# entry in it is `force`d, and a cargo [env] entry without `force` yields to a
+# variable already in the environment, so exporting LIBCLANG_PATH below is how
+# the build host's own clang wins on a host that has one.
+#
+# What that export must NOT do is replace a working path with a broken one.
+# libclang_dir() searches the rvn per-user prefix along with the system ones
+# for exactly that reason: on the machine the config was written for, the only
+# libclang is the one it names, and an export of "/usr/lib" there would turn a
+# build that works into one that cannot find a compiler. It exports what it
+# found, which on that machine is the same directory the config already says.
+#
+# Its companion BINDGEN_EXTRA_CLANG_ARGS -- the -isystem that points libclang
+# loaded from a non-standard prefix at its own builtin headers -- is left
+# alone. It is required when libclang does come from that prefix, and when it
+# does not, clang ignores an -isystem naming a directory that is not there.
+#
+# The same file's [target.x86_64-unknown-linux-gnu] asks for lld. That is a
+# link-speed choice and not a correctness one, so a host without lld is not a
+# host that cannot build this -- but cargo will not quietly pick another
+# linker, it will fail. RUSTFLAGS in the environment takes precedence over
+# every rustflags in every config file, so setting it empty is how the request
+# is withdrawn without editing the checkout.
+#
+# Environment:
+#   PLAYER_SKIP=1      skip it; nothing on the image plays a film or a song
+#   PLAYER_OFFLINE=1   never touch the network; use the existing clone
+#   PLAYER_REF=<ref>   build a particular ref instead of the default
+
+# The directory holding libclang.so, or nothing.
+#
+# Probed in the order clang-sys itself would be satisfied by, and the order
+# matters at both ends. LIBCLANG_PATH comes first because somebody who set it
+# meant it -- but it is still checked rather than trusted, so a stale value
+# does not shadow a working library. The loader's cache is the honest answer
+# for a host that has it on its library path; the fixed prefixes are for a host
+# whose ldconfig cache does not list it, which includes every distribution that
+# has no ldconfig cache at all.
+#
+# The rvn per-user prefix is last and is not filler. Raven ships llvm-libs and
+# not clang, so on a Raven machine the supported way to get one is
+# `rvn --user -i clang`, which installs it under a single account rather than
+# into /usr -- and that is the machine OwlPlayer's own .cargo/config.toml was
+# written on and points at. A host where that is the only libclang is a host
+# this must find one on.
+libclang_dir() {
+    local cand
+
+    if [[ -n "${LIBCLANG_PATH:-}" ]] \
+        && compgen -G "${LIBCLANG_PATH}/libclang.so*" >/dev/null 2>&1; then
+        printf '%s\n' "${LIBCLANG_PATH}"
+        return 0
+    fi
+
+    if command -v ldconfig &>/dev/null; then
+        cand="$(ldconfig -p 2>/dev/null | awk '/libclang\.so/ {print $NF; exit}')"
+        if [[ -n "${cand}" && -e "${cand}" ]]; then
+            dirname "${cand}"
+            return 0
+        fi
+    fi
+
+    for cand in /usr/lib /usr/lib64 /usr/local/lib \
+            "${XDG_DATA_HOME:-${HOME:-/root}/.local/share}/rvn/root/usr/lib"; do
+        if compgen -G "${cand}/libclang.so*" >/dev/null 2>&1; then
+            printf '%s\n' "${cand}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+stage_player() {
+    if [[ "${PLAYER_SKIP:-0}" == "1" ]]; then
+        log_info "  PLAYER_SKIP=1: no media player on the image"
+        return 0
+    fi
+
+    command -v cargo &>/dev/null || {
+        log_warn "  cargo not found; Owl Player will not be built"
+        return 0
+    }
+
+    local -a missing=()
+    local mod
+    for mod in gtk4 libadwaita-1 glib-2.0 gio-2.0; do
+        pkg-config --exists "${mod}" 2>/dev/null || missing+=("${mod}")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        log_warn "  missing build dependencies for Owl Player: ${missing[*]}"
+        log_warn "  install them with: pacman -S --needed gtk4 libadwaita"
+        log_warn "  the desktop will ship without a media player"
+        return 0
+    fi
+
+    # libavdevice and libavfilter are checked although the player calls into
+    # neither: they are in ffmpeg-next's default features, so a host carrying a
+    # trimmed FFmpeg passes every probe for a library the player names and
+    # fails the build on one the crate links anyway. alsa is cpal's, and it is
+    # how the sound reaches PipeWire.
+    missing=()
+    for mod in libavformat libavcodec libavutil libavfilter libavdevice \
+            libswscale libswresample alsa; do
+        pkg-config --exists "${mod}" 2>/dev/null || missing+=("${mod}")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        log_warn "  missing media libraries for Owl Player: ${missing[*]}"
+        log_warn "  install them with: pacman -S --needed ffmpeg alsa-lib"
+        log_warn "  the desktop will ship without a media player"
+        return 0
+    fi
+
+    local libclang
+    if ! libclang="$(libclang_dir)"; then
+        log_warn "  no libclang on this build host; Owl Player will not be built"
+        log_warn "  ffmpeg-sys-next reads the FFmpeg headers with bindgen, and"
+        log_warn "  bindgen loads libclang.so to parse them"
+        log_warn "  install it with: pacman -S --needed clang"
+        log_warn "  the desktop will ship without a media player"
+        return 0
+    fi
+
+    local dest="${GUI_SRC_DIR}/${PLAYER_REPO}"
+    if ! fetch_repo "${PLAYER_REPO}" "${PLAYER_URL}" "${dest}" \
+            "${PLAYER_REF:-}" "${PLAYER_OFFLINE:-${GUI_OFFLINE:-0}}" "${PLAYER_MANIFEST}"; then
+        log_warn "  OwlPlayer source unavailable; no media player on the image"
+        return 0
+    fi
+
+    # `ld.lld`, not `lld`: that is the name gcc looks for when the checkout's
+    # rustflags pass -fuse-ld=lld.
+    local drop_lld=0
+    if ! command -v ld.lld &>/dev/null; then
+        log_info "  ld.lld not on this host; linking with the default linker"
+        drop_lld=1
+    fi
+
+    log_info "  building Owl Player for ${GUI_TARGET}..."
+    local -a cargo_args=(build --release --target "${GUI_TARGET}")
+    [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
+    if ! (
+        cd "${dest}"
+        unset CGO_ENABLED
+        # Over the checkout's un-`force`d [env] entry, with the directory
+        # libclang_dir actually found -- which on the machine that config was
+        # written for is the directory it already names. Its companion
+        # BINDGEN_EXTRA_CLANG_ARGS is deliberately not touched.
+        export LIBCLANG_PATH="${libclang}"
+        if (( drop_lld )); then
+            export RUSTFLAGS="${RUSTFLAGS:-}"
+        fi
+        cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}"
+    ); then
+        log_warn "  Owl Player build failed; no media player on the image"
+        return 0
+    fi
+
+    local out="${dest}/target/${GUI_TARGET}/release/${PLAYER_BIN}"
+    if [[ ! -x "${out}" ]]; then
+        log_warn "  Owl Player produced no binary; no media player on the image"
+        return 0
+    fi
+
+    install -Dm 0755 "${out}" "${SYSROOT_DIR}/usr/bin/${PLAYER_BIN}"
+    log_success "  ${PLAYER_BIN} installed ($(du -h "${out}" | cut -f1))"
+
+    # The widest link graph of anything on this image, and by a distance: the
+    # FFmpeg closure alone is every codec, container and colour library the
+    # host's ffmpeg was built against. All of it is resolved here rather than
+    # listed anywhere, which is the point of doing this with ldd.
+    stage_gui_libraries "${out}"
+
+    # As with Raven Viewer and EagleEye, the stylesheets are include_str!ed --
+    # by crates/owl-player/src/theme.rs, which takes all three of
+    # data/raven-glass.css, data/raven-glass-light.css and data/owl-player.css
+    # into the binary -- so only the icon and metainfo ship; the entry is
+    # install_desktop_entries' job.
+    local appdata="${SYSROOT_DIR}/usr/share"
+    install -Dm 0644 "${dest}/data/icons/hicolor/scalable/apps/${PLAYER_APPID}.svg" \
+        "${appdata}/icons/hicolor/scalable/apps/${PLAYER_APPID}.svg" 2>/dev/null \
+        && log_info "    + ${PLAYER_APPID}.svg (hicolor/scalable)" \
+        || log_warn "    no icon in the checkout; the launcher entry will draw blank"
+    install -Dm 0644 "${dest}/data/${PLAYER_APPID}.metainfo.xml" \
+        "${appdata}/metainfo/${PLAYER_APPID}.metainfo.xml" 2>/dev/null || true
+
+    if declare -F stage_gtk_runtime &>/dev/null; then
+        stage_gtk_runtime
+    fi
+}
+
 install_desktop_entries() {
     local dir="${SYSROOT_DIR}/usr/share/applications"
     mkdir -p "${dir}"
@@ -2228,6 +2523,52 @@ ENTRY
         done
         chmod 0644 "${list}"
         log_info "    + mimeapps.list (${#EAGLEEYE_MIME_TYPES[@]} image types)"
+    fi
+
+    # The media player, and the third and last application on this image to
+    # claim a MIME type. Between the three of them -- documents, images, and
+    # now video and audio -- a double-click in the file manager now opens
+    # something for most of what is in a home directory.
+    #
+    # StartupWMClass is the application id rather than upstream's "owl-player",
+    # for the same reason as the two above: adw::Application sets the window's
+    # app_id from its id -- crates/owl-player/src/window.rs's APP_ID -- and
+    # dock::owns checks StartupWMClass first.
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${PLAYER_BIN}" ]]; then
+        local player_mimes
+        player_mimes="$(printf '%s;' "${PLAYER_MIME_TYPES[@]}")"
+        cat > "${dir}/${PLAYER_APPID}.desktop" << ENTRY
+[Desktop Entry]
+Type=Application
+Name=Owl Player
+GenericName=Media Player
+Comment=See more - play anything, beautifully
+Exec=${PLAYER_BIN} %U
+Icon=${PLAYER_APPID}
+Categories=AudioVideo;Player;Video;GTK;
+Keywords=video;movie;film;audio;music;player;media;subtitles;dvd;
+MimeType=${player_mimes}
+StartupWMClass=${PLAYER_APPID}
+StartupNotify=true
+SingleMainWindow=true
+Terminal=false
+ENTRY
+        chmod 0644 "${dir}/${PLAYER_APPID}.desktop"
+        written=$((written + 1))
+        log_info "    + ${PLAYER_APPID}.desktop"
+
+        # Appended, like the two blocks above and for the same reason: the file
+        # manager writes the header, and may not have run. Nothing here
+        # collides with what they wrote -- they claim application/* and
+        # image/*, this one video/* and audio/* -- so a key is never written
+        # twice and the file needs no de-duplication.
+        local list="${dir}/mimeapps.list" mime
+        [[ -f "${list}" ]] || printf '[Default Applications]\n' > "${list}"
+        for mime in "${PLAYER_MIME_TYPES[@]}"; do
+            printf '%s=%s.desktop\n' "${mime}" "${PLAYER_APPID}" >> "${list}"
+        done
+        chmod 0644 "${list}"
+        log_info "    + mimeapps.list (${#PLAYER_MIME_TYPES[@]} media types)"
     fi
 
     # The one entry on this image that is copied rather than written here.
@@ -2864,6 +3205,12 @@ print_gui_summary() {
         echo "  [--] image viewer        not built - nothing on the image opens an image"
     fi
 
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${PLAYER_BIN}" ]]; then
+        echo "  [OK] media player        /usr/bin/${PLAYER_BIN} (default for video/* and audio/*)"
+    else
+        echo "  [--] media player        not built - nothing on the image plays a film or a song"
+    fi
+
     if [[ -x "${SYSROOT_DIR}/usr/bin/${BATTERY_BIN}" ]]; then
         echo "  [OK] battery management  /usr/bin/${BATTERY_BIN} (Settings > General)"
     else
@@ -3095,6 +3442,18 @@ main() {
     # install_desktop_entries() makes it the default for every image type.
     log_step "Staging the image viewer..."
     stage_eagleeye
+
+    # Same rule, and directly after the image viewer because the three of them
+    # split one job between them: that one claims image/*, the viewer above it
+    # claims PDF and DOCX, and this one claims video/* and audio/*.
+    # install_desktop_entries() makes it the default for every media type.
+    #
+    # It is also the slowest application in this stage by a wide margin --
+    # ffmpeg-sys-next runs bindgen over the FFmpeg headers before a line of the
+    # player itself compiles -- so it is worth knowing that a long silence here
+    # is a build and not a hang.
+    log_step "Staging the media player..."
+    stage_player
 
     # Before install_desktop_entries, like the rest: the entry is written only
     # if the binary is there to see. This one also stages a udev rule and the

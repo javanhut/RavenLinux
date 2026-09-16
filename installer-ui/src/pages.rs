@@ -175,6 +175,26 @@ fn welcome(app: &Rc<App>) {
 // the probe already reported for every disk. Building them once means the
 // answer shown is always the probe's answer for that exact disk, with nothing
 // recomputed in between.
+//
+// One thing is recomputed: how much room the install needs. Swap is carved out
+// of the same unallocated run as the root, and the swap switch is further down
+// this page, so every "does it fit" answer here is taken again whenever that
+// switch moves. The facts it is taken from are still the probe's.
+
+/// How big a swap partition these answers would produce, in bytes.
+///
+/// `probe_swap` is the disk's own `swap_bytes` -- the figure the installer
+/// would pick unprompted, already in bytes. Preferring it to re-parsing
+/// `swap.suggested` keeps this free of the megabyte rounding in size_to_mb,
+/// which matters because the number is compared against a partition boundary.
+fn swap_bytes_for(a: &Answers, probe_swap: u64) -> u64 {
+    match a.swap.as_str() {
+        "none" => 0,
+        "" => probe_swap,
+        other => probe::size_to_mb(other).unwrap_or(0).saturating_mul(1024 * 1024),
+    }
+}
+
 fn install_mode(app: &Rc<App>, page: &adw::PreferencesPage, disks: &[Disk]) {
     for d in disks {
         let group = adw::PreferencesGroup::builder()
@@ -194,42 +214,15 @@ fn install_mode(app: &Rc<App>, page: &adw::PreferencesPage, disks: &[Disk]) {
         group.add(&erase);
 
         let along = adw::ActionRow::builder().title("Install alongside").build();
+        along.set_subtitle_lines(0);
         let along_check = gtk::CheckButton::new();
         along_check.set_group(Some(&erase_check));
         along.add_prefix(&along_check);
         group.add(&along);
 
-        // Not offered where it cannot work, and the probe's reason is shown
-        // instead of nothing. A greyed-out row with no explanation is the thing
-        // people file bugs about.
-        if d.alongside {
-            along.set_subtitle(&if d.has_free_room() {
-                format!(
-                    "Keep everything on the disk. RavenLinux goes into the {} \
-                     of unallocated space already on it, and boots from the EFI \
-                     partition that is already there.",
-                    probe::human_bytes(d.free_bytes)
-                )
-            } else {
-                "Keep everything on the disk. Space is taken from a partition \
-                 you choose below, and RavenLinux boots from the EFI partition \
-                 that is already there."
-                    .to_string()
-            });
-            along.set_activatable_widget(Some(&along_check));
-        } else {
-            along.set_sensitive(false);
-            along.set_subtitle(&if d.alongside_why.is_empty() {
-                "Not possible on this disk.".to_string()
-            } else {
-                format!("Not possible here: {}.", d.alongside_why)
-            });
-        }
-        along.set_subtitle_lines(0);
-
         // ---- where the space comes from -------------------------------------
-        // Hidden until "install alongside" is chosen, and skipped entirely when
-        // the disk already has room: offering to resize somebody's Windows when
+        // Hidden until "install alongside" is chosen, and hidden again when the
+        // disk already has room: offering to resize somebody's Windows when
         // nothing needs resizing is offering a risk for no reason.
         let source = adw::ExpanderRow::builder()
             .title("Take the space from")
@@ -238,69 +231,65 @@ fn install_mode(app: &Rc<App>, page: &adw::PreferencesPage, disks: &[Disk]) {
         source.set_expanded(true);
 
         let size_row = adw::EntryRow::builder().title("Space for RavenLinux").build();
+
+        // Every partition gets a row, including the ones that cannot give up
+        // anything -- a Windows that is simply too full is a thing to see and
+        // understand, not to leave off the list. The rows are kept so the
+        // refresh below can re-take the "too full" half of that judgement.
+        let mut rows: Vec<(probe::ShrinkCandidate, adw::ActionRow)> = Vec::new();
         let mut first_part: Option<gtk::CheckButton> = None;
 
         for c in &d.candidates {
-            let row = adw::ActionRow::builder()
-                .title(&c.dev)
-                .subtitle(if c.shrinkable {
-                    format!(
-                        "{} — {}, {} in use, up to {} can be freed",
-                        c.os,
-                        probe::human_bytes(c.size_bytes),
-                        probe::human_bytes(c.used_bytes),
-                        probe::human_bytes(c.spare_bytes)
-                    )
-                } else {
-                    format!(
-                        "{} — {}. Cannot be shrunk: {}",
-                        c.os,
-                        probe::human_bytes(c.size_bytes),
-                        c.why
-                    )
-                })
-                .build();
+            let row = adw::ActionRow::builder().title(&c.dev).build();
             row.set_subtitle_lines(0);
 
-            if !c.shrinkable {
-                row.set_sensitive(false);
-                source.add_row(&row);
-                continue;
-            }
-
-            let check = gtk::CheckButton::new();
-            if let Some(f) = &first_part {
-                check.set_group(Some(f));
-            } else {
-                first_part = Some(check.clone());
-            }
-            row.add_prefix(&check);
-            row.set_activatable_widget(Some(&check));
-
-            check.connect_toggled({
-                let app = app.clone();
-                let dev = c.dev.clone();
-                let spare = c.spare_bytes;
-                let min = d.min_root_bytes;
-                let size_row = size_row.clone();
-                move |ch| {
-                    if !ch.is_active() {
-                        return;
-                    }
-                    app.answers.borrow_mut().shrink_part = dev.clone();
-                    // Half of what it can spare, which is the same default the
-                    // terminal wizard offers. A number in the box beats an
-                    // empty box: it is a working answer, and it shows the shape
-                    // the field wants.
-                    if size_row.text().is_empty() {
-                        let half = (spare / 2).max(min);
-                        let gib = (half / (1024 * 1024 * 1024)).max(1);
-                        size_row.set_text(&format!("{gib}G"));
-                    }
-                    app.revalidate();
+            // Only a filesystem this image can resize at all gets a button.
+            // Whether it can spare enough is the part that moves, and that is
+            // handled by the row's sensitivity rather than by its existence.
+            if c.resizable {
+                let check = gtk::CheckButton::new();
+                if let Some(f) = &first_part {
+                    check.set_group(Some(f));
+                } else {
+                    first_part = Some(check.clone());
                 }
-            });
+                row.add_prefix(&check);
+                row.set_activatable_widget(Some(&check));
+
+                check.connect_toggled({
+                    let app = app.clone();
+                    let dev = c.dev.clone();
+                    let spare = c.spare_bytes;
+                    let min_root = d.min_root_bytes;
+                    let probe_swap = d.swap_bytes;
+                    let size_row = size_row.clone();
+                    move |ch| {
+                        if !ch.is_active() {
+                            return;
+                        }
+                        let need = {
+                            let mut a = app.answers.borrow_mut();
+                            a.shrink_part = dev.clone();
+                            min_root.saturating_add(swap_bytes_for(&a, probe_swap))
+                        };
+                        // Half of what it can spare, which is the same default
+                        // the terminal wizard offers -- but never less than the
+                        // install needs, because half of a 30 GiB spare is a
+                        // root of nothing once swap has come out of it. A
+                        // number in the box beats an empty box: it is a working
+                        // answer, and it shows the shape the field wants.
+                        if size_row.text().is_empty() {
+                            let half = (spare / 2).max(need);
+                            let gib = (half / (1024 * 1024 * 1024)).max(1);
+                            size_row.set_text(&format!("{gib}G"));
+                        }
+                        app.revalidate();
+                    }
+                });
+            }
+
             source.add_row(&row);
+            rows.push((c.clone(), row));
         }
 
         size_row.connect_changed({
@@ -313,19 +302,120 @@ fn install_mode(app: &Rc<App>, page: &adw::PreferencesPage, disks: &[Disk]) {
         source.add_row(&size_row);
         group.add(&source);
 
-        // Only shown when a partition actually has to give something up.
-        let needs_shrink = !d.has_free_room();
+        // ---- the part that depends on the swap switch -----------------------
+        let refresh: Rc<dyn Fn()> = Rc::new({
+            let app = app.clone();
+            let d = d.clone();
+            let along = along.clone();
+            let along_check = along_check.clone();
+            let erase_check = erase_check.clone();
+            let source = source.clone();
+            let rows = rows.clone();
+            move || {
+                // Read and drop: set_active below re-enters the toggled
+                // handlers, and those take the same RefCell mutably.
+                let (swap, alongside_chosen) = {
+                    let a = app.answers.borrow();
+                    (swap_bytes_for(&a, d.swap_bytes), a.mode == "alongside")
+                };
+                let need = d.min_total_for(swap);
+                let possible = d.alongside_for(swap);
+                let free_room = d.has_free_room(swap);
+
+                // Not offered where it cannot work, and the probe's reason is
+                // shown instead of nothing. A greyed-out row with no
+                // explanation is the thing people file bugs about.
+                if possible {
+                    along.set_sensitive(true);
+                    along.set_activatable_widget(Some(&along_check));
+                    along.set_subtitle(&if free_room {
+                        format!(
+                            "Keep everything on the disk. RavenLinux goes into the {} \
+                             of unallocated space already on it, and boots from the EFI \
+                             partition that is already there.",
+                            probe::human_bytes(d.free_bytes)
+                        )
+                    } else {
+                        format!(
+                            "Keep everything on the disk. {} is taken from a partition \
+                             you choose below, and RavenLinux boots from the EFI \
+                             partition that is already there.",
+                            probe::human_bytes(need)
+                        )
+                    });
+                } else {
+                    // Back to erasing rather than leaving a selected radio that
+                    // has just been greyed out: the answers behind it describe
+                    // a plan this disk can no longer take.
+                    if along_check.is_active() {
+                        erase_check.set_active(true);
+                    }
+                    along.set_sensitive(false);
+                    along.set_activatable_widget(gtk::Widget::NONE);
+                    let why = d.alongside_why_for(swap);
+                    along.set_subtitle(&if why.is_empty() {
+                        "Not possible on this disk.".to_string()
+                    } else {
+                        format!("Not possible here: {why}.")
+                    });
+                }
+
+                let mut chosen_is_gone = false;
+                for (c, row) in rows.iter() {
+                    let usable = c.resizable && c.spare_bytes >= need;
+                    row.set_sensitive(usable);
+                    row.set_subtitle(&if usable {
+                        format!(
+                            "{} — {}, {} in use, up to {} can be freed",
+                            c.os,
+                            probe::human_bytes(c.size_bytes),
+                            probe::human_bytes(c.used_bytes),
+                            probe::human_bytes(c.spare_bytes)
+                        )
+                    } else if !c.resizable {
+                        format!(
+                            "{} — {}. Cannot be shrunk: {}",
+                            c.os,
+                            probe::human_bytes(c.size_bytes),
+                            c.why
+                        )
+                    } else {
+                        // Resizable, just not by enough. Saying which two
+                        // numbers failed to meet is what tells somebody that
+                        // turning swap off is the lever.
+                        format!(
+                            "{} — {}. Only {} can be freed; this install needs {}.",
+                            c.os,
+                            probe::human_bytes(c.size_bytes),
+                            probe::human_bytes(c.spare_bytes),
+                            probe::human_bytes(need)
+                        )
+                    });
+                    if !usable && app.answers.borrow().shrink_part == c.dev {
+                        chosen_is_gone = true;
+                    }
+                }
+                if chosen_is_gone {
+                    // The radio stays where it is; clearing the answer is what
+                    // stops the install running against a partition the page
+                    // has just stopped offering, and the page validator says so.
+                    app.answers.borrow_mut().shrink_part.clear();
+                }
+
+                source.set_visible(alongside_chosen && possible && !free_room);
+                app.revalidate();
+            }
+        });
 
         along_check.connect_toggled({
             let app = app.clone();
-            let source = source.clone();
+            let refresh = refresh.clone();
             move |c| {
                 if !c.is_active() {
                     return;
                 }
                 app.answers.borrow_mut().mode = "alongside".into();
-                source.set_visible(needs_shrink);
-                app.revalidate();
+                refresh();
             }
         });
         erase_check.connect_toggled({
@@ -349,6 +439,9 @@ fn install_mode(app: &Rc<App>, page: &adw::PreferencesPage, disks: &[Disk]) {
             }
         });
 
+        refresh();
+        app.swap_watchers.borrow_mut().push(refresh);
+
         // This whole group belongs to one disk; it appears when that disk is
         // the selected one. The first disk is preselected by the group above,
         // so the matching group starts visible and the rest do not.
@@ -359,6 +452,7 @@ fn install_mode(app: &Rc<App>, page: &adw::PreferencesPage, disks: &[Disk]) {
         page.add(&group);
     }
 }
+
 
 // =============================================================================
 // Disk
@@ -413,7 +507,12 @@ fn disk(app: &Rc<App>) {
             // unconditionally true, so it says what the current mode would do
             // rather than what erasing would.
             let icon = gtk::Image::from_icon_name("dialog-warning-symbolic");
-            icon.set_tooltip_text(Some(if d.alongside {
+            // alongside_for(0) rather than the probe's own verdict: this
+            // says whether the Windows on this disk can be kept at all, and
+            // the swap switch is not allowed to turn that sentence into "it
+            // will be erased" when the only thing in the way is a swap
+            // partition the person can still decline.
+            icon.set_tooltip_text(Some(if d.alongside_for(0) {
                 "This looks like a Windows installation. It can be kept --                  choose Install alongside below."
             } else {
                 "This looks like a Windows installation. It will be erased."
@@ -524,11 +623,31 @@ fn disk(app: &Rc<App>) {
     swap_row.connect_active_notify({
         let app = app.clone();
         move |r| {
-            app.answers.borrow_mut().swap = if r.is_active() { String::new() } else { "none".into() };
+            {
+                app.answers.borrow_mut().swap =
+                    if r.is_active() { String::new() } else { "none".into() };
+            }
+            // Swap and the root share one hole in the partition table, so this
+            // switch decides how much room "install alongside" needs. The rows
+            // that say whether there is that much are in a group above, built
+            // before this one existed; each left a closure behind to be told.
+            let watchers: Vec<_> = app.swap_watchers.borrow().clone();
+            for f in watchers {
+                f();
+            }
             app.revalidate();
         }
     });
     layout.add(&swap_row);
+    // mkswap missing turned the switch off above, before any of this was
+    // connected, so the alongside rows are still judged against a swap that
+    // will not be created.
+    if !app.probe.mkswap {
+        let watchers: Vec<_> = app.swap_watchers.borrow().clone();
+        for f in watchers {
+            f();
+        }
+    }
     page.add(&layout);
 
     // ---- advanced -----------------------------------------------------------
@@ -601,6 +720,45 @@ fn disk(app: &Rc<App>) {
                         d.dev,
                         p.source_size_mb as f64 / 1024.0
                     ));
+                }
+                // An alongside install puts swap and the root in the same hole,
+                // so the space asked for has to cover both. raven-install
+                // checks this again and refuses -- but it refuses after the
+                // summary page, and being told here is being told while the
+                // box that sets it is still on screen.
+                if a.mode == "alongside" {
+                    let need = d.min_total_for(swap_bytes_for(a, d.swap_bytes));
+                    if a.shrink_part.is_empty() {
+                        if !d.has_free_room(swap_bytes_for(a, d.swap_bytes)) {
+                            v.push(format!(
+                                "Choose a partition to take the {} for RavenLinux from.",
+                                probe::human_bytes(need)
+                            ));
+                        }
+                    } else if let Some(want_mb) = probe::size_to_mb(&a.alongside_size) {
+                        let want = (want_mb as u64).saturating_mul(1024 * 1024);
+                        if want < need {
+                            v.push(format!(
+                                "{} is not enough: {} has to cover the root and the swap \
+                                 partition next to it. Ask for {} or more, or turn swap \
+                                 off under Layout.",
+                                a.alongside_size,
+                                probe::human_bytes(want),
+                                probe::human_bytes(need)
+                            ));
+                        }
+                        if let Some(c) =
+                            d.candidates.iter().find(|c| c.dev == a.shrink_part)
+                        {
+                            if want > c.spare_bytes {
+                                v.push(format!(
+                                    "{} can only give up {}.",
+                                    c.dev,
+                                    probe::human_bytes(c.spare_bytes)
+                                ));
+                            }
+                        }
+                    }
                 }
             }
             v

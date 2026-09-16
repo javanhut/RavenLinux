@@ -64,6 +64,35 @@ class ImageContract(unittest.TestCase):
         self.assertTrue(any('enabled service definition: bluetoothd' in error
                             for error in contract.validate(self.root, ['huginn'])))
 
+    def test_removable_storage_daemon_is_required(self):
+        """A drive plugged into an image without raven-mount is a dead device node."""
+        self.desktop()
+        config = self.root / 'etc/raven/init.toml'
+        config.write_text(config.read_text().replace(
+            'name = "mount"\ndescription = "Removable storage: mount USB drives and cards under /media as they arrive"\nexec = "/usr/bin/raven-mount"\nargs = ["watch", "--automount"]\nafter = ["udev"]\nrestart = true\nenabled = true',
+            'name = "mount"\ndescription = "Removable storage: mount USB drives and cards under /media as they arrive"\nexec = "/usr/bin/raven-mount"\nargs = ["watch", "--automount"]\nafter = ["udev"]\nrestart = true\nenabled = false'))
+        self.assertTrue(any('enabled service definition: mount' in error
+                            for error in contract.validate(self.root, ['huginn'])))
+
+    def test_cupsd_without_its_account_is_an_error(self):
+        """cupsd drops privilege to `cups`; with no such account it never starts."""
+        self.desktop()
+        shutil.copyfile(PROJECT / 'configs/raven/services/cupsd.toml',
+                        self.root / 'etc/raven/init.d/cupsd.toml')
+        self.put('usr/bin/cupsd', '#!/bin/sh\n', True)
+        errors = contract.validate(self.root, ['huginn'])
+        self.assertTrue(any('no cups account' in error for error in errors), errors)
+        # With the account present it passes, which is what skeleton.sh ships.
+        passwd = self.root / 'etc/passwd'
+        passwd.write_text(passwd.read_text() + 'cups:x:209:209::/var/spool/cups:/usr/bin/nologin\n')
+        self.assertEqual([e for e in contract.validate(self.root, ['huginn']) if 'cups' in e], [])
+
+    def test_optional_peripheral_stack_is_reported_not_required(self):
+        """An image without printing is diminished, not invalid."""
+        self.desktop()
+        self.assertEqual(contract.validate(self.root, ['huginn', 'raven-output']), [])
+        self.assertTrue(any('no printing on this image' in note for note in contract.NOTES))
+
     def test_new_user_defaults_are_portable(self):
         source = (PROJECT / 'scripts/stages/stage-gui.sh').read_text()
         start = source.index('install_wallpaper_dirs() {')

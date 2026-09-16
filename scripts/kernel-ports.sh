@@ -45,7 +45,13 @@ y TYPEC_MUX_PI3USB30532 TYPEC_MUX_INTEL_PMC TYPEC_MUX_FSA4480 TYPEC_MUX_IT5205
 y TYPEC_MUX_NB7VPQ904M TYPEC_MUX_PTN36502
 y INTEL_SCU_PCI                     # INTEL_SCU_IPC, which the PMC mux needs
 y USB_ROLE_SWITCH USB_ROLES_INTEL_XHCI
-y USB_XHCI_PCI_RENESAS       # Renesas uPD720201/2 host controllers (needs its firmware)
+# Renesas uPD720201/2 is the one host controller that uploads firmware at
+# probe. Built in, it probes during PCI enumeration -- before any root
+# filesystem -- asks for renesas_usb_fw.mem, gets nothing, and never asks
+# again, so the card is dead for the rest of the boot. The firmware is in the
+# image (stage2-native.sh copies renesas/) but not the initramfs, so the
+# driver has to wait for the real root like every other firmware user.
+m USB_XHCI_PCI_RENESAS
 
 # --- USB4 / Thunderbolt: docks, eGPUs, DP tunnelling -------------------------
 y USB4 USB4_NET INTEL_WMI_THUNDERBOLT
@@ -95,7 +101,10 @@ for o in SND_SOC_AMD_ACP3x SND_SOC_AMD_ACP5x SND_SOC_AMD_ACP6x; do
     echo "CONFIG_${o}=m" >> .config
 done
 m SND_SOC_AMD_YC_MACH SND_SOC_AMD_ACP63_TOPLEVEL SND_AMD_ASOC_ACP70
-m SND_SOC_INTEL_SST_TOPLEVEL SND_SOC_INTEL_MACH SND_SOC_INTEL_SOUNDWIRE_SOF_MACH
+# SST_TOPLEVEL and INTEL_MACH are bool menu gates, not drivers; asking for
+# =m on either is silently corrected to =y by olddefconfig.
+y SND_SOC_INTEL_SST_TOPLEVEL SND_SOC_INTEL_MACH
+m SND_SOC_INTEL_SOUNDWIRE_SOF_MACH
 m SND_SOC_INTEL_SOF_RT5682_MACH SND_SOC_INTEL_SOF_DA7219_MACH SND_SOC_INTEL_SOF_NAU8825_MACH
 m SND_SOC_INTEL_SOF_CS42L42_MACH SND_SOC_INTEL_SOF_ES8336_MACH SND_SOC_INTEL_SOF_SSP_AMP_MACH
 m SND_SOC_INTEL_SKL_HDA_DSP_GENERIC_MACH SND_SOC_INTEL_AVS
@@ -137,5 +146,77 @@ y MARVELL_PHY BROADCOM_PHY MICREL_PHY AQUANTIA_PHY
 # command line turns it back on for a machine that wants it.
 n BT_HCIBTUSB_AUTOSUSPEND
 
+# --- Mobile broadband: the WWAN card in a business laptop --------------------
+# Without the WWAN class the modem enumerates and stops there: no /dev/wwan*,
+# no control port, nothing for a userspace dialler to talk to. The USB side
+# of this was already on (USB_SERIAL_WWAN, CDC_MBIM) but the PCIe side --
+# every Qualcomm SDX card Dell, Lenovo and HP fit -- arrives over MHI, which
+# needs the class and the generic MHI PCI driver.
+y WWAN
+m MHI_WWAN_CTRL MHI_WWAN_MBIM MHI_NET MHI_BUS_PCI_GENERIC
+m USB_NET_QMI_WWAN
+
+# --- USB dual role: the device side of a USB-C port --------------------------
+# USB_ROLE_SWITCH above only flips the port. Being the device on the other end
+# of the cable -- tethering out, g_ether to a second machine, a serial console
+# over USB -- needs a gadget stack and a UDC, and on a laptop the UDC is dwc3.
+y USB_GADGET USB_CONFIGFS
+y USB_CONFIGFS_NCM USB_CONFIGFS_ECM USB_CONFIGFS_RNDIS USB_CONFIGFS_EEM
+y USB_CONFIGFS_MASS_STORAGE USB_CONFIGFS_SERIAL USB_CONFIGFS_ACM USB_CONFIGFS_F_FS
+m USB_DWC3 USB_DWC3_PCI
+y USB_DWC3_DUAL_ROLE
+
+# --- Microsoft Surface -------------------------------------------------------
+# Surface Laptop and Pro put the keyboard, touchpad, battery, thermal profile
+# and the detach button behind the Surface Aggregator Module, a controller on
+# a serial port. Without it the machine boots to a desktop with no input
+# devices at all, which reads as a dead image rather than a missing driver.
+y SERIAL_8250_DW                      # the UART the aggregator sits on
+y SURFACE_AGGREGATOR SURFACE_AGGREGATOR_BUS SURFACE_AGGREGATOR_REGISTRY
+y SURFACE_AGGREGATOR_HUB SURFACE_AGGREGATOR_CDEV SURFACE_AGGREGATOR_TABLET_SWITCH
+y SURFACE_ACPI_NOTIFY SURFACE_DTX SURFACE_GPE SURFACE_HOTPLUG
+y SURFACE_PRO3_BUTTON SURFACE3_WMI SURFACE_3_POWER_OPREGION
+y SURFACE_HID SURFACE_KBD
+
+# --- ChromeOS EC: Chromebooks, and every Framework laptop --------------------
+# Framework ships a ChromeOS EC, which is why it lands in this section rather
+# than one of its own: charge thresholds, fan control, the ambient light
+# sensor and the privacy switches all come through cros_ec_lpc.
+y CHROME_PLATFORMS
+y CROS_EC CROS_EC_LPC CROS_EC_I2C CROS_EC_SPI CROS_EC_ISHTP
+y CROS_EC_CHARDEV CROS_EC_SYSFS CROS_EC_DEBUGFS CROS_EC_SENSORHUB
+y CROS_KBD_LED_BACKLIGHT CROS_USBPD_LOGGER
+m SENSORS_CROS_EC
+
+# --- AMD platform: thermal and power profile on Ryzen laptops ----------------
+m AMD_PMF                             # needs AMD_PMC and ACPI_PLATFORM_PROFILE, both on
+y I2C_AMD_MP2                         # the I2C controller AMD laptop touchpads hang off
+
+# --- HID: peripherals the generic driver only half drives --------------------
+# Generic HID gets a mouse moving; these are what make the extra buttons,
+# the tablet pressure axis and the per-key LEDs work.
+y HID_ELAN HID_ALPS HID_UCLOGIC HID_KYE HID_WALTOP HID_VIEWSONIC
+y HID_CORSAIR HID_RAZER HID_HOLTEK HID_ELECOM HID_CMEDIA HID_LED HID_MCP2221
+m TOUCHSCREEN_USB_COMPOSITE           # touchscreens in monitors and KVMs
+
+# --- USB audio interfaces the class driver does not cover --------------------
+m SND_USB_UA101 SND_USB_USX2Y SND_USB_CAIAQ SND_USB_US122L
+m SND_USB_6FIRE SND_USB_HIFACE
+m SND_USB_POD SND_USB_PODHD SND_USB_TONEPORT SND_USB_VARIAX   # the Line 6 family
+y SND_USB_CAIAQ_INPUT
+
+# --- Removable-media filesystems ---------------------------------------------
+# A drive formatted somewhere else is the common case for external storage.
+# vfat, exfat, ntfs3, udf and iso9660 were already in; these are the two that
+# were not, and both turn up on a desk: F2FS on anything an Android phone
+# formatted, HFS+ on a drive that came off a Mac.
+y F2FS_FS F2FS_FS_XATTR F2FS_FS_POSIX_ACL
+m HFSPLUS_FS HFS_FS
+
 # --- Thermal readouts, for the peripherals utility ---------------------------
+# CORETEMP and K10TEMP are the CPU package only. A peripherals view that
+# claims to show what the machine is doing needs the board too: fans, chassis
+# temperatures and voltages live on a Super I/O chip or behind vendor WMI.
 y SENSORS_CORETEMP SENSORS_K10TEMP
+m SENSORS_NCT6775 SENSORS_NCT6683 SENSORS_IT87
+m SENSORS_DELL_SMM SENSORS_ASUS_WMI SENSORS_ASUS_EC

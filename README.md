@@ -470,11 +470,22 @@ it will not shrink NTFS that Windows left dirty. Hibernation and Fast Startup
 both leave it that way; `shutdown /s /t 0` from a Windows command prompt does
 not.
 
+The space it asks for covers **the root and the swap partition beside it**, not
+the root alone: both go into the same hole, so on a machine with 16 GB of
+memory the floor is 12 GiB + 16 GiB, and `--swap none` drops it back to 12 GiB.
+Every refusal that quotes a size says which part of it is swap, because "28 GiB"
+is otherwise a number nobody can account for.
+
 `raven-install --probe` reports all of this per disk before anything is chosen:
-`disk.alongside` and, when it is 0, `disk.alongside_why`; then one
-`part.begin`/`part.end` block per partition carrying `part.os`,
-`part.shrinkable`, `part.used_bytes` and `part.spare_bytes`. The graphical
-installer draws its "install alongside" page from exactly those records.
+`disk.alongside` and, when it is 0, `disk.alongside_why`; `disk.min_root_bytes`,
+`disk.swap_bytes` and `disk.min_total_bytes` for the arithmetic behind it; then
+one `part.begin`/`part.end` block per partition carrying `part.os`,
+`part.resizable`, `part.shrinkable`, `part.used_bytes` and `part.spare_bytes`.
+The graphical installer draws its "install alongside" page from exactly those
+records — and because `part.resizable` ("this filesystem can be shrunk at all")
+is reported separately from `part.shrinkable` ("by enough"), turning the swap
+switch off on that page brings back a partition that was too small with it on,
+without re-running the probe.
 
 The base installation stays small, and the selected package profile installs
 itself afterwards: with a network in the live session the installer does it

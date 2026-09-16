@@ -1,0 +1,22 @@
+# CUPS. raven-init reads an enabled copy from /etc/raven/init.d; stage-gui.sh
+# copies this template there when the printing stack is staged.
+#
+# -f keeps cupsd in the foreground. Without it cupsd forks and exits, raven-init
+# sees the parent die immediately and, with restart = true, spends the rest of
+# the boot starting a daemon that keeps "failing" while a working one runs
+# detached behind it.
+#
+# cupsd starts as root -- it binds :631 and opens the USB backend, both of
+# which need it -- and drops to the cups account from skeleton.sh for
+# everything after. Nothing here runs it as a different user: doing that is
+# what stops it binding the port at all.
+[[services]]
+name = "cupsd"
+description = "Printing: the CUPS scheduler"
+exec = "/usr/bin/cupsd"
+args = ["-f"]
+after = ["dbus"]
+runtime_dirs = ["/run/cups"]
+restart = true
+enabled = true
+critical = false

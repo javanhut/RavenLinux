@@ -955,9 +955,11 @@ ESP_DEV=""; SWAP_DEV=""; ROOT_DEV=""; ROOT_ALONGSIDE_BYTES=0
 ESP_REUSED=0; SHRINK_DEV=""; SHRINK_OLD_SECTORS=0; SHRINK_NEW_SECTORS=0
 SHRINK_NEW_BYTES=0; SHRINK_MIN_BYTES=0; GAP_START=0; GAP_SECTORS=0
 ALONGSIDE_PARTS=""; OPT_SHRINK_PART=""; OPT_ALONGSIDE_SIZE=""; SWAP_SIZE=""
+OPT_SWAP=""
 
 import_fn to_bytes to_human read_disk_table table_rows part_field find_esp \
           free_gaps largest_gap align_up align_down \
+          suggested_swap resolve_swap_size alongside_min_total swap_share_note \
           plan_alongside plan_shrink plan_alongside_partitions part_by_name
 
 # A laptop as it comes from the shop: ESP, Microsoft Reserved, a 62G Windows
@@ -1134,6 +1136,52 @@ DISK="$FREE"; OPT_ALONGSIDE_SIZE="40G"
 plan_alongside
 eq "--size caps what is taken from free space" \
    "$(to_human "$ROOT_ALONGSIDE_BYTES")" "40.0 GiB"
+
+# --- swap comes out of the same gap ------------------------------------------
+# plan_alongside_partitions splits one hole between swap and root, so every
+# "is there room" answer has to be about both. It used to be about the root
+# alone: on a machine with 16 GB of memory the probe offered an install that
+# needed 12 GiB, the wizard then asked for a 16 GiB swap out of the same gap,
+# and the root came out at less than nothing.
+OPT_SWAP=""
+suggested_swap() { echo "16G"; }
+eq "swap is counted in the minimum" \
+   "$(to_human "$(alongside_min_total)")" "28.0 GiB"
+eq "the total says where it went" \
+   "$(swap_share_note "$(resolve_swap_size)")" \
+   " (12.0 GiB for the root plus 16G of swap; --swap none drops it)"
+
+OPT_SWAP="none"
+eq "--swap none asks only for a root" \
+   "$(to_human "$(alongside_min_total)")" "12.0 GiB"
+eq "and has nothing to explain" "$(swap_share_note "$(resolve_swap_size)")" ""
+OPT_SWAP=""
+
+# A 20 GiB hole fits a root and does not fit a root plus a 16 GiB swap. The
+# whole point of the fix is that this is refused here, at planning time, with
+# the swap named -- rather than accepted and turned into a root of 4 GiB.
+SMALL="${WORKDIR}/small.img"
+truncate -s 128G "$SMALL"
+sfdisk -q "$SMALL" >/dev/null 2>&1 <<'PARTS'
+label: gpt
+size=1G,   type=uefi, name="EFI system partition"
+size=106G, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="linux-root"
+PARTS
+die() { echo "$*"; return 1; }   # a refusal is a value again, not an exit
+refuses "refuses a gap that fits the root but not the swap" \
+        'DISK="$SMALL"; OPT_SHRINK_PART=""; OPT_ALONGSIDE_SIZE=""; SWAP_SIZE="16G"' \
+        "this install needs 28\.0 GiB"
+refuses "and names the swap it could not fit" \
+        'DISK="$SMALL"; OPT_SHRINK_PART=""; OPT_ALONGSIDE_SIZE=""; SWAP_SIZE="16G"' \
+        "16G of swap"
+
+# The same gap, with swap turned off, is enough.
+DISK="$SMALL"; OPT_SHRINK_PART=""; OPT_ALONGSIDE_SIZE=""; SWAP_SIZE=""
+unset -f die; die() { echo "unexpected die: $*" >&2; exit 9; }
+plan_alongside
+eq "and takes it once swap is off" \
+   "$(to_human "$ROOT_ALONGSIDE_BYTES")" "21.0 GiB"
+SWAP_SIZE=""
 
 fi
 

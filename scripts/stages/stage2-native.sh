@@ -969,6 +969,33 @@ install_raven_dhcp() {
 }
 
 # =============================================================================
+# raven-firmware -- the entry point for fwupd
+# =============================================================================
+# Installed here rather than with the desktop for the same reason raven-dhcp
+# is: the Raven and GUI layers are droppable, and a console image is still a
+# machine whose dock or SSD may need a firmware fix. The script needs only
+# /bin/sh; it looks for fwupdtool at run time and names the package when it is
+# absent, so installing it on an image without fwupd is harmless rather than a
+# command that fails with "not found".
+#
+# There is no service and no timer, and that is deliberate -- a firmware write
+# is not something to do to someone's dock while they are using it. See the
+# header of configs/raven-firmware for why this drives fwupdtool directly
+# rather than the fwupd daemon: fwupdmgr authorises through polkit, which this
+# system does not run.
+install_raven_firmware() {
+    local src="${PROJECT_ROOT}/configs/raven-firmware"
+
+    if [[ ! -f "${src}" ]]; then
+        log_warn "  configs/raven-firmware is missing; no firmware update path"
+        return 0
+    fi
+
+    install -D -m 0755 "${src}" "${SYSROOT_DIR}/usr/bin/raven-firmware"
+    log_info "  Installed raven-firmware"
+}
+
+# =============================================================================
 # raven-udev and raven-console-font -- the other two init.toml entry points
 # =============================================================================
 # Both are shell scripts in configs/ that /etc/raven/init.toml runs at boot:
@@ -3642,6 +3669,7 @@ main() {
     # The init.toml entry points that ride on what copy_system_utils staged.
     install_raven_udev
     install_raven_console_font
+    install_raven_firmware
     install_raven_fstrim
     copy_networking
     setup_pam_and_nss

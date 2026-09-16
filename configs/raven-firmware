@@ -1,0 +1,161 @@
+#!/bin/sh
+# =============================================================================
+# raven-firmware -- firmware updates for the machine and what is plugged into it
+# =============================================================================
+#
+# Ships at /usr/bin/raven-firmware.
+#
+# WHY THIS EXISTS
+#
+# A Thunderbolt dock whose firmware is two years old drops its displays. An
+# NVMe drive with a known data-loss bug ships with that firmware from the
+# factory. A USB-C hub renegotiates power wrongly until it is updated. None of
+# these look like a firmware problem from the desktop; they look like Raven is
+# broken. fwupd and the LVFS are how every other Linux distribution fixes them,
+# and the image carried nothing that could.
+#
+# WHY IT IS A WRAPPER AND NOT AN UPDATER
+#
+# Same reason raven-dhcp wraps dhcpcd. fwupd is a large, audited body of work
+# with per-device plugins, signed metadata and a vendor relationship this
+# project does not have and should not imitate. What was missing was not the
+# protocol work. It was a way to reach it on a system shaped like this one.
+#
+# WHY fwupdtool AND NOT fwupdmgr
+#
+# This is the decision the file exists to make, so it is worth being plain.
+#
+# fwupdmgr talks over D-Bus to `fwupd`, a root daemon, which authorises every
+# call through polkit. Raven does not run polkitd -- see the note at the end of
+# /etc/raven/init.toml, which explains that nothing on this system consults it
+# -- so on a stock image that path ends in a denial, not an update.
+#
+# fwupdtool is the same engine with no daemon, no D-Bus and no polkit: it loads
+# the plugins in-process and does the work directly, and it expects to be run
+# as root, which is the authorisation. It is what fwupd's own developers use
+# and what its documentation points at for exactly this case. So a machine
+# needs no extra always-on root process to keep its firmware current, which is
+# the outcome that made adding fwupd worth it at all.
+#
+# Anyone who does want the daemon can have it: `rvn install polkit fwupd` and
+# enable the drop-in in configs/raven/services/fwupd.toml. That is a supported
+# choice, not the default one.
+#
+# WHAT IT WILL NOT DO
+#
+# It will not update anything on its own. There is no timer here and no
+# service: a firmware write is not something to do to someone's dock while
+# they are using it, and an interrupted one can leave hardware that does not
+# come back. `check` is safe and read-only. `update` is the deliberate step,
+# and it says what it is about to do first.
+#
+#   raven-firmware            devices with updatable firmware, and their versions
+#   raven-firmware check      refresh metadata from the LVFS and list what is available
+#   raven-firmware update     apply available updates (asks first)
+#   raven-firmware history    what has been updated on this machine before
+#   raven-firmware security   the host security (HSI) report
+# =============================================================================
+
+set -eu
+
+FWUPDTOOL=/usr/bin/fwupdtool
+
+usage() {
+    cat >&2 <<'USAGE'
+usage: raven-firmware [list|check|update|history|security]
+
+  list      devices with updatable firmware (default)
+  check     refresh LVFS metadata, then show what is available
+  update    apply available updates; asks before writing anything
+  history   updates applied on this machine before
+  security  host security report
+
+Runs as root, through fwupdtool: no daemon and no polkit involved.
+USAGE
+}
+
+mode="${1:-list}"
+case "$mode" in
+    -h|--help|help) usage; exit 0 ;;
+    list|check|update|history|security) ;;
+    *) echo "raven-firmware: unknown command '$mode'" >&2; usage; exit 2 ;;
+esac
+
+# fwupd is staged with the desktop runtime and is optional there, so it can
+# legitimately be absent. Say which command brings it, rather than failing with
+# "not found" and leaving the reader to guess the package name. After the mode
+# check above, so `--help` answers on an image that does not have it.
+if [ ! -x "$FWUPDTOOL" ]; then
+    if command -v fwupdtool >/dev/null 2>&1; then
+        FWUPDTOOL=$(command -v fwupdtool)
+    else
+        echo "raven-firmware: fwupdtool is not installed on this image." >&2
+        echo "  rvn install fwupd" >&2
+        exit 1
+    fi
+fi
+
+# Every one of these reads or writes device firmware directly. Refusing early
+# with the reason beats fwupdtool's own permission errors, which arrive after
+# it has loaded every plugin and read like a bug in fwupd.
+if [ "$(id -u)" -ne 0 ]; then
+    echo "raven-firmware $mode: needs root (fwupdtool talks to the hardware directly)" >&2
+    echo "  sudo raven-firmware $mode" >&2
+    exit 1
+fi
+
+# UEFI capsule updates -- system firmware, and the Thunderbolt controllers on
+# many laptops -- are staged by writing an EFI variable and a file to the ESP.
+# init mounts efivarfs (see EARLY_FILESYSTEMS in init/src/main.rs); on a
+# machine booted in BIOS mode it is simply not there, and device updates that
+# go over USB or Thunderbolt still work. Worth one line so a partial device
+# list is not a mystery.
+if [ ! -d /sys/firmware/efi/efivars ] && [ "$mode" != "history" ]; then
+    echo "raven-firmware: no efivarfs; system firmware updates are unavailable" >&2
+    echo "  (this machine booted in BIOS mode -- peripherals are unaffected)" >&2
+fi
+
+case "$mode" in
+    list)
+        exec "$FWUPDTOOL" get-devices
+        ;;
+    history)
+        exec "$FWUPDTOOL" get-history
+        ;;
+    security)
+        exec "$FWUPDTOOL" security
+        ;;
+    check)
+        # refresh fetches signed metadata from the LVFS; --force makes it do so
+        # even when the local copy is not yet stale, which is what someone
+        # running `check` by hand is asking for.
+        "$FWUPDTOOL" refresh --force || {
+            echo "raven-firmware: could not refresh metadata (offline?)" >&2
+            echo "  the list below is from the last copy fetched" >&2
+        }
+        exec "$FWUPDTOOL" get-updates
+        ;;
+    update)
+        "$FWUPDTOOL" refresh --force >/dev/null 2>&1 || true
+        if ! "$FWUPDTOOL" get-updates; then
+            echo "raven-firmware: nothing to update." >&2
+            exit 0
+        fi
+        cat >&2 <<'WARNING'
+
+About to write firmware to the devices listed above.
+
+  * Do not unplug anything, and do not power the machine off.
+  * A dock or drive may reset; a laptop may reboot to apply system firmware.
+  * An interrupted write can leave a device that does not come back.
+
+WARNING
+        printf 'Continue? [y/N] ' >&2
+        read -r reply || reply=n
+        case "$reply" in
+            y|Y|yes|YES) ;;
+            *) echo "raven-firmware: nothing was written." >&2; exit 0 ;;
+        esac
+        exec "$FWUPDTOOL" update
+        ;;
+esac

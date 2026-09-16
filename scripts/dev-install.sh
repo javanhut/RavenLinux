@@ -17,7 +17,7 @@
 #
 # Targets (default: init installer tools):
 #   init        build init/ natively; install raven-init, raven-rc,
-#               raven-powerd, raven-ports, raven-timed to /usr/bin
+#               raven-powerd, raven-ports, raven-timed, raven-mount to /usr/bin
 #               (stage-raven.sh:build_raven_init)
 #   installer-ui  build installer-ui/ natively; install raven-installer-ui and
 #               its launcher entry, icon and metainfo. Not in the default set:
@@ -155,14 +155,14 @@ install_config() {
 # Targets
 # -----------------------------------------------------------------------------
 do_init() {
-    log_section "init crate (raven-init, raven-rc, raven-powerd, raven-ports, raven-timed)"
+    log_section "init crate (raven-init, raven-rc, raven-powerd, raven-ports, raven-timed, raven-mount)"
     local src="${RAVEN_ROOT}/init"
     ( cd "$src" && "${BUILD_AS[@]}" cargo build --release --locked ) || {
         log_error "cargo build failed; nothing installed"
         return 1
     }
     local out="${src}/target/release"
-    for b in raven-init raven-rc raven-powerd raven-ports raven-timed; do
+    for b in raven-init raven-rc raven-powerd raven-ports raven-timed raven-mount; do
         install_file "${out}/${b}" "/usr/bin/${b}" 0755
     done
 }
@@ -281,6 +281,13 @@ if (( NO_RESTART == 0 )); then
     if changed /usr/bin/raven-ports; then
         log_step "restarting ports"
         "${SUDO[@]}" raven-rc restart ports || log_warn "raven-rc restart ports failed"
+    fi
+    if changed /usr/bin/raven-mount; then
+        log_step "restarting mount"
+        # A restart drops nothing: volumes stay mounted, and the record of
+        # which ones are ours is in /run, which outlives the process.
+        "${SUDO[@]}" raven-rc restart mount \
+            || log_warn "raven-rc restart mount failed (new here? run: imlazy dev configs, then sudo raven-rc start mount)"
     fi
     if changed /usr/bin/raven-timed; then
         log_step "restarting timed"

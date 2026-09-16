@@ -140,6 +140,30 @@ RUN pacman -Syu --noconfirm --needed \
         # an unresolved library rather than shipping something that cannot run.
         pipewire pipewire-audio pipewire-pulse wireplumber bluez bluez-utils ell \
         alsa-ucm-conf alsa-topology-conf sof-firmware polkit \
+        # Peripherals above the kernel driver. The kernel had USB_PRINTER and
+        # the USB storage stack in for years and the image shipped nothing that
+        # could use either, so a printer was a dead /dev/usb/lp0 and a phone was
+        # nothing at all. stage-desktop-runtime.py stages these into the sysroot
+        # and treats each as optional, so a rename upstream costs a warning
+        # rather than the ISO.
+        #
+        # Driverless only, deliberately: cups plus cups-filters plus ipp-usb is
+        # about 40MB and covers every IPP Everywhere and AirPrint printer, which
+        # is everything sold in roughly the last decade. ghostscript, gutenprint
+        # and foomatic-db would add most of a gigabyte for older hardware and
+        # are an `rvn install` away for whoever actually has it.
+        cups cups-filters ipp-usb avahi nss-mdns \
+        # Scanners, the same way: eSCL and WSD, no vendor backends.
+        sane sane-airscan \
+        # Phones and cameras -- the device databases and the transfer tools.
+        libmtp libgphoto2 \
+        # Bluetooth file transfer, and lsusb with a readable id database.
+        bluez-obex usbutils hwdata \
+        # Firmware updates. raven-firmware drives fwupdtool directly -- no
+        # fwupd daemon and no polkit -- so a dock, an SSD or a hub with a
+        # known-bad firmware is fixable on a stock image. fwupd-efi is the
+        # capsule loader for system firmware.
+        fwupd fwupd-efi \
         # The GTK4 stack -- SIX of the image's applications, and every one of
         # its graphical *applications* as opposed to its shell, is a GTK4 +
         # libadwaita client: Files, Settings, Store, Power, Controls and the
@@ -198,6 +222,30 @@ RUN pacman -Syu --noconfirm --needed \
         # loader with ldd, so with libheif absent the loader is staged with a
         # dangling NEEDED and check-desktop-image.py rejects the image.
         glycin glycin-gtk4 bubblewrap librsvg dconf libheif \
+        # Owl Player's stack, and the only build dependencies in this file
+        # that belong to a single application.
+        #
+        #   ffmpeg   the player is a front end for libavformat, libavcodec,
+        #            libswscale and libswresample rather than a GStreamer
+        #            widget, and ffmpeg-sys-next probes pkg-config for each of
+        #            them. Arch ships the headers and .pc files in the same
+        #            package as the libraries, so this one name is both halves;
+        #            on a distribution that splits them the -dev package is
+        #            what stage_player's pkg-config check is looking for.
+        #   clang    that crate then runs bindgen over those headers, and
+        #            bindgen dlopens libclang.so. Without it the build stops in
+        #            a build script with "Unable to find libclang" -- which is
+        #            why stage_player looks for the library up front and skips
+        #            the application with a sentence that names the package.
+        #   lld      OwlPlayer's own .cargo/config.toml links this target with
+        #            -fuse-ld=lld. stage_player withdraws that request through
+        #            RUSTFLAGS on a host without it, so this is here for the
+        #            link speed it was asked for rather than to make the build
+        #            possible.
+        #
+        # alsa-lib, which the player's audio output needs, is already in the
+        # compositor group above.
+        ffmpeg clang lld \
         # The terminal needs no packages of its own. stage-gui.sh builds
         # RavenTerminal from source with `go build -tags wayland`, whose GLFW
         # compiles from vendored C against wayland-client/cursor/egl and

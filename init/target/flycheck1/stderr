@@ -1,0 +1,28 @@
+    Blocking waiting for file lock on package cache
+   0.061847333s  INFO prepare_target{force=false package_id=raven-init v0.1.0 (/home/javanstorm/Development/RavenLinux/init) target="raven-mount"}: cargo::core::compiler::fingerprint: fingerprint error for raven-init v0.1.0 (/home/javanstorm/Development/RavenLinux/init)/Check { test: true }/TargetInner { name: "raven-mount", doc: true, ..: with_path("/home/javanstorm/Development/RavenLinux/init/src/mount.rs", Edition2021) }
+   0.061869126s  INFO prepare_target{force=false package_id=raven-init v0.1.0 (/home/javanstorm/Development/RavenLinux/init) target="raven-mount"}: cargo::core::compiler::fingerprint:     err: failed to read `/home/javanstorm/Development/RavenLinux/init/target/debug/.fingerprint/raven-init-b79a20402323246d/test-bin-raven-mount`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: <unknown>
+   1: <unknown>
+   2: <unknown>
+   3: <unknown>
+   4: <unknown>
+   5: <unknown>
+   6: <unknown>
+   7: <unknown>
+   8: <unknown>
+   9: <unknown>
+  10: <unknown>
+  11: <unknown>
+  12: <unknown>
+  13: <unknown>
+  14: <unknown>
+  15: <unknown>
+  16: __libc_start_main
+  17: <unknown>
+    Checking raven-init v0.1.0 (/home/javanstorm/Development/RavenLinux/init)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.37s

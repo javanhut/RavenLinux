@@ -1,0 +1,16 @@
+# Avahi. Network printers and scanners announce themselves over mDNS and are
+# found no other way -- a driverless printing stack without this can only
+# print to something plugged into a USB port.
+#
+# avahi-daemon stays in the foreground unless given -D, which is what raven-init
+# wants. It binds :5353 as root and drops to the avahi account.
+[[services]]
+name = "avahi-daemon"
+description = "mDNS/DNS-SD: find printers and scanners on the network"
+exec = "/usr/bin/avahi-daemon"
+args = []
+after = ["dbus", "network"]
+runtime_dirs = ["/run/avahi-daemon"]
+restart = true
+enabled = true
+critical = false

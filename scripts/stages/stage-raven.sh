@@ -475,6 +475,10 @@ build_raven_init() {
     # other half of init's boot-time hwclock read -- NTP sync keeps the RTC
     # worth reading, and its socket is how the timezone gets set.
     install -m 0755 "${outdir}/raven-timed" "${SYSROOT_DIR}/usr/bin/raven-timed"
+    # Removable storage. init.toml starts it as the `mount` service; without
+    # it a plugged-in USB drive is a device node and nothing else, which is
+    # what every file manager on the machine shows: nothing.
+    install -m 0755 "${outdir}/raven-mount" "${SYSROOT_DIR}/usr/bin/raven-mount"
 
     # stage4 owns the poweroff/reboot/halt/shutdown names and installs a
     # dispatcher that uses raven-rc when raven-init is PID 1, with an emergency
@@ -486,6 +490,7 @@ build_raven_init() {
     log_success "  raven-powerd installed ($(du -h "${outdir}/raven-powerd" | cut -f1))"
     log_success "  raven-ports installed ($(du -h "${outdir}/raven-ports" | cut -f1))"
     log_success "  raven-timed installed ($(du -h "${outdir}/raven-timed" | cut -f1))"
+    log_success "  raven-mount installed ($(du -h "${outdir}/raven-mount" | cut -f1))"
 }
 
 build_all_components() {

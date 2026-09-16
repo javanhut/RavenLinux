@@ -71,7 +71,7 @@ declare -a RAVEN_COMPONENTS=(
 # row above -- but it is built by the same stage and it is just as required, so
 # the check has to know about it. raven-rc dispatches on argv[0], so
 # poweroff/reboot/halt/shutdown are symlinks to it and not separate binaries.
-RAVEN_INIT_BINARIES="raven-init,raven-rc,raven-powerd,raven-ports,raven-timed"
+RAVEN_INIT_BINARIES="raven-init,raven-rc,raven-powerd,raven-ports,raven-timed,raven-mount"
 
 # =============================================================================
 # The base layer -- scripts/stages/stage2-native.sh
@@ -98,7 +98,14 @@ RAVEN_INIT_BINARIES="raven-init,raven-rc,raven-powerd,raven-ports,raven-timed"
 #
 # syslogd and klogd are deliberately absent: their services ship
 # `enabled = false`, so an image without them is the intended image.
-RAVEN_BASE_BINARIES="raven-udev,raven-console-font,agetty,dbus-daemon,raven-dhcp,dhcpcd"
+#
+# raven-firmware is the one entry here that init.toml does not name in an exec
+# -- it has no service on purpose, because nothing should write firmware to a
+# dock unasked. It is in the list anyway, for the reason the list exists: it is
+# installed by stage2's install_raven_firmware and would go missing exactly as
+# quietly as raven-dhcp did, with the same "there is no such program" outcome
+# for anyone who ran it.
+RAVEN_BASE_BINARIES="raven-udev,raven-console-font,agetty,dbus-daemon,raven-dhcp,dhcpcd,raven-firmware"
 
 # =============================================================================
 # The GUI layer -- scripts/stages/stage-gui.sh
@@ -134,6 +141,7 @@ declare -a GUI_APPS=(
     "CONTROLS|RavenControls|raven-controls,raven-controlsd|gui/raven-controls|Raven Controls - keyboard backlight, fans and thermals, with its daemon"
     "VIEWER|RavenViewer|raven-viewer|gui/raven-viewer|Raven Viewer - the PDF and DOCX reader"
     "EAGLEEYE|EagleEye|eagleeye|gui/eagleeye|EagleEye - the image viewer"
+    "PLAYER|OwlPlayer|owl-player|gui/owl-player|Owl Player - the media player"
     "LOGIN|RavenLogin|ravend,raven-greeter,raven-lock|gui/ravenlogin|Raven Login - the display manager, its greeter and the lock screen"
     "CANVAS|RavenCanvas|ravencanvasd,ravencanvas|gui/ravencanvas|Raven Canvas - the wallpaper daemon and its CLI"
     "ROOSTBAR|RoostBar|roostbar|gui/roostbar|RoostBar - the layer-shell status bar"

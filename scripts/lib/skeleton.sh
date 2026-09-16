@@ -173,6 +173,19 @@ RAVEN_SKELETON_DIRS_VAR=(
     "var/opt:755"
     "var/spool:755"
     "var/spool/mail:1777"     # target of /var/mail; sticky, same as /tmp
+    # cupsd and avahi-daemon need their state and spool trees to exist before
+    # they start. stage-desktop-runtime.py stages package *files* and skips
+    # directory entries, so an empty directory a package would have created
+    # never arrives -- and cupsd exits rather than create its own spool.
+    "var/spool/cups:710:209"
+    "var/spool/cups/tmp:1770:209"
+    "var/cache/cups:770:209"
+    "var/log/cups:755"
+    "var/lib/cups:755"
+    "var/lib/avahi:755:84"
+    "var/spool/bluetooth:775:92"   # obexd inbox; group audio, as bluetooth is
+    "var/lib/fwupd:755"            # fwupd state: pending updates and the history db
+    "var/cache/fwupd:755"          # downloaded LVFS metadata and firmware cabinets
     "var/tmp:1777"
 )
 
@@ -408,6 +421,7 @@ RAVEN_SKELETON_GROUPS=(
     "proc:26"
     "games:50"
     "lock:54"
+    "avahi:84"                # avahi-daemon drops to this after opening :5353
     "network:90"
     "video:91"
     "audio:92"
@@ -417,6 +431,7 @@ RAVEN_SKELETON_GROUPS=(
     "scanner:96"
     "input:97"
     "power:98"
+    "cups:209"                # cupsd's own account; /etc/cups is gid 209 in Arch's payload
     "nobody:65534"
 )
 
@@ -427,6 +442,12 @@ RAVEN_SKELETON_USERS=(
     "mail:8:12::/var/spool/mail:/usr/bin/nologin"   # uid 8, gid 12: intentional
     "ftp:14:11::/srv/ftp:/usr/bin/nologin"
     "http:33:33::/srv/http:/usr/bin/nologin"
+    # cupsd and avahi-daemon both start as root -- one to bind :631 and open
+    # the USB backend, the other to bind :5353 -- and drop to these. Without
+    # the accounts in the shipped files, both refuse to start rather than run
+    # as root, because there is no sysusers here to create them later.
+    "avahi:84:84::/var/lib/avahi:/usr/bin/nologin"
+    "cups:209:209::/var/spool/cups:/usr/bin/nologin"
 )
 
 # `http` has no group in arch.conf's group block because sysusers derives it

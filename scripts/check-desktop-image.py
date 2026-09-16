@@ -60,8 +60,15 @@ def digest(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
+# Things worth saying about an image that are not wrong with it. Populated by
+# validate(), printed by main(); cleared on each call so a second validate in
+# the same process does not inherit the first one's notes.
+NOTES = []
+
+
 def validate(root, binaries, desktop=True, sources=()):
     errors = []
+    NOTES.clear()
     def exists(name, executable=False):
         try:
             p = target_path(root, name)
@@ -119,7 +126,7 @@ def validate(root, binaries, desktop=True, sources=()):
                 for command in filter(None, commands):
                     if not exists(command, True):
                         errors.append(f'{name}: missing service executable {command}')
-        for name in ['cawd', 'powerd', 'controlsd', 'timed', 'ports', 'bluetoothd']:
+        for name in ['cawd', 'powerd', 'controlsd', 'timed', 'ports', 'mount', 'bluetoothd']:
             if name not in enabled:
                 errors.append(f'Missing enabled service definition: {name}')
         passwd = root / 'etc/passwd'
@@ -127,6 +134,22 @@ def validate(root, binaries, desktop=True, sources=()):
         for name in ['dbus', 'raven-greeter']:
             if name not in names:
                 errors.append(f'Missing daemon account: {name}')
+        # A daemon that drops privilege to an account the image does not have
+        # does not start. These services are optional -- stage-gui.sh installs
+        # each drop-in only when its binary arrived -- so the account is only
+        # required when the service it belongs to is actually enabled.
+        for service, account in [('cupsd', 'cups'), ('avahi-daemon', 'avahi')]:
+            if service in enabled and account not in names:
+                errors.append(f'{service} is enabled but there is no {account} account')
+        # Not errors, only notes: an image can legitimately ship without the
+        # printing stack, but "did printing make it in" should not need a
+        # filesystem tour to answer. validate() returns errors, so these go in
+        # a list the caller prints rather than out of here directly.
+        for what, marker in [('printing', 'cupsd'), ('printer discovery', 'avahi-daemon'),
+                             ('driverless USB printing', 'ipp-usb'),
+                             ('Bluetooth file transfer', 'obexd')]:
+            if marker not in enabled:
+                NOTES.append(f'no {what} on this image ({marker} is not enabled)')
     # Inspect ELF metadata only: do not execute programs or resolve libraries
     # against the builder's root. Check plugins as well as launchable programs.
     #
@@ -223,6 +246,8 @@ def main():
     args = parser.parse_args()
     root = args.root.absolute()
     errors = validate(root, args.binary, sources=args.source)
+    for note in NOTES:
+        print('note: ' + note)
     for error in errors:
         print('ERROR: ' + error, file=sys.stderr)
     if errors and not args.allow_incomplete:

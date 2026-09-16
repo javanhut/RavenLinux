@@ -34,6 +34,12 @@ pub struct ShrinkCandidate {
     /// What the installer thinks is on it: "Windows", "Windows Recovery",
     /// "ext4 (ubuntu)". Its own words, from part_os_hint.
     pub os: String,
+    /// The filesystem can be made smaller at all, by this image, right now.
+    /// A fact about the partition: nothing on screen changes it.
+    pub resizable: bool,
+    /// Resizable *and* able to spare what the install needs. The probe decided
+    /// this at the swap it would have chosen itself, so it moves when the swap
+    /// switch does -- `Disk::shrinkable_for` is the one to ask.
     pub shrinkable: bool,
     /// Why not, when `shrinkable` is false. Shown rather than hidden: "this
     /// partition is greyed out" with no reason is the thing people file bugs
@@ -72,6 +78,12 @@ pub struct Disk {
     pub free_bytes: u64,
     pub min_root_bytes: u64,
     pub min_headroom_bytes: u64,
+    /// The swap partition the installer would create, which comes out of the
+    /// same gap as the root. Zero when swap is off.
+    pub swap_bytes: u64,
+    /// `min_root_bytes + swap_bytes` -- what the gap actually has to hold, and
+    /// the figure the probe judged `alongside` by.
+    pub min_total_bytes: u64,
     pub candidates: Vec<ShrinkCandidate>,
 }
 
@@ -89,17 +101,81 @@ impl Disk {
         s
     }
 
-    /// The partitions actually worth offering as a source of space.
-    pub fn shrinkable(&self) -> Vec<&ShrinkCandidate> {
-        self.candidates.iter().filter(|c| c.shrinkable).collect()
+    /// What an alongside install has to find on this disk, for a given swap.
+    ///
+    /// The probe answered this for the swap the installer would have picked on
+    /// its own, and `min_total_bytes` is that answer. The swap switch is two
+    /// groups further down the same page, though, so by the time anything is
+    /// on screen the person may have turned swap off -- and then the figure to
+    /// judge by is the root alone. Recomputing beats re-running the probe: the
+    /// two numbers it takes are both already here.
+    pub fn min_total_for(&self, swap_bytes: u64) -> u64 {
+        self.min_root_bytes.saturating_add(swap_bytes)
     }
 
     /// True when the disk already has room and no filesystem needs touching.
     /// This is the safe case and it is worth saying so on screen: it is the
     /// difference between "we will resize Windows" and "we will use the space
     /// you already left".
-    pub fn has_free_room(&self) -> bool {
-        self.min_root_bytes > 0 && self.free_bytes >= self.min_root_bytes
+    ///
+    /// `swap_bytes` is part of the question because swap is carved out of the
+    /// same unallocated run as the root: a 20 GiB hole is room for RavenLinux
+    /// and is not room for RavenLinux plus a 16 GiB swap.
+    pub fn has_free_room(&self, swap_bytes: u64) -> bool {
+        self.min_root_bytes > 0 && self.free_bytes >= self.min_total_for(swap_bytes)
+    }
+
+    /// The partitions that could give up `min_total_for(swap_bytes)`.
+    ///
+    /// `shrinkable` is the probe's verdict at its own swap figure; this is the
+    /// same verdict re-taken at the swap actually chosen, so turning swap off
+    /// brings back a partition that was too small with it on.
+    pub fn shrinkable_for(&self, swap_bytes: u64) -> Vec<&ShrinkCandidate> {
+        let need = self.min_total_for(swap_bytes);
+        self.candidates
+            .iter()
+            .filter(|c| c.resizable && c.spare_bytes >= need)
+            .collect()
+    }
+
+    /// Can RavenLinux go on this disk without erasing it, at this swap size?
+    ///
+    /// The probe's own `alongside` is this question answered at the probe's
+    /// own swap figure. Re-asking it here is what keeps the disk page honest
+    /// in both directions: a disk the probe ruled out only on size comes back
+    /// when swap is turned off, and one it allowed stops being offered if the
+    /// swap it was judged against grows.
+    pub fn alongside_for(&self, swap_bytes: u64) -> bool {
+        // Unreadable, no partition table, not GPT, no ESP: the probe stopped
+        // before it reported any of the numbers below, and not one of those
+        // refusals is about size, so nothing here can overturn them.
+        if self.min_root_bytes == 0 {
+            return self.alongside;
+        }
+        self.free_bytes >= self.min_total_for(swap_bytes)
+            || !self.shrinkable_for(swap_bytes).is_empty()
+    }
+
+    /// Why `alongside_for` said no, in the installer's own words where they
+    /// still apply and in the same shape where the figure has moved.
+    pub fn alongside_why_for(&self, swap_bytes: u64) -> String {
+        if self.min_root_bytes == 0 {
+            return self.alongside_why.clone();
+        }
+        let mut s = format!(
+            "no free space and nothing that can give up {}",
+            human_bytes(self.min_total_for(swap_bytes))
+        );
+        // The lever, named only when pulling it would actually help. Offering
+        // "turn swap off" on a disk that is full either way is advice that
+        // costs the person a page of clicking to find out it was wrong.
+        if swap_bytes > 0 && self.alongside_for(0) {
+            s.push_str(&format!(
+                " -- {} of that is the swap partition, which you can turn off under Layout below",
+                human_bytes(swap_bytes)
+            ));
+        }
+        s
     }
 
     pub fn holds_summary(&self) -> Option<String> {
@@ -350,6 +426,7 @@ pub fn parse(text: &str) -> Probe {
                     "part.fstype" => c.fstype = value.to_string(),
                     "part.label" => c.label = value.to_string(),
                     "part.os" => c.os = value.to_string(),
+                    "part.resizable" => c.resizable = value == "1",
                     "part.shrinkable" => c.shrinkable = value == "1",
                     "part.why" => c.why = value.to_string(),
                     "part.used_bytes" => c.used_bytes = value.parse().unwrap_or(0),
@@ -374,6 +451,8 @@ pub fn parse(text: &str) -> Probe {
                     "disk.min_headroom_bytes" => {
                         d.min_headroom_bytes = value.parse().unwrap_or(0)
                     }
+                    "disk.swap_bytes" => d.swap_bytes = value.parse().unwrap_or(0),
+                    "disk.min_total_bytes" => d.min_total_bytes = value.parse().unwrap_or(0),
                     "disk.part" => {
                         let f: Vec<&str> = value.splitn(4, '|').collect();
                         d.parts.push(Partition {
@@ -510,16 +589,20 @@ probe.end=1
              disk.esp=/dev/sda1\n\
              disk.free_bytes=0\n\
              disk.min_root_bytes=12884901888\n\
+             disk.swap_bytes=17179869184\n\
+             disk.min_total_bytes=30064771072\n\
              part.begin=/dev/sda3\n\
              part.size_bytes=66571993088\n\
              part.fstype=ntfs\n\
              part.os=Windows\n\
+             part.resizable=1\n\
              part.shrinkable=1\n\
              part.used_bytes=21474836480\n\
              part.spare_bytes=40802189312\n\
              part.end=/dev/sda3\n\
              part.begin=/dev/sda4\n\
              part.fstype=xfs\n\
+             part.resizable=0\n\
              part.shrinkable=0\n\
              part.why=xfs cannot be shrunk here\n\
              part.end=/dev/sda4\n\
@@ -534,11 +617,12 @@ probe.end=1
         let a = &p.disks[0];
         assert!(a.alongside);
         assert_eq!(a.esp, "/dev/sda1");
-        assert!(!a.has_free_room(), "0 free is not room for a 12 GiB root");
+        assert!(!a.has_free_room(0), "0 free is not room for a 12 GiB root");
         assert_eq!(a.candidates.len(), 2);
-        assert_eq!(a.shrinkable().len(), 1);
-        assert_eq!(a.shrinkable()[0].dev, "/dev/sda3");
-        assert_eq!(a.shrinkable()[0].os, "Windows");
+        // 38 GiB to spare covers a 12 GiB root and a 16 GiB swap either way.
+        assert_eq!(a.shrinkable_for(a.swap_bytes).len(), 1);
+        assert_eq!(a.shrinkable_for(a.swap_bytes)[0].dev, "/dev/sda3");
+        assert_eq!(a.shrinkable_for(a.swap_bytes)[0].os, "Windows");
         assert_eq!(a.candidates[1].why, "xfs cannot be shrunk here");
 
         // The second disk gets none of the first disk's partitions.
@@ -555,9 +639,92 @@ probe.end=1
              disk.alongside=1\n\
              disk.free_bytes=68719476736\n\
              disk.min_root_bytes=12884901888\n\
+             disk.swap_bytes=17179869184\n\
+             disk.min_total_bytes=30064771072\n\
              disk.end=/dev/sda\n",
         );
-        assert!(p.disks[0].has_free_room());
+        // 64 GiB is room for the root and the swap that goes beside it.
+        assert!(p.disks[0].has_free_room(p.disks[0].swap_bytes));
+    }
+
+    #[test]
+    fn swap_comes_out_of_the_same_hole_as_the_root() {
+        // The bug this guards: the probe used to answer "is there room" about
+        // the root alone, while plan_alongside_partitions put swap in the same
+        // gap. On a 16 GB machine that offered an install needing 12 GiB and
+        // then asked for 28.
+        let p = parse(
+            "disk.begin=/dev/sda\n\
+             disk.alongside=0\n\
+             disk.esp=/dev/sda1\n\
+             disk.free_bytes=21474836480\n\
+             disk.min_root_bytes=12884901888\n\
+             disk.swap_bytes=17179869184\n\
+             disk.min_total_bytes=30064771072\n\
+             disk.alongside_why=no free space and nothing that can give up 28.0 GiB\n\
+             disk.end=/dev/sda\n",
+        );
+        let d = &p.disks[0];
+
+        // 20 GiB of free space: a root fits, a root plus a 16 GiB swap does not.
+        assert_eq!(d.min_total_for(d.swap_bytes), 30064771072);
+        assert!(!d.has_free_room(d.swap_bytes));
+        assert!(d.has_free_room(0));
+
+        // And so the whole disk swings on the swap switch.
+        assert!(!d.alongside_for(d.swap_bytes));
+        assert!(d.alongside_for(0));
+
+        // The refusal has to name the lever, or "28.0 GiB" is a number nobody
+        // can account for on a machine with 16 GB of memory.
+        let why = d.alongside_why_for(d.swap_bytes);
+        assert!(why.contains("16.0 GiB"), "{why}");
+        assert!(why.contains("turn off"), "{why}");
+    }
+
+    #[test]
+    fn a_partition_too_small_for_swap_comes_back_without_it() {
+        // 20 GiB of spare on the only resizable partition: enough for a root,
+        // not enough for a root and a 16 GiB swap.
+        let p = parse(
+            "disk.begin=/dev/sda\n\
+             disk.alongside=0\n\
+             disk.esp=/dev/sda1\n\
+             disk.free_bytes=0\n\
+             disk.min_root_bytes=12884901888\n\
+             disk.swap_bytes=17179869184\n\
+             disk.min_total_bytes=30064771072\n\
+             part.begin=/dev/sda3\n\
+             part.size_bytes=66571993088\n\
+             part.os=Windows\n\
+             part.resizable=1\n\
+             part.shrinkable=0\n\
+             part.why=only 20.0 GiB to spare; this install needs 28.0 GiB\n\
+             part.used_bytes=21474836480\n\
+             part.spare_bytes=21474836480\n\
+             part.end=/dev/sda3\n\
+             disk.end=/dev/sda\n",
+        );
+        let d = &p.disks[0];
+        assert!(d.shrinkable_for(d.swap_bytes).is_empty());
+        assert_eq!(d.shrinkable_for(0).len(), 1);
+        assert!(!d.alongside_for(d.swap_bytes));
+        assert!(d.alongside_for(0));
+    }
+
+    #[test]
+    fn an_early_refusal_is_not_about_size() {
+        // No ESP, no GPT, unreadable: the probe stops before it reports any of
+        // the numbers, and turning swap off cannot bring those disks back.
+        let p = parse(
+            "disk.begin=/dev/sdb\n\
+             disk.alongside=0\n\
+             disk.alongside_why=no EFI System Partition\n\
+             disk.end=/dev/sdb\n",
+        );
+        let d = &p.disks[0];
+        assert!(!d.alongside_for(0));
+        assert_eq!(d.alongside_why_for(0), "no EFI System Partition");
     }
 
     #[test]

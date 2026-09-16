@@ -86,6 +86,14 @@ pub struct App {
     /// thing that has to show and hide them is a callback on a different
     /// widget, built in a different loop.
     pub mode_groups: RefCell<Vec<(String, adw::PreferencesGroup, gtk::CheckButton)>>,
+    /// Re-judge the "install alongside" rows, one closure per disk.
+    ///
+    /// Swap comes out of the same unallocated space as the root, so how much
+    /// room an alongside install needs depends on a switch two groups further
+    /// down the page -- and that switch is built after these rows, by a
+    /// different function, and cannot reach them. Held here for the same
+    /// reason as `mode_groups` above.
+    pub swap_watchers: RefCell<Vec<Rc<dyn Fn()>>>,
 }
 
 impl App {
@@ -388,6 +396,7 @@ fn build_wizard(window: &adw::ApplicationWindow, p: Probe, level: Priv, installe
         disk_dirty: Cell::new(false),
         installing: Cell::new(false),
         mode_groups: RefCell::new(Vec::new()),
+        swap_watchers: RefCell::new(Vec::new()),
     });
 
     pages::build_all(&app);

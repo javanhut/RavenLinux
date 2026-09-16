@@ -1,0 +1,107 @@
+# The media player, and the default handler for every video and audio type on
+# this image.
+#
+# It is a GTK4 + libadwaita application like Raven Viewer and EagleEye beside
+# it, and it is the one whose build asks the host for something they do not.
+# The other two decode their formats in pure Rust; this one is a front end for
+# FFmpeg, so the build host needs FFmpeg's shared libraries *and* its headers,
+# and ffmpeg-sys-next reads those headers with bindgen -- which loads
+# libclang.so at build time. See the [dependencies] build list below, and
+# stage_player() in scripts/stages/stage-gui.sh, which checks for both before
+# it starts and skips the application rather than failing the stage.
+[package]
+name = "owl-player"
+version = "0.1.0"
+description = "Owl Player - the media player"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/javanhut/OwlPlayer"
+repository = "https://github.com/javanhut/OwlPlayer"
+maintainers = ["RavenLinux Team"]
+categories = ["gui", "wayland", "application"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/OwlPlayer.git"
+# Unpinned, like eagleeye, ravengui, ravenlogin and ravencanvas: nothing has
+# been tagged in that repository yet. A `commit` added here is read by the GUI
+# stage through raven_resolve_ref, so pinning it at the first release is a
+# one-line change here and nowhere else.
+
+[build]
+system = "cargo"
+# The same glibc target as raven-viewer and eagleeye. For those two it is GTK4
+# and libadwaita that have no musl build; here it would be the wrong target
+# even without them, because ffmpeg-sys-next links the host's FFmpeg and that
+# is a glibc object.
+#
+# One `cargo build` over the whole workspace: owl-media and owl-render are path
+# dependencies of owl-player, so there is nothing to pass -p for. The split
+# between them is a threading rule inside the application -- decode threads
+# never touch GTK -- and not three things to build.
+target = "x86_64-unknown-linux-gnu"
+build_flags = ["--release", "--locked"]
+
+[dependencies]
+# Shared libraries are resolved with ldd at build time -- see
+# stage_gui_libraries() in stage-gui.sh. What is listed is what a package
+# manager would have to install on a system that did not get those files
+# staged off a build host.
+#
+# ffmpeg is the whole reason this application exists rather than a GStreamer
+# widget: libavformat, libavcodec, libswscale and libswresample are what it
+# demuxes and decodes with, and libavfilter and libavdevice come with them in
+# ffmpeg-next's default features. The list of things Owl Player opens is the
+# list of things that FFmpeg opens.
+#
+# alsa-lib and pipewire are one requirement wearing two names. The player's
+# output goes through cpal, which speaks ALSA; on this desktop the PCM it opens
+# is PipeWire's, which is what pipewire-audio installs. Both halves are already
+# on the image for RoostBar and the session's own daemons, and are named here
+# because an image built without them has a player that draws a window and
+# plays silence.
+#
+# mesa for libEGL and libGL: the video plane is a GL texture, and owl-render
+# resolves its entry points through eglGetProcAddress rather than linking them.
+runtime = [
+    "gtk4", "libadwaita", "glib2", "gsettings-desktop-schemas",
+    "shared-mime-info", "desktop-file-utils", "hicolor-icon-theme",
+    "ffmpeg", "alsa-lib", "pipewire", "pipewire-audio", "mesa",
+]
+# clang and lld are build-only, and neither is the usual kind of build
+# dependency -- nothing links against them.
+#
+#   clang  ffmpeg-sys-next runs bindgen over the FFmpeg headers, and bindgen
+#          dlopens libclang.so to parse them. Without it the build fails inside
+#          a -sys crate's build script with "Unable to find libclang", which
+#          names nothing a reader would connect to a missing compiler.
+#   lld    the checkout's own .cargo/config.toml passes
+#          `-C link-arg=-fuse-ld=lld` for this target. It is there for link
+#          speed and not for correctness, but cargo does not treat a missing
+#          linker as a reason to fall back to another one.
+build = [
+    "rust", "cargo", "pkg-config", "gtk4", "libadwaita", "glib2",
+    "ffmpeg", "alsa-lib", "clang", "lld",
+]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-gnu/release/owl-player", dest = "/usr/bin/owl-player", mode = 755 },
+    { src = "data/icons/hicolor/scalable/apps/com.owlplayer.Raven.svg", dest = "/usr/share/icons/hicolor/scalable/apps/com.owlplayer.Raven.svg", mode = 644 },
+    { src = "data/com.owlplayer.Raven.metainfo.xml", dest = "/usr/share/metainfo/com.owlplayer.Raven.metainfo.xml", mode = 644 }
+]
+
+# data/raven-glass*.css and data/owl-player.css are deliberately absent:
+# crates/owl-player/src/theme.rs include_str!s all three, so the stylesheets
+# are inside the binary. The GL shaders are the same story one crate over --
+# owl-render's src/lib.rs include_str!s each of the six.
+#
+# The upstream data/com.owlplayer.Raven.desktop is deliberately not in this
+# list either. install_desktop_entries() in scripts/stages/stage-gui.sh writes
+# every application entry on this image, and the one it writes is also what
+# claims the video and audio MIME types in mimeapps.list. It differs from
+# upstream's in one field: StartupWMClass is the application id rather than
+# "owl-player", because adw::Application sets the window's app_id from its id
+# and that is what the dock matches on.
+
+# usr-merged root: no /bin aliases. See scripts/lib/usrmerge.sh.
+symlinks = []
