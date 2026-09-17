@@ -90,7 +90,8 @@ import_fn initrd_cat initrd_root_support
 import_fn partdev valid_username valid_hostname \
           ensure_group add_group_member remove_group_member next_free_uid \
           create_user grant_sudo open_local_prefix set_hostname set_locale_and_time \
-          switch_to_raven_init remove_live_credentials
+          switch_to_raven_init remove_live_credentials \
+          remove_graphical_installer
 
 # =============================================================================
 # Partition device naming
@@ -584,6 +585,63 @@ if [[ -f "${STAGE4}" ]]; then
         failed "the live sudo rule is not scoped to the two expected commands" \
                "got: ${rule_line:-<no %wheel NOPASSWD line>}"
     fi
+fi
+
+# =============================================================================
+# The graphical installer does not survive the install
+# =============================================================================
+#
+# The squashfs is copied wholesale, so raven-installer-ui and its launcher
+# entry land on the disk the installer just wrote -- an application whose only
+# job is to partition a disk and copy a system onto it, in the launcher of the
+# system it copied. The entry, its icon, its metainfo and the binary all go.
+#
+# raven-install stays: it is not in the launcher, and it is what installs this
+# machine onto a second disk or reinstalls its bootloader.
+section "the graphical installer is removed at install time"
+
+TARGET="${WORKDIR}/gui-installer"
+build_mock_target "$TARGET"
+mkdir -p "${TARGET}/usr/share/applications" \
+         "${TARGET}/usr/share/icons/hicolor/scalable/apps" \
+         "${TARGET}/usr/share/metainfo"
+UI_BIN="${TARGET}/usr/bin/raven-installer-ui"
+UI_DESKTOP="${TARGET}/usr/share/applications/com.raveninstaller.Raven.desktop"
+UI_ICON="${TARGET}/usr/share/icons/hicolor/scalable/apps/com.raveninstaller.Raven.svg"
+UI_METAINFO="${TARGET}/usr/share/metainfo/com.raveninstaller.Raven.metainfo.xml"
+printf '#!/bin/sh\n' > "${UI_BIN}"; chmod 0755 "${UI_BIN}"
+printf '[Desktop Entry]\n' > "${UI_DESKTOP}"
+printf '<svg/>\n'          > "${UI_ICON}"
+printf '<component/>\n'    > "${UI_METAINFO}"
+# The neighbours that must be left alone.
+printf '#!/bin/sh\n' > "${TARGET}/usr/bin/raven-install"; chmod 0755 "${TARGET}/usr/bin/raven-install"
+printf '[Desktop Entry]\n' > "${TARGET}/usr/share/applications/com.ravenstore.Raven.desktop"
+
+remove_graphical_installer
+
+absent "the launcher entry is gone"      "${UI_DESKTOP}"
+absent "the binary is gone"              "${UI_BIN}"
+absent "the icon is gone"                "${UI_ICON}"
+absent "the metainfo is gone"            "${UI_METAINFO}"
+exists "raven-install is left in place"  "${TARGET}/usr/bin/raven-install"
+exists "other launcher entries are left alone" \
+    "${TARGET}/usr/share/applications/com.ravenstore.Raven.desktop"
+
+# Idempotent, for the same reason remove_live_credentials is: an installed
+# machine cloning itself onto a second disk has none of these files, and
+# configure_system calls this on every install regardless.
+remove_graphical_installer && pass "running it again on a system without the entry is fine" \
+    || failed "removing an absent graphical installer reported an error"
+
+# The other half of the pair. stage-gui writes the entry and the binary at the
+# paths this removes; if either side is renamed and the other is not, the
+# installed system keeps an "Install RavenLinux" entry nobody meant to ship.
+STAGE_GUI="${SCRIPT_DIR}/../stages/stage-gui.sh"
+if [[ -f "${STAGE_GUI}" ]]; then
+    matches "stage-gui installs the app id this function removes" \
+        'com\.raveninstaller\.Raven' "${STAGE_GUI}"
+    matches "stage-gui installs the binary this function removes" \
+        'raven-installer-ui' "${STAGE_GUI}"
 fi
 
 # =============================================================================

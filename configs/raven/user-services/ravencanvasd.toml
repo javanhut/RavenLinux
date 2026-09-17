@@ -9,3 +9,16 @@ after = []
 restart = true
 enabled = true
 critical = false
+
+# The daemon reads a wallpaper at its full size, scales it for the screen and
+# hands the source straight back; see `Engine::release_sources`. glibc will not
+# return a freed block that large to the kernel on its own -- it keeps it in
+# the arena against a future allocation the daemon never makes -- so without
+# these it gives back about half of what it let go. Measured on a 4608x3456
+# photograph: 96 MB resident before the release, 65 MB after it, 34 MB with
+# these set. The thresholds stop being adaptive, which is what is wanted here:
+# this process makes a handful of large, long-lived allocations and no small
+# churn for an adaptive threshold to learn from.
+[services.environment]
+MALLOC_MMAP_THRESHOLD_ = "131072"
+MALLOC_TRIM_THRESHOLD_ = "131072"

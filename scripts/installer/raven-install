@@ -2633,6 +2633,46 @@ remove_live_credentials() {
     fi
 }
 
+# Take the graphical installer off the machine it just installed.
+#
+# The squashfs is copied wholesale, so everything the live image carries lands
+# on the target -- including raven-installer-ui and the "Install RavenLinux"
+# entry that puts it in the launcher. On the ISO that entry is the point of the
+# image. On the disk it has just written, it is an application whose entire job
+# is to partition a disk and copy a system onto it, sitting in the launcher of
+# the system it copied, one click away, offering to do it again.
+#
+# So the entry, its icon, its metainfo -- which is what the store reads -- and
+# the binary all go. Removing the binary as well as the entry is deliberate:
+# an entry with a binary still behind it is a launcher search away from being
+# found by name, which is most of what the entry was doing.
+#
+# raven-install itself stays. It is not in the launcher, nothing on the desktop
+# starts it, and it is what installs this machine onto a second disk, restores
+# a bootloader, or reinstalls over the top -- see stage4-iso.sh's
+# install_installer(), which puts it in the squashfs for exactly that reason.
+# The rule this draws is "no graphical installer on an installed system", not
+# "an installed system cannot install".
+remove_graphical_installer() {
+    local removed=0 f
+    local files=(
+        "usr/bin/raven-installer-ui"
+        "usr/share/applications/com.raveninstaller.Raven.desktop"
+        "usr/share/icons/hicolor/scalable/apps/com.raveninstaller.Raven.svg"
+        "usr/share/metainfo/com.raveninstaller.Raven.metainfo.xml"
+    )
+
+    for f in "${files[@]}"; do
+        if [[ -e "${TARGET}/${f}" ]]; then
+            rm -f "${TARGET}/${f}" && removed=$((removed + 1))
+        fi
+    done
+
+    if (( removed > 0 )); then
+        ok "Graphical installer removed from the installed system (${removed} files)"
+    fi
+}
+
 # Put the seatd service definition where raven-rc can see it.
 #
 # The other templates under /usr/share/raven/services are inert until `rvn
@@ -2779,6 +2819,7 @@ configure_system() {
     set_locale_and_time
     switch_to_raven_init
     remove_live_credentials
+    remove_graphical_installer
     install_seat_service
     install_postinstall_service
     {
