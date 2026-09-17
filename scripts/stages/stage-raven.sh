@@ -479,6 +479,12 @@ build_raven_init() {
     # it a plugged-in USB drive is a device node and nothing else, which is
     # what every file manager on the machine shows: nothing.
     install -m 0755 "${outdir}/raven-mount" "${SYSROOT_DIR}/usr/bin/raven-mount"
+    # The fingerprint sensor. init.toml starts it as the `fprintd` service on a
+    # machine that has a reader; on one that does not it answers "absent" and
+    # costs a socket, which is a far better answer for a settings panel than a
+    # missing socket it has to guess about. Nothing else on the image can talk
+    # to the device -- there is no libfprint here.
+    install -m 0755 "${outdir}/raven-fprintd" "${SYSROOT_DIR}/usr/bin/raven-fprintd"
 
     # stage4 owns the poweroff/reboot/halt/shutdown names and installs a
     # dispatcher that uses raven-rc when raven-init is PID 1, with an emergency
@@ -491,6 +497,7 @@ build_raven_init() {
     log_success "  raven-ports installed ($(du -h "${outdir}/raven-ports" | cut -f1))"
     log_success "  raven-timed installed ($(du -h "${outdir}/raven-timed" | cut -f1))"
     log_success "  raven-mount installed ($(du -h "${outdir}/raven-mount" | cut -f1))"
+    log_success "  raven-fprintd installed ($(du -h "${outdir}/raven-fprintd" | cut -f1))"
 }
 
 build_all_components() {

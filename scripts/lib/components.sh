@@ -71,7 +71,7 @@ declare -a RAVEN_COMPONENTS=(
 # row above -- but it is built by the same stage and it is just as required, so
 # the check has to know about it. raven-rc dispatches on argv[0], so
 # poweroff/reboot/halt/shutdown are symlinks to it and not separate binaries.
-RAVEN_INIT_BINARIES="raven-init,raven-rc,raven-powerd,raven-ports,raven-timed,raven-mount"
+RAVEN_INIT_BINARIES="raven-init,raven-rc,raven-powerd,raven-ports,raven-timed,raven-mount,raven-fprintd"
 
 # =============================================================================
 # The base layer -- scripts/stages/stage2-native.sh

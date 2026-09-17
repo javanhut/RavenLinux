@@ -81,3 +81,13 @@ path = "src/timed.rs"
 [[bin]]
 name = "raven-mount"
 path = "src/mount.rs"
+
+# The fingerprint sensor's driver and the only process that touches it. In this
+# crate because it is the same kind of thing as raven-powerd and raven-mount: a
+# small privileged daemon that owns one piece of hardware the kernel exposes and
+# nothing else claims. It shares no code with init itself, and deliberately
+# shares no code with ravend -- see src/fprintd.rs for why the process holding
+# /etc/shadow does not also drive a USB device.
+[[bin]]
+name = "raven-fprintd"
+path = "src/fprintd.rs"

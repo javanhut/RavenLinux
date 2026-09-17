@@ -265,6 +265,42 @@ restart = true
 enabled = true
 critical = false
 
+# The fingerprint sensor.
+#
+# There is no libfprint on this image and no fprintd on the bus, for the reason
+# there is no wpa_supplicant: the stack under the one operation that has to work
+# when everything else has gone wrong should not be the largest C dependency on
+# the machine. raven-fprintd is the whole of it -- it talks to the reader over
+# usbfs and answers one question, which stored finger is on the sensor right
+# now. It cannot unlock anything; ravend decides what a match is worth.
+#
+# Started on every machine, including the ones with no reader. A daemon that
+# refused to run without hardware could not answer "there is no reader", and the
+# settings panel would instead find a missing socket and have to guess. It opens
+# the device lazily, so on a machine with none this costs a socket and a few
+# kilobytes of resident memory.
+#
+# after = udev because the node it opens is under /dev/bus/usb. It looks again
+# on every request, so a reader that appears late -- or a race with udev -- costs
+# one request and not a restart.
+#
+# Its socket is root-only: unlike the lock screen's verify socket, which any
+# session may use because it only ever checks a password against the *asker's
+# own* account, this one reports matches without being told whose they are.
+[[services]]
+name = "fprintd"
+description = "Fingerprint reader"
+exec = "/usr/bin/raven-fprintd"
+args = []
+after = ["udev"]
+runtime_dirs = ["/run/raven-fprint"]
+# The socket is the proof it is serving; it binds before opening any device.
+ready_path = "/run/raven-fprint/sensor.sock"
+ready_timeout = 5
+restart = true
+enabled = true
+critical = false
+
 # Removable storage: a drive that arrives after boot.
 #
 # Everything below the device node was already there -- USB storage, vfat,

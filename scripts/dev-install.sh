@@ -17,7 +17,8 @@
 #
 # Targets (default: init installer tools):
 #   init        build init/ natively; install raven-init, raven-rc,
-#               raven-powerd, raven-ports, raven-timed, raven-mount to /usr/bin
+#               raven-powerd, raven-ports, raven-timed, raven-mount,
+#               raven-fprintd to /usr/bin
 #               (stage-raven.sh:build_raven_init)
 #   installer-ui  build installer-ui/ natively; install raven-installer-ui and
 #               its launcher entry, icon and metainfo. Not in the default set:
@@ -155,14 +156,14 @@ install_config() {
 # Targets
 # -----------------------------------------------------------------------------
 do_init() {
-    log_section "init crate (raven-init, raven-rc, raven-powerd, raven-ports, raven-timed, raven-mount)"
+    log_section "init crate (raven-init, raven-rc, raven-powerd, raven-ports, raven-timed, raven-mount, raven-fprintd)"
     local src="${RAVEN_ROOT}/init"
     ( cd "$src" && "${BUILD_AS[@]}" cargo build --release --locked ) || {
         log_error "cargo build failed; nothing installed"
         return 1
     }
     local out="${src}/target/release"
-    for b in raven-init raven-rc raven-powerd raven-ports raven-timed raven-mount; do
+    for b in raven-init raven-rc raven-powerd raven-ports raven-timed raven-mount raven-fprintd; do
         install_file "${out}/${b}" "/usr/bin/${b}" 0755
     done
 }

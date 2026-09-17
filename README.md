@@ -26,6 +26,10 @@ What's here:
   the lid suspend the machine, and the buttons wake it again; on a laptop it
   also keeps the CPU on a balanced frequency policy and steps it down when the
   cord comes out (`[profile]` in `/etc/raven/power.toml`)
+- **Fingerprint readers** (`raven-fprintd`): Elan match-on-chip sensors, driven
+  over usbfs with no `libfprint` and no `libusb` — the same trade CAW makes for
+  wireless. The template stays on the chip and no fingerprint image ever reaches
+  the host. See RavenGUI's `docs/fingerprint.md`
 - **Custom bootloader** (RavenBoot), a UEFI loader written in Rust, with GRUB as
   the BIOS fallback
 - **uutils coreutils** (Rust) for the core userland
