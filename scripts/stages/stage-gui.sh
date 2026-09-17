@@ -100,6 +100,10 @@
 #   BATTERY_SKIP=1             skip Raven Power; battery policy still runs
 #   BATTERY_OFFLINE=1          as GUI_OFFLINE, for Raven Power alone
 #   BATTERY_REF=<git-ref>      build a particular RavenBatteryManagement ref
+#   GAMING_SKIP=1              skip Raven Gaming; games still run, nothing
+#                              checks the machine is ready for them
+#   GAMING_OFFLINE=1           as GUI_OFFLINE, for Raven Gaming alone
+#   GAMING_REF=<git-ref>       build a particular RavenGaming ref
 #   CONTROLS_SKIP=1            skip Raven Controls; no keyboard-light or fan UI,
 #                              and no raven-controlsd, so init's controlsd
 #                              service finds nothing to start
@@ -182,8 +186,13 @@ FILEMANAGER_APPID="com.ravenfilemanager.Raven"
 # Raven Settings: the one window for network, Bluetooth, sound, screens,
 # appearance and updates. GTK4 like the file manager, so it rides on the same
 # staged toolkit; huginn opens it from quick settings and Super+Ctrl+P.
+#
+# The repository is a workspace of two: the window, and raven-keycast, the
+# on-screen keystroke overlay its Key Overlay page switches on. The overlay has
+# no GTK in it, but it is one clone and one build with the window, so it is
+# staged here with it.
 raven_gui_app_vars SETTINGS
-SETTINGS_BIN="${SETTINGS_BINARIES}"
+IFS=',' read -r SETTINGS_BIN SETTINGS_KEYCAST <<< "${SETTINGS_BINARIES}"
 SETTINGS_APPID="com.ravensettings.Raven"
 
 # Raven Store: the graphical front-end for rvn. Browse, install, remove and
@@ -203,6 +212,15 @@ STORE_APPID="com.ravenstore.Raven"
 raven_gui_app_vars BATTERY
 BATTERY_BIN="${BATTERY_BINARIES}"
 BATTERY_APPID="org.raven.Power"
+
+# Raven Gaming: graphics drivers, the kernel settings games run into, launch
+# options, controllers and Huginn's recordings, in one window. GTK4 +
+# libadwaita like the rest. Packages go through `rvn --json` and everything
+# else through its own `--apply` half, so an image without it has lost the
+# diagnosis and none of the games.
+raven_gui_app_vars GAMING
+GAMING_BIN="${GAMING_BINARIES}"
+GAMING_APPID="org.raven.Gaming"
 
 # Raven Viewer: the PDF and DOCX reader. GTK4 + libadwaita like the rest, so it
 # rides on the same staged toolkit. Its application id is its .desktop stem,
@@ -1702,8 +1720,11 @@ stage_settings() {
         return 0
     fi
 
+    # --workspace, because raven-keycast is a member and not the root package:
+    # without it cargo builds the window alone, and the Key Overlay page on the
+    # image reports an overlay that was never installed.
     log_info "  building Raven Settings for ${GUI_TARGET}..."
-    local -a cargo_args=(build --release --target "${GUI_TARGET}")
+    local -a cargo_args=(build --release --workspace --target "${GUI_TARGET}")
     [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
     if ! ( cd "${dest}" && cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}" ); then
         log_warn "  Raven Settings build failed; no settings app on the image"
@@ -1719,6 +1740,17 @@ stage_settings() {
     install -Dm 0755 "${out}" "${SYSROOT_DIR}/usr/bin/${SETTINGS_BIN}"
     log_success "  ${SETTINGS_BIN} installed ($(du -h "${out}" | cut -f1))"
     stage_gui_libraries "${out}"
+
+    # A warning and not a failure: the window is still worth having, and its
+    # Key Overlay page says so itself when the overlay is absent.
+    local keycast="${dest}/target/${GUI_TARGET}/release/${SETTINGS_KEYCAST}"
+    if [[ -x "${keycast}" ]]; then
+        install -Dm 0755 "${keycast}" "${SYSROOT_DIR}/usr/bin/${SETTINGS_KEYCAST}"
+        log_success "  ${SETTINGS_KEYCAST} installed (the Key Overlay page starts it)"
+        stage_gui_libraries "${keycast}"
+    else
+        log_warn "  no ${SETTINGS_KEYCAST} binary; the Key Overlay page will have nothing to start"
+    fi
 
     local appdata="${SYSROOT_DIR}/usr/share"
     install -Dm 0644 "${dest}/data/icons/hicolor/scalable/apps/${SETTINGS_APPID}.svg" \
@@ -1944,6 +1976,81 @@ stage_battery_management() {
 
     # Idempotent when another GTK application staged it first, and sufficient
     # when Raven Power is the only GTK application included in a custom image.
+    if declare -F stage_gtk_runtime &>/dev/null; then
+        stage_gtk_runtime
+    fi
+}
+
+# =============================================================================
+# Raven Gaming
+# =============================================================================
+#
+# Environment:
+#   GAMING_SKIP=1      skip it; the desktop is complete without it
+#   GAMING_OFFLINE=1   never touch the network; use the existing clone
+#   GAMING_REF=<ref>   build a particular ref instead of the default
+stage_gaming() {
+    if [[ "${GAMING_SKIP:-0}" == "1" ]]; then
+        log_info "  GAMING_SKIP=1: no gaming setup app on the image"
+        return 0
+    fi
+
+    command -v cargo &>/dev/null || {
+        log_warn "  cargo not found; Raven Gaming will not be built"
+        return 0
+    }
+
+    local -a missing=()
+    local mod
+    for mod in gtk4 libadwaita-1 glib-2.0 gio-2.0; do
+        pkg-config --exists "${mod}" 2>/dev/null || missing+=("${mod}")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        log_warn "  missing build dependencies for Raven Gaming: ${missing[*]}"
+        log_warn "  install them with: pacman -S --needed gtk4 libadwaita"
+        log_warn "  the desktop will ship without the gaming setup app"
+        return 0
+    fi
+
+    # Its floors are higher than the other GTK applications': v4_18 and v1_7
+    # in its Cargo.toml, where Settings asks for v4_12 and v1_5. Said here,
+    # because the alternative is a page of gtk4-sys link errors that names
+    # neither number.
+    if ! pkg-config --atleast-version=4.18 gtk4 2>/dev/null \
+            || ! pkg-config --atleast-version=1.7 libadwaita-1 2>/dev/null; then
+        log_warn "  Raven Gaming needs gtk4 >= 4.18 and libadwaita >= 1.7; this host has" \
+            "$(pkg-config --modversion gtk4 2>/dev/null) and $(pkg-config --modversion libadwaita-1 2>/dev/null)"
+        log_warn "  the desktop will ship without the gaming setup app"
+        return 0
+    fi
+
+    local dest="${GUI_SRC_DIR}/${GAMING_REPO}"
+    if ! fetch_repo "${GAMING_REPO}" "${GAMING_URL}" "${dest}" \
+            "${GAMING_REF:-}" "${GAMING_OFFLINE:-${GUI_OFFLINE:-0}}" "${GAMING_MANIFEST}"; then
+        log_warn "  RavenGaming source unavailable; no gaming setup app on the image"
+        return 0
+    fi
+
+    log_info "  building Raven Gaming for ${GUI_TARGET}..."
+    local -a cargo_args=(build --release --target "${GUI_TARGET}")
+    [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
+    if ! ( cd "${dest}" && cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}" ); then
+        log_warn "  Raven Gaming build failed; no gaming setup app on the image"
+        return 0
+    fi
+
+    local out="${dest}/target/${GUI_TARGET}/release/${GAMING_BIN}"
+    if [[ ! -x "${out}" ]]; then
+        log_warn "  Raven Gaming produced no binary; no gaming setup app on the image"
+        return 0
+    fi
+
+    install -Dm 0755 "${out}" "${SYSROOT_DIR}/usr/bin/${GAMING_BIN}"
+    log_success "  ${GAMING_BIN} installed ($(du -h "${out}" | cut -f1))"
+    stage_gui_libraries "${out}"
+
+    # Idempotent when another GTK application staged it first, and sufficient
+    # when Raven Gaming is the only GTK application included in a custom image.
     if declare -F stage_gtk_runtime &>/dev/null; then
         stage_gtk_runtime
     fi
@@ -2626,6 +2733,28 @@ ENTRY
         log_info "    + ${BATTERY_APPID}.desktop"
     fi
 
+    # A stock symbolic from Adwaita, as Raven Power uses: the repository ships
+    # no icon of its own, and its upstream entry names this one.
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${GAMING_BIN}" ]]; then
+        cat > "${dir}/${GAMING_APPID}.desktop" << ENTRY
+[Desktop Entry]
+Type=Application
+Name=Raven Gaming
+GenericName=Gaming Setup
+Comment=Graphics drivers, performance settings and gameplay capture
+Exec=${GAMING_BIN}
+Icon=applications-games-symbolic
+Categories=Settings;System;Game;GTK;
+Keywords=Game;Gaming;GPU;Graphics;Driver;NVIDIA;AMD;Vulkan;Steam;Proton;Record;Capture;
+StartupWMClass=${GAMING_APPID}
+StartupNotify=true
+Terminal=false
+ENTRY
+        chmod 0644 "${dir}/${GAMING_APPID}.desktop"
+        written=$((written + 1))
+        log_info "    + ${GAMING_APPID}.desktop"
+    fi
+
     # Icon= names the SVG stage_controls staged into hicolor, rather than a
     # stock symbolic: this one ships an icon, as Settings and the file manager
     # do. StartupWMClass matches the application id libadwaita sets from
@@ -3189,6 +3318,11 @@ print_gui_summary() {
     fi
     if [[ -x "${SYSROOT_DIR}/usr/bin/${SETTINGS_BIN}" ]]; then
         echo "  [OK] settings app        /usr/bin/${SETTINGS_BIN} (Super+Ctrl+P, quick settings > All settings)"
+        if [[ -x "${SYSROOT_DIR}/usr/bin/${SETTINGS_KEYCAST}" ]]; then
+            echo "  [OK] key overlay         /usr/bin/${SETTINGS_KEYCAST} (Settings > Key Overlay)"
+        else
+            echo "  [--] key overlay         ${SETTINGS_KEYCAST} missing; the Key Overlay page has nothing to start"
+        fi
     else
         echo "  [--] settings app        not built"
     fi
@@ -3215,6 +3349,12 @@ print_gui_summary() {
         echo "  [OK] battery management  /usr/bin/${BATTERY_BIN} (Settings > General)"
     else
         echo "  [--] battery management  not built - raven-powerd policy remains active"
+    fi
+
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${GAMING_BIN}" ]]; then
+        echo "  [OK] gaming setup        /usr/bin/${GAMING_BIN} (app menu > Raven Gaming)"
+    else
+        echo "  [--] gaming setup        not built - games still run, nothing checks the machine for them"
     fi
 
     # Three states worth telling apart, because the middle one is a working
@@ -3431,6 +3571,11 @@ main() {
     # It must exist before install_desktop_entries decides what to advertise.
     log_step "Staging battery management..."
     stage_battery_management
+
+    # GTK4 and optional like the ones above, and before install_desktop_entries
+    # for the same reason: that function advertises only what it can see.
+    log_step "Staging the gaming setup app..."
+    stage_gaming
 
     # GTK4 and optional like the four above; before install_desktop_entries
     # for the same reason, and that function also makes it the PDF default.

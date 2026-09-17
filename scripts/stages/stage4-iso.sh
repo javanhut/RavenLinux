@@ -1320,7 +1320,7 @@ check_sysroot_layers() {
     mapfile -t raven_expected < <(raven_layer_binaries)
     mapfile -t gui_expected   < <(raven_gui_binaries)
 
-    local -a base_missing=() raven_missing=() gui_missing=()
+    local -a base_missing=() raven_missing=() gui_missing=() files_missing=()
     local b
 
     # No -type f here, unlike the two loops below. These are not all binaries
@@ -1332,6 +1332,15 @@ check_sysroot_layers() {
             || base_missing+=("${b}")
     done
 
+    # Non-empty, not merely present: a CA bundle that was truncated by a full
+    # disk is as useless as none, and -s is the cheapest way to tell.
+    if declare -F raven_base_files >/dev/null 2>&1; then
+        while IFS= read -r b; do
+            [[ -n "${b}" ]] || continue
+            [[ -s "${SYSROOT_DIR}${b}" ]] || files_missing+=("${b}")
+        done < <(raven_base_files)
+    fi
+
     for b in "${raven_expected[@]}"; do
         [[ -x "${SYSROOT_DIR}/usr/bin/${b}" ]] \
             || raven_missing+=("${b}")
@@ -1342,7 +1351,7 @@ check_sysroot_layers() {
             || gui_missing+=("${b}")
     done
 
-    if (( ${#base_missing[@]} == 0 && ${#raven_missing[@]} == 0 && ${#gui_missing[@]} == 0 )); then
+    if (( ${#base_missing[@]} == 0 && ${#files_missing[@]} == 0 && ${#raven_missing[@]} == 0 && ${#gui_missing[@]} == 0 )); then
         log_success "Sysroot carries the base, Raven and GUI layers (${#base_expected[@]} + ${#raven_expected[@]} + ${#gui_expected[@]} binaries)"
         return 0
     fi
@@ -1369,6 +1378,14 @@ check_sysroot_layers() {
         log_warn "    A service whose exec does not exist fails silently --"
         log_warn "    they are all critical = false -- so this warning is the"
         log_warn "    only place it will ever be said. Fix in stage2."
+    fi
+
+    if (( ${#files_missing[@]} > 0 )); then
+        log_warn "  Base layer files missing or empty:"
+        log_warn "    ${files_missing[*]}"
+        log_warn "    Without the CA bundle no HTTPS connection on the image"
+        log_warn "    verifies: curl, git, wget and poxy all fail. Install"
+        log_warn "    ca-certificates on the build host and rerun stage2."
     fi
 
     if (( raven_absent == 1 )); then

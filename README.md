@@ -59,10 +59,11 @@ And a graphical layer, built separately because it cannot be static:
 | `raven-lock` | the session lock screen — from RavenLogin, and the same screen as the login prompt; on `Super`+`L`, after ten idle minutes, and on resume from suspend |
 | `raven-terminal` | [RavenTerminal](https://github.com/javanhut/RavenTerminal), the terminal the desktop opens — on the dock and on `Super`+`Shift`+`T` |
 | `ravenfilemanager` | [RavenFileManager](https://github.com/javanhut/RavenFileManager), the file manager — the other icon on the dock, and the first GTK client the image had |
-| `raven-settings` | [RavenSettingsUI](https://github.com/javanhut/RavenSettingsUI), the settings window — network, Bluetooth, sound, screens, appearance and updates; on `Super`+`Ctrl`+`P` |
+| `raven-settings`, `raven-keycast` | [RavenSettingsUI](https://github.com/javanhut/RavenSettingsUI), the settings window — network, Bluetooth, sound, screens, appearance and updates; on `Super`+`Ctrl`+`P` — and the on-screen keystroke overlay its Key Overlay page switches on |
 | `ravencanvasd`, `ravencanvas` | [RavenCanvas](https://github.com/javanhut/RavenCanvas), the wallpaper — a layer-shell client, started by the session script before the compositor it draws behind |
 | `roostbar` | [RoostBar](https://github.com/javanhut/RoostBar), the layer-shell status bar — date, Wi-Fi, Bluetooth, volume, battery and clock |
 | `raven-store` | [RavenStore](https://github.com/javanhut/RavenStore), the software store — a GTK front-end that runs `rvn --json` underneath; on `Super`+`Ctrl`+`I` |
+| `raven-gaming` | [RavenGaming](https://github.com/javanhut/RavenGaming), game readiness in one window — graphics drivers, the kernel settings games run into, launch options, controllers, audio latency and Huginn's recordings |
 | `raven-power` | [RavenBatteryManagement](https://github.com/javanhut/RavenBatteryManagement), native battery profiles, energy diagnostics, application Eco mode and battery health — linked from Settings > General |
 | `raven-controls`, `raven-controlsd` | [RavenControls](https://github.com/javanhut/RavenControls), keyboard backlight, fan speeds and thermal profiles — and the daemon that owns the fan writes, which raven-init starts as the `controlsd` service |
 | `raven-viewer` | [RavenViewer](https://github.com/javanhut/RavenViewer), the document reader — PDF and DOCX, and the default for both |
@@ -336,6 +337,7 @@ STORE_SKIP=1 imlazy gui                     # no software store; rvn from a term
 STORE_REF=v0.1.0 imlazy gui                 # pin RavenStore to a git ref
 SETTINGS_SKIP=1 imlazy gui                  # no settings window
 BATTERY_SKIP=1 imlazy gui                   # no battery UI; powerd policy stays
+GAMING_SKIP=1 imlazy gui                    # no gaming setup app; games still run
 CONTROLS_SKIP=1 imlazy gui                  # no backlight/fan UI, no controlsd
 VIEWER_SKIP=1 imlazy gui                    # no PDF/DOCX reader
 EAGLEEYE_SKIP=1 imlazy gui                  # nothing opens an image

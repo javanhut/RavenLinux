@@ -107,6 +107,13 @@ RAVEN_INIT_BINARIES="raven-init,raven-rc,raven-powerd,raven-ports,raven-timed,ra
 # for anyone who ran it.
 RAVEN_BASE_BINARIES="raven-udev,raven-console-font,agetty,dbus-daemon,raven-dhcp,dhcpcd,raven-firmware"
 
+# Base-layer files that are not programs and go missing just as quietly. The CA
+# bundle is the first: stage2's copy_ca_certificates stages it from the build
+# host, and an image without it builds, boots and logs in -- and then cannot
+# make one verified HTTPS connection, which on a running system is also the
+# only way to get the bundle back. Absolute paths inside the sysroot.
+RAVEN_BASE_FILES="/etc/ssl/certs/ca-certificates.crt"
+
 # =============================================================================
 # The GUI layer -- scripts/stages/stage-gui.sh
 # =============================================================================
@@ -135,9 +142,10 @@ declare -a GUI_COMPONENTS=(
 declare -a GUI_APPS=(
     "TERMINAL|RavenTerminal|raven-terminal||Raven Terminal - the Wayland terminal emulator"
     "FILEMANAGER|RavenFileManager|ravenfilemanager|gui/ravenfilemanager|Raven Files - the GTK4 file manager"
-    "SETTINGS|RavenSettingsUI|raven-settings|gui/raven-settings|Raven Settings - network, sound, screens and updates"
+    "SETTINGS|RavenSettingsUI|raven-settings,raven-keycast|gui/raven-settings|Raven Settings - network, sound, screens and updates, with its key overlay"
     "STORE|RavenStore|raven-store|gui/raven-store|Raven Store - the graphical front-end for rvn"
     "BATTERY|RavenBatteryManagement|raven-power|gui/raven-power|Raven Power - battery profiles and energy use"
+    "GAMING|RavenGaming|raven-gaming|gui/raven-gaming|Raven Gaming - graphics drivers, game readiness and capture"
     "CONTROLS|RavenControls|raven-controls,raven-controlsd|gui/raven-controls|Raven Controls - keyboard backlight, fans and thermals, with its daemon"
     "VIEWER|RavenViewer|raven-viewer|gui/raven-viewer|Raven Viewer - the PDF and DOCX reader"
     "EAGLEEYE|EagleEye|eagleeye|gui/eagleeye|EagleEye - the image viewer"
@@ -199,6 +207,11 @@ raven_layer_binaries() {
 # Every base-layer program /etc/raven/init.toml expects to be able to exec.
 raven_base_binaries() {
     printf '%s\n' "${RAVEN_BASE_BINARIES//,/$'\n'}"
+}
+
+# Every base-layer file the image is not usable without, one per line.
+raven_base_files() {
+    printf '%s\n' "${RAVEN_BASE_FILES//,/$'\n'}"
 }
 
 # Every binary the GUI layer installs, one per line, in table order.

@@ -1698,28 +1698,90 @@ copy_ca_certificates() {
 
     mkdir -p "${SYSROOT_DIR}/etc/ssl/certs" "${SYSROOT_DIR}/etc/pki/tls/certs"
 
-    local src=""
+    # The extracted path is where Arch's ca-certificates-utils really keeps the
+    # bundle; the /etc/ssl names are symlinks onto it, and a host that lost
+    # them to a half-finished update still has the file itself.
+    local src="" candidate
     for candidate in \
         /etc/ssl/certs/ca-certificates.crt \
+        /etc/ca-certificates/extracted/tls-ca-bundle.pem \
         /etc/ssl/cert.pem \
         /etc/pki/tls/certs/ca-bundle.crt \
         /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem; do
-        if [[ -f "$candidate" ]]; then
+        if [[ -s "$candidate" ]] && grep -q 'BEGIN CERTIFICATE' "$candidate" 2>/dev/null; then
             src="$candidate"
             break
         fi
     done
 
+    # Fatal, where this used to warn and return 0. An image without a CA
+    # bundle builds green and then cannot make one verified HTTPS connection:
+    # curl, git, wget and poxy all fail, and the only fix on the running system
+    # is a download it can no longer do. RAVEN_ALLOW_NO_CA=1 is for a build
+    # host that genuinely has none and an image that will never go online.
     if [[ -z "$src" ]]; then
-        log_warn "No CA bundle found on host; HTTPS may fail in the target system"
-        return 0
+        if [[ "${RAVEN_ALLOW_NO_CA:-0}" == "1" ]]; then
+            log_warn "No CA bundle found on host; RAVEN_ALLOW_NO_CA=1, so HTTPS will fail on this image"
+            return 0
+        fi
+        log_fatal "No CA bundle found on the build host. Install ca-certificates (pacman -S ca-certificates) and rebuild stage2, or set RAVEN_ALLOW_NO_CA=1."
     fi
 
-    cp -L "$src" "${SYSROOT_DIR}/etc/ssl/certs/ca-certificates.crt" 2>/dev/null || true
-    ln -sf /etc/ssl/certs/ca-certificates.crt "${SYSROOT_DIR}/etc/ssl/cert.pem" 2>/dev/null || true
-    cp -L "${SYSROOT_DIR}/etc/ssl/certs/ca-certificates.crt" "${SYSROOT_DIR}/etc/pki/tls/certs/ca-bundle.crt" 2>/dev/null || true
+    # The p11-kit layout first, when the host has it, so the /etc/ssl names
+    # below are written over it and not the other way round. gnutls on an Arch
+    # host is built against the pkcs11 trust store, not against a bundle file,
+    # and the GUI stage ships that gnutls behind libgiognutls.so -- so every
+    # GIO client (libsoup, GStreamer's souphttpsrc) verifies against these
+    # directories through p11-kit-trust.so and never opens ca-certificates.crt.
+    local dir
+    for dir in /etc/ca-certificates/extracted /usr/share/ca-certificates/trust-source; do
+        [[ -d "$dir" ]] || continue
+        mkdir -p "${SYSROOT_DIR}${dir}"
+        cp -a "${dir}/." "${SYSROOT_DIR}${dir}/" 2>/dev/null \
+            && log_info "  Copied ${dir}"
+        # update-ca-trust leaves extracted/cadir mode 0555, and cp -a keeps it.
+        # A directory its owner cannot write is one an unprivileged rebuild
+        # cannot delete, so the next stage2 would fail resetting the sysroot.
+        chmod -R u+w "${SYSROOT_DIR}${dir}" 2>/dev/null || true
+    done
 
-    log_info "  Added CA bundle from ${src}"
+    # /etc/ca-certificates/trust-source is the administrator's half: anchors
+    # this one machine was told to trust. Created empty and never copied -- a
+    # build host's private or corporate CA has no business in an image other
+    # people install. The extracted bundle above is generated from both halves,
+    # so a host that has local anchors is worth saying out loud.
+    mkdir -p "${SYSROOT_DIR}/etc/ca-certificates/trust-source/anchors" \
+             "${SYSROOT_DIR}/etc/ca-certificates/trust-source/blocklist"
+    if [[ -n "$(find /etc/ca-certificates/trust-source/anchors -type f 2>/dev/null | head -1)" ]]; then
+        log_warn "  this host has local trust anchors in /etc/ca-certificates/trust-source/anchors;"
+        log_warn "  they are part of its extracted bundle and so of this image's. Build in the container to avoid that."
+    fi
+    if [[ -f /usr/lib/pkcs11/p11-kit-trust.so ]]; then
+        install -Dm 0755 /usr/lib/pkcs11/p11-kit-trust.so \
+            "${SYSROOT_DIR}/usr/lib/pkcs11/p11-kit-trust.so"
+        if [[ -f /usr/share/p11-kit/modules/p11-kit-trust.module ]]; then
+            install -Dm 0644 /usr/share/p11-kit/modules/p11-kit-trust.module \
+                "${SYSROOT_DIR}/usr/share/p11-kit/modules/p11-kit-trust.module"
+        fi
+        log_info "  Copied the p11-kit trust module (copy_libraries resolves what it links)"
+    fi
+
+    # Real files under the names everything else looks for: OpenSSL's cert.pem,
+    # Go's and curl's ca-certificates.crt, and the Red Hat path rustls-native-
+    # certs and openssl-probe try. rm first, because on a rebuilt sysroot the
+    # destination can be a symlink and cp -L would write through it.
+    local bundle="${SYSROOT_DIR}/etc/ssl/certs/ca-certificates.crt"
+    rm -f "$bundle" "${SYSROOT_DIR}/etc/pki/tls/certs/ca-bundle.crt"
+    cp -L "$src" "$bundle" || log_fatal "Could not copy the CA bundle from ${src}"
+    chmod 0644 "$bundle"
+    ln -sfn /etc/ssl/certs/ca-certificates.crt "${SYSROOT_DIR}/etc/ssl/cert.pem"
+    cp "$bundle" "${SYSROOT_DIR}/etc/pki/tls/certs/ca-bundle.crt"
+
+    local count
+    count="$(grep -c 'BEGIN CERTIFICATE' "$bundle" 2>/dev/null || true)"
+    (( ${count:-0} > 0 )) || log_fatal "The staged CA bundle holds no certificates (${src})"
+
+    log_info "  Added CA bundle from ${src} (${count} certificates)"
     log_success "CA certificates installed"
 }
 
@@ -1887,6 +1949,7 @@ copy_libraries() {
         "${SYSROOT_DIR}"/usr/lib/security/*.so \
         "${SYSROOT_DIR}"/usr/lib/libnss_*.so.* \
         "${SYSROOT_DIR}"/usr/lib/libnss_*.so.* \
+        "${SYSROOT_DIR}"/usr/lib/pkcs11/*.so \
         "${SYSROOT_DIR}"/usr/lib/libweston-*/*.so \
         "${SYSROOT_DIR}"/usr/lib64/libweston-*/*.so \
         "${SYSROOT_DIR}"/usr/lib/weston/*.so \

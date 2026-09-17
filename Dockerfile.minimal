@@ -34,8 +34,10 @@ RUN pacman -Syu --noconfirm --needed \
         base-devel make gcc binutils \
         # Archive / compression
         tar gzip xz bzip2 cpio zstd unzip \
-        # Download + VCS
-        curl wget git \
+        # Download + VCS. ca-certificates is named although curl pulls it in:
+        # stage2 copies this container's bundle into the image, and fails the
+        # build without one.
+        curl wget git ca-certificates \
         # File / text utilities
         findutils file patch coreutils rsync sed gawk grep diffutils which less \
         # Disk / filesystem / ISO tooling

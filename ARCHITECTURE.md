@@ -105,8 +105,9 @@ line:
 | `raven-lock` | RavenLogin | Rust | Session lock screen: the login screen's twin, on `ext-session-lock-v1` |
 | `raven-terminal` | RavenTerminal | Go + cgo | Terminal emulator (OpenGL 4.1 via GLFW, Wayland backend) |
 | `ravenfilemanager` | RavenFileManager | Rust | File manager (GTK4, libadwaita) — the first GTK client the image had |
-| `raven-settings` | RavenSettingsUI | Rust | Settings (GTK4, libadwaita): network, Bluetooth, sound, screens, appearance and updates |
+| `raven-settings`, `raven-keycast` | RavenSettingsUI | Rust | Settings (GTK4, libadwaita): network, Bluetooth, sound, screens, appearance and updates — and the keystroke overlay (layer-shell, no GTK) its Key Overlay page switches on |
 | `raven-store` | RavenStore | Rust | Software store (GTK4, libadwaita): a front-end for `rvn --json`, which does the installing |
+| `raven-gaming` | RavenGaming | Rust | Game readiness (GTK4, libadwaita): graphics drivers, kernel settings, launch options, controllers, audio latency and capture |
 | `raven-power` | RavenBatteryManagement | Rust | Battery profiles, per-application Eco mode, energy use and battery health (GTK4, libadwaita) |
 | `raven-controls`, `raven-controlsd` | RavenControls | Rust | Keyboard backlight, fans and thermals (GTK4, libadwaita), and the daemon that owns the fan writes — init's `controlsd` service |
 | `raven-viewer` | RavenViewer | Rust | PDF and DOCX reader (GTK4, libadwaita); the default for both |
@@ -545,8 +546,8 @@ Sets:
 - `packages/base/` — bash, fish
 - `packages/raven/` — ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw
 - `packages/gui/` — ravengui (huginn), ravenfilemanager, raven-settings,
-  raven-store, raven-power, raven-controls, raven-viewer, eagleeye, owl-player,
-  ravenlogin, ravencanvas, roostbar. raven-terminal is built by the same stage
+  raven-store, raven-power, raven-gaming, raven-controls, raven-viewer,
+  eagleeye, owl-player, ravenlogin, ravencanvas, roostbar. raven-terminal is built by the same stage
   from its own repository and is the one GUI component with no manifest here
   yet, which is why its row in `scripts/lib/components.sh` has an empty
   manifest field and `fetch` reports it as unpinned rather than pretending

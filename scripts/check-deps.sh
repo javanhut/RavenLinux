@@ -122,6 +122,9 @@ DEPENDENCIES=(
     "perl:-:-:-:-:-:-:Perl interpreter"
     "python3:python:-:-:-:-:-:Python 3 interpreter"
     "openssl:-:-:-:-:-:-:OpenSSL toolkit"
+    # Not a build tool: stage2 copies the host's bundle into the image, and
+    # refuses to go on without one.
+    "ca-certificates:-:-:-:-:-:-:CA certificate bundle (copied into the image)"
     
     # Python modules (checked via python import)
     "jinja2:python-jinja:python3-jinja2:python3-jinja2:python3-Jinja2:python3-Jinja2:py3-jinja2:Python Jinja2 templating"
@@ -482,6 +485,13 @@ check_command() {
         # Library header checks
         ncurses)
             [[ -f /usr/include/ncurses.h ]] || [[ -f /usr/include/ncursesw/ncurses.h ]]
+            return $?
+            ;;
+        ca-certificates)
+            [[ -s /etc/ssl/certs/ca-certificates.crt ]] \
+                || [[ -s /etc/ca-certificates/extracted/tls-ca-bundle.pem ]] \
+                || [[ -s /etc/pki/tls/certs/ca-bundle.crt ]] \
+                || [[ -s /etc/ssl/cert.pem ]]
             return $?
             ;;
         ssl)

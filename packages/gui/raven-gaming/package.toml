@@ -1,0 +1,43 @@
+[package]
+name = "raven-gaming"
+version = "0.1.0"
+description = "Raven Gaming - graphics drivers, game readiness, performance settings, controllers and gameplay capture"
+license = "GPL-3.0-or-later"
+homepage = "https://github.com/javanhut/RavenGaming"
+repository = "https://github.com/javanhut/RavenGaming"
+maintainers = ["RavenLinux Team"]
+categories = ["gui", "wayland", "application", "system"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/RavenGaming.git"
+
+[build]
+system = "cargo"
+# GTK4 + libadwaita, like raven-settings and raven-power, and for the same
+# reason: there is no musl build of that stack to be had. Its floors are the
+# highest on the image -- gtk4 >= 4.18 and libadwaita >= 1.7.
+target = "x86_64-unknown-linux-gnu"
+build_flags = ["--release", "--locked"]
+
+[dependencies]
+# The GTK half mirrors raven-settings' list. rvn is how it installs packages,
+# the same `rvn --json` path Raven Store uses. Everything else it drives --
+# dkms, nvidia-smi, raven-export, Steam, pw-metadata -- is detected at runtime
+# and reported when absent rather than assumed, so none of it is listed here.
+runtime = [
+    "gtk4", "libadwaita", "glib2", "gsettings-desktop-schemas",
+    "shared-mime-info", "desktop-file-utils", "librsvg", "gdk-pixbuf2",
+    "hicolor-icon-theme", "adwaita-icon-theme", "dconf",
+    "rvn",
+]
+build = ["rust", "cargo", "pkg-config", "gtk4", "libadwaita", "glib2"]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-gnu/release/raven-gaming", dest = "/usr/bin/raven-gaming", mode = 755 },
+]
+
+# stage-gui.sh owns desktop entries on the image, matching Raven Settings and
+# Raven Power. The application uses the symbolic games icon from Adwaita.
+symlinks = []

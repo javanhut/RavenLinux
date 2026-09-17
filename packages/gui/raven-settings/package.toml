@@ -17,7 +17,10 @@ system = "cargo"
 # GTK4 + libadwaita, like ravenfilemanager, and for the same reason: there is
 # no musl build of that stack to be had.
 target = "x86_64-unknown-linux-gnu"
-build_flags = ["--release", "--locked"]
+# --workspace: this repository produces two binaries. raven-keycast, the
+# keystroke overlay, is a workspace member and not the root package, so
+# building only the default member ships a Key Overlay page with no overlay.
+build_flags = ["--release", "--locked", "--workspace"]
 
 [dependencies]
 # The GTK half mirrors ravenfilemanager's list -- the same toolkit, the same
@@ -37,6 +40,9 @@ build = ["rust", "cargo", "pkg-config", "gtk4", "libadwaita", "glib2"]
 [install]
 files = [
     { src = "target/x86_64-unknown-linux-gnu/release/raven-settings", dest = "/usr/bin/raven-settings", mode = 755 },
+    # The keystroke overlay the Key Overlay page switches on. No GTK in it; the
+    # page looks for it beside raven-settings.
+    { src = "target/x86_64-unknown-linux-gnu/release/raven-keycast", dest = "/usr/bin/raven-keycast", mode = 755 },
     { src = "data/icons/hicolor/scalable/apps/com.ravensettings.Raven.svg", dest = "/usr/share/icons/hicolor/scalable/apps/com.ravensettings.Raven.svg", mode = 644 },
     { src = "data/com.ravensettings.Raven.metainfo.xml", dest = "/usr/share/metainfo/com.ravensettings.Raven.metainfo.xml", mode = 644 },
     # Lets the session (group video) set backlight brightness without root.
