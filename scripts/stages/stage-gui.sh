@@ -1119,6 +1119,43 @@ stage_filemanager() {
     install -Dm 0644 "${dest}/data/${FILEMANAGER_APPID}.metainfo.xml" \
         "${appdata}/metainfo/${FILEMANAGER_APPID}.metainfo.xml" 2>/dev/null || true
 
+    # What makes it the file manager other applications use, rather than one
+    # that is merely installed. mimeapps.list only covers double-clicking a
+    # directory; a browser's "Show in folder" goes over D-Bus to
+    # org.freedesktop.FileManager1, and its open/save dialog goes through
+    # xdg-desktop-portal to whichever FileChooser backend portals.conf names.
+    # Without these three pieces both fall through to the GTK portal, or to
+    # nothing at all. Same files as upstream's `make install`, with @BINDIR@
+    # resolved to /usr/bin.
+    local svc
+    for svc in org.freedesktop.FileManager1 org.freedesktop.impl.portal.desktop.raven; do
+        if [[ -f "${dest}/data/${svc}.service.in" ]]; then
+            install -d "${appdata}/dbus-1/services"
+            sed 's|@BINDIR@|/usr/bin|g' "${dest}/data/${svc}.service.in" \
+                > "${appdata}/dbus-1/services/${svc}.service"
+            chmod 0644 "${appdata}/dbus-1/services/${svc}.service"
+            log_info "    + dbus-1/services/${svc}.service"
+        else
+            log_warn "    no ${svc}.service.in in the checkout; other applications will not reach it"
+        fi
+    done
+
+    if install -Dm 0644 "${dest}/data/raven.portal" \
+            "${appdata}/xdg-desktop-portal/portals/raven.portal" 2>/dev/null; then
+        log_info "    + xdg-desktop-portal/portals/raven.portal"
+
+        # Per-desktop, not the bare portals.conf: xdg-desktop-portal tries
+        # <desktop>-portals.conf for each name in XDG_CURRENT_DESKTOP
+        # (Huginn:Raven) before portals.conf, and a user's own
+        # ~/.config/xdg-desktop-portal/portals.conf still wins over this.
+        install -Dm 0644 "${dest}/data/raven-portals.conf" \
+            "${appdata}/xdg-desktop-portal/raven-portals.conf" 2>/dev/null \
+            && log_info "    + xdg-desktop-portal/raven-portals.conf (FileChooser=raven)" \
+            || log_warn "    no raven-portals.conf in the checkout; file dialogs stay on GTK"
+    else
+        log_warn "    no raven.portal in the checkout; file dialogs stay on GTK"
+    fi
+
     # Its default config, shipped as reference and not as configuration.
     #
     # Worth being exact about, because the path looks load-bearing and is not.
@@ -3290,6 +3327,12 @@ print_gui_summary() {
             echo "  [OK] GSettings schemas   gschemas.compiled"
         else
             echo "  [!!] GSettings schemas   MISSING - every GTK application aborts on startup"
+        fi
+        if [[ -f "${SYSROOT_DIR}/usr/share/xdg-desktop-portal/portals/raven.portal" \
+              && -f "${SYSROOT_DIR}/usr/share/dbus-1/services/org.freedesktop.FileManager1.service" ]]; then
+            echo "  [OK] default file mgr    FileManager1 + FileChooser portal"
+        else
+            echo "  [--] default file mgr    not registered - browsers use the GTK dialog"
         fi
         if [[ -x "${SYSROOT_DIR}/usr/bin/bwrap" ]]; then
             echo "  [OK] image decoding      glycin + bwrap"
