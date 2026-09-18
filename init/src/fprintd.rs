@@ -57,7 +57,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use fprint::{Record, Retry, Scan, Sensor};
+use fprint::{Retry, Scan, Sensor};
+
+mod roster;
 
 /// Where the daemon listens. Its directory is created `0700` and owned by
 /// root; see the module note.
@@ -73,17 +75,15 @@ const SOCKET_PATH: &str = "/run/raven-fprint/sensor.sock";
 /// In the meantime the failure is answered at once, with the reason it had.
 const RETRY_OPEN_AFTER: Duration = Duration::from_secs(10);
 
-/// How a stored finger is named in the sensor's 92 bytes.
+/// How a stored finger is named.
 ///
-/// `<account>:<finger>`, which is what makes the record self-describing: the
-/// sensor is the only place this is written down, so a template that did not
-/// say whose it was could never be deleted when somebody's account went away.
-fn record_for(account: &str, finger: &str) -> Record {
-    // The two identifier bytes are libfprint's and are always zero for records
-    // it wrote. Kept zero here so that a sensor enrolled under either stack is
-    // readable by the other -- somebody dual-booting should not have to enrol
-    // twice.
-    Record::new([0, 0], format!("{account}:{finger}").as_bytes())
+/// `<account>:<finger>`. It goes to the sensor with the template, for the sake
+/// of anything that can read it back, and to [`crate::roster`], which is where
+/// this daemon reads it from -- this chip takes a name and has no command that
+/// returns one. `ravend` splits it on the colon to decide whose finger
+/// matched, so the account comes first and an account may not contain one.
+fn label_for(account: &str, finger: &str) -> String {
+    format!("{account}:{finger}")
 }
 
 fn main() {
@@ -181,7 +181,8 @@ fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
 /// |   | `nomatch`, or `error <why>` |
 /// | `enrol <account> <finger>` | `frame <done> <of>` or `retry <advice> <done> <of>` |
 /// |   | per reading, then `ok`, or `error <why>` |
-/// | `forget <account> <finger>` | `ok`, or `error <why>` |
+/// | `forget <account> <finger>` | `ok`, or `error <why>`; only the last finger |
+/// |   | can be removed, because the sensor has no per-finger delete |
 /// | `forget-all` | `ok` |
 ///
 /// Every error is a line beginning `error` and never a closed connection: a
@@ -226,12 +227,11 @@ fn serve(stream: UnixStream, sensor: &mut Slot) -> std::io::Result<()> {
                     writeln!(out, "error forget wants an account and a finger")?;
                     continue;
                 }
-                open_sensor(sensor)
-                    .and_then(|s| s.forget(&record_for(account, finger)))
-                    .and_then(|()| writeln!(out, "ok"))
+                open_sensor(sensor).and_then(|s| forget(&mut out, s, account, finger))
             }
             "forget-all" => open_sensor(sensor)
                 .and_then(Sensor::forget_all)
+                .and_then(|()| roster::clear())
                 .and_then(|()| writeln!(out, "ok")),
             other => {
                 writeln!(out, "error unknown verb {other}")?;
@@ -323,10 +323,60 @@ fn status(stream: &mut UnixStream, slot: &mut Slot) -> std::io::Result<()> {
     }
 }
 
-fn list(out: &mut UnixStream, sensor: &mut Sensor) -> std::io::Result<()> {
-    for record in sensor.list()? {
-        writeln!(out, "finger {}", record.label())?;
+/// The roster, with anything the sensor is not holding dropped first.
+///
+/// Every verb that names a finger goes through this: the file and the chip can
+/// disagree -- a sensor cleared by something else, a roster written for fingers
+/// that are gone -- and the chip is the one telling the truth about what it
+/// holds.
+fn fingers(sensor: &mut Sensor) -> std::io::Result<Vec<roster::Entry>> {
+    let stored = sensor.count()?;
+    let (entries, changed) = roster::reconcile(roster::load()?, stored);
+    if changed {
+        roster::save(&entries)?;
     }
+    Ok(entries)
+}
+
+fn list(out: &mut UnixStream, sensor: &mut Sensor) -> std::io::Result<()> {
+    for entry in fingers(sensor)? {
+        writeln!(out, "finger {}", entry.label)?;
+    }
+    writeln!(out, "ok")
+}
+
+/// Remove one finger, when that can be done at all.
+///
+/// This sensor has no per-finger delete -- see [`fprint::Sensor::forget_all`]
+/// -- so the only removal it can carry out is of the last finger there is, by
+/// clearing the store. Anything else is refused rather than half done, because
+/// the alternative is a removal that silently takes somebody's other fingers
+/// with it.
+fn forget(
+    out: &mut UnixStream,
+    sensor: &mut Sensor,
+    account: &str,
+    finger: &str,
+) -> std::io::Result<()> {
+    let label = label_for(account, finger);
+    let known = fingers(sensor)?;
+    if !known.iter().any(|entry| entry.label == label) {
+        // Removing a finger that is not there is the state the caller asked
+        // for, so it is an `ok` and not an error: a settings page retrying a
+        // removal must not be told it failed the second time.
+        log::info!("no stored {label} to forget");
+        return writeln!(out, "ok");
+    }
+    if known.len() > 1 {
+        return writeln!(
+            out,
+            "error this sensor cannot remove one finger; it can only clear all {} of them",
+            known.len()
+        );
+    }
+    sensor.forget_all()?;
+    roster::clear()?;
+    log::info!("forgot {label}, the only finger stored");
     writeln!(out, "ok")
 }
 
@@ -347,12 +397,18 @@ fn verify(
             return Ok(());
         };
         match scan {
-            Scan::Match(index) => {
+            Scan::Match(slot) => {
                 // Which finger matched is looked up rather than reported as a
-                // bare index, so the caller can tell whose it was -- and so
-                // that a session cannot be unlocked by a finger enrolled to a
-                // different account.
-                let label = sensor.list()?.get(usize::from(index)).map(Record::label);
+                // bare slot number, so the caller can tell whose it was -- and
+                // so that a session cannot be unlocked by a finger enrolled to
+                // a different account. The sensor answers with a slot and
+                // nothing else, so the name comes from the roster; see
+                // [`crate::roster`] for why it is kept there and not on the
+                // chip.
+                let label = fingers(sensor)?
+                    .into_iter()
+                    .find(|entry| entry.slot == slot)
+                    .map(|entry| entry.label);
                 return match label {
                     Some(label) if !label.is_empty() => writeln!(out, "match {label}"),
                     // The sensor matched something it will not name: an index
@@ -362,7 +418,7 @@ fn verify(
                     // and "some finger, not saying whose" is exactly the
                     // answer an unlock must not accept.
                     _ => {
-                        log::warn!("the sensor matched index {index} and would not name it");
+                        log::warn!("the sensor matched slot {slot} and would not name it");
                         writeln!(out, "nomatch")
                     }
                 };
@@ -393,11 +449,23 @@ fn enrol(
     const PATIENCE: u8 = 10;
 
     let stages = sensor.stages();
-    let record = record_for(account, finger);
-    // Re-enrolling a finger replaces it. Without this the sensor fills up with
-    // duplicates of the one finger somebody keeps re-adding because it never
-    // quite works, and it holds nine.
-    let _ = sensor.forget(&record);
+    let label = label_for(account, finger);
+    let known = fingers(sensor)?;
+
+    // Re-enrolling used to replace the stored finger. It cannot here: this
+    // sensor has no command that removes one, so enrolling the same finger
+    // again would leave two templates under one name, the second unreachable
+    // and neither removable except by clearing the lot. Refused with the way
+    // out said plainly.
+    if known.iter().any(|entry| entry.label == label) {
+        return writeln!(
+            out,
+            "error that finger is already enrolled; this sensor can only remove every finger at once"
+        );
+    }
+    if known.len() >= usize::from(fprint::MAX_ENROLLED) {
+        return writeln!(out, "error the sensor is full");
+    }
 
     let mut done: u8 = 0;
     let mut wasted: u8 = 0;
@@ -430,8 +498,17 @@ fn enrol(
             }
         }
     }
-    sensor.enrol_commit(&record)?;
-    log::info!("enrolled {account}:{finger}");
+    let slot = sensor.enrol_commit(label.as_bytes())?;
+    // Written down before the caller is told it worked: a finger the sensor
+    // holds and the roster does not is one nothing can attribute, and this is
+    // the only moment its slot is known.
+    let mut known = known;
+    known.push(roster::Entry {
+        slot,
+        label: label.clone(),
+    });
+    roster::save(&known)?;
+    log::info!("enrolled {account}:{finger} in slot {slot}");
     writeln!(out, "ok")
 }
 
@@ -450,20 +527,22 @@ fn advice(why: Retry) -> &'static str {
 mod tests {
     use super::*;
 
-    /// A record has to say whose finger it is, or a template outlives the
+    /// A label has to say whose finger it is, or a template outlives the
     /// account it belonged to with no way to find it.
     #[test]
-    fn a_record_names_the_account_and_the_finger() {
-        let record = record_for("javanstorm", "right-index");
-        assert_eq!(record.label(), "javanstorm:right-index");
-        assert_eq!(record.id, [0, 0]);
+    fn a_label_names_the_account_and_the_finger() {
+        assert_eq!(label_for("javanstorm", "right-index"), "javanstorm:right-index");
     }
 
-    /// The identifier bytes stay libfprint's zeroes so a sensor enrolled under
-    /// either stack reads under the other.
+    /// The label written to the roster is the one `ravend` splits on a colon
+    /// to decide whose finger matched, so the account must come first and the
+    /// separator must be there.
     #[test]
-    fn records_are_compatible_with_libfprints() {
-        assert_eq!(record_for("a", "b").id, [0, 0]);
+    fn a_label_splits_back_into_the_account_and_the_finger() {
+        let label = label_for("javanstorm", "right-index");
+        let (account, finger) = label.split_once(':').expect("a label has a colon");
+        assert_eq!(account, "javanstorm");
+        assert_eq!(finger, "right-index");
     }
 
     /// Every retry has a word for the screen, including one the sensor never

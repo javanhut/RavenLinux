@@ -68,9 +68,6 @@ const EP_FINGER_IN: u8 = 0x84;
 
 /// How long a command that is not waiting for a finger may take.
 const CMD_TIMEOUT_MS: u32 = 5000;
-/// How long the optional answer to the mode change is waited for. Short,
-/// because on the sensor this was written for it never comes.
-const SET_MODE_ANSWER_MS: u32 = 500;
 
 /// The interface the sensor's endpoints live on.
 const INTERFACE: u32 = 0;
@@ -78,11 +75,26 @@ const INTERFACE: u32 = 0;
 /// The largest response any command below asks for.
 const MAX_RESPONSE: usize = 128;
 
-/// A stored finger's record: two identifier bytes, a length, and up to 92
-/// bytes of name. The sensor holds it verbatim and hands it back unchanged, so
-/// what goes in it is entirely this daemon's business — see [`Record`].
-const RECORD_LEN: usize = 95;
+/// The name stored with a finger: two bytes this daemon keeps zero, a length,
+/// and up to 92 bytes of label.
+///
+/// The chip takes it and never gives it back — see the module note on what
+/// this firmware does not implement — so it is written for the sake of a
+/// system that can read it, and this daemon reads the labels from its own
+/// roster instead.
+const USER_DATA_LEN: usize = 95;
 const MAX_NAME: usize = 92;
+/// A command that carries a name: `40 ff <op>`, two bytes the chip fills in
+/// itself, the name, and zeroes to the length it reads.
+const NAMED_CMD_LEN: usize = 128;
+/// Where the name begins in one.
+const NAME_AT: usize = 5;
+
+/// Slots the sensor holds.
+pub const MAX_ENROLLED: u8 = 10;
+
+/// Frames this firmware wants before a template is complete.
+const ENROL_FRAMES: u8 = 9;
 
 /// The sensor's own "that reading was fine" code.
 const MSG_OK: u8 = 0x00;
@@ -100,9 +112,6 @@ const MSG_TOO_HIGH: u8 = 0x41;
 const MSG_TOO_LEFT: u8 = 0x42;
 const MSG_TOO_LOW: u8 = 0x43;
 const MSG_TOO_RIGHT: u8 = 0x44;
-
-/// The most fingers any of these sensors will hold.
-pub const MAX_ENROLLED: u8 = 9;
 
 // -----------------------------------------------------------------------------
 // usbfs
@@ -312,60 +321,19 @@ impl Retry {
     }
 }
 
-/// One stored finger, as the sensor holds it.
+/// The name to store with a finger, in the shape the chip takes it.
 ///
-/// Ninety-five bytes: two the sensor treats as an identifier and hands back
-/// untouched, a length, and a name. Nothing in the record is a fingerprint —
-/// the template is on the chip and is never any of this daemon's business —
-/// so what goes here is whatever the caller wants to recognise later, which
-/// for Raven is the account and the finger.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Record {
-    pub id: [u8; 2],
-    pub name: Vec<u8>,
-}
-
-impl Record {
-    /// Build one, truncating a name the sensor has no room for rather than
-    /// failing: a long username is not a reason to refuse to enrol a finger.
-    pub fn new(id: [u8; 2], name: &[u8]) -> Self {
-        let mut name = name.to_vec();
-        name.truncate(MAX_NAME);
-        Self { id, name }
-    }
-
-    fn encode(&self) -> [u8; RECORD_LEN] {
-        let mut out = [0u8; RECORD_LEN];
-        out[0] = self.id[0];
-        out[1] = self.id[1];
-        let len = self.name.len().min(MAX_NAME);
-        out[2] = len as u8;
-        out[3..3 + len].copy_from_slice(&self.name[..len]);
-        out
-    }
-
-    /// Read one out of a `get_userid` response, whose first two bytes are the
-    /// command echo and status.
-    fn decode(response: &[u8]) -> Option<Self> {
-        // 0x43 echo, status, then the record itself.
-        if response.len() < 5 || response[0] != 0x43 || response[1] != MSG_OK {
-            return None;
-        }
-        let len = usize::from(response[4]);
-        if len > response.len() - 5 {
-            return None;
-        }
-        Some(Self {
-            id: [response[2], response[3]],
-            name: response[5..5 + len].to_vec(),
-        })
-    }
-
-    /// The name as text, for a log line or a list. Lossy on purpose: a record
-    /// written by somebody else's tooling is not this daemon's to reject.
-    pub fn label(&self) -> String {
-        String::from_utf8_lossy(&self.name).into_owned()
-    }
+/// Two bytes kept zero, the length, then the label. Nothing in it is a
+/// fingerprint — the template is on the chip and is never any of this daemon's
+/// business — so what goes here is the account and the finger, for whatever
+/// can read it. Truncated rather than refused: a long username is not a reason
+/// to refuse to enrol a finger.
+fn user_data(label: &[u8]) -> [u8; USER_DATA_LEN] {
+    let mut out = [0u8; USER_DATA_LEN];
+    let len = label.len().min(MAX_NAME);
+    out[2] = len as u8;
+    out[3..3 + len].copy_from_slice(&label[..len]);
+    out
 }
 
 // -----------------------------------------------------------------------------
@@ -376,10 +344,9 @@ impl Record {
 #[derive(Debug)]
 pub struct Sensor {
     fd: OwnedFd,
-    /// Frames the chip wants before a template is complete. Product-specific,
-    /// and asked of the hardware rather than assumed: it is the difference
-    /// between an enrolment that feels brisk and one that feels broken, and a
-    /// progress bar built on a guess is a progress bar that lies.
+    /// Frames the chip wants before a template is complete. The same number
+    /// the enrolment command carries, kept here because the progress a caller
+    /// shows has to be the progress the sensor is working to.
     stages: u8,
     /// Fingers currently stored, as of the last time anything asked.
     enrolled: u8,
@@ -402,11 +369,16 @@ impl Sensor {
             .open(&found.node)?;
         let fd = OwnedFd::from(file);
         ioctl_u32(fd.as_raw_fd(), USBDEVFS_CLAIMINTERFACE, INTERFACE)?;
+        log::debug!(
+            "claimed {:04x}:{:04x} at {}",
+            ELAN_VENDOR,
+            found.product,
+            found.node.display()
+        );
 
         let mut sensor = Self {
             fd,
-            // Replaced by the real number below; never used before then.
-            stages: stages_for(found.product),
+            stages: ENROL_FRAMES,
             enrolled: 0,
             firmware: 0,
         };
@@ -415,11 +387,9 @@ impl Sensor {
     }
 
     /// The sequence the sensor expects before it will do anything: wait for
-    /// calibration, put it in the mode the commands below assume, then read
-    /// back what it is and what it holds.
+    /// calibration, then read back what it is and what it holds.
     fn bring_up(&mut self) -> io::Result<()> {
         self.wait_calibrated()?;
-        self.set_mode()?;
         let version = self.command(&[0x40, 0x19], 2)?;
         self.firmware = u16::from(version[0]) << 8 | u16::from(version[1]);
         self.enrolled = self.read_enrolled_count()?;
@@ -459,19 +429,6 @@ impl Sensor {
     /// The mode change is not reliably acknowledged: the `0c00` accepts it and
     /// answers nothing, so an answer is read if one comes and not required.
     /// Whether the sensor took it shows in the next command, which does answer.
-    fn set_mode(&mut self) -> io::Result<()> {
-        const CMD: &[u8] = &[0x40, 0xff, 0x14, 0x03];
-        self.send(CMD).map_err(|e| named(e, "sending", CMD))?;
-        match self.read_bulk(EP_CMD_IN, 2, SET_MODE_ANSWER_MS) {
-            Ok(_) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
-                log::info!("the sensor did not acknowledge the mode change; carrying on");
-                Ok(())
-            }
-            Err(e) => Err(named(e, "reading the answer to", CMD)),
-        }
-    }
-
     fn read_enrolled_count(&mut self) -> io::Result<u8> {
         let response = self.command(&[0x40, 0xff, 0x04], 2)?;
         Ok(response[1].min(MAX_ENROLLED))
@@ -492,17 +449,10 @@ impl Sensor {
         self.firmware
     }
 
-    /// Every stored finger's record.
-    pub fn list(&mut self) -> io::Result<Vec<Record>> {
+    /// How many fingers the sensor holds, asked afresh.
+    pub fn count(&mut self) -> io::Result<u8> {
         self.enrolled = self.read_enrolled_count()?;
-        let mut out = Vec::new();
-        for index in 0..self.enrolled {
-            let response = self.command(&[0x43, 0x21, index], 97)?;
-            if let Some(record) = Record::decode(&response) {
-                out.push(record);
-            }
-        }
-        Ok(out)
+        Ok(self.enrolled)
     }
 
     /// Wait for a finger and ask whether it is one the sensor knows.
@@ -510,14 +460,16 @@ impl Sensor {
     /// Blocks until somebody touches the sensor, `cancel` becomes readable, or
     /// the device goes away. See the module note on cancellation.
     pub fn verify(&mut self, cancel: BorrowedFd<'_>) -> io::Result<Option<Scan>> {
-        self.set_mode()?;
-        self.send(&[0x40, 0xff, 0x73, 0x00, 0x00])?;
+        self.send(&[0x40, 0xff, 0x03])?;
         let Some(response) = self.wait(EP_FINGER_IN, 2, cancel)? else {
             return Ok(None);
         };
         Ok(Some(match response[1] {
             MSG_NO_MATCH => Scan::NoMatch,
-            index if index <= MAX_ENROLLED => Scan::Match(index),
+            // A match answers with the slot the finger is in, and every slot
+            // number is below the count the sensor holds. The codes that mean
+            // something went wrong all have the top nibble set.
+            slot if slot < MAX_ENROLLED => Scan::Match(slot),
             other => Scan::Retry(Retry::of(other)),
         }))
     }
@@ -527,8 +479,9 @@ impl Sensor {
     /// `frame` is how many good ones the chip already has: it accumulates, and
     /// this tells it where the caller believes it is so the two cannot drift.
     pub fn enrol_frame(&mut self, frame: u8, cancel: BorrowedFd<'_>) -> io::Result<Option<Scan>> {
-        let stages = self.stages;
-        self.send(&[0x40, 0xff, 0x01, self.enrolled, stages, frame, 0x00])?;
+        // The sensor is told the slot the template is being built for, how
+        // many frames the whole enrolment takes, and which one this is.
+        self.send(&[0x40, 0xff, 0x01, self.enrolled, ENROL_FRAMES, frame, 0x00])?;
         let Some(response) = self.wait(EP_FINGER_IN, 2, cancel)? else {
             return Ok(None);
         };
@@ -544,11 +497,18 @@ impl Sensor {
         }))
     }
 
-    /// Tell the sensor the template is complete and store it under `record`.
-    pub fn enrol_commit(&mut self, record: &Record) -> io::Result<()> {
-        let mut cmd = [0u8; 128];
+    /// Tell the sensor the template is complete and store it under `label`.
+    ///
+    /// Answers with the slot it went into, which is the count of what was
+    /// already stored: the chip fills its slots in order, and that number is
+    /// the only handle anything has on the finger afterwards. A caller that
+    /// wants to know whose finger it was later has to write it down — see the
+    /// module note.
+    pub fn enrol_commit(&mut self, label: &[u8]) -> io::Result<u8> {
+        let slot = self.enrolled;
+        let mut cmd = [0u8; NAMED_CMD_LEN];
         cmd[..3].copy_from_slice(&[0x40, 0xff, 0x11]);
-        cmd[5..5 + RECORD_LEN].copy_from_slice(&record.encode());
+        cmd[NAME_AT..NAME_AT + USER_DATA_LEN].copy_from_slice(&user_data(label));
         let response = self.command(&cmd, 2)?;
         if response[1] != MSG_OK {
             return Err(io::Error::other(format!(
@@ -557,46 +517,42 @@ impl Sensor {
             )));
         }
         self.enrolled = self.read_enrolled_count()?;
-        Ok(())
+        Ok(slot)
     }
 
     /// Abandon a template the sensor is part way through building.
     ///
-    /// The `above` command takes it out of the waiting-for-a-finger state,
-    /// after which re-setting the mode leaves it where a fresh enrolment
-    /// expects to find it. A part-built template left behind is a slot gone
-    /// from a sensor that has nine.
+    /// This takes it out of the waiting-for-a-finger state, which is where a
+    /// fresh enrolment expects to find it. A part-built template left behind
+    /// is a slot gone from a sensor that has ten.
     pub fn enrol_abandon(&mut self) -> io::Result<()> {
-        self.send(&[0x40, 0xff, 0x02])?;
-        self.set_mode()
-    }
-
-    /// Forget one stored finger.
-    pub fn forget(&mut self, record: &Record) -> io::Result<()> {
-        let mut cmd = [0u8; 128];
-        cmd[..3].copy_from_slice(&[0x40, 0xff, 0x13]);
-        cmd[3..3 + RECORD_LEN].copy_from_slice(&record.encode());
-        let response = self.command(&cmd, 2)?;
-        if response[1] != MSG_OK {
-            return Err(io::Error::other(format!(
-                "the sensor refused to forget the finger (0x{:02x})",
-                response[1]
-            )));
-        }
-        self.enrolled = self.read_enrolled_count()?;
+        self.command(&[0x40, 0xff, 0x02], 2)?;
         Ok(())
     }
 
     /// Forget every stored finger.
+    ///
+    /// All of them or none: this firmware has no per-finger delete. Both
+    /// commands that would remove one -- `40 ff 13` in either shape -- are
+    /// refused, and `40 ff 05` takes the whole store whatever slot it is
+    /// given. Worse, a refused delete leaves the chip counting fingers that no
+    /// longer match anything, so the only way back to a sensor that behaves is
+    /// to clear it and enrol again.
     pub fn forget_all(&mut self) -> io::Result<()> {
-        let response = self.command(&[0x40, 0xff, 0x98], 2)?;
+        let response = self.command(&[0x40, 0xff, 0x05, 0x00, 0x00], 2)?;
         if response[1] != MSG_OK {
             return Err(io::Error::other(format!(
                 "the sensor refused to clear itself (0x{:02x})",
                 response[1]
             )));
         }
-        self.enrolled = 0;
+        self.enrolled = self.read_enrolled_count()?;
+        if self.enrolled != 0 {
+            return Err(io::Error::other(format!(
+                "the sensor still holds {} fingers after being cleared",
+                self.enrolled
+            )));
+        }
         Ok(())
     }
 
@@ -814,18 +770,6 @@ impl Drop for Sensor {
     }
 }
 
-/// Frames a template wants, by product id.
-///
-/// The three that differ are the ones `libfprint` carries numbers for; nine is
-/// what the rest of the family uses, the sensor in this machine included.
-fn stages_for(product: u16) -> u8 {
-    match product {
-        0x0c8c => 11,
-        0x0c99 => 14,
-        0x0c8d => 17,
-        _ => 9,
-    }
-}
 
 /// An error that says which command it came from and which half of it failed,
 /// because "did not answer" is only useful once it says which step of the
@@ -880,39 +824,40 @@ mod tests {
         assert_eq!(offset(std::ptr::addr_of!(urb.actual_length).cast()), 28);
         assert_eq!(offset(std::ptr::addr_of!(urb.usercontext).cast()), 48);
     }
-
+    /// The name goes to the chip as a length and then the label, at the
+    /// offset the store command reads it from. Nothing reads it back -- this
+    /// firmware has no command that returns it -- so the shape is checked here
+    /// or nowhere.
     #[test]
-    fn a_record_survives_a_round_trip() {
-        let record = Record::new([0, 0], b"javanstorm:right-index");
-        let encoded = record.encode();
-        // A get_userid response is the command echo, the status, then the
-        // record: the decoder has to skip exactly those two.
-        let mut response = vec![0x43, MSG_OK];
-        response.extend_from_slice(&encoded);
-        assert_eq!(Record::decode(&response), Some(record));
+    fn a_name_is_stored_as_a_length_and_the_label() {
+        let data = user_data(b"javanstorm:right-index");
+        assert_eq!(data[0..2], [0, 0]);
+        assert_eq!(data[2], 22);
+        assert_eq!(&data[3..25], b"javanstorm:right-index");
+        assert!(data[25..].iter().all(|b| *b == 0));
     }
 
     /// A long account name must cost a truncated label and not a refusal to
     /// enrol.
     #[test]
     fn an_over_long_name_is_truncated_rather_than_refused() {
-        let long = vec![b'a'; 200];
-        let record = Record::new([1, 2], &long);
-        assert_eq!(record.name.len(), MAX_NAME);
-        assert_eq!(record.encode()[2], MAX_NAME as u8);
+        let data = user_data(&vec![b'a'; 200]);
+        assert_eq!(data.len(), USER_DATA_LEN);
+        assert_eq!(data[2], MAX_NAME as u8);
     }
 
-    /// A short or corrupt response must not be believed.
+    /// The store command is the length the chip reads, with the name where it
+    /// looks for it: a byte out either way and the finger is stored under a
+    /// name nothing will recognise.
     #[test]
-    fn a_response_that_is_not_a_record_decodes_to_nothing() {
-        assert_eq!(Record::decode(&[]), None);
-        assert_eq!(Record::decode(&[0x43, MSG_OK]), None);
-        // Wrong echo.
-        assert_eq!(Record::decode(&[0x40, MSG_OK, 0, 0, 0]), None);
-        // Status says the sensor refused.
-        assert_eq!(Record::decode(&[0x43, 0xfd, 0, 0, 0]), None);
-        // Length longer than the packet.
-        assert_eq!(Record::decode(&[0x43, MSG_OK, 0, 0, 90, 1, 2]), None);
+    fn the_store_command_puts_the_name_where_the_chip_reads_it() {
+        let mut cmd = [0u8; NAMED_CMD_LEN];
+        cmd[..3].copy_from_slice(&[0x40, 0xff, 0x11]);
+        cmd[NAME_AT..NAME_AT + USER_DATA_LEN].copy_from_slice(&user_data(b"a:b"));
+        assert_eq!(cmd.len(), 128);
+        assert_eq!(cmd[3..5], [0, 0]);
+        assert_eq!(cmd[NAME_AT + 2], 3);
+        assert_eq!(&cmd[NAME_AT + 3..NAME_AT + 6], b"a:b");
     }
 
     /// The four off-centre codes are one correction, and a code nobody
@@ -927,12 +872,14 @@ mod tests {
         assert_eq!(Retry::of(0x77), Retry::Unknown(0x77));
     }
 
+    /// The count the enrolment asks the person for and the count it tells the
+    /// sensor are the same number, or the chip is still waiting for frames
+    /// when the caller believes the template is done.
     #[test]
-    fn the_sensor_in_this_machine_wants_nine_frames() {
-        assert_eq!(stages_for(0x0c00), 9);
-        assert_eq!(stages_for(0x0c8c), 11);
-        assert_eq!(stages_for(0x0c99), 14);
-        assert_eq!(stages_for(0x0c8d), 17);
+    fn a_template_takes_the_frames_the_sensor_is_told_it_does() {
+        // Nine is what this firmware was seen to take, frame by frame, before
+        // it would accept a commit.
+        assert_eq!(ENROL_FRAMES, 9);
     }
 
     /// Finding a sensor must never fail on a machine that has none — a desktop
