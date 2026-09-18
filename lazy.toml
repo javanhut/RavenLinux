@@ -71,7 +71,7 @@ desc = "Show what 'dev' would change on this running Raven system, without writi
 run = ["./scripts/dev-install.sh all --dry-run"]
 
 [commands.dev-configs]
-desc = "dev's configs target alone: new /etc/raven files land, edited ones are shown as diffs"
+desc = "dev's configs target alone: new /etc/raven and /etc/wireplumber files land, edited ones are shown as diffs"
 run = ["./scripts/dev-install.sh configs"]
 
 [commands.dev-ui]

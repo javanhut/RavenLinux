@@ -30,7 +30,9 @@
 #               configs/raven-dhcp, etc/raven/raven-shell -> /usr/bin
 #   configs     etc/raven/{init,power,time}.toml -> /etc/raven,
 #               configs/raven/services/*.toml -> /etc/raven/init.d,
-#               configs/raven/session.d/* -> /etc/raven/session.d.
+#               configs/raven/session.d/* -> /etc/raven/session.d,
+#               configs/wireplumber/wireplumber.conf.d/*.conf
+#               -> /etc/wireplumber/wireplumber.conf.d.
 #               Diff-only unless --force-configs: the live init.toml carries
 #               machine-local edits (hostname, agetty args) that a blind copy
 #               would erase.
@@ -247,6 +249,13 @@ do_configs() {
     for f in "${RAVEN_ROOT}"/configs/raven/session.d/*; do
         [[ -e "$f" ]] || continue
         install_config "$f" "/etc/raven/session.d/$(basename "$f")" 0755
+    done
+    # Raven's WirePlumber defaults (stage2-native.sh stages the same files).
+    # Diff-only like the rest unless --force-configs; WirePlumber reads them
+    # at its next start, which is the next login.
+    for f in "${RAVEN_ROOT}"/configs/wireplumber/wireplumber.conf.d/*.conf; do
+        [[ -e "$f" ]] || continue
+        install_config "$f" "/etc/wireplumber/wireplumber.conf.d/$(basename "$f")" 0644
     done
 }
 
