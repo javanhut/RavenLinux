@@ -83,6 +83,10 @@ const MAX_NAME: usize = 92;
 
 /// The sensor's own "that reading was fine" code.
 const MSG_OK: u8 = 0x00;
+/// What the calibration status poll answers once the sensor is ready. Not
+/// [`MSG_OK`]: that poll has its own vocabulary, and libfprint's elanmoc driver
+/// waits for this value on the same command.
+const STATUS_CALIBRATED: u8 = 0x03;
 /// A clean reading of a finger it does not know.
 const MSG_NO_MATCH: u8 = 0xfd;
 /// A reading it could not use: too little of the finger, or a dirty sensor.
@@ -424,16 +428,27 @@ impl Sensor {
     /// Bounded. A sensor that never finishes calibrating is a broken sensor,
     /// and a daemon that waits for it forever is a daemon that never starts.
     fn wait_calibrated(&mut self) -> io::Result<()> {
+        let mut last = None;
         for _ in 0..500 {
             let status = self.command(&[0x40, 0xff, 0x00], 2)?;
-            if status[1] == MSG_OK {
+            // Logged on change rather than per poll: the byte is what says
+            // whether a sensor is slow or speaking a different protocol, and
+            // five hundred copies of it say nothing more.
+            if last != Some(status[1]) {
+                log::debug!("calibration status {:02x}", status[1]);
+                last = Some(status[1]);
+            }
+            if status[1] == STATUS_CALIBRATED {
                 return Ok(());
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         Err(io::Error::new(
             io::ErrorKind::TimedOut,
-            "the fingerprint sensor never finished calibrating",
+            format!(
+                "the fingerprint sensor never finished calibrating (last status {:02x}, waiting for {STATUS_CALIBRATED:02x})",
+                last.unwrap_or_default()
+            ),
         ))
     }
 
