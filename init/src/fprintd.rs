@@ -55,6 +55,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use fprint::{Record, Retry, Scan, Sensor};
 
@@ -62,6 +63,15 @@ use fprint::{Record, Retry, Scan, Sensor};
 /// root; see the module note.
 const SOCKET_DIR: &str = "/run/raven-fprint";
 const SOCKET_PATH: &str = "/run/raven-fprint/sensor.sock";
+
+/// How long a sensor that would not open is left alone before the next try.
+///
+/// Opening one that is not answering takes many seconds -- every command in
+/// the bring-up waits out its own timeout -- and each request would otherwise
+/// try again. A settings page asking for status then queues behind one slow
+/// open after another, and every caller behind it is told the reader is busy.
+/// In the meantime the failure is answered at once, with the reason it had.
+const RETRY_OPEN_AFTER: Duration = Duration::from_secs(10);
 
 /// How a stored finger is named in the sensor's 92 bytes.
 ///
@@ -94,7 +104,7 @@ fn run() -> std::io::Result<()> {
     // the answer a settings panel most needs, and the one it would instead get
     // as a missing socket and have to guess at. It also gets hotplug for free:
     // a reader that appears later is found by the next request.
-    let mut sensor: Option<Sensor> = None;
+    let mut sensor = Slot::default();
 
     for stream in listener.incoming() {
         let mut stream = match stream {
@@ -177,7 +187,7 @@ fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
 /// Every error is a line beginning `error` and never a closed connection: a
 /// caller that cannot tell a broken sensor from a crashed daemon has to treat
 /// both as the worst case.
-fn serve(stream: UnixStream, sensor: &mut Option<Sensor>) -> std::io::Result<()> {
+fn serve(stream: UnixStream, sensor: &mut Slot) -> std::io::Result<()> {
     // Three handles on the one connection, because they are held at once: the
     // reader owns its buffer for the whole conversation, replies are written
     // while that reader still has it, and the wait for a finger polls a third
@@ -233,38 +243,83 @@ fn serve(stream: UnixStream, sensor: &mut Option<Sensor>) -> std::io::Result<()>
             // A sensor that failed may be unplugged, wedged, or merely
             // confused. Dropping it means the next request opens it again,
             // which recovers every one of those without a restart.
-            *sensor = None;
+            sensor.sensor = None;
         }
     }
     Ok(())
 }
 
-/// The open sensor, opening one if there is not already one.
-///
-/// Lazy for the reason [`run`] gives: a machine with no reader has to be able
-/// to say so, and a reader plugged in later has to be found without a restart.
-fn open_sensor(sensor: &mut Option<Sensor>) -> std::io::Result<&mut Sensor> {
-    if sensor.is_none() {
-        *sensor = Sensor::open()?;
+/// The sensor, opened on demand, and how the last attempt to open it went.
+#[derive(Default)]
+struct Slot {
+    sensor: Option<Sensor>,
+    /// When opening last failed, and why. Cleared by the next open that works.
+    failed: Option<(Instant, String)>,
+}
+
+impl Slot {
+    /// The open sensor, opening one if there is not already one; `None` for a
+    /// machine with no reader.
+    ///
+    /// Lazy for the reason [`run`] gives: a machine with no reader has to be
+    /// able to say so, and a reader plugged in later has to be found without a
+    /// restart. A reader that failed to open is not tried again for
+    /// [`RETRY_OPEN_AFTER`].
+    fn open(&mut self) -> std::io::Result<Option<&mut Sensor>> {
+        if self.sensor.is_none() {
+            if let Some((at, why)) = &self.failed {
+                if at.elapsed() < RETRY_OPEN_AFTER {
+                    return Err(std::io::Error::other(why.clone()));
+                }
+            }
+            let started = Instant::now();
+            match Sensor::open() {
+                Ok(sensor) => {
+                    if let Some(open) = &sensor {
+                        log::info!(
+                            "opened the sensor in {} ms: firmware {:04x}, {} stages, {} stored",
+                            started.elapsed().as_millis(),
+                            open.firmware(),
+                            open.stages(),
+                            open.enrolled()
+                        );
+                    }
+                    self.sensor = sensor;
+                    self.failed = None;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "cannot open the sensor (gave up after {} ms): {e}",
+                        started.elapsed().as_millis()
+                    );
+                    self.failed = Some((Instant::now(), e.to_string()));
+                    return Err(e);
+                }
+            }
+        }
+        Ok(self.sensor.as_mut())
     }
-    sensor
-        .as_mut()
+}
+
+/// The open sensor, or an error if there is none.
+fn open_sensor(slot: &mut Slot) -> std::io::Result<&mut Sensor> {
+    slot.open()?
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no fingerprint reader"))
 }
 
-fn status(stream: &mut UnixStream, sensor: &mut Option<Sensor>) -> std::io::Result<()> {
-    if sensor.is_none() {
-        *sensor = Sensor::open().unwrap_or(None);
-    }
-    match sensor.as_ref() {
-        Some(open) => writeln!(
+/// `ok present ...` or `ok absent`, or `error <why>` for a reader that is there
+/// but would not open -- which is not the same answer as having none.
+fn status(stream: &mut UnixStream, slot: &mut Slot) -> std::io::Result<()> {
+    match slot.open() {
+        Ok(Some(open)) => writeln!(
             stream,
             "ok present {} {} {:04x}",
             open.stages(),
             open.enrolled(),
             open.firmware()
         ),
-        None => writeln!(stream, "ok absent"),
+        Ok(None) => writeln!(stream, "ok absent"),
+        Err(e) => writeln!(stream, "error {e}"),
     }
 }
 
