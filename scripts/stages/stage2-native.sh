@@ -1379,6 +1379,9 @@ EOF
         pam_wheel.so
         pam_access.so
         pam_faildelay.so
+        # What /etc/pam.d/sudo runs raven-finger-auth through when somebody
+        # turns fingerprint sudo on. Absent, that switch has nothing to do.
+        pam_exec.so
     )
 
     local copied_any=0

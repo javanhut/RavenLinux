@@ -36,7 +36,7 @@ system = "cargo"
 target = "x86_64-unknown-linux-gnu"
 build_flags = [
     "--release", "--locked",
-    "-p", "ravend", "-p", "raven-greeter", "-p", "raven-lock",
+    "-p", "ravend", "-p", "raven-greeter", "-p", "raven-lock", "-p", "raven-finger",
 ]
 
 [dependencies]
@@ -63,6 +63,10 @@ files = [
     # so this path is the contract: the compositor blanks the session on resume
     # and starts this, and if it is not here it un-blanks and logs why.
     { src = "target/x86_64-unknown-linux-gnu/release/raven-lock",    dest = "/usr/bin/raven-lock",         mode = 755 },
+    # What pam_exec runs so sudo can take a finger instead of the password.
+    # Inert until Settings > Security puts its line in /etc/pam.d/sudo, and
+    # even then it steps aside for any account that did not ask for it.
+    { src = "target/x86_64-unknown-linux-gnu/release/raven-finger-auth", dest = "/usr/bin/raven-finger-auth", mode = 755 },
     # Every value in it is a default ravend already has compiled in, so this is
     # a reference for the keys that exist rather than a file the machine needs.
     # A file that is present and does not parse is a hard error -- ravend

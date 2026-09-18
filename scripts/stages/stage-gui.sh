@@ -1329,7 +1329,7 @@ stage_login() {
     log_info "  building RavenLogin for ${GUI_TARGET}..."
     local -a cargo_args=(
         build --release --target "${GUI_TARGET}"
-        -p ravend -p raven-greeter -p raven-lock
+        -p ravend -p raven-greeter -p raven-lock -p raven-finger
     )
     [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
     if ! ( cd "${dest}" && cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}" ); then
@@ -1364,6 +1364,21 @@ stage_login() {
         install -m 0755 "${built}/${binary}" "${SYSROOT_DIR}/usr/bin/${binary}"
         log_success "  ${binary} installed ($(du -h "${built}/${binary}" | cut -f1))"
     done
+
+    # The fingerprint half, outside the all-or-none above: a login screen
+    # without it is a login screen that asks for the password, which is what
+    # every machine without a reader gets anyway. raven-finger-auth is what
+    # pam_exec runs so sudo can take a finger; it is named in /etc/pam.d/sudo
+    # only once somebody turns fingerprint sudo on in Settings. The policy
+    # directory is root's alone -- see raven_finger::policy.
+    if [[ -x "${built}/raven-finger-auth" ]]; then
+        install -m 0755 "${built}/raven-finger-auth" "${SYSROOT_DIR}/usr/bin/raven-finger-auth"
+        install -d -m 0700 "${SYSROOT_DIR}/var/lib/raven-login" \
+            "${SYSROOT_DIR}/var/lib/raven-login/fingerprint"
+        log_success "  raven-finger-auth installed; fingerprint sudo is available"
+    else
+        log_warn "  raven-finger-auth was not produced; fingerprint sudo will not be offered"
+    fi
 
     # Never overwritten: every value in it is a default ravend already carries,
     # so a file that is already there is one somebody edited on purpose.
