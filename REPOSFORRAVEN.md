@@ -593,3 +593,38 @@ Its link graph is the widest on the image by a distance: the FFmpeg closure is
 every codec, container and colour library the build host's `ffmpeg` was built
 against. None of it is listed anywhere — `stage_gui_libraries()` resolves the
 whole of it with `ldd`, which is the point of doing it that way.
+
+## Camera and Screen Recorder
+
+| Status | Binary | Repo |
+|--------|--------|------|
+| **wired** | `raven-camera` | [javanhut/RavenCamera](https://github.com/javanhut/RavenCamera) |
+
+Built by `stage_camera()` in `stage-gui.sh`, from its own repository, with the
+other GTK4 applications and after the media player. `imlazy gui` builds it;
+`CAMERA_SKIP=1` leaves it out, and an image without it can still record the
+screen with Huginn's own `Super`+`Print` but has no camera application and no
+window or region recording.
+
+Photos and video from the built-in camera or any USB webcam (V4L2, straight to
+the kernel), screenshots, and screen, window and region recording through
+Huginn's `raven_capture_v1` (`raven_shell_v1` version 4), with system sound
+and the microphone through PipeWire's `pw-record` and an optional webcam
+overlay. Nothing is encoded while recording: the screen goes into `raven-rec`,
+the camera as its own JPEG frames, sound as WAV, and the MP4 is made afterwards
+on every core with RavenGUI's `raven-h264`, `raven-aac` and `raven-mp4`.
+
+**It builds against RavenGUI, not beside it.** Those crates are git
+dependencies on RavenGUI in its `Cargo.toml`, and its `.cargo/config.toml`
+patches them to `../RavenGUI` -- which under `GUI_SRC_DIR` is exactly the
+checkout `fetch_gui_source()` made for the compositor. So the camera on an
+image is always built against the same encoder and protocol source as that
+image's huginn and raven-export, and `stage_camera()` skips the application,
+with a sentence saying why, when that checkout predates `raven-mp4`.
+
+Its stylesheets are compiled in, so the only data it ships is its icon and
+metainfo. `install_desktop_entries()` writes its entry with two desktop
+actions, "Take a Screenshot" and "Stop Recording", which the dock's right-click
+menu offers -- the second is the way back to a recording whose window was
+minimised out of it. It claims no MIME type: it makes files, and the videos it
+saves are Owl Player's to open.

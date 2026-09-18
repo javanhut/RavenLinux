@@ -73,6 +73,7 @@ And a graphical layer, built separately because it cannot be static:
 | `raven-viewer` | [RavenViewer](https://github.com/javanhut/RavenViewer), the document reader — PDF and DOCX, and the default for both |
 | `eagleeye` | [EagleEye](https://github.com/javanhut/EagleEye), the image viewer — the only thing on the image that opens a picture, and the default for all 27 image types |
 | `owl-player` | [OwlPlayer](https://github.com/javanhut/OwlPlayer), the media player — FFmpeg with its own GPU renderer in front of it, and the default for all 29 video and audio types |
+| `raven-camera` | [RavenCamera](https://github.com/javanhut/RavenCamera), the camera and screen recorder — photos and video from the built-in or any USB webcam, screenshots, and screen, window and region recording with system sound, microphone and a webcam overlay, saved as MP4 through Raven's own H.264, AAC and MP4 writer |
 | `raven-installer-ui` | the graphical installer — `installer-ui/` in this repository rather than its own, because it is the front-end for `scripts/installer/raven-install` and a version skew between the two is a wizard that cannot drive the installer it is looking at |
 | `ravend`, `raven-greeter` | [RavenLogin](https://github.com/javanhut/RavenLogin), the login screen — and the root daemon behind it, which is not the process that draws |
 
@@ -85,7 +86,7 @@ there is nothing to log into, and without the terminal nothing to launch —
 huginn names it in two compiled-in places — so either one failing fails the
 stage. Everything else is something a desktop can be missing, and each says so
 with a `<NAME>_SKIP=1` of its own: `FILEMANAGER_SKIP=1`, `CANVAS_SKIP=1`,
-`LOGIN_SKIP=1`, `EAGLEEYE_SKIP=1`, `PLAYER_SKIP=1` and the rest each produce an
+`LOGIN_SKIP=1`, `EAGLEEYE_SKIP=1`, `PLAYER_SKIP=1`, `CAMERA_SKIP=1` and the rest each produce an
 image that still boots to a working session.
 
 RavenCanvas is the one of those that is a separate process by choice rather than
@@ -96,8 +97,8 @@ rule is not about, since huginn paints its own background underneath and the
 worst its death can do is leave a plain desktop.
 
 RavenFileManager was the first thing on the image that is simply an
-application, and for a while the only GTK client on it. It is now one of nine:
-Settings, Store, Power, Controls, Viewer, EagleEye, Owl Player and the
+application, and for a while the only GTK client on it. It is now one of ten:
+Settings, Store, Power, Controls, Viewer, EagleEye, Owl Player, Camera and the
 graphical installer are all GTK4 + libadwaita too, they all fail the same
 `pkg-config` check on a host without the toolkit, and whichever of them builds
 first stages the runtime the rest ride on.
@@ -288,7 +289,7 @@ next `imlazy build` ships it.
 | `stage2` | `scripts/stages/stage2-native.sh` | Native rebuild of the sysroot: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | `stage3` | `scripts/stages/stage3-packages.sh` | Base packages: core libraries (zlib, ncurses, readline, attr, acl), shells, OpenSSH, RavenBoot |
 | `raven` | `scripts/stages/stage-raven.sh` | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw |
-| `gui` | `scripts/stages/stage-gui.sh` | The desktop: huginn, raven-terminal, ravenfilemanager, the seven other GTK4 applications (Settings, Store, Power, Controls, Viewer, EagleEye, Owl Player) and the graphical installer, ravencanvasd, roostbar, ravend, raven-lock, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
+| `gui` | `scripts/stages/stage-gui.sh` | The desktop: huginn, raven-terminal, ravenfilemanager, the eight other GTK4 applications (Settings, Store, Power, Controls, Viewer, EagleEye, Owl Player, Camera) and the graphical installer, ravencanvasd, roostbar, ravend, raven-lock, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
 | `stage4` | `scripts/stages/stage4-iso.sh` | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
 
 The Raven layer is unnumbered on purpose. Stages 0–4 build a base system that
@@ -346,6 +347,7 @@ CONTROLS_SKIP=1 imlazy gui                  # no backlight/fan UI, no controlsd
 VIEWER_SKIP=1 imlazy gui                    # no PDF/DOCX reader
 EAGLEEYE_SKIP=1 imlazy gui                  # nothing opens an image
 PLAYER_SKIP=1 imlazy gui                    # nothing plays a film or a song
+CAMERA_SKIP=1 imlazy gui                    # no camera app or screen recorder
 ```
 
 Every component in that list also takes a `<NAME>_REF=<git-ref>` and a

@@ -1,0 +1,109 @@
+ALSA: hda/realtek: Remove the internal mic boost on HP 103c:883e
+
+The internal microphone on this HP laptop (Celeron N4120, ALC236 with
+codec SSID 103c:8c03, PCI SSID 103c:883e) is a digital mic on pin 0x12.
+The PCI SSID is in no quirk table, so the codec gets only the vendor-wide
+ALC269_FIXUP_HP_MUTE_LED, and the generic parser exposes the pin's boost
+amp as "Internal Mic Boost": three steps of +10 dB.
+
+A DMIC's samples are already full scale, so the boost only multiplies
+them. PipeWire and PulseAudio fold the boost into the source volume, and
+at 100% -- WirePlumber's default for a source -- the boost is at +30 dB
+and the capture volume at its maximum: 87.6% of the samples were pinned
+at full scale, left and right in opposite polarity, and a recording of a
+quiet room was a roar. Measured on the machine:
+
+  source volume  boost    ADC    clipped
+  100%           +30 dB   0x3f   87.6%
+  60%            +10 dB   0x3f   12.6%
+  40%            0 dB     0x3f    0.0%
+
+Nearby HP ALC236 machines (ProBook 445 G8, 0x8862/0x8863) carry
+ALC236_FIXUP_HP_LIMIT_INT_MIC_BOOST for the same reason, but that leaves
+one +10 dB step, which the table shows still clips here, and chains to a
+VREF mic-mute LED this machine is not known to have. Add a fixup that
+takes the boost away altogether -- no steps, so no control, and the amp
+held at 0 dB at init and resume -- and chains to the HP mute-LED fixup
+the machine already had, so nothing else about it changes.
+
+--- a/sound/hda/codecs/realtek/alc269.c
++++ b/sound/hda/codecs/realtek/alc269.c
+@@ -2163,6 +2163,49 @@
+ 	}
+ }
+ 
++/* An internal digital mic behind the pin's boost amp. A DMIC delivers its
++ * samples already at full scale, so every boost step only multiplies them:
++ * with the boost at +30 dB and the capture volume at its maximum -- which is
++ * what a mixer at 100% asks for -- the input sits pinned at full scale and
++ * records as a roar. Unlike alc269_fixup_limit_int_mic_boost, which still
++ * leaves one step, remove the boost altogether and hold it at 0 dB, so the
++ * capture volume is the only gain there is.
++ */
++static void alc236_fixup_no_int_mic_boost(struct hda_codec *codec,
++					  const struct hda_fixup *fix,
++					  int action)
++{
++	struct alc_spec *spec = codec->spec;
++	struct auto_pin_cfg *cfg = &spec->gen.autocfg;
++	int i;
++
++	if (action != HDA_FIXUP_ACT_PROBE && action != HDA_FIXUP_ACT_INIT)
++		return;
++
++	for (i = 0; i < cfg->num_inputs; i++) {
++		hda_nid_t nid = cfg->inputs[i].pin;
++		unsigned int defcfg;
++		if (cfg->inputs[i].type != AUTO_PIN_MIC)
++			continue;
++		defcfg = snd_hda_codec_get_pincfg(codec, nid);
++		if (snd_hda_get_input_pin_attr(defcfg) != INPUT_PIN_ATTR_INT)
++			continue;
++
++		if (action == HDA_FIXUP_ACT_PROBE)
++			/* No steps: no "Internal Mic Boost" control is made. */
++			snd_hda_override_amp_caps(codec, nid, HDA_INPUT,
++						  (0x00 << AC_AMPCAP_OFFSET_SHIFT) |
++						  (0x00 << AC_AMPCAP_NUM_STEPS_SHIFT) |
++						  (0x27 << AC_AMPCAP_STEP_SIZE_SHIFT) |
++						  (0 << AC_AMPCAP_MUTE_SHIFT));
++		else
++			/* And the amp itself at 0 dB, on boot and on resume. */
++			snd_hda_codec_write(codec, nid, 0,
++					    AC_VERB_SET_AMP_GAIN_MUTE,
++					    AMP_IN_UNMUTE(0));
++	}
++}
++
+ static void alc283_hp_automute_hook(struct hda_codec *codec,
+ 				    struct hda_jack_callback *jack)
+ {
+@@ -3672,6 +3715,7 @@
+ 	ALC623_FIXUP_LENOVO_THINKSTATION_P340,
+ 	ALC255_FIXUP_ACER_HEADPHONE_AND_MIC,
+ 	ALC236_FIXUP_HP_LIMIT_INT_MIC_BOOST,
++	ALC236_FIXUP_HP_NO_INT_MIC_BOOST,
+ 	ALC287_FIXUP_LEGION_15IMHG05_SPEAKERS,
+ 	ALC287_FIXUP_LEGION_15IMHG05_AUTOMUTE,
+ 	ALC287_FIXUP_YOGA7_14ITL_SPEAKERS,
+@@ -5663,6 +5707,12 @@
+ 		.chained = true,
+ 		.chain_id = ALC236_FIXUP_HP_MUTE_LED_MICMUTE_VREF,
+ 	},
++	[ALC236_FIXUP_HP_NO_INT_MIC_BOOST] = {
++		.type = HDA_FIXUP_FUNC,
++		.v.func = alc236_fixup_no_int_mic_boost,
++		.chained = true,
++		.chain_id = ALC269_FIXUP_HP_MUTE_LED,
++	},
+ 	[ALC285_FIXUP_LEGION_Y9000X_SPEAKERS] = {
+ 		.type = HDA_FIXUP_FUNC,
+ 		.v.func = alc285_fixup_ideapad_s740_coef,
+@@ -6450,6 +6500,7 @@
+ 	SND_PCI_QUIRK(0x103c, 0x8812, "HP Spectre x360 15-eb1xxx", ALC285_FIXUP_HP_SPECTRE_X360_EB1),
+ 	SND_PCI_QUIRK(0x103c, 0x881d, "HP 250 G8 Notebook PC", ALC236_FIXUP_HP_MUTE_LED_COEFBIT2),
+ 	SND_PCI_QUIRK(0x103c, 0x881e, "HP Laptop 15s-du3xxx", ALC236_FIXUP_HP_MUTE_LED_COEFBIT2),
++	SND_PCI_QUIRK(0x103c, 0x883e, "HP Laptop (ALC236, Celeron N4120)", ALC236_FIXUP_HP_NO_INT_MIC_BOOST),
+ 	SND_PCI_QUIRK(0x103c, 0x8846, "HP EliteBook 850 G8 Notebook PC", ALC285_FIXUP_HP_GPIO_LED),
+ 	SND_PCI_QUIRK(0x103c, 0x8847, "HP EliteBook x360 830 G8 Notebook PC", ALC285_FIXUP_HP_GPIO_LED),
+ 	SND_PCI_QUIRK(0x103c, 0x884b, "HP EliteBook 840 Aero G8 Notebook PC", ALC285_FIXUP_HP_GPIO_LED),

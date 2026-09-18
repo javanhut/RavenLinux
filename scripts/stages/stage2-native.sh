@@ -2701,6 +2701,14 @@ EOF
 	        cp "${PROJECT_ROOT}/configs/raven/user-services/"*.toml \
 	            "${SYSROOT_DIR}/usr/share/raven/user-services/" 2>/dev/null || true
 	    fi
+	    # WirePlumber's Raven defaults, beside the package's own config in
+	    # /usr/share: /etc/wireplumber is the drop-in directory it reads, and
+	    # a file no package owns there survives every wireplumber update.
+	    if [[ -d "${PROJECT_ROOT}/configs/wireplumber/wireplumber.conf.d" ]]; then
+	        mkdir -p "${SYSROOT_DIR}/etc/wireplumber/wireplumber.conf.d"
+	        cp "${PROJECT_ROOT}/configs/wireplumber/wireplumber.conf.d/"*.conf \
+	            "${SYSROOT_DIR}/etc/wireplumber/wireplumber.conf.d/" 2>/dev/null || true
+	    fi
     if [[ ! -f "${SYSROOT_DIR}/etc/raven/init.toml" ]]; then
         cat > "${SYSROOT_DIR}/etc/raven/init.toml" << 'EOF'
 # RavenLinux Init Configuration

@@ -1,0 +1,51 @@
+[package]
+name = "raven-camera"
+version = "0.1.0"
+description = "Raven Camera - photos, video, screenshots and screen recording"
+license = "GPL-3.0-or-later"
+homepage = "https://github.com/javanhut/RavenCamera"
+repository = "https://github.com/javanhut/RavenCamera"
+maintainers = ["RavenLinux Team"]
+categories = ["gui", "wayland", "application"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/RavenCamera.git"
+# Unpinned: nothing has been tagged in that repository yet. A `commit` added
+# here is read by the GUI stage through raven_resolve_ref.
+
+[build]
+system = "cargo"
+# GTK4 + libadwaita, glibc target, like every other GTK application here.
+# Everything else is pure Rust or RavenGUI's own crates: cameras are V4L2
+# ioctls, pictures are zune-jpeg / jpeg-encoder / png, and video, sound and
+# MP4 are raven-h264, raven-aac and raven-mp4, which the checkout's
+# .cargo/config.toml takes from ../RavenGUI (see stage_camera()).
+target = "x86_64-unknown-linux-gnu"
+build_flags = ["--release", "--locked"]
+
+[dependencies]
+# The toolkit, as for raven-viewer. pipewire provides pw-record and pw-dump,
+# which is how sound is recorded; without them recordings are silent and the
+# app says so. ravengui provides the compositor whose raven_capture_v1 the
+# screen recorder needs (raven_shell_v1 version 4); against an older Huginn
+# the camera, photos and sound still work and screen capture says why not.
+runtime = [
+    "gtk4", "libadwaita", "glib2", "gsettings-desktop-schemas",
+    "shared-mime-info", "desktop-file-utils", "hicolor-icon-theme",
+    "pipewire", "ravengui",
+]
+build = ["rust", "cargo", "pkg-config", "gtk4", "libadwaita", "glib2"]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-gnu/release/raven-camera", dest = "/usr/bin/raven-camera", mode = 755 },
+    { src = "data/icons/hicolor/scalable/apps/com.ravencamera.Raven.svg", dest = "/usr/share/icons/hicolor/scalable/apps/com.ravencamera.Raven.svg", mode = 644 },
+    { src = "data/com.ravencamera.Raven.metainfo.xml", dest = "/usr/share/metainfo/com.ravencamera.Raven.metainfo.xml", mode = 644 }
+]
+
+# data/*.css are include_str!ed into the binary. The upstream .desktop file is
+# deliberately absent: install_desktop_entries() in scripts/stages/stage-gui.sh
+# writes every entry on this image, with StartupWMClass set to the GTK
+# application id and the Screenshot and Stop Recording actions.
+symlinks = []

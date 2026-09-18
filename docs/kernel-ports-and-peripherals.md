@@ -217,6 +217,34 @@ Jack detection is a kernel event (an input device named `HDA ... Headphone`)
 and a PipeWire/WirePlumber policy; nothing in the kernel config needs to change
 for it.
 
+### An internal microphone that records a roar
+
+Not every laptop digital mic goes through SOF. Many still hang a DMIC off the
+HDA codec itself -- on Realtek parts it is pin 0x12, which
+`/proc/asound/card0/codec#0` shows as `[Fixed] Mic at Oth Mobile-In`,
+`Conn = Digital` -- and the generic parser gives that pin an
+`Internal Mic Boost` of up to +30 dB. PipeWire folds the boost into the source
+volume, so an input at 100% is the boost at maximum on top of the capture
+volume at maximum: the DMIC's samples, already full scale, pin there, and a
+recording of a quiet room is a roar. The telltale is a raw capture that is
+mostly ±32767 with the two channels in opposite polarity.
+
+Two things keep that from happening:
+
+* `configs/wireplumber/wireplumber.conf.d/50-raven-input-volume.conf`, staged
+  to `/etc/wireplumber`, starts every input WirePlumber has not seen before
+  at 40% rather than 100%. That is below the first boost step, and measured
+  clean on the machine that found this.
+* `configs/kernel/patches/0002-*` removes the boost outright on the machine
+  that found it (HP, PCI SSID `103c:883e`), so no slider position brings the
+  roar back. Another model with the same symptom wants its SSID
+  (`/sys/bus/pci/devices/0000:00:0e.0/subsystem_{vendor,device}`) added to
+  the same quirk -- `ALC236_FIXUP_HP_NO_INT_MIC_BOOST`, or upstream's
+  `LIMIT_INT_MIC_BOOST` fixups where one +10 dB step is tolerable.
+
+An input someone already set to 100% keeps what they chose; `wpctl set-volume
+@DEFAULT_AUDIO_SOURCE@ 0.4` puts it back.
+
 ## Input and peripherals
 
 Game controllers: `INPUT_JOYDEV`, `JOYSTICK_XPAD` (Xbox, wired and wireless

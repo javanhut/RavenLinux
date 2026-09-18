@@ -121,6 +121,10 @@
 #                              video/* or audio/* at all
 #   PLAYER_OFFLINE=1           as GUI_OFFLINE, for the media player alone
 #   PLAYER_REF=<git-ref>       build a particular OwlPlayer ref
+#   CAMERA_SKIP=1              skip Raven Camera; no camera app, and no way to
+#                              record the screen but Huginn's own Super+Print
+#   CAMERA_OFFLINE=1           as GUI_OFFLINE, for the camera app alone
+#   CAMERA_REF=<git-ref>       build a particular RavenCamera ref
 #
 #   LOGIN_OFFLINE=1            as GUI_OFFLINE, for the login screen alone
 #   LOGIN_REF=<git-ref>        build a particular RavenLogin ref
@@ -266,6 +270,15 @@ EAGLEEYE_MIME_TYPES=(
 raven_gui_app_vars PLAYER
 PLAYER_BIN="${PLAYER_BINARIES}"
 PLAYER_APPID="com.owlplayer.Raven"
+
+# Raven Camera: photos and video from any webcam, screenshots, and screen,
+# window and region recording through Huginn's raven_capture_v1. GTK4 +
+# libadwaita like the rest; its video, sound and MP4 come from RavenGUI's own
+# raven-h264, raven-aac and raven-mp4, which it builds against the RavenGUI
+# checkout beside it -- see stage_camera().
+raven_gui_app_vars CAMERA
+CAMERA_BIN="${CAMERA_BINARIES}"
+CAMERA_APPID="com.ravencamera.Raven"
 
 # What it claims. This is crates/owl-player/src/main.rs's MIME_TYPES -- the
 # same list the application's own `owl-player set-default` writes into a user's
@@ -2271,6 +2284,92 @@ stage_eagleeye() {
 }
 
 # =============================================================================
+# Raven Camera
+# =============================================================================
+# stage_viewer's shape: GTK4, optional, and every failure warns and returns 0.
+#
+# One difference. Raven Camera's encoders are RavenGUI crates (raven-h264,
+# raven-rec, raven-aac, raven-mp4), declared as git dependencies on
+# RavenGUI and patched, in the checkout's .cargo/config.toml, to
+# ../RavenGUI. Under GUI_SRC_DIR that path is exactly the RavenGUI checkout
+# fetch_gui_source() made for the compositor, so the camera is built against
+# the same encoder source as the huginn and raven-export on this image, and
+# the build needs no second copy of RavenGUI from the network.
+#
+# Environment:
+#   CAMERA_SKIP=1      skip it
+#   CAMERA_OFFLINE=1   never touch the network; use the existing clone
+#   CAMERA_REF=<ref>   build a particular ref instead of the default
+stage_camera() {
+    if [[ "${CAMERA_SKIP:-0}" == "1" ]]; then
+        log_info "  CAMERA_SKIP=1: no camera app on the image"
+        return 0
+    fi
+
+    command -v cargo &>/dev/null || {
+        log_warn "  cargo not found; Raven Camera will not be built"
+        return 0
+    }
+
+    local -a missing=()
+    local mod
+    for mod in gtk4 libadwaita-1 glib-2.0 gio-2.0; do
+        pkg-config --exists "${mod}" 2>/dev/null || missing+=("${mod}")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        log_warn "  missing build dependencies for Raven Camera: ${missing[*]}"
+        log_warn "  install them with: pacman -S --needed gtk4 libadwaita"
+        log_warn "  the desktop will ship without a camera app"
+        return 0
+    fi
+
+    if [[ ! -d "${GUI_SRC_DIR}/${GUI_REPO}/crates/raven-mp4" ]]; then
+        log_warn "  ${GUI_SRC_DIR}/${GUI_REPO} has no raven-mp4: the RavenGUI checkout"
+        log_warn "  predates Raven Camera's encoders; no camera app on the image"
+        return 0
+    fi
+
+    local dest="${GUI_SRC_DIR}/${CAMERA_REPO}"
+    if ! fetch_repo "${CAMERA_REPO}" "${CAMERA_URL}" "${dest}" \
+            "${CAMERA_REF:-}" "${CAMERA_OFFLINE:-${GUI_OFFLINE:-0}}" "${CAMERA_MANIFEST}"; then
+        log_warn "  RavenCamera source unavailable; no camera app on the image"
+        return 0
+    fi
+
+    log_info "  building Raven Camera for ${GUI_TARGET}..."
+    local -a cargo_args=(build --release --target "${GUI_TARGET}")
+    [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
+    if ! ( cd "${dest}" && cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}" ); then
+        log_warn "  Raven Camera build failed; no camera app on the image"
+        return 0
+    fi
+
+    local out="${dest}/target/${GUI_TARGET}/release/${CAMERA_BIN}"
+    if [[ ! -x "${out}" ]]; then
+        log_warn "  Raven Camera produced no binary; no camera app on the image"
+        return 0
+    fi
+
+    install -Dm 0755 "${out}" "${SYSROOT_DIR}/usr/bin/${CAMERA_BIN}"
+    log_success "  ${CAMERA_BIN} installed ($(du -h "${out}" | cut -f1))"
+    stage_gui_libraries "${out}"
+
+    # The stylesheets are include_str!ed, so only the icon and metainfo ship;
+    # the entry is install_desktop_entries' job.
+    local appdata="${SYSROOT_DIR}/usr/share"
+    install -Dm 0644 "${dest}/data/icons/hicolor/scalable/apps/${CAMERA_APPID}.svg" \
+        "${appdata}/icons/hicolor/scalable/apps/${CAMERA_APPID}.svg" 2>/dev/null \
+        && log_info "    + ${CAMERA_APPID}.svg (hicolor/scalable)" \
+        || log_warn "    no icon in the checkout; the launcher entry will draw blank"
+    install -Dm 0644 "${dest}/data/${CAMERA_APPID}.metainfo.xml" \
+        "${appdata}/metainfo/${CAMERA_APPID}.metainfo.xml" 2>/dev/null || true
+
+    if declare -F stage_gtk_runtime &>/dev/null; then
+        stage_gtk_runtime
+    fi
+}
+
+# =============================================================================
 # Owl Player
 # =============================================================================
 # The media player. stage_eagleeye's shape again -- optional like every GTK4
@@ -2728,6 +2827,39 @@ ENTRY
         done
         chmod 0644 "${list}"
         log_info "    + mimeapps.list (${#PLAYER_MIME_TYPES[@]} media types)"
+    fi
+
+    # The camera. No MimeType: it opens nothing, it makes things. Its two
+    # desktop actions are what the dock's right-click menu offers, and "Stop
+    # Recording" is the way back to a recording whose window was minimised
+    # out of it.
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${CAMERA_BIN}" ]]; then
+        cat > "${dir}/${CAMERA_APPID}.desktop" << ENTRY
+[Desktop Entry]
+Type=Application
+Name=Camera
+GenericName=Camera and Screen Recorder
+Comment=Take photos, record video, and capture or record the screen
+Exec=${CAMERA_BIN}
+Icon=${CAMERA_APPID}
+Categories=AudioVideo;Video;Recorder;GTK;
+Keywords=camera;webcam;photo;video;screenshot;screen;record;recorder;capture;microphone;
+StartupWMClass=${CAMERA_APPID}
+StartupNotify=true
+Terminal=false
+Actions=screenshot;stop;
+
+[Desktop Action screenshot]
+Name=Take a Screenshot
+Exec=${CAMERA_BIN} --screenshot
+
+[Desktop Action stop]
+Name=Stop Recording
+Exec=${CAMERA_BIN} --stop
+ENTRY
+        chmod 0644 "${dir}/${CAMERA_APPID}.desktop"
+        written=$((written + 1))
+        log_info "    + ${CAMERA_APPID}.desktop"
     fi
 
     # The one entry on this image that is copied rather than written here.
@@ -3657,6 +3789,12 @@ main() {
     # is a build and not a hang.
     log_step "Staging the media player..."
     stage_player
+
+    # Same rule. After the player because the videos it saves are the
+    # player's to open, and after the compositor build above because it
+    # compiles against the RavenGUI checkout that build fetched.
+    log_step "Staging the camera and screen recorder..."
+    stage_camera
 
     # Before install_desktop_entries, like the rest: the entry is written only
     # if the binary is there to see. This one also stages a udev rule and the

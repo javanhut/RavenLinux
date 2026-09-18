@@ -113,6 +113,7 @@ line:
 | `raven-viewer` | RavenViewer | Rust | PDF and DOCX reader (GTK4, libadwaita); the default for both |
 | `eagleeye` | EagleEye | Rust | Image viewer (GTK4, libadwaita); the default for every `image/*` on the image |
 | `owl-player` | OwlPlayer | Rust | Media player (GTK4, libadwaita) built on FFmpeg with its own GL renderer; the default for `video/*` and `audio/*` |
+| `raven-camera` | RavenCamera | Rust | Camera and screen recorder (GTK4, libadwaita): V4L2 webcams, Huginn's `raven_capture_v1`, PipeWire sound, and RavenGUI's own H.264, AAC and MP4 crates, built against the RavenGUI checkout beside it |
 | `ravencanvasd`, `ravencanvas` | RavenCanvas | Rust | The wallpaper: a wlr-layer-shell client, and its control CLI |
 | `roostbar` | RoostBar | Rust | Layer-shell status bar, started through the global session.d drop-in |
 | `ravend`, `raven-greeter` | RavenLogin | Rust | The login daemon, which reads `/etc/shadow`, and the login screen, which does not |
@@ -473,7 +474,7 @@ working shell; the Raven layer takes that over once `ravenshell` is installed.
 | **Stage 2** | Rebuild the sysroot natively: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
 | **Stage 3** | Base packages: core libraries, shells, OpenSSH, RavenBoot |
 | **Raven** | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw |
-| **GUI** | The desktop: huginn, raven-terminal, ravenfilemanager, the seven other GTK4 applications (Settings, Store, Power, Controls, Viewer, EagleEye, Owl Player) and the graphical installer, ravencanvasd, roostbar, ravend, raven-lock, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
+| **GUI** | The desktop: huginn, raven-terminal, ravenfilemanager, the eight other GTK4 applications (Settings, Store, Power, Controls, Viewer, EagleEye, Owl Player, Camera) and the graphical installer, ravencanvasd, roostbar, ravend, raven-lock, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
 | **Stage 4** | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
 
 The Raven layer carries no stage number. Stages 0–4 are the base system and
@@ -547,7 +548,7 @@ Sets:
 - `packages/raven/` — ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw
 - `packages/gui/` — ravengui (huginn), ravenfilemanager, raven-settings,
   raven-store, raven-power, raven-gaming, raven-controls, raven-viewer,
-  eagleeye, owl-player, ravenlogin, ravencanvas, roostbar. raven-terminal is built by the same stage
+  eagleeye, owl-player, raven-camera, ravenlogin, ravencanvas, roostbar. raven-terminal is built by the same stage
   from its own repository and is the one GUI component with no manifest here
   yet, which is why its row in `scripts/lib/components.sh` has an empty
   manifest field and `fetch` reports it as unpinned rather than pretending
