@@ -68,6 +68,9 @@ const EP_FINGER_IN: u8 = 0x84;
 
 /// How long a command that is not waiting for a finger may take.
 const CMD_TIMEOUT_MS: u32 = 5000;
+/// How long the optional answer to the mode change is waited for. Short,
+/// because on the sensor this was written for it never comes.
+const SET_MODE_ANSWER_MS: u32 = 500;
 
 /// The interface the sensor's endpoints live on.
 const INTERFACE: u32 = 0;
@@ -439,6 +442,7 @@ impl Sensor {
                 last = Some(status[1]);
             }
             if status[1] == STATUS_CALIBRATED {
+                log::info!("the sensor is calibrated");
                 return Ok(());
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -452,9 +456,20 @@ impl Sensor {
         ))
     }
 
+    /// The mode change is not reliably acknowledged: the `0c00` accepts it and
+    /// answers nothing, so an answer is read if one comes and not required.
+    /// Whether the sensor took it shows in the next command, which does answer.
     fn set_mode(&mut self) -> io::Result<()> {
-        self.command(&[0x40, 0xff, 0x14, 0x03], 2)?;
-        Ok(())
+        const CMD: &[u8] = &[0x40, 0xff, 0x14, 0x03];
+        self.send(CMD).map_err(|e| named(e, "sending", CMD))?;
+        match self.read_bulk(EP_CMD_IN, 2, SET_MODE_ANSWER_MS) {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                log::info!("the sensor did not acknowledge the mode change; carrying on");
+                Ok(())
+            }
+            Err(e) => Err(named(e, "reading the answer to", CMD)),
+        }
     }
 
     fn read_enrolled_count(&mut self) -> io::Result<u8> {
@@ -594,11 +609,12 @@ impl Sensor {
     /// For everything that does not wait for a finger. The ones that do go
     /// through [`Self::wait`] instead, which can be cancelled.
     fn command(&mut self, cmd: &[u8], response_len: usize) -> io::Result<Vec<u8>> {
-        self.send(cmd)?;
+        self.send(cmd).map_err(|e| named(e, "sending", cmd))?;
         if response_len == 0 {
             return Ok(Vec::new());
         }
         self.read_bulk(EP_CMD_IN, response_len, CMD_TIMEOUT_MS)
+            .map_err(|e| named(e, "reading the answer to", cmd))
     }
 
     fn send(&mut self, cmd: &[u8]) -> io::Result<()> {
@@ -809,6 +825,14 @@ fn stages_for(product: u16) -> u8 {
         0x0c8d => 17,
         _ => 9,
     }
+}
+
+/// An error that says which command it came from and which half of it failed,
+/// because "did not answer" is only useful once it says which step of the
+/// bring-up went unanswered.
+fn named(e: io::Error, doing: &str, cmd: &[u8]) -> io::Error {
+    let hex: Vec<String> = cmd.iter().map(|b| format!("{b:02x}")).collect();
+    io::Error::new(e.kind(), format!("{e} ({doing} command {})", hex.join(" ")))
 }
 
 /// A command timeout as a `poll` timeout.
