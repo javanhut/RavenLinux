@@ -1,0 +1,35 @@
+# raven-fprintd -- the fingerprint sensor.
+#
+# On any image built from this tree you do not need this file: /etc/raven/
+# init.toml defines this service itself and raven-init starts it at boot. It is
+# shipped for the other case -- an already-installed machine whose init.toml
+# predates raven-fprintd, where `dev` installs the binary but, leaving the live
+# init.toml alone, never adds the service that runs it.
+#
+# raven-init reads /etc/raven/init.d/*.toml alongside init.toml, so copying this
+# there is how the daemon starts without a reboot and without hand-editing a
+# file the next upgrade may replace:
+#
+#   cp /usr/share/raven/services/fprintd.toml /etc/raven/init.d/
+#   raven-rc reload
+#   raven-rc start fprintd
+#
+# Leaving it there afterwards is safe. When an init.toml that defines fprintd
+# does arrive, init keeps its own definition and logs that this drop-in was
+# ignored -- it cannot end up defined twice.
+#
+# No libfprint, no fprintd on the bus: see the fprintd entry in
+# etc/raven/init.toml for why, and for why it runs on machines with no reader.
+[[services]]
+name = "fprintd"
+description = "Fingerprint reader"
+exec = "/usr/bin/raven-fprintd"
+args = []
+after = ["udev"]
+runtime_dirs = ["/run/raven-fprint"]
+# The socket is the proof it is serving; it binds before opening any device.
+ready_path = "/run/raven-fprint/sensor.sock"
+ready_timeout = 5
+restart = true
+enabled = true
+critical = false
