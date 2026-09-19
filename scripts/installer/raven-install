@@ -3567,6 +3567,19 @@ install_bootloader() {
 
     local base_cmdline="root=UUID=${ROOT_UUID} rw"
 
+    # Dell firmware can hang on the kernel's default ACPI reset: a Latitude
+    # 5350 went to a black screen with the backlight on and never reached
+    # POST, and reboot=efi did no better. The PCI reset (port 0xcf9) is what
+    # brings it back. Dells only -- elsewhere the default is known to work,
+    # and forcing a reset method on unknown firmware can break a good one.
+    # The installer runs on the target, so its DMI vendor is the machine's.
+    local sys_vendor=""
+    sys_vendor="$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || true)"
+    if [[ "$sys_vendor" == Dell* ]]; then
+        base_cmdline+=" reboot=pci"
+        info "Dell firmware detected; adding reboot=pci"
+    fi
+
     # Does this root actually carry a compositor? The Desktop entry is written
     # only if it does, so everything below keys off the same answer.
     local has_desktop=0
