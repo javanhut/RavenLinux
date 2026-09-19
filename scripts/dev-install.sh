@@ -157,10 +157,14 @@ install_config() {
 # -----------------------------------------------------------------------------
 # Targets
 # -----------------------------------------------------------------------------
+# --locked only when a Cargo.lock is present, as in the build stages: the
+# checkout does not always carry one, and --locked refuses to create it.
 do_init() {
     log_section "init crate (raven-init, raven-rc, raven-powerd, raven-ports, raven-timed, raven-mount, raven-fprintd)"
     local src="${RAVEN_ROOT}/init"
-    ( cd "$src" && "${BUILD_AS[@]}" cargo build --release --locked ) || {
+    local -a cargo_args=(build --release)
+    [[ -f "${src}/Cargo.lock" ]] && cargo_args+=(--locked)
+    ( cd "$src" && "${BUILD_AS[@]}" cargo "${cargo_args[@]}" ) || {
         log_error "cargo build failed; nothing installed"
         return 1
     }
@@ -205,7 +209,9 @@ do_installer_ui() {
         return 1
     fi
 
-    ( cd "$src" && "${BUILD_AS[@]}" cargo build --release --locked ) || {
+    local -a cargo_args=(build --release)
+    [[ -f "${src}/Cargo.lock" ]] && cargo_args+=(--locked)
+    ( cd "$src" && "${BUILD_AS[@]}" cargo "${cargo_args[@]}" ) || {
         log_error "cargo build failed; nothing installed"
         return 1
     }
