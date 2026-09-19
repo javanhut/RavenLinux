@@ -220,9 +220,9 @@ EOF
 # from a sandboxed or portal-using client. Nothing on the image fails without
 # it; a dialog just never appears, which is the quietest failure in this file.
 #
-# xdg-utils is xdg-open, the command nearly every program -- a browser opening
-# a download, a terminal opening a link -- runs to hand a URL or file to its
-# default application. Without it those clicks do nothing at all.
+# No xdg-utils: the image's own raven-open is xdg-open, xdg-settings and
+# xdg-mime, and declares so in /usr/share/rvn/provides.d/raven-open. Listing
+# xdg-utils here would ask rvn to install it over them, which rvn refuses.
 set_portals() {
     cat <<'EOF'
 dbus
@@ -230,7 +230,6 @@ dbus-broker
 dbus-broker-units
 xdg-desktop-portal
 xdg-desktop-portal-gtk
-xdg-utils
 glib-networking
 libsecret
 EOF

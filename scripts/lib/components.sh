@@ -119,9 +119,16 @@ RAVEN_BASE_FILES="/etc/ssl/certs/ca-certificates.crt"
 # =============================================================================
 # The compositor workspace. key|package|binary|description -- one cargo build
 # of the RavenGUI tree produces every row.
+#
+# raven-open is the desktop's xdg-open, xdg-settings and xdg-mime -- one binary
+# under three more names, which install_raven_open_names links. It is here
+# rather than a Raven-layer row because it shares raven-desktop, the .desktop
+# parser, with the compositor's launcher: one workspace, so what the launcher
+# lists and what opens a link can never parse an entry differently.
 declare -a GUI_COMPONENTS=(
     "huginn-comp|huginn-comp|huginn|Huginn - Wayland compositor, and the shell it draws"
     "raven-output|raven-output|raven-output|Display layout and scaling utility"
+    "raven-open|raven-open|raven-open|Raven Open - opens files and links; the system's xdg-open"
 )
 
 # The rest of the desktop: one row per repository the GUI stage clones and

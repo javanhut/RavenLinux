@@ -3580,6 +3580,46 @@ install_gui_binary() {
     install -m 0755 "${src}" "${SYSROOT_DIR}/usr/bin/${binary}"
 }
 
+# The names every other program calls raven-open by, and the declaration that
+# keeps rvn from installing xdg-utils over them.
+#
+# raven-open picks what to be from the name it was run as, so these are plain
+# symlinks to it. Relative, so they resolve the same inside the sysroot, on the
+# installed disk and in a chroot. `ln -sfn` replaces whatever is there: an
+# xdg-utils copied in from the build host must not win over the system's own.
+#
+# The provides file is shipped by raven-open itself (dist/rvn-provides in the
+# RavenGUI tree) rather than written here, so the claim travels with the
+# component making it. Without it the names still work -- but the first
+# `rvn install chromium` would try to install xdg-utils, find /usr/bin/xdg-open
+# owned by no package, and refuse the whole installation.
+RAVEN_OPEN_NAMES=(xdg-open xdg-settings xdg-mime)
+install_raven_open_names() {
+    local src="$1"
+    local bin="${SYSROOT_DIR}/usr/bin"
+
+    [[ -x "${bin}/raven-open" ]] || {
+        log_warn "  raven-open not installed; xdg-open and friends are not provided"
+        return 0
+    }
+
+    local name
+    for name in "${RAVEN_OPEN_NAMES[@]}"; do
+        ln -sfn raven-open "${bin}/${name}"
+    done
+    log_info "    + ${RAVEN_OPEN_NAMES[*]} -> raven-open"
+
+    local provides="${src}/crates/tools/raven-open/dist/rvn-provides"
+    if [[ -f "${provides}" ]]; then
+        install -Dm 0644 "${provides}" \
+            "${SYSROOT_DIR}/usr/share/rvn/provides.d/raven-open"
+        log_info "    + usr/share/rvn/provides.d/raven-open"
+    else
+        log_warn "  no dist/rvn-provides in the RavenGUI checkout: rvn will try to"
+        log_warn "  install xdg-utils over raven-open for packages that depend on it"
+    fi
+}
+
 # =============================================================================
 # Summary
 # =============================================================================
@@ -3915,6 +3955,8 @@ main() {
         GUI_BUILT+=("${binary}")
         log_success "  ${binary} installed ($(du -h "${out}" | cut -f1))"
     done
+
+    install_raven_open_names "${src}"
 
     log_step "Staging shared libraries..."
     stage_gui_libraries "${built_paths[@]}"
