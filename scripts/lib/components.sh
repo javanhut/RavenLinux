@@ -156,6 +156,20 @@ declare -a GUI_APPS=(
     "ROOSTBAR|RoostBar|roostbar|gui/roostbar|RoostBar - the layer-shell status bar"
 )
 
+# Applications the ISO carries for the installer to offer, and nothing else.
+# Same row format as GUI_APPS, and the same <KEY>_* variables through
+# raven_gui_app_vars -- but they are not part of the system: the GUI stage
+# builds each into its own tree under /usr/share/raven/optional/<id>/root,
+# where the live session neither runs nor advertises it, and raven-install
+# copies a tree onto the disk only when somebody switches it on. So they are
+# not in raven_gui_binaries either: nothing expects them in /usr/bin.
+#
+# The installer's id for each is the key, lowercased.
+declare -a OPTIONAL_APPS=(
+    "TUTORIAL|RavenTutorial|raven-tutorial|gui/raven-tutorial|Raven Tutorial - a guided first tour of the desktop"
+    "ORACLE|Oracle|oracle,raven-oracle|gui/raven-oracle|Oracle - a local troubleshooting companion, command line and app"
+)
+
 # RavenTerminal has no row under packages/ -- the manifest field above is empty
 # for it, and it is the one GUI repository that cannot be pinned until one is
 # written. fetch reports it as unpinned rather than pretending otherwise.
@@ -237,7 +251,7 @@ raven_component_url() {
 }
 
 # Populates <KEY>_REPO, <KEY>_URL, <KEY>_BINARIES and <KEY>_MANIFEST from the
-# GUI_APPS row for
+# GUI_APPS (or OPTIONAL_APPS) row for
 # <KEY>, so the GUI stage names each repository once -- here -- and every
 # fetch, build and install site reads it back out.
 #
@@ -247,7 +261,7 @@ raven_component_url() {
 raven_gui_app_vars() {
     local key="$1" spec rowkey repo binaries manifest
 
-    for spec in "${GUI_APPS[@]}"; do
+    for spec in "${GUI_APPS[@]}" "${OPTIONAL_APPS[@]}"; do
         IFS='|' read -r rowkey repo binaries manifest _ <<< "${spec}"
         [[ "${rowkey}" == "${key}" ]] || continue
         printf -v "${key}_REPO" '%s' "${repo}"

@@ -59,6 +59,9 @@
 //! prints the reply, which is how the CLI gets a time tool without a second
 //! binary.
 
+#[path = "rtc.rs"]
+mod rtc;
+
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{ToSocketAddrs, UdpSocket};
@@ -327,7 +330,7 @@ fn write_ntp_timestamp(bytes: &mut [u8], unix: f64) {
 ///
 /// `clock_settime` rather than `date`, because the daemon is the thing a
 /// shell tool would be shelling out to. The RTC write goes through the same
-/// `hwclock --utc` init reads it back with at boot; if the binary is missing
+/// `hwclock` mode init reads it back with at boot (see rtc.rs); if the binary is missing
 /// the step still stands, it just does not survive a power cut.
 fn step_clock(offset: f64) -> Result<(), String> {
     let target = unix_now() + offset;
@@ -345,7 +348,7 @@ fn step_clock(offset: f64) -> Result<(), String> {
     }
 
     let rtc = Command::new("/sbin/hwclock")
-        .args(["--systohc", "--utc"])
+        .args(["--systohc", rtc::hwclock_flag()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();

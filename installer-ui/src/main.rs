@@ -22,6 +22,7 @@
 mod answers;
 mod engine;
 mod install;
+mod manual;
 mod pages;
 mod privesc;
 mod probe;
@@ -94,6 +95,11 @@ pub struct App {
     /// different function, and cannot reach them. Held here for the same
     /// reason as `mode_groups` above.
     pub swap_watchers: RefCell<Vec<Rc<dyn Fn()>>>,
+    /// Rows on the disk page that only mean something when the installer lays
+    /// the disk out itself (swap size, ESP size): hidden in manual mode.
+    pub auto_only: RefCell<Vec<gtk::Widget>>,
+    /// The boot-entry switch, whose default depends on the disk and the mode.
+    pub nvram_row: RefCell<Option<adw::SwitchRow>>,
 }
 
 impl App {
@@ -397,6 +403,8 @@ fn build_wizard(window: &adw::ApplicationWindow, p: Probe, level: Priv, installe
         installing: Cell::new(false),
         mode_groups: RefCell::new(Vec::new()),
         swap_watchers: RefCell::new(Vec::new()),
+        auto_only: RefCell::new(Vec::new()),
+        nvram_row: RefCell::new(None),
     });
 
     pages::build_all(&app);

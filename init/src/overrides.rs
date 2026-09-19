@@ -142,9 +142,9 @@ pub(crate) fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<
         }
     }
 
-    // Avoid starting both a compositor and the session wrapper at once.
+    // The session is (re)defined below; start from it disabled.
     for svc in &mut config.services {
-        if svc.name == "raven-compositor" || svc.name == "wayland-session" {
+        if svc.name == "wayland-session" {
             svc.enabled = false;
         }
     }
@@ -382,7 +382,7 @@ pub(crate) fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<
         let mut env = compositor_env;
         env.insert(
             "RAVEN_WAYLAND_COMPOSITOR".to_string(),
-            wayland_choice.unwrap_or("raven-compositor").to_string(),
+            wayland_choice.unwrap_or("huginn").to_string(),
         );
 
         ensure_service(
@@ -409,30 +409,15 @@ pub(crate) fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<
             },
         );
     } else {
-        // Fallback to raven-compositor directly
-        ensure_service(
-            &mut config.services,
-            ServiceConfig {
-                name: "raven-compositor".to_string(),
-                description: "Raven Wayland compositor".to_string(),
-                exec: "/bin/raven-compositor".to_string(),
-                args: vec!["--backend".to_string(), "udev".to_string()],
-                restart: true,
-                enabled: true,
-                critical: false,
-                environment: compositor_env,
-                pre_exec: udev_settle,
-                tty: None,
-                user: session_account,
-                runtime_dirs: Vec::new(),
-                after: vec!["udev".to_string(), "seatd".to_string()],
-                ready_path: None,
-                ready_timeout: 5,
-                stop_exec: None,
-                stop_args: Vec::new(),
-                stop_timeout: 5,
-            },
-        );
+        // No launcher, no session: huginn is only ever started through
+        // raven-wayland-session. Give tty1 its getty back so the machine
+        // still has a login on the screen it booted to.
+        log::warn!("raven.graphics=wayland but raven-wayland-session is not installed; no graphical session");
+        for svc in &mut config.services {
+            if svc.name == "getty-tty1" {
+                svc.enabled = true;
+            }
+        }
     }
 
     Ok(())

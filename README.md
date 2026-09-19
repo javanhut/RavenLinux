@@ -77,6 +77,14 @@ And a graphical layer, built separately because it cannot be static:
 | `raven-installer-ui` | the graphical installer — `installer-ui/` in this repository rather than its own, because it is the front-end for `scripts/installer/raven-install` and a version skew between the two is a wizard that cannot drive the installer it is looking at |
 | `ravend`, `raven-greeter` | [RavenLogin](https://github.com/javanhut/RavenLogin), the login screen — and the root daemon behind it, which is not the process that draws |
 
+Two more are built by the same stage but are **not** part of the system:
+[RavenTutorial](https://github.com/javanhut/RavenTutorial) (`raven-tutorial`)
+and [Oracle](https://github.com/javanhut/Oracle) (`oracle`, `raven-oracle`).
+They ride on the ISO under `/usr/share/raven/optional/`, where the live session
+does not see them, and the installer's *Optional applications* switches (or
+`raven-install --optional tutorial,oracle`) decide whether they are copied onto
+the disk, into `/usr/local`. Both default to off.
+
 Boot the `Raven Desktop (Huginn)` entry, or add `raven.graphics=wayland` to the
 kernel cmdline, and raven-init starts the session instead of a getty — or, if
 `ravend` is on the image, the password prompt in front of it.
@@ -348,6 +356,8 @@ VIEWER_SKIP=1 imlazy gui                    # no PDF/DOCX reader
 EAGLEEYE_SKIP=1 imlazy gui                  # nothing opens an image
 PLAYER_SKIP=1 imlazy gui                    # nothing plays a film or a song
 CAMERA_SKIP=1 imlazy gui                    # no camera app or screen recorder
+TUTORIAL_SKIP=1 imlazy gui                  # installer does not offer the tutorial
+ORACLE_SKIP=1 imlazy gui                    # installer does not offer Oracle
 ```
 
 Every component in that list also takes a `<NAME>_REF=<git-ref>` and a
@@ -491,7 +501,26 @@ report how small it can be made.
 
 It never formats the EFI System Partition in this mode — it reuses the one the
 other OS boots from, which is the single action that would make that OS
-unbootable. An existing `\EFI\BOOT\BOOTX64.EFI` is kept as
+unbootable. When that ESP is too full to share (Windows makes a 100 MB one and
+fills most of it; RavenBoot and its kernel need about 120 MB), RavenLinux gets
+a small ESP of its own in the same space instead, and the other one is not
+touched. That is decided while planning, before anything is shrunk.
+
+**Next to another OS the installer registers a UEFI boot entry** (efibootmgr
+puts it first). Windows Boot Manager, or another distribution's GRUB or shim,
+already has an entry ahead of the fallback path, and without one of ours the
+firmware keeps booting it. With an ESP of RavenLinux's own the entry is
+required; otherwise `efi_nvram=0` declines it. A later Windows update or a
+distribution's bootloader update can put its own entry back in front; move
+RavenLinux first again in the firmware setup, or with `efibootmgr -o`.
+
+**Windows keeps the hardware clock in local time.** When the installer finds
+Windows on the machine it writes `LOCAL` to `/etc/adjtime`, which raven-init
+and raven-timed read, so the two systems stop disagreeing by the timezone
+offset (`rtc=utc` in an answers file, or the switch on the installer's Time and
+language page, keeps UTC). **BitLocker**: Windows will ask for its recovery key
+once, the first time it starts from RavenBoot's menu; the installer says so
+before it writes anything. An existing `\EFI\BOOT\BOOTX64.EFI` is kept as
 `BOOTX64.RAVENBAK.EFI` before RavenBoot takes that path. RavenBoot finds
 Windows, Ubuntu, Fedora, Debian and Arch by itself and puts them in its menu,
 so there is nothing to configure for the other side of the dual boot.
@@ -530,6 +559,31 @@ records — and because `part.resizable` ("this filesystem can be shrunk at all"
 is reported separately from `part.shrinkable` ("by enough"), turning the swap
 switch off on that page brings back a partition that was too small with it on,
 without re-running the probe.
+
+**Manual partitioning** (`--manual`, or "Manual partitioning" on the graphical
+installer's disk page) lets you lay the disk out yourself: delete partitions,
+create new ones in free space, and put existing ones to work, all on a GPT
+disk. The plan is three lists, and nothing that is not named in them is
+touched:
+
+```bash
+# Keep Windows' ESP, delete an old Linux, and put root and swap where it was.
+raven-install --disk /dev/nvme0n1 --delete /dev/nvme0n1p4 \
+    --new '839428096:83886080:root;923314176:33554432:swap' \
+    --use '/dev/nvme0n1p1:esp:keep' --dry-run
+```
+
+`--new` entries are `START:SECTORS:ROLE` in the disk's own sectors
+(`--probe` reports `disk.sector_size`, `disk.first_lba`, `disk.last_lba` and one
+`slot.*` block per partition), and `--use` entries are `PART:ROLE:ACTION`. Roles
+are `root` (always formatted), `home`, `swap` and `esp`; the action is `keep`
+or `format`. Keeping `/home` keeps the files on it -- the live image's own
+`/home` is not copied over it, and `/etc/skel` does not overwrite a dotfile
+that is already there. Keeping the ESP shares it with the other OS exactly as
+`--alongside` does. The whole plan is checked before the first write: one root
+and one ESP, nothing overlapping a partition that is kept, everything on a
+1 MiB boundary and inside the disk, nothing mounted. The answers-file keys are
+`manual_delete`, `manual_new` and `manual_use`, with `mode=manual`.
 
 The base installation stays small, and the selected package profile installs
 itself afterwards: with a network in the live session the installer does it

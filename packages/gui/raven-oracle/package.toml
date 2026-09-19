@@ -1,0 +1,43 @@
+[package]
+name = "raven-oracle"
+version = "0.1.0"
+description = "Oracle - a local troubleshooting companion, command line and desktop app"
+license = "MIT"
+homepage = "https://github.com/javanhut/Oracle"
+repository = "https://github.com/javanhut/Oracle"
+maintainers = ["RavenLinux Team"]
+categories = ["gui", "wayland", "application", "system", "optional"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/Oracle.git"
+# Unpinned: nothing has been tagged in that repository yet.
+
+[build]
+system = "cargo"
+# Both front ends (the `oracle` CLI/TUI and the `raven-oracle` GTK4 app), the
+# crate's default features. glibc target for GTK, like every Raven GTK app.
+target = "x86_64-unknown-linux-gnu"
+build_flags = ["--release", "--locked"]
+
+[dependencies]
+runtime = [
+    "gtk4", "libadwaita", "glib2", "gsettings-desktop-schemas",
+    "hicolor-icon-theme",
+]
+build = ["rust", "cargo", "pkg-config", "gtk4", "libadwaita", "glib2"]
+
+# Optional, and deliberately so -- Oracle's own README says it is in no install
+# profile and adds no service or autostart. The GUI stage builds it into
+# /usr/share/raven/optional/oracle/root on the ISO; raven-install copies that
+# onto the disk only when its switch is on. /usr/local, as its Makefile and its
+# own uninstall instructions expect.
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-gnu/release/oracle", dest = "/usr/local/bin/oracle", mode = 755 },
+    { src = "target/x86_64-unknown-linux-gnu/release/raven-oracle", dest = "/usr/local/bin/raven-oracle", mode = 755 },
+    { src = "data/com.ravenoracle.Raven.desktop", dest = "/usr/local/share/applications/com.ravenoracle.Raven.desktop", mode = 644 },
+    { src = "data/com.ravenoracle.Raven.metainfo.xml", dest = "/usr/local/share/metainfo/com.ravenoracle.Raven.metainfo.xml", mode = 644 },
+    { src = "data/icons/hicolor/scalable/apps/com.ravenoracle.Raven.svg", dest = "/usr/local/share/icons/hicolor/scalable/apps/com.ravenoracle.Raven.svg", mode = 644 },
+]
+symlinks = []

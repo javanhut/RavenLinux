@@ -12,6 +12,24 @@
 
 use std::fmt::Write as _;
 
+/// A partition manual mode creates: where, how big, and for what.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPart {
+    pub start: u64,
+    pub sectors: u64,
+    /// root, home, swap or esp.
+    pub role: String,
+}
+
+/// An existing partition manual mode puts to work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsePart {
+    pub dev: String,
+    pub role: String,
+    /// keep or format.
+    pub action: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Answers {
     pub disk: String,
@@ -46,6 +64,17 @@ pub struct Answers {
     /// --postinstall; "auto" is what it does when the key is absent.
     pub postinstall: String,
     pub efi_nvram: bool,
+    /// Ids of the optional applications to install, from the probe's
+    /// optional.* records. Empty installs none of them.
+    pub optional: Vec<String>,
+    /// Manual mode's plan: partitions to delete, to create, and to reuse.
+    /// Only written when `mode` is "manual".
+    pub manual_delete: Vec<String>,
+    pub manual_new: Vec<NewPart>,
+    pub manual_use: Vec<UsePart>,
+    /// The hardware clock: "local" (as Windows keeps it) or "utc". Empty lets
+    /// the installer decide, which it does by looking for Windows.
+    pub rtc: String,
 }
 
 impl Default for Answers {
@@ -71,6 +100,11 @@ impl Default for Answers {
             profile: "minimal".into(),
             postinstall: "auto".into(),
             efi_nvram: false,
+            optional: Vec::new(),
+            manual_delete: Vec::new(),
+            manual_new: Vec::new(),
+            manual_use: Vec::new(),
+            rtc: String::new(),
         }
     }
 }
@@ -190,6 +224,21 @@ impl Answers {
             put("shrink_part", &self.shrink_part);
             put("alongside_size", &self.alongside_size);
         }
+        if self.mode == "manual" {
+            put("manual_delete", &self.manual_delete.join(","));
+            let new: Vec<String> = self
+                .manual_new
+                .iter()
+                .map(|n| format!("{}:{}:{}", n.start, n.sectors, n.role))
+                .collect();
+            put("manual_new", &new.join(";"));
+            let used: Vec<String> = self
+                .manual_use
+                .iter()
+                .map(|u| format!("{}:{}:{}", u.dev, u.role, u.action))
+                .collect();
+            put("manual_use", &used.join(";"));
+        }
         put("fs", &self.fs);
         put("esp_size", &self.esp_size);
         put("swap", &self.swap);
@@ -205,6 +254,10 @@ impl Answers {
         put("profile", &self.profile);
         put("postinstall", &self.postinstall);
         put("efi_nvram", if self.efi_nvram { "1" } else { "0" });
+        // Always written: an empty value is the answer "none of them", which
+        // is what the switches default to.
+        put("optional", &self.optional.join(","));
+        put("rtc", &self.rtc);
         s
     }
 }
@@ -329,5 +382,13 @@ mod tests {
             let n = f.lines().filter(|l| l.starts_with(&format!("{k}="))).count();
             assert_eq!(n, 1, "{k} written {n} times");
         }
+    }
+
+    #[test]
+    fn optional_is_always_written() {
+        let mut a = good();
+        assert!(a.to_file().lines().any(|l| l == "optional="));
+        a.optional = vec!["tutorial".into(), "oracle".into()];
+        assert!(a.to_file().lines().any(|l| l == "optional=tutorial,oracle"));
     }
 }

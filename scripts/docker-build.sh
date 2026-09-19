@@ -200,7 +200,7 @@ BUILD_ENV_VARS=(
 )
 # Derive per-component controls from the same table used by the build.
 source "${RAVEN_ROOT}/scripts/lib/components.sh"
-for spec in "${GUI_APPS[@]}"; do
+for spec in "${GUI_APPS[@]}" "${OPTIONAL_APPS[@]}"; do
     IFS='|' read -r key _ <<< "$spec"
     BUILD_ENV_VARS+=("${key}_REF" "${key}_OFFLINE" "${key}_SKIP")
 done

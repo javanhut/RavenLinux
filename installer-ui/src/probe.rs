@@ -51,6 +51,32 @@ pub struct ShrinkCandidate {
     pub spare_bytes: u64,
 }
 
+/// One row of a disk's partition table, as manual partitioning sees it: every
+/// partition, the ESP included, with where it sits. One `slot.begin`/`slot.end`
+/// bracket from the probe.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Slot {
+    pub dev: String,
+    pub start: u64,
+    pub sectors: u64,
+    /// The GPT type GUID, upper case.
+    pub type_guid: String,
+    pub fstype: String,
+    pub label: String,
+    /// The installer's own name for what is on it (part_os_hint).
+    pub os: String,
+    /// Mounted, or active swap, in the live system. Cannot be touched.
+    pub in_use: bool,
+    /// Free space on a FAT partition, when the probe could look.
+    pub free_bytes: Option<u64>,
+}
+
+pub const GUID_ESP: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
+
+/// What RavenBoot, a kernel and an initramfs need free on an ESP.
+/// ESP_MIN_FREE in raven-install.
+pub const ESP_MIN_FREE: u64 = 120 * 1024 * 1024;
+
 /// A disk the installer could be pointed at.
 #[derive(Debug, Clone, Default)]
 pub struct Disk {
@@ -85,6 +111,24 @@ pub struct Disk {
     /// the figure the probe judged `alongside` by.
     pub min_total_bytes: u64,
     pub candidates: Vec<ShrinkCandidate>,
+
+    /// The partition table, for manual partitioning. `label` is "gpt", "dos",
+    /// or empty for a disk with no table.
+    pub label: String,
+    pub sector_size: u64,
+    pub first_lba: u64,
+    pub last_lba: u64,
+    pub align_sectors: u64,
+    pub slots: Vec<Slot>,
+
+    /// Free space on the existing ESP, when the probe could look.
+    pub esp_free_bytes: Option<u64>,
+    /// What an ESP of RavenLinux's own adds to an alongside install, because
+    /// the existing one is too full to share (Windows' 100 MB one usually is).
+    /// Zero when it can be shared.
+    pub esp_extra_bytes: u64,
+    /// Windows on this disk is encrypted with BitLocker.
+    pub bitlocker: bool,
 }
 
 impl Disk {
@@ -110,7 +154,9 @@ impl Disk {
     /// judge by is the root alone. Recomputing beats re-running the probe: the
     /// two numbers it takes are both already here.
     pub fn min_total_for(&self, swap_bytes: u64) -> u64 {
-        self.min_root_bytes.saturating_add(swap_bytes)
+        self.min_root_bytes
+            .saturating_add(swap_bytes)
+            .saturating_add(self.esp_extra_bytes)
     }
 
     /// True when the disk already has room and no filesystem needs touching.
@@ -200,6 +246,15 @@ impl Disk {
     }
 }
 
+/// An application the install media carries but the system does not include:
+/// installed only when somebody switches it on.
+#[derive(Debug, Clone, Default)]
+pub struct OptionalApp {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Probe {
     pub protocol: String,
@@ -229,6 +284,9 @@ pub struct Probe {
     pub source_size_mb: u64,
     pub initrd_root_support: String,
     pub has_desktop: bool,
+    /// Windows is somewhere on this machine: the installed system keeps the
+    /// hardware clock in local time, as Windows does.
+    pub machine_windows: bool,
 
     pub mem_total_mb: u64,
     pub swap_suggested: String,
@@ -237,6 +295,7 @@ pub struct Probe {
     pub disks: Vec<Disk>,
     pub timezones: Vec<String>,
     pub profiles: Vec<String>,
+    pub optional: Vec<OptionalApp>,
     pub answer_keys: Vec<String>,
     pub answers_required: Vec<String>,
 }
@@ -398,6 +457,8 @@ pub fn parse(text: &str) -> Probe {
     // the disk that is open. They are not named disk.* because they are about
     // one partition rather than the disk, so they need their own arms below.
     let mut cand: Option<ShrinkCandidate> = None;
+    let mut opt: Option<OptionalApp> = None;
+    let mut slot: Option<Slot> = None;
     // Everything that is not a repeating record, so single-valued keys need no
     // match arm of their own below.
     let mut single: HashMap<&str, String> = HashMap::new();
@@ -420,6 +481,31 @@ pub fn parse(text: &str) -> Probe {
                 cand = None;
                 if let Some(d) = disk.take() {
                     p.disks.push(d);
+                }
+            }
+            "slot.begin" => {
+                slot = Some(Slot {
+                    dev: value.to_string(),
+                    ..Default::default()
+                });
+            }
+            "slot.end" => {
+                if let (Some(sl), Some(d)) = (slot.take(), disk.as_mut()) {
+                    d.slots.push(sl);
+                }
+            }
+            _ if key.starts_with("slot.") => {
+                let Some(sl) = slot.as_mut() else { continue };
+                match key {
+                    "slot.start" => sl.start = value.parse().unwrap_or(0),
+                    "slot.sectors" => sl.sectors = value.parse().unwrap_or(0),
+                    "slot.type" => sl.type_guid = value.to_ascii_uppercase(),
+                    "slot.fstype" => sl.fstype = value.to_string(),
+                    "slot.label" => sl.label = value.to_string(),
+                    "slot.os" => sl.os = value.to_string(),
+                    "slot.in_use" => sl.in_use = value == "1",
+                    "slot.free_bytes" => sl.free_bytes = value.parse().ok(),
+                    _ => {}
                 }
             }
             "part.begin" => {
@@ -467,6 +553,14 @@ pub fn parse(text: &str) -> Probe {
                     }
                     "disk.swap_bytes" => d.swap_bytes = value.parse().unwrap_or(0),
                     "disk.min_total_bytes" => d.min_total_bytes = value.parse().unwrap_or(0),
+                    "disk.label" => d.label = value.to_string(),
+                    "disk.sector_size" => d.sector_size = value.parse().unwrap_or(0),
+                    "disk.first_lba" => d.first_lba = value.parse().unwrap_or(0),
+                    "disk.last_lba" => d.last_lba = value.parse().unwrap_or(0),
+                    "disk.align_sectors" => d.align_sectors = value.parse().unwrap_or(0),
+                    "disk.esp_free_bytes" => d.esp_free_bytes = value.parse().ok(),
+                    "disk.esp_extra_bytes" => d.esp_extra_bytes = value.parse().unwrap_or(0),
+                    "disk.bitlocker" => d.bitlocker = value == "1",
                     "disk.part" => {
                         let f: Vec<&str> = value.splitn(4, '|').collect();
                         d.parts.push(Partition {
@@ -477,6 +571,27 @@ pub fn parse(text: &str) -> Probe {
                         });
                     }
                     _ => {}
+                }
+            }
+            "optional.begin" => {
+                opt = Some(OptionalApp {
+                    id: value.to_string(),
+                    ..Default::default()
+                });
+            }
+            "optional.end" => {
+                if let Some(o) = opt.take() {
+                    p.optional.push(o);
+                }
+            }
+            "optional.name" => {
+                if let Some(o) = opt.as_mut() {
+                    o.name = value.to_string();
+                }
+            }
+            "optional.description" => {
+                if let Some(o) = opt.as_mut() {
+                    o.description = value.to_string();
                 }
             }
             "probe.error" => p.errors.push(value.to_string()),
@@ -529,6 +644,7 @@ pub fn parse(text: &str) -> Probe {
     p.source_size_mb = n("source.size_mb");
     p.initrd_root_support = s("source.initrd_root_support");
     p.has_desktop = b("source.has_desktop");
+    p.machine_windows = b("machine.windows");
     p.mem_total_mb = n("mem.total_mb");
     p.swap_suggested = s("swap.suggested");
     p.esp_size_default = s("esp.size_default");
@@ -829,5 +945,54 @@ probe.end=1
         };
         assert!(p.disk_too_small(&tiny, 0, 512));
         assert!(!p.disk_too_small(&p.disks[0], 16384, 512));
+    }
+
+    #[test]
+    fn optional_apps() {
+        let p = parse(
+            "optional.begin=oracle\noptional.name=Oracle\noptional.description=Asks why\n\
+             optional.end=oracle\noptional.begin=tutorial\noptional.name=Raven Tutorial\n\
+             optional.description=\noptional.end=tutorial\n",
+        );
+        assert_eq!(p.optional.len(), 2);
+        assert_eq!(p.optional[0].id, "oracle");
+        assert_eq!(p.optional[0].name, "Oracle");
+        assert_eq!(p.optional[0].description, "Asks why");
+        assert_eq!(p.optional[1].name, "Raven Tutorial");
+    }
+
+    #[test]
+    fn partition_table_slots() {
+        let p = parse(
+            "disk.begin=/dev/sda\ndisk.label=gpt\ndisk.sector_size=512\ndisk.first_lba=2048\n\
+             disk.last_lba=134217694\ndisk.align_sectors=2048\nslot.begin=/dev/sda1\n\
+             slot.start=2048\nslot.sectors=1048576\nslot.type=c12a7328-f81f-11d2-ba4b-00a0c93ec93b\n\
+             slot.fstype=vfat\nslot.os=EFI System Partition\nslot.in_use=0\nslot.end=/dev/sda1\n\
+             disk.end=/dev/sda\n",
+        );
+        let d = &p.disks[0];
+        assert_eq!(d.label, "gpt");
+        assert_eq!(d.last_lba, 134217694);
+        assert_eq!(d.slots.len(), 1);
+        assert_eq!(d.slots[0].type_guid, GUID_ESP);
+        assert_eq!(d.slots[0].sectors, 1048576);
+    }
+
+    /// The fake installer under dev/ is how the window is worked on without a
+    /// disk to lose; it has to keep parsing into something with every page's
+    /// data in it.
+    #[test]
+    fn the_dev_fake_installer_parses() {
+        let fake = concat!(env!("CARGO_MANIFEST_DIR"), "/dev/fake-raven-install");
+        let p = run(&[fake.to_string(), "--probe".to_string()]).expect("fake probe runs");
+        assert!(p.ok);
+        assert!(p.machine_windows);
+        assert_eq!(p.optional.len(), 2);
+        let d = &p.disks[0];
+        assert_eq!(d.label, "gpt");
+        assert_eq!(d.slots.len(), 4);
+        assert!(d.bitlocker);
+        assert_eq!(d.esp_extra_bytes, 536870912);
+        assert_eq!(d.slots[0].free_bytes, Some(41943040));
     }
 }

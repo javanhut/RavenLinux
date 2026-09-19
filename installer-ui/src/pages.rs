@@ -11,6 +11,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use crate::answers::Answers;
+use crate::manual;
 use crate::probe::{self, Disk, Probe};
 use crate::{App, PageDef, Validator};
 
@@ -71,6 +72,7 @@ pub fn build_all(app: &Rc<App>) {
     account(app);
     locale(app);
     profile(app);
+    apps(app);
     summary(app);
 }
 
@@ -234,6 +236,33 @@ fn apply_nvram_default(app: &Rc<App>, row: &adw::SwitchRow, target: &str) {
     if !app.probe.efibootmgr {
         return;
     }
+    let (mode, mandatory) = {
+        let a = app.answers.borrow();
+        (a.mode.clone(), nvram_mandatory(&a, &app.probe))
+    };
+    row.set_sensitive(!mandatory);
+    if mandatory {
+        row.set_subtitle(
+            "Required: RavenLinux has an EFI partition of its own next to the other \
+             OS's, and the firmware can only find it through a boot entry.",
+        );
+        row.set_active(true);
+        app.answers.borrow_mut().efi_nvram = true;
+        return;
+    }
+    if mode != "wipe" {
+        // The OS being kept has a boot entry of its own -- "Windows Boot
+        // Manager", "ubuntu" -- ahead of the fallback path, so without ours the
+        // firmware goes on booting it and RavenBoot never runs.
+        row.set_subtitle(
+            "On by default: the operating system kept on this disk has a boot entry \
+             of its own that comes first, so without one for RavenLinux the firmware \
+             goes on booting it. RavenBoot's menu offers that system too.",
+        );
+        row.set_active(true);
+        app.answers.borrow_mut().efi_nvram = true;
+        return;
+    }
     match other_disk_note(&app.probe, target) {
         Some(note) => {
             row.set_subtitle(&note);
@@ -248,6 +277,41 @@ fn apply_nvram_default(app: &Rc<App>, row: &adw::SwitchRow, target: &str) {
         }
     }
     app.answers.borrow_mut().efi_nvram = row.is_active();
+}
+
+/// Whether the plan leaves RavenLinux reachable only through a boot entry.
+fn nvram_mandatory(a: &Answers, p: &Probe) -> bool {
+    let Some(d) = p.disks.iter().find(|d| d.dev == a.disk) else { return false };
+    match a.mode.as_str() {
+        "alongside" => d.esp_extra_bytes > 0,
+        "manual" => manual::own_esp_beside_another(d, a),
+        _ => false,
+    }
+}
+
+/// Re-seed the boot-entry switch for the disk and mode now chosen.
+fn refresh_nvram(app: &Rc<App>) {
+    let row = app.nvram_row.borrow().clone();
+    if let Some(row) = row {
+        let target = app.answers.borrow().disk.clone();
+        apply_nvram_default(app, &row, &target);
+    }
+}
+
+/// Only the "required" half of refresh_nvram: lock the switch on when the plan
+/// needs it, give it back when it stops needing it, and otherwise leave the
+/// person's choice alone. Run on every edit of a manual layout.
+fn enforce_nvram(app: &Rc<App>) {
+    let row = app.nvram_row.borrow().clone();
+    let Some(row) = row else { return };
+    if !app.probe.efibootmgr {
+        return;
+    }
+    let mandatory = nvram_mandatory(&app.answers.borrow(), &app.probe);
+    if mandatory != !row.is_sensitive() {
+        let target = app.answers.borrow().disk.clone();
+        apply_nvram_default(app, &row, &target);
+    }
 }
 
 fn install_mode(app: &Rc<App>, page: &adw::PreferencesPage, disks: &[Disk]) {
@@ -274,6 +338,51 @@ fn install_mode(app: &Rc<App>, page: &adw::PreferencesPage, disks: &[Disk]) {
         along_check.set_group(Some(&erase_check));
         along.add_prefix(&along_check);
         group.add(&along);
+
+        // Manual: the person lays the disk out. Offered on any disk with a GPT
+        // -- raven-install's plan_manual edits a table, it does not make one.
+        let manual_row = adw::ActionRow::builder().title("Manual partitioning").build();
+        manual_row.set_subtitle_lines(0);
+        let manual_check = gtk::CheckButton::new();
+        manual_check.set_group(Some(&erase_check));
+        manual_row.add_prefix(&manual_check);
+        if d.label == "gpt" {
+            manual_row.set_subtitle(
+                "Choose yourself which partitions to delete, create, reuse or format. \
+                 Anything you leave alone is not touched.",
+            );
+            manual_row.set_activatable_widget(Some(&manual_check));
+        } else {
+            manual_row.set_sensitive(false);
+            manual_row.set_subtitle(&format!(
+                "Not possible here: {}. Erase the disk to give it one.",
+                match d.label.as_str() {
+                    "" => "the disk has no partition table".to_string(),
+                    "dos" => "the disk is MBR, not GPT".to_string(),
+                    other => format!("the disk is {other}, not GPT"),
+                }
+            ));
+        }
+        group.add(&manual_row);
+
+        if d.bitlocker {
+            let row = adw::ActionRow::builder()
+                .title("Windows on this disk uses BitLocker")
+                .subtitle(
+                    "If you keep it, Windows will ask for its BitLocker recovery key \
+                     the first time it starts from RavenBoot's menu. Have the key \
+                     ready (aka.ms/myrecoverykey), or suspend BitLocker in Windows \
+                     before installing. An encrypted partition cannot be shrunk from \
+                     here: make room in Windows' Disk Management first.",
+                )
+                .build();
+            row.set_subtitle_lines(0);
+            let icon = gtk::Image::from_icon_name("dialog-warning-symbolic");
+            icon.add_css_class("warning");
+            row.add_prefix(&icon);
+            group.add(&row);
+        }
+        let (editor, rebuild_editor) = manual_editor(app, d);
 
         // ---- where the space comes from -------------------------------------
         // Hidden until "install alongside" is chosen, and hidden again when the
@@ -383,18 +492,22 @@ fn install_mode(app: &Rc<App>, page: &adw::PreferencesPage, disks: &[Disk]) {
                 if possible {
                     along.set_sensitive(true);
                     along.set_activatable_widget(Some(&along_check));
+                    let boots = if d.esp_extra_bytes > 0 {
+                        "gets a small EFI partition of its own, because the one already \
+                         there is too full to share"
+                    } else {
+                        "boots from the EFI partition that is already there"
+                    };
                     along.set_subtitle(&if free_room {
                         format!(
                             "Keep everything on the disk. RavenLinux goes into the {} \
-                             of unallocated space already on it, and boots from the EFI \
-                             partition that is already there.",
+                             of unallocated space already on it, and {boots}.",
                             probe::human_bytes(d.free_bytes)
                         )
                     } else {
                         format!(
                             "Keep everything on the disk. {} is taken from a partition \
-                             you choose below, and RavenLinux boots from the EFI \
-                             partition that is already there.",
+                             you choose below, and RavenLinux {boots}.",
                             probe::human_bytes(need)
                         )
                     });
@@ -465,17 +578,45 @@ fn install_mode(app: &Rc<App>, page: &adw::PreferencesPage, disks: &[Disk]) {
         along_check.connect_toggled({
             let app = app.clone();
             let refresh = refresh.clone();
+            let editor = editor.clone();
             move |c| {
                 if !c.is_active() {
                     return;
                 }
                 app.answers.borrow_mut().mode = "alongside".into();
+                editor.set_visible(false);
+                set_auto_only(&app, true);
+                refresh_nvram(&app);
                 refresh();
+            }
+        });
+        manual_check.connect_toggled({
+            let app = app.clone();
+            let source = source.clone();
+            let editor = editor.clone();
+            let rebuild_editor = rebuild_editor.clone();
+            move |c| {
+                if !c.is_active() {
+                    return;
+                }
+                {
+                    let mut a = app.answers.borrow_mut();
+                    a.mode = "manual".into();
+                    a.shrink_part.clear();
+                    a.alongside_size.clear();
+                }
+                source.set_visible(false);
+                set_auto_only(&app, false);
+                editor.set_visible(true);
+                refresh_nvram(&app);
+                rebuild_editor();
+                app.revalidate();
             }
         });
         erase_check.connect_toggled({
             let app = app.clone();
             let source = source.clone();
+            let editor = editor.clone();
             move |c| {
                 if !c.is_active() {
                     return;
@@ -490,6 +631,9 @@ fn install_mode(app: &Rc<App>, page: &adw::PreferencesPage, disks: &[Disk]) {
                     a.alongside_size.clear();
                 }
                 source.set_visible(false);
+                editor.set_visible(false);
+                set_auto_only(&app, true);
+                refresh_nvram(&app);
                 app.revalidate();
             }
         });
@@ -505,7 +649,256 @@ fn install_mode(app: &Rc<App>, page: &adw::PreferencesPage, disks: &[Disk]) {
             .borrow_mut()
             .push((d.dev.clone(), group.clone(), erase_check.clone()));
         page.add(&group);
+        page.add(&editor);
     }
+}
+
+/// Show or hide the rows that only apply when the installer lays the disk out.
+fn set_auto_only(app: &Rc<App>, visible: bool) {
+    for w in app.auto_only.borrow().iter() {
+        w.set_visible(visible);
+    }
+}
+
+/// What a partition holds, for a row subtitle: "Windows · ntfs “DATA”".
+fn slot_desc(s: &probe::Slot) -> String {
+    let mut out = s.os.clone();
+    if !s.fstype.is_empty() && !s.os.contains(&s.fstype) {
+        out.push_str(&format!(" · {}", s.fstype));
+    }
+    if !s.label.is_empty() && !s.os.contains(&s.label) {
+        out.push_str(&format!(" “{}”", s.label));
+    }
+    out
+}
+
+/// The partition editor for one disk: its partitions, the ones this plan
+/// creates, and the free space between them, each with what can be done to it.
+/// Everything edits `answers.manual_*`; nothing touches the disk. Returns the
+/// group and the function that redraws it from the answers.
+fn manual_editor(app: &Rc<App>, d: &Disk) -> (adw::PreferencesGroup, Rc<dyn Fn()>) {
+    let group = adw::PreferencesGroup::builder()
+        .title("Partitions")
+        .description(
+            "Set what each partition is for. You need a / (root) and an EFI System \
+             Partition; /home and swap are optional. Nothing is written until you \
+             press Install on the last page.",
+        )
+        .visible(false)
+        .build();
+    let disk = Rc::new(d.clone());
+    let rows: Rc<RefCell<Vec<gtk::Widget>>> = Rc::new(RefCell::new(Vec::new()));
+    let cell: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+
+    // Redraws happen from inside the handlers of widgets the redraw removes,
+    // so they are deferred to the next idle rather than run in place.
+    let later: Rc<dyn Fn()> = Rc::new({
+        let cell = cell.clone();
+        move || {
+            let f = cell.borrow().clone();
+            if let Some(f) = f {
+                gtk::glib::idle_add_local_once(move || f());
+            }
+        }
+    });
+
+    let rebuild: Rc<dyn Fn()> = Rc::new({
+        let app = app.clone();
+        let group = group.clone();
+        let rows = rows.clone();
+        let disk = disk.clone();
+        let later = later.clone();
+        move || {
+            for w in rows.borrow_mut().drain(..) {
+                group.remove(&w);
+            }
+            let a = app.answers.borrow().clone();
+            let d = &*disk;
+            let human = |sectors: u64| probe::human_bytes(manual::bytes(d, sectors));
+            let add = |w: gtk::Widget| {
+                group.add(&w);
+                rows.borrow_mut().push(w);
+            };
+
+            // Deleted partitions, each with a way back.
+            for dev in &a.manual_delete {
+                let Some(s) = d.slots.iter().find(|s| s.dev == *dev) else { continue };
+                let row = adw::ActionRow::builder()
+                    .title(dev.as_str())
+                    .subtitle(format!("{} · {} — will be deleted", human(s.sectors), slot_desc(s)))
+                    .build();
+                row.add_css_class("dim-label");
+                let icon = gtk::Image::from_icon_name("user-trash-symbolic");
+                icon.add_css_class("error");
+                row.add_prefix(&icon);
+                let undo = gtk::Button::builder()
+                    .label("Undo")
+                    .valign(gtk::Align::Center)
+                    .css_classes(["flat"])
+                    .build();
+                undo.connect_clicked({
+                    let app = app.clone();
+                    let disk = disk.clone();
+                    let dev = dev.clone();
+                    let later = later.clone();
+                    move |_| {
+                        manual::undelete(&mut app.answers.borrow_mut(), &disk, &dev);
+                        later();
+                    }
+                });
+                row.add_suffix(&undo);
+                add(row.upcast());
+            }
+
+            for seg in manual::segments(d, &a) {
+                match seg {
+                    manual::Segment::Existing(s) => {
+                        let row = adw::ActionRow::builder().title(s.dev.as_str()).build();
+                        row.set_subtitle_lines(0);
+                        let mut sub = format!("{} · {}", human(s.sectors), slot_desc(&s));
+                        let icon = gtk::Image::from_icon_name("drive-harddisk-symbolic");
+                        row.add_prefix(&icon);
+                        let choices = manual::choices(&s);
+                        let labels: Vec<&str> = choices.iter().map(|c| c.0.as_str()).collect();
+                        let dd = gtk::DropDown::from_strings(&labels);
+                        dd.set_valign(gtk::Align::Center);
+                        let cur = manual::current_choice(&a, &s.dev);
+                        let idx = choices.iter().position(|c| c.1 == cur).unwrap_or(0);
+                        dd.set_selected(idx as u32);
+                        if s.in_use {
+                            dd.set_sensitive(false);
+                            sub.push_str(" · in use by the live system");
+                        }
+                        if !cur.is_empty() {
+                            row.add_css_class("accent");
+                        }
+                        row.set_subtitle(&sub);
+                        let values: Vec<String> = choices.into_iter().map(|c| c.1).collect();
+                        dd.connect_selected_notify({
+                            let app = app.clone();
+                            let dev = s.dev.clone();
+                            let later = later.clone();
+                            move |dd| {
+                                let Some(v) = values.get(dd.selected() as usize) else { return };
+                                manual::set_choice(&mut app.answers.borrow_mut(), &dev, v);
+                                later();
+                            }
+                        });
+                        row.add_suffix(&dd);
+                        add(row.upcast());
+                    }
+                    manual::Segment::New(i, n) => {
+                        let row = adw::ActionRow::builder()
+                            .title("New partition")
+                            .subtitle(format!("{} → {}", human(n.sectors), manual::role_label(&n.role)))
+                            .build();
+                        row.add_css_class("accent");
+                        let icon = gtk::Image::from_icon_name("list-add-symbolic");
+                        row.add_prefix(&icon);
+                        let remove = gtk::Button::builder()
+                            .icon_name("user-trash-symbolic")
+                            .tooltip_text("Don't create this partition")
+                            .valign(gtk::Align::Center)
+                            .css_classes(["flat"])
+                            .build();
+                        remove.connect_clicked({
+                            let app = app.clone();
+                            let later = later.clone();
+                            move |_| {
+                                let mut a = app.answers.borrow_mut();
+                                if i < a.manual_new.len() {
+                                    a.manual_new.remove(i);
+                                }
+                                drop(a);
+                                later();
+                            }
+                        });
+                        row.add_suffix(&remove);
+                        add(row.upcast());
+                    }
+                    manual::Segment::Free { start, sectors } => {
+                        let exp = adw::ExpanderRow::builder()
+                            .title("Free space")
+                            .subtitle(format!("{} unallocated — expand to create a partition", human(sectors)))
+                            .build();
+                        let icon = gtk::Image::from_icon_name("list-add-symbolic");
+                        exp.add_prefix(&icon);
+
+                        let size = adw::EntryRow::builder()
+                            .title(format!("Size, like 40G (empty for all {})", human(sectors)))
+                            .build();
+                        let role_labels: Vec<&str> = manual::ROLES.iter().map(|r| r.1).collect();
+                        let role = adw::ComboRow::builder()
+                            .title("Use as")
+                            .model(&gtk::StringList::new(&role_labels))
+                            .build();
+                        // The first thing the plan is still missing.
+                        let has = |r: &str| {
+                            a.manual_new.iter().any(|n| n.role == r)
+                                || a.manual_use.iter().any(|u| u.role == r)
+                        };
+                        let want = if !has("root") {
+                            "root"
+                        } else if !has("esp") {
+                            "esp"
+                        } else {
+                            "home"
+                        };
+                        if let Some(i) = manual::ROLES.iter().position(|r| r.0 == want) {
+                            role.set_selected(i as u32);
+                        }
+                        let create = gtk::Button::builder()
+                            .label("Create partition")
+                            .valign(gtk::Align::Center)
+                            .css_classes(["suggested-action"])
+                            .build();
+                        let create_row = adw::ActionRow::builder().build();
+                        create_row.add_suffix(&create);
+                        create.connect_clicked({
+                            let app = app.clone();
+                            let disk = disk.clone();
+                            let size = size.clone();
+                            let role = role.clone();
+                            let later = later.clone();
+                            move |_| {
+                                let text = size.text().to_string();
+                                let want = if text.trim().is_empty() {
+                                    sectors
+                                } else {
+                                    match probe::size_to_mb(&text) {
+                                        Some(mb) => manual::sectors_for(&disk, mb * 1024 * 1024),
+                                        None => 0,
+                                    }
+                                };
+                                if want == 0 || want > sectors {
+                                    size.add_css_class("error");
+                                    return;
+                                }
+                                let r = manual::ROLES
+                                    .get(role.selected() as usize)
+                                    .map_or("root", |r| r.0);
+                                app.answers.borrow_mut().manual_new.push(crate::answers::NewPart {
+                                    start,
+                                    sectors: want,
+                                    role: r.to_string(),
+                                });
+                                later();
+                            }
+                        });
+                        size.connect_changed(|e| e.remove_css_class("error"));
+                        exp.add_row(&size);
+                        exp.add_row(&role);
+                        exp.add_row(&create_row);
+                        add(exp.upcast());
+                    }
+                }
+            }
+            enforce_nvram(&app);
+            app.revalidate();
+        }
+    });
+    *cell.borrow_mut() = Some(rebuild.clone());
+    (group, rebuild)
 }
 
 
@@ -521,7 +914,6 @@ fn disk(app: &Rc<App>) {
     // be reachable from the disk radios at the top of it, because what it
     // should default to is a fact about which disk was picked. Same problem as
     // App::mode_groups, small enough to solve locally.
-    let nvram_cell: Rc<RefCell<Option<adw::SwitchRow>>> = Rc::new(RefCell::new(None));
 
     let group = adw::PreferencesGroup::builder()
         .title("Target disk")
@@ -585,7 +977,6 @@ fn disk(app: &Rc<App>) {
         check.connect_toggled({
             let app = app.clone();
             let dev = d.dev.clone();
-            let nvram_cell = nvram_cell.clone();
             move |c| {
                 if !c.is_active() {
                     return;
@@ -601,6 +992,11 @@ fn disk(app: &Rc<App>) {
                     a.mode = "wipe".into();
                     a.shrink_part.clear();
                     a.alongside_size.clear();
+                    // Partition names from the disk being left mean nothing on
+                    // this one.
+                    a.manual_delete.clear();
+                    a.manual_new.clear();
+                    a.manual_use.clear();
                 }
                 for (owner, mgroup, erase) in app.mode_groups.borrow().iter() {
                     mgroup.set_visible(*owner == dev);
@@ -612,10 +1008,7 @@ fn disk(app: &Rc<App>) {
                 // Whether a firmware boot entry is needed is a fact about the
                 // disk that was just picked: it is needed when the other OS is
                 // on a different one.
-                let row = nvram_cell.borrow().clone();
-                if let Some(row) = row {
-                    apply_nvram_default(&app, &row, &dev);
-                }
+                refresh_nvram(&app);
                 app.revalidate();
             }
         });
@@ -708,6 +1101,7 @@ fn disk(app: &Rc<App>) {
         }
     });
     layout.add(&swap_row);
+    app.auto_only.borrow_mut().push(swap_row.clone().upcast());
     // mkswap missing turned the switch off above, before any of this was
     // connected, so the alongside rows are still judged against a swap that
     // will not be created.
@@ -735,6 +1129,7 @@ fn disk(app: &Rc<App>) {
         }
     });
     advanced.add(&esp_row);
+    app.auto_only.borrow_mut().push(esp_row.clone().upcast());
 
     let nvram_row = adw::SwitchRow::builder()
         .title("Register a UEFI boot entry")
@@ -753,9 +1148,8 @@ fn disk(app: &Rc<App>) {
     // Seeded for the disk that starts selected, and re-seeded by the radios
     // above whenever that changes.
     {
-        let target = app.answers.borrow().disk.clone();
-        apply_nvram_default(app, &nvram_row, &target);
-        *nvram_cell.borrow_mut() = Some(nvram_row.clone());
+        *app.nvram_row.borrow_mut() = Some(nvram_row.clone());
+        refresh_nvram(app);
     }
     page.add(&advanced);
 
@@ -768,6 +1162,12 @@ fn disk(app: &Rc<App>) {
             let mut v = Vec::new();
             if a.disk.is_empty() {
                 v.push("Choose the disk to install onto.".to_string());
+                return v;
+            }
+            if a.mode == "manual" {
+                if let Some(d) = p.disks.iter().find(|d| d.dev == a.disk) {
+                    return manual::problems(d, a, p);
+                }
                 return v;
             }
             let esp_mb = match probe::size_to_mb(&a.esp_size) {
@@ -1072,6 +1472,31 @@ fn locale(app: &Rc<App>) {
         }
     });
     group.add(&keymap);
+
+    // Windows keeps the hardware clock in local time; a Linux that keeps it in
+    // UTC shows the Windows side's clock off by the timezone offset, and the
+    // other way round. Matching Windows is the only arrangement both accept.
+    let rtc = adw::SwitchRow::builder()
+        .title("Hardware clock in local time")
+        .subtitle(if app.probe.machine_windows {
+            "On because Windows is on this machine: Windows keeps the clock in \
+             local time, and matching it stops the two disagreeing about the time."
+        } else {
+            "Only needed when this machine also runs Windows. Other Linux systems \
+             keep the clock in UTC, like RavenLinux does with this off."
+        })
+        .active(app.probe.machine_windows)
+        .build();
+    rtc.set_subtitle_lines(0);
+    app.answers.borrow_mut().rtc = if rtc.is_active() { "local".into() } else { "utc".into() };
+    rtc.connect_active_notify({
+        let app = app.clone();
+        move |r| {
+            app.answers.borrow_mut().rtc =
+                if r.is_active() { "local".into() } else { "utc".into() };
+        }
+    });
+    group.add(&rtc);
     page.add(&group);
 
     // set_locale_and_time warns about exactly this after the fact. Saying it
@@ -1202,6 +1627,61 @@ fn profile(app: &Rc<App>) {
 }
 
 // =============================================================================
+// Optional applications
+// =============================================================================
+
+/// Its own page rather than a group under the profiles: it is a question the
+/// person is actually being asked, and one they should not scroll past.
+fn apps(app: &Rc<App>) {
+    let page = adw::PreferencesPage::new();
+    let group = adw::PreferencesGroup::builder()
+        .title("Optional applications")
+        .description(
+            "Not part of the system, and not installed unless you switch them on. \
+             They are copied from this install media, so no network is needed.",
+        )
+        .build();
+    if app.probe.optional.is_empty() {
+        let row = adw::ActionRow::builder()
+            .title("This install media carries none")
+            .subtitle(
+                "Raven Tutorial and Oracle are added to the ISO by the GUI build \
+                 stage. An image built without them -- or with TUTORIAL_SKIP=1 / \
+                 ORACLE_SKIP=1, or on a host that could not build them -- has \
+                 nothing to offer here.",
+            )
+            .build();
+        row.set_subtitle_lines(0);
+        let icon = gtk::Image::from_icon_name("dialog-information-symbolic");
+        icon.add_css_class("dim-label");
+        row.add_prefix(&icon);
+        group.add(&row);
+    }
+    for o in &app.probe.optional {
+        let row = adw::SwitchRow::builder()
+            .title(if o.name.is_empty() { &o.id } else { &o.name })
+            .subtitle(&o.description)
+            .build();
+        row.set_subtitle_lines(0);
+        row.set_active(app.answers.borrow().optional.contains(&o.id));
+        row.connect_active_notify({
+            let app = app.clone();
+            let id = o.id.clone();
+            move |r| {
+                let mut a = app.answers.borrow_mut();
+                a.optional.retain(|x| *x != id);
+                if r.is_active() {
+                    a.optional.push(id.clone());
+                }
+            }
+        });
+        group.add(&row);
+    }
+    page.add(&group);
+    push(app, "apps", "Apps", &scrolled(&page), Box::new(|_, _| Vec::new()));
+}
+
+// =============================================================================
 // Summary
 // =============================================================================
 
@@ -1248,7 +1728,39 @@ fn plan_rows(a: &Answers, p: &Probe) -> Vec<(String, String)> {
     // new partitions get is sfdisk's decision at the moment they are created --
     // --append fills the lowest free slots -- so the plan describes them by
     // what they are instead of by a node that would be a guess.
-    let (partitioning, layout) = if a.mode == "alongside" {
+    let (partitioning, layout) = if a.mode == "manual" {
+        let disk = p.disks.iter().find(|d| d.dev == a.disk);
+        let size = |sectors: u64| {
+            disk.map(|d| probe::human_bytes(manual::bytes(d, sectors))).unwrap_or_default()
+        };
+        let slot = |dev: &str| disk.and_then(|d| d.slots.iter().find(|s| s.dev == dev));
+        let mut l = Vec::new();
+        for dev in &a.manual_delete {
+            let what = slot(dev).map(|s| format!("{}   {}", size(s.sectors), slot_desc(s)));
+            l.push(format!("{dev}   deleted   {}", what.unwrap_or_default()));
+        }
+        for u in &a.manual_use {
+            let sz = slot(&u.dev).map(|s| size(s.sectors)).unwrap_or_default();
+            let how = match (u.role.as_str(), u.action.as_str()) {
+                ("root", _) | ("home", "format") => format!("format {}", a.fs),
+                ("esp", "format") => "format FAT32".to_string(),
+                (_, act) => act.to_string(),
+            };
+            l.push(format!("{}   {sz}   {how} → {}", u.dev, manual::role_label(&u.role)));
+        }
+        for n in &a.manual_new {
+            let how = match n.role.as_str() {
+                "esp" => "FAT32".to_string(),
+                "swap" => "swap".to_string(),
+                _ => a.fs.clone(),
+            };
+            l.push(format!("new partition   {}   {how} → {}", size(n.sectors), manual::role_label(&n.role)));
+        }
+        (
+            "Manual. Every partition not listed here is left exactly as it is.".to_string(),
+            l.join("\n"),
+        )
+    } else if a.mode == "alongside" {
         let disk = p.disks.iter().find(|d| d.dev == a.disk);
         let mut l = String::new();
         if a.shrink_part.is_empty() {
@@ -1272,10 +1784,19 @@ fn plan_rows(a: &Answers, p: &Probe) -> Vec<(String, String)> {
             ));
         }
         let existing_esp = disk.map(|d| d.esp.clone()).unwrap_or_default();
-        l.push_str(&format!(
-            "\n{}   reused as the EFI System Partition, not formatted",
-            if existing_esp.is_empty() { "the existing ESP".to_string() } else { existing_esp }
-        ));
+        let existing_esp =
+            if existing_esp.is_empty() { "the existing ESP".to_string() } else { existing_esp };
+        if disk.is_some_and(|d| d.esp_extra_bytes > 0) {
+            l.push_str(&format!(
+                "\nnew partition   {}   EFI System Partition for RavenLinux\n{existing_esp}   \
+                 the other system's, too full to share; not touched",
+                a.esp_size
+            ));
+        } else {
+            l.push_str(&format!(
+                "\n{existing_esp}   reused as the EFI System Partition, not formatted"
+            ));
+        }
         if !swap_size.is_empty() {
             l.push_str(&format!("\nnew partition   {swap_size}   swap"));
         }
@@ -1322,6 +1843,23 @@ fn plan_rows(a: &Answers, p: &Probe) -> Vec<(String, String)> {
             format!("{} (applied later with raven-postinstall)", a.profile),
         ),
         (
+            "Optional apps".into(),
+            if a.optional.is_empty() {
+                "none".to_string()
+            } else {
+                a.optional
+                    .iter()
+                    .map(|id| {
+                        p.optional
+                            .iter()
+                            .find(|o| o.id == *id && !o.name.is_empty())
+                            .map_or(id.clone(), |o| o.name.clone())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+        ),
+        (
             "Bootloader".into(),
             format!(
                 "RavenBoot at \\EFI\\raven and \\EFI\\BOOT\\BOOTX64.EFI{}",
@@ -1359,6 +1897,22 @@ fn summary(app: &Rc<App>) {
     nopw.set_visible(false);
     page.add(&nopw);
 
+    let bl = adw::PreferencesGroup::new();
+    let bl_row = adw::ActionRow::builder()
+        .title("Have Windows' BitLocker recovery key ready")
+        .subtitle(
+            "Windows on this disk is encrypted. The first time it starts from \
+             RavenBoot's menu it will ask for the recovery key (aka.ms/myrecoverykey).",
+        )
+        .build();
+    bl_row.set_subtitle_lines(0);
+    let bl_icon = gtk::Image::from_icon_name("dialog-warning-symbolic");
+    bl_icon.add_css_class("warning");
+    bl_row.add_prefix(&bl_icon);
+    bl.add(&bl_row);
+    bl.set_visible(false);
+    page.add(&bl);
+
     // Rebuilt on entry rather than on every keystroke: it summarises five
     // pages, and it is only ever looked at from this one.
     let rows: Rc<std::cell::RefCell<Vec<adw::ActionRow>>> = Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -1380,7 +1934,15 @@ fn summary(app: &Rc<App>) {
                 plan.add(&row);
                 rows.borrow_mut().push(row);
             }
-            danger_row.set_title(&if a.mode == "alongside" {
+            danger_row.set_title(&if a.mode == "manual" {
+                if a.manual_delete.is_empty()
+                    && !a.manual_use.iter().any(|u| u.action == "format" || u.role == "root")
+                {
+                    format!("{}'s partition table will be changed", a.disk)
+                } else {
+                    "Partitions marked deleted or formatted lose everything on them".to_string()
+                }
+            } else if a.mode == "alongside" {
                 if a.shrink_part.is_empty() {
                     format!("{}'s partition table will be changed", a.disk)
                 } else {
@@ -1393,6 +1955,9 @@ fn summary(app: &Rc<App>) {
                 format!("Everything on {} will be destroyed", a.disk)
             });
             nopw.set_visible(a.no_password_anywhere());
+            let bitlocker = a.mode != "wipe"
+                && app.probe.disks.iter().any(|d| d.dev == a.disk && d.bitlocker);
+            bl.set_visible(bitlocker);
         }
     };
     refresh();

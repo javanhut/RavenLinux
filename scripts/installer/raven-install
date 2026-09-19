@@ -54,6 +54,7 @@ ESP_SIZE_DEFAULT="512M"
 ESP_LABEL="RAVEN_ESP"      # FAT labels are capped at 11 characters
 ROOT_LABEL="RAVEN_ROOT"
 SWAP_LABEL="RAVEN_SWAP"
+HOME_LABEL="RAVEN_HOME"
 
 # Where we do our work. Under /run so it is a tmpfs and never lands on disk.
 WORK="/run/raven-install"
@@ -175,6 +176,12 @@ OPT_DISK=""
 # does when nobody says otherwise, and it is the one that cannot be asked to
 # resize a filesystem it did not create.
 OPT_MODE="wipe"
+# manual: the person has laid the disk out themselves -- which partitions to
+# delete, which to create where, and which existing ones to use for what. See
+# "Manual partitioning" below for the three lists and what each entry means.
+OPT_MANUAL_DELETE=""
+OPT_MANUAL_NEW=""
+OPT_MANUAL_USE=""
 OPT_SHRINK_PART=""     # which partition alongside mode takes space from
 OPT_ALONGSIDE_SIZE=""  # how much to take, or empty for "about half of what is free"
 OPT_FS="ext4"
@@ -185,6 +192,12 @@ NVRAM_DECLINED=0     # 1 when an answers file said efi_nvram=0 outright
 OPT_DRY_RUN=0
 OPT_YES=0
 OPT_PROFILE=""
+# Optional applications to install, comma-separated ids from OPTIONAL_DIR. The
+# flag says whether anything answered the question, so an interactive run asks
+# only when neither --optional nor the answers file did -- and "" is then an
+# answer ("none of them"), not a question left open.
+OPT_OPTIONAL=""
+OPT_OPTIONAL_SET=0
 OPT_POSTINSTALL=""   # now | later | auto; empty until the answers file or the default fills it
 OPT_ANSWERS=""
 OPT_NONINTERACTIVE=0
@@ -211,6 +224,18 @@ Options:
   --size SIZE        How much space to give RavenLinux, e.g. 120G. With
                      --shrink and no --size, about half of what the partition
                      can spare.
+  --manual           Lay the disk out yourself, with the three options below.
+                     Nothing is erased that you did not name, and nothing is
+                     written until the plan has been checked and confirmed.
+  --delete LIST      Manual: partitions to delete, comma-separated.
+  --new LIST         Manual: partitions to create, ';'-separated, each
+                     START:SECTORS:ROLE in the disk's own sectors (see
+                     --probe's disk.sector_size). ROLE is root, home, swap or
+                     esp. Every one must sit in free space, after --delete.
+  --use LIST         Manual: existing partitions to use, ';'-separated, each
+                     PART:ROLE:ACTION. ACTION is keep or format; root is
+                     always formatted, and keep is for an ESP (shared with
+                     another OS), a /home whose data should survive, or a swap.
   --wipe             Erase the disk. The default, so this is only worth typing
                      to say so out loud in a script.
   --fs TYPE          Root filesystem: ext4 (default) or xfs or btrfs, if the
@@ -218,11 +243,16 @@ Options:
   --swap SIZE        Swap partition size (e.g. 8G), or "none" for no swap.
   --esp-size SIZE    EFI System Partition size. Default ${ESP_SIZE_DEFAULT}.
   --efi-nvram        Also register a "RavenLinux" UEFI NVRAM boot entry with
-                     efibootmgr. Off by default: the fallback bootloader path
-                     boots without it, and writing NVRAM can reorder the
-                     firmware's existing entries.
+                     efibootmgr. Off by default when the disk is erased (the
+                     fallback path boots without it); on by default next to
+                     another OS -- on the same disk or another one -- whose own
+                     entry would otherwise keep booting first.
   --profile NAME     Post-install package template: minimal (default), desktop,
                      or developer.
+  --optional LIST    Optional applications to install, comma-separated (e.g.
+                     tutorial,oracle), or "none". They ride on the install
+                     media but are not part of the system; only the ones named
+                     here are copied onto the disk. --probe lists them.
   --postinstall MODE When the profile's packages are installed. "now" runs
                      raven-postinstall inside the new system before the
                      installer finishes, over the live session's network;
@@ -276,6 +306,10 @@ while [[ $# -gt 0 ]]; do
         --disk)      OPT_DISK="${2:-}"; shift 2 ;;
         --alongside) OPT_MODE="alongside"; shift ;;
         --wipe)      OPT_MODE="wipe"; shift ;;
+        --manual)    OPT_MODE="manual"; shift ;;
+        --delete)    OPT_MANUAL_DELETE="${2:-}"; OPT_MODE="manual"; shift 2 ;;
+        --new)       OPT_MANUAL_NEW="${2:-}"; OPT_MODE="manual"; shift 2 ;;
+        --use)       OPT_MANUAL_USE="${2:-}"; OPT_MODE="manual"; shift 2 ;;
         --shrink)    OPT_SHRINK_PART="${2:-}"; OPT_MODE="alongside"; shift 2 ;;
         --size)      OPT_ALONGSIDE_SIZE="${2:-}"; shift 2 ;;
         --fs)        OPT_FS="${2:-}"; shift 2 ;;
@@ -284,6 +318,7 @@ while [[ $# -gt 0 ]]; do
         --efi-nvram) OPT_NVRAM=1; shift ;;
         --profile)   OPT_PROFILE="${2:-}"; shift 2 ;;
         --postinstall) OPT_POSTINSTALL="${2:-}"; shift 2 ;;
+        --optional)  OPT_OPTIONAL="${2:-}"; OPT_OPTIONAL_SET=1; shift 2 ;;
         --dry-run)   OPT_DRY_RUN=1; shift ;;
         -y|--yes)    OPT_YES=1; shift ;;
         --answers)   OPT_ANSWERS="${2:-}"; shift 2 ;;
@@ -341,7 +376,11 @@ on_error() {
     fail "Installation aborted."
     emit dirty "$DISK_DIRTY"
     emit done "$rc"
-    if [[ $DISK_DIRTY -eq 1 && "$OPT_MODE" == "alongside" ]]; then
+    if [[ $DISK_DIRTY -eq 1 && "$OPT_MODE" == "manual" ]]; then
+        echo "  ${YELLOW}The disk has been modified: RavenLinux is not installed.${NC}"
+        echo "  Only the partitions named in the plan were deleted, created or"
+        echo "  formatted; every other one was left as it was. Re-run raven-install."
+    elif [[ $DISK_DIRTY -eq 1 && "$OPT_MODE" == "alongside" ]]; then
         echo "  ${YELLOW}The disk has been modified: RavenLinux is not installed.${NC}"
         echo "  The other operating system on this disk was not formatted and"
         echo "  should still boot. Re-run raven-install to try again."
@@ -765,6 +804,46 @@ largest_gap() {
     free_gaps | sort -n -k3,3 | tail -n 1
 }
 
+# What RavenBoot, a kernel and an initramfs need on an ESP: about 100 MB, and
+# a little over for the next kernel. The same figure format_partitions holds a
+# reused ESP to -- asked here, while planning, because finding out there was
+# finding out after Windows had already been shrunk.
+ESP_MIN_FREE="$(( 120 * 1024 * 1024 ))"
+ESP_OWN=0              # 1 when RavenLinux gets its own ESP next to another OS's
+
+# Free bytes on a FAT partition, or nothing when it cannot be looked at (not
+# root, or not mountable). Unknown is not treated as too small: the check in
+# format_partitions is still there behind it.
+esp_free_bytes() {
+    local dev="$1" mnt kb=""
+    mnt=$(findmnt -no TARGET --source "$dev" 2>/dev/null | head -n 1)
+    if [[ -n "$mnt" ]]; then
+        kb=$(df -k "$mnt" 2>/dev/null | awk 'NR==2 { print $4 }')
+    else
+        mnt="${WORK}/espfree.$$"
+        mkdir -p "$mnt" 2>/dev/null || return 0
+        if mount -o ro "$dev" "$mnt" 2>/dev/null; then
+            kb=$(df -k "$mnt" 2>/dev/null | awk 'NR==2 { print $4 }')
+            umount "$mnt" 2>/dev/null
+        fi
+        rmdir "$mnt" 2>/dev/null
+    fi
+    [[ "$kb" =~ ^[0-9]+$ ]] && echo $(( kb * 1024 ))
+    return 0
+}
+
+# Is Windows anywhere on this machine? NTFS or BitLocker, or the partition
+# types only Windows makes (Microsoft Reserved, Windows Recovery). "Basic
+# data" is not evidence: every FAT USB stick is typed that way.
+machine_has_windows() {
+    lsblk -rno FSTYPE,PARTTYPE 2>/dev/null \
+        | grep -qiE 'ntfs|bitlocker|e3c9e316-0b5c-4db8-817d-f92df00215ae|de94bba4-06d1-4d40-a16a-bfd50179d6ac'
+}
+
+disk_has_bitlocker() {
+    lsblk -rno FSTYPE "$1" 2>/dev/null | grep -qi '^bitlocker$'
+}
+
 
 # =============================================================================
 # Filesystems on somebody else's partition
@@ -939,10 +1018,11 @@ other_esp_disks() {
 
 # Whether to register a UEFI NVRAM boot entry, when nobody has said either way.
 #
-# Off is right on one disk: \EFI\BOOT\BOOTX64.EFI is what firmware runs when
-# no NVRAM entry matches, that file is RavenBoot after this install, and not
-# touching NVRAM leaves the firmware's existing entries in their existing
-# order.
+# Off is right when the disk is erased: \EFI\BOOT\BOOTX64.EFI is what firmware
+# runs when no NVRAM entry matches, that file is RavenBoot after this install,
+# and not touching NVRAM leaves the firmware's existing entries in their
+# existing order. It is not right next to another OS on the same disk -- see
+# below -- which is every install that is not a wipe.
 #
 # On two disks it is wrong, and wrong in a way that looks like a failed
 # install. The other disk has a fallback loader of its own and an NVRAM entry
@@ -950,8 +1030,32 @@ other_esp_disks() {
 # so the firmware goes on booting that. RavenBoot is never reached, and so the
 # menu it would have shown, with that other OS in it, is never reached either.
 decide_nvram() {
+    # An ESP of our own next to another OS's is reachable only through a boot
+    # entry: the firmware's entry for the other OS comes first, and the
+    # fallback path it would try after that is on the other OS's ESP.
+    if (( ${ESP_OWN:-0} )); then
+        (( NVRAM_DECLINED )) && die "RavenLinux has its own EFI partition next to another OS's, and
+       the firmware can only find it through a boot entry. Allow the boot
+       entry (efi_nvram=1), or share the existing EFI partition."
+        have efibootmgr || die "RavenLinux needs a UEFI boot entry here and efibootmgr is not on this image."
+        OPT_NVRAM=1
+        info "Registering a UEFI boot entry for RavenLinux's own EFI partition."
+        return 0
+    fi
+
     (( OPT_NVRAM ))      && return 0
     (( NVRAM_DECLINED )) && return 0
+
+    # Next to another OS on the same disk. That OS has an NVRAM entry of its
+    # own -- "Windows Boot Manager", "ubuntu" -- ahead of the fallback path in
+    # the boot order, so without ours the firmware goes on booting it and
+    # RavenBoot never runs. efibootmgr -c puts the new entry first.
+    if [[ "$OPT_MODE" != "wipe" ]]; then
+        OPT_NVRAM=1
+        info "Another operating system shares ${DISK}; registering a UEFI boot entry so RavenBoot runs first."
+        info "Put efi_nvram=0 in an answers file to skip it."
+        return 0
+    fi
 
     local others
     others="$(other_esp_disks)"
@@ -1019,6 +1123,18 @@ plan_alongside() {
         || die "${DISK} has no EFI System Partition. There is no other UEFI OS on it
        to install alongside -- use --wipe to erase the disk and start clean."
     ESP_REUSED=1
+    ESP_OWN=0
+
+    # Windows makes a 100 MB ESP and fills most of it. Sharing one that small
+    # fails in the bootloader step, after everything else has been written, so
+    # it is decided here instead: RavenLinux gets an ESP of its own in the same
+    # space, the other OS's is not touched, and a boot entry points at ours.
+    local esp_free; esp_free="$(esp_free_bytes "$ESP_DEV")"
+    if [[ -n "$esp_free" ]] && (( esp_free < ESP_MIN_FREE )); then
+        ESP_OWN=1
+        ESP_REUSED=0
+        info "${ESP_DEV} has only $(to_human "$esp_free") free; RavenLinux gets an EFI partition of its own"
+    fi
 
     local want_bytes=0
     [[ -n "$OPT_ALONGSIDE_SIZE" ]] && want_bytes=$(to_bytes "$OPT_ALONGSIDE_SIZE")
@@ -1028,6 +1144,7 @@ plan_alongside() {
     # answer rather than the estimate the probe had to work from.
     local need=$ALONGSIDE_MIN_ROOT
     [[ -n "$SWAP_SIZE" ]] && need=$(( need + $(to_bytes "$SWAP_SIZE") ))
+    (( ${ESP_OWN:-0} )) && need=$(( need + $(to_bytes "$OPT_ESP_SIZE") ))
     local need_detail; need_detail="$(swap_share_note "$SWAP_SIZE")"
 
     if [[ -n "$OPT_SHRINK_PART" ]]; then
@@ -1164,16 +1281,27 @@ plan_alongside_partitions() {
     local cursor=$GAP_START
     local end_excl=$(( GAP_START + GAP_SECTORS ))
     local lines=""
+    ESP_START=""; SWAP_START=""
+
+    if (( ${ESP_OWN:-0} )); then
+        local esp_sectors
+        esp_sectors=$(align_up $(( $(to_bytes "$OPT_ESP_SIZE") / DISK_SECTOR )))
+        lines+="start=${cursor}, size=${esp_sectors}, type=${GUID_ESP}, name=\"${ESP_LABEL}\""$'\n'
+        ESP_START=$cursor
+        cursor=$(( cursor + esp_sectors ))
+    fi
 
     if [[ -n "$SWAP_SIZE" ]]; then
         local swap_sectors
         swap_sectors=$(align_up $(( $(to_bytes "$SWAP_SIZE") / DISK_SECTOR )))
         lines+="start=${cursor}, size=${swap_sectors}, type=${GUID_SWAP}, name=\"${SWAP_LABEL}\""$'\n'
+        SWAP_START=$cursor
         cursor=$(( cursor + swap_sectors ))
     fi
 
     local root_sectors=$(( end_excl - cursor ))
     lines+="start=${cursor}, size=${root_sectors}, type=${GUID_LINUX}, name=\"${ROOT_LABEL}\""$'\n'
+    ROOT_START=$cursor
 
     ALONGSIDE_PARTS="$lines"
     ROOT_ALONGSIDE_BYTES=$(( root_sectors * DISK_SECTOR ))
@@ -1248,6 +1376,8 @@ choose_install_mode() {
     # A flag or an answers file has already decided. --shrink implies
     # --alongside in the parser, so there is no half-set state to reconcile.
     [[ "$OPT_MODE" == "alongside" ]] && { choose_shrink_target; return 0; }
+    # Manual is decided entirely by its three lists; there is no question left.
+    [[ "$OPT_MODE" == "manual" ]] && return 0
     (( OPT_NONINTERACTIVE )) && return 0
     (( OPT_YES )) && return 0
 
@@ -1399,6 +1529,7 @@ ANSWER_KEYS=(
     disk mode shrink_part alongside_size
     fs esp_size swap hostname username fullname user_password user_sudo
     root_password timezone locale keymap profile efi_nvram postinstall
+    optional manual_delete manual_new manual_use rtc
 )
 ANSWER_REQUIRED=(disk hostname username)
 
@@ -1456,8 +1587,19 @@ load_answers() {
     # from is not something you do to a disk you are erasing, and making the
     # front-end send two keys that cannot disagree is two chances to disagree.
     [[ -n "$OPT_SHRINK_PART" ]] && OPT_MODE="alongside"
+    [[ -z "$OPT_MANUAL_DELETE" ]] && OPT_MANUAL_DELETE="${ANS[manual_delete]:-}"
+    [[ -z "$OPT_MANUAL_NEW"    ]] && OPT_MANUAL_NEW="${ANS[manual_new]:-}"
+    [[ -z "$OPT_MANUAL_USE"    ]] && OPT_MANUAL_USE="${ANS[manual_use]:-}"
+    case "$OPT_MODE" in
+        wipe|alongside|manual) ;;
+        *) die "answers: mode must be wipe, alongside or manual, not '${OPT_MODE}'" ;;
+    esac
     [[ -z "$OPT_PROFILE" ]] && OPT_PROFILE="${ANS[profile]:-}"
     [[ -z "$OPT_POSTINSTALL" ]] && OPT_POSTINSTALL="${ANS[postinstall]:-}"
+    if (( ! OPT_OPTIONAL_SET )) && [[ -v 'ANS[optional]' ]]; then
+        OPT_OPTIONAL="${ANS[optional]}"
+        OPT_OPTIONAL_SET=1
+    fi
     [[ -z "$OPT_SWAP"    ]] && OPT_SWAP="${ANS[swap]:-}"
     [[ "$OPT_FS" == "ext4" && -n "${ANS[fs]:-}" ]] && OPT_FS="${ANS[fs]}"
     [[ "$OPT_ESP_SIZE" == "${ESP_SIZE_DEFAULT}" && -n "${ANS[esp_size]:-}" ]] \
@@ -1683,6 +1825,8 @@ run_wizard() {
     esac
     decide_postinstall
 
+    choose_optional_apps
+
     echo
     if [[ -z "${OPT_SWAP}" ]]; then
         local suggested
@@ -1752,6 +1896,7 @@ apply_answers() {
         *) die "answers: unknown install profile '${INSTALL_PROFILE}'" ;;
     esac
     decide_postinstall
+    resolve_optional_apps
 
     # Same three cases as the prompt: unset means "decide for me", which here
     # is the same memory-sized default the wizard offers -- and the same rule
@@ -1762,6 +1907,7 @@ apply_answers() {
     ok "User: ${USERNAME}${FULLNAME:+ (${FULLNAME})}"
     ok "Timezone: ${TIMEZONE}, locale ${LOCALE}, keymap ${KEYMAP}"
     ok "Profile: ${INSTALL_PROFILE}, swap: ${SWAP_SIZE:-none}"
+    ok "Optional apps: $(optional_names)"
 }
 
 # =============================================================================
@@ -1774,6 +1920,10 @@ ROOT_DEV=""
 ROOT_ALONGSIDE_BYTES=0
 
 plan_partitions() {
+    if [[ "$OPT_MODE" == "manual" ]]; then
+        plan_manual
+        return 0
+    fi
     if [[ "$OPT_MODE" == "alongside" ]]; then
         # Every number in the alongside plan comes off the disk that is
         # already there, so the plan cannot be written down until it has been
@@ -1793,10 +1943,368 @@ plan_partitions() {
     ROOT_DEV="$(partdev "$DISK" $n)"
 }
 
-# Which of the two partitioners runs. Named for what it does rather than for
+# =============================================================================
+# Manual partitioning
+# =============================================================================
+# The person decides the layout; this checks it, prints it, and carries it out.
+# Three lists, from --delete/--new/--use or the answers file's manual_* keys:
+#
+#   delete  PART,PART,...           removed from the table first
+#   new     START:SECTORS:ROLE;...  created in what is free after the deletes
+#   use     PART:ROLE:ACTION;...    existing partitions put to work
+#
+# ROLE is root, home, swap or esp. ACTION is keep or format; root is always
+# formatted, and a new partition always is. Anything not named is not touched.
+#
+# Everything is validated here, before a byte is written, against the table as
+# it is read now -- the front-end's arithmetic is a proposal, not an authority.
+
+MANUAL_DELETE=()        # partition nodes
+MANUAL_NEW=()           # "start sectors role"
+MANUAL_USE=()           # "node role action"
+ESP_FORMAT=0            # 1 when the ESP is created or reformatted here
+SWAP_KEEP=0             # 1 when an existing swap is used as it is
+HOME_DEV=""
+HOME_KEPT=0             # 1 when /home is an existing filesystem left intact
+ESP_NEEDS_TYPE=""       # an existing partition made the ESP that is not typed as one
+
+MANUAL_MIN_ESP="$(( 200 * 1024 * 1024 ))"
+
+# The table as it would be after the deletes: DISK_TABLE minus those rows.
+manual_kept_rows() {
+    local node start size type d skip
+    while IFS=$'\t' read -r node start size type; do
+        [[ -z "$node" ]] && continue
+        skip=0
+        for d in "${MANUAL_DELETE[@]}"; do [[ "$d" == "$node" ]] && skip=1; done
+        (( skip )) || printf '%s\t%s\t%s\t%s\n' "$node" "$start" "$size" "$type"
+    done < <(table_rows)
+}
+
+# Is this node, or anything on it, in use by the running system?
+part_in_use() {
+    local node="$1"
+    findmnt -no TARGET --source "$node" >/dev/null 2>&1 && return 0
+    awk 'NR > 1 { print $1 }' /proc/swaps 2>/dev/null | grep -qxF -- "$node" && return 0
+    return 1
+}
+
+role_label() {
+    case "$1" in
+        root) echo "/ (root)" ;;
+        home) echo "/home" ;;
+        swap) echo "swap" ;;
+        esp)  echo "EFI System Partition -> /boot/efi" ;;
+    esac
+}
+
+plan_manual() {
+    MANUAL_DELETE=(); MANUAL_NEW=(); MANUAL_USE=()
+    ESP_REUSED=0; ESP_FORMAT=0; SWAP_KEEP=0; HOME_KEPT=0; ESP_NEEDS_TYPE=""
+    ESP_DEV=""; ROOT_DEV=""; SWAP_DEV=""; HOME_DEV=""; SWAP_SIZE=""
+
+    read_disk_table "$DISK" \
+        || die "${DISK} has no partition table. Manual partitioning edits an existing
+       GPT; use --wipe to lay a fresh one down."
+    [[ "${DISK_LABEL,,}" == "gpt" ]] \
+        || die "${DISK} is ${DISK_LABEL:-MBR}, not GPT. Manual partitioning needs a GPT
+       disk, because RavenBoot is a UEFI loader. Use --wipe to convert it (erasing it)."
+
+    local item node start size type role action
+    local -A all_nodes=()
+    while IFS=$'\t' read -r node start size type; do
+        [[ -n "$node" ]] && all_nodes["$node"]=1
+    done < <(table_rows)
+
+    # -- deletes ---------------------------------------------------------------
+    local -a list=()
+    IFS=',' read -r -a list <<< "${OPT_MANUAL_DELETE// /}"
+    for node in "${list[@]}"; do
+        [[ -z "$node" ]] && continue
+        [[ -n "${all_nodes[$node]:-}" ]] || die "manual: ${node} is not a partition on ${DISK}"
+        part_in_use "$node" && die "manual: ${node} is mounted or in use as swap; it cannot be deleted"
+        MANUAL_DELETE+=("$node")
+    done
+
+    local kept; kept="$(manual_kept_rows)"
+    local -A kept_nodes=()
+    while IFS=$'\t' read -r node _; do
+        [[ -n "$node" ]] && kept_nodes["$node"]=1
+    done <<< "$kept"
+
+    local -A role_count=([root]=0 [home]=0 [swap]=0 [esp]=0)
+
+    # -- existing partitions put to work ----------------------------------------
+    IFS=';' read -r -a list <<< "${OPT_MANUAL_USE}"
+    for item in "${list[@]}"; do
+        item="${item// /}"
+        [[ -z "$item" ]] && continue
+        IFS=':' read -r node role action <<< "$item"
+        [[ -n "${kept_nodes[$node]:-}" ]] \
+            || die "manual: ${node} is not on ${DISK}, or is also being deleted"
+        part_in_use "$node" && die "manual: ${node} is mounted or in use as swap"
+        local fstype; fstype="$(fs_type_of "$node")"
+        case "$role" in
+            root)
+                [[ "${action:-format}" == "format" ]] \
+                    || die "manual: the root partition is always formatted; ${node} cannot be kept"
+                ROOT_DEV="$node" ;;
+            home)
+                case "${action:-}" in
+                    keep)
+                        [[ -n "$fstype" ]] || die "manual: ${node} has no filesystem to keep as /home"
+                        case "$fstype" in
+                            ext2|ext3|ext4|xfs|btrfs) ;;
+                            *) die "manual: ${node} is ${fstype}; /home has to be a Linux filesystem (or formatted)" ;;
+                        esac
+                        HOME_KEPT=1 ;;
+                    format) HOME_KEPT=0 ;;
+                    *) die "manual: ${node}: /home needs keep or format" ;;
+                esac
+                HOME_DEV="$node" ;;
+            swap)
+                case "${action:-format}" in
+                    keep)
+                        [[ "$fstype" == "swap" ]] || die "manual: ${node} is not a swap partition; format it instead"
+                        SWAP_KEEP=1 ;;
+                    format) SWAP_KEEP=0 ;;
+                    *) die "manual: ${node}: swap needs keep or format" ;;
+                esac
+                SWAP_DEV="$node" ;;
+            esp)
+                case "${action:-keep}" in
+                    keep)
+                        [[ "$fstype" == "vfat" ]] \
+                            || die "manual: ${node} is ${fstype:-unformatted}, not FAT; an ESP to keep has to be FAT already"
+                        local efree; efree="$(esp_free_bytes "$node")"
+                        if [[ -n "$efree" ]] && (( efree < ESP_MIN_FREE )); then
+                            die "manual: ${node} has only $(to_human "$efree") free, and RavenBoot with its kernel
+       needs $(to_human "$ESP_MIN_FREE"). Create a new EFI System Partition for RavenLinux
+       in free space instead; a boot entry will point the firmware at it."
+                        fi
+                        ESP_REUSED=1; ESP_FORMAT=0 ;;
+                    format) ESP_REUSED=0; ESP_FORMAT=1 ;;
+                    *) die "manual: ${node}: esp needs keep or format" ;;
+                esac
+                local ptype; ptype="$(part_field "$node" type)"
+                [[ "${ptype^^}" == "$GUID_ESP" ]] || ESP_NEEDS_TYPE="$node"
+                (( $(part_field "$node" size) * DISK_SECTOR >= MANUAL_MIN_ESP )) || (( ESP_REUSED )) \
+                    || die "manual: ${node} is smaller than $(to_human $MANUAL_MIN_ESP), too small for an ESP"
+                ESP_DEV="$node" ;;
+            *) die "manual: unknown role '${role}' for ${node} (root, home, swap or esp)" ;;
+        esac
+        role_count[$role]=$(( role_count[$role] + 1 ))
+        MANUAL_USE+=("${node} ${role} ${action:-format}")
+    done
+
+    # -- new partitions ---------------------------------------------------------
+    local a=$(( ALIGN_BYTES / DISK_SECTOR )); (( a < 1 )) && a=1
+    local occupied; occupied="$(cut -f2,3 <<< "$kept")"
+    IFS=';' read -r -a list <<< "${OPT_MANUAL_NEW}"
+    for item in "${list[@]}"; do
+        item="${item// /}"
+        [[ -z "$item" ]] && continue
+        IFS=':' read -r start size role <<< "$item"
+        [[ "$start" =~ ^[0-9]+$ && "$size" =~ ^[0-9]+$ ]] \
+            || die "manual: '${item}' is not START:SECTORS:ROLE"
+        (( size > 0 )) || die "manual: '${item}' has no size"
+        (( start % a == 0 )) || die "manual: ${start} is not on a 1 MiB boundary"
+        (( start >= DISK_FIRST_LBA && start + size - 1 <= DISK_LAST_LBA )) \
+            || die "manual: ${start}+${size} is outside ${DISK}'s usable sectors (${DISK_FIRST_LBA}-${DISK_LAST_LBA})"
+        local os oz
+        while read -r os oz; do
+            [[ -z "$os" ]] && continue
+            if (( start < os + oz && os < start + size )); then
+                die "manual: the new ${role} at sector ${start} overlaps a partition that is being kept"
+            fi
+        done <<< "${occupied//$'\t'/ }"
+        case "$role" in
+            root|home|swap) ;;
+            esp) (( size * DISK_SECTOR >= MANUAL_MIN_ESP )) \
+                    || die "manual: a new ESP needs at least $(to_human $MANUAL_MIN_ESP)"
+                 ESP_REUSED=0; ESP_FORMAT=1 ;;
+            *) die "manual: unknown role '${role}' for a new partition (root, home, swap or esp)" ;;
+        esac
+        [[ "$role" == "home" ]] && HOME_KEPT=0
+        [[ "$role" == "swap" ]] && SWAP_KEEP=0
+        role_count[$role]=$(( role_count[$role] + 1 ))
+        MANUAL_NEW+=("${start} ${size} ${role}")
+        occupied+=$'\n'"${start}"$'\t'"${size}"
+    done
+
+    # -- the whole ------------------------------------------------------------------
+    (( role_count[root] == 1 )) || die "manual: exactly one partition must be the root (have ${role_count[root]})"
+    (( role_count[esp]  == 1 )) || die "manual: exactly one partition must be the EFI System Partition (have ${role_count[esp]})"
+    (( role_count[home] <= 1 )) || die "manual: more than one partition is /home"
+    (( role_count[swap] <= 1 )) || die "manual: more than one partition is swap"
+
+    # Our own ESP while another one stays on the disk: that other one belongs
+    # to an OS whose boot entry comes first, so ours needs an entry too.
+    ESP_OWN=0
+    if (( ! ESP_REUSED )); then
+        while IFS=$'\t' read -r node start size type; do
+            [[ -z "$node" || "$node" == "$ESP_DEV" ]] && continue
+            [[ "${type^^}" == "$GUID_ESP" ]] && { ESP_OWN=1; break; }
+        done <<< "$kept"
+    fi
+
+    # Root size: new or existing, it has to hold the system with room to spare.
+    local root_sectors=0
+    if [[ -n "$ROOT_DEV" ]]; then
+        root_sectors=$(part_field "$ROOT_DEV" size)
+    else
+        for item in "${MANUAL_NEW[@]}"; do
+            read -r start size role <<< "$item"
+            [[ "$role" == "root" ]] && root_sectors=$size
+        done
+    fi
+    ROOT_ALONGSIDE_BYTES=$(( root_sectors * DISK_SECTOR ))
+    local src_mb=0
+    [[ -n "$SRC_ROOT" ]] && src_mb=$(du -sm --one-file-system "$SRC_ROOT" 2>/dev/null | awk '{print $1}')
+    [[ "$src_mb" =~ ^[0-9]+$ ]] || src_mb=0
+    local need=$(( (src_mb + src_mb / 10) * 1024 * 1024 ))
+    (( ROOT_ALONGSIDE_BYTES >= need )) \
+        || die "manual: the root partition is $(to_human $ROOT_ALONGSIDE_BYTES); the system alone needs $(to_human $need)"
+    (( ROOT_ALONGSIDE_BYTES >= ALONGSIDE_MIN_ROOT )) \
+        || warn "The root partition is under $(to_human $ALONGSIDE_MIN_ROOT); it will fill up quickly."
+
+    # For the summary. The swap size is informational here: it is the partition.
+    if [[ -n "$SWAP_DEV" ]]; then
+        SWAP_SIZE="$(to_human $(( $(part_field "$SWAP_DEV" size) * DISK_SECTOR )))"
+    else
+        for item in "${MANUAL_NEW[@]}"; do
+            read -r start size role <<< "$item"
+            [[ "$role" == "swap" ]] && SWAP_SIZE="$(to_human $(( size * DISK_SECTOR )))"
+        done
+    fi
+}
+
+print_manual_plan() {
+    local item node role action start size
+    if (( ${#MANUAL_DELETE[@]} )); then
+        echo
+        for node in "${MANUAL_DELETE[@]}"; do
+            printf '      %-16s %-10s deleted  (%s)\n' "$node" \
+                "$(to_human $(( $(part_field "$node" size) * DISK_SECTOR )))" "$(part_os_hint "$node")"
+        done
+    fi
+    echo
+    for item in "${MANUAL_USE[@]}"; do
+        read -r node role action <<< "$item"
+        [[ "$role" == "root" ]] && action="format (${OPT_FS})"
+        [[ "$role" == "home" && "$action" == "format" ]] && action="format (${OPT_FS})"
+        printf '      %-16s %-10s %-8s -> %s\n' "$node" \
+            "$(to_human $(( $(part_field "$node" size) * DISK_SECTOR )))" "$action" "$(role_label "$role")"
+    done
+    for item in "${MANUAL_NEW[@]}"; do
+        read -r start size role <<< "$item"
+        printf '      %-16s %-10s %-8s -> %s\n' "new @${start}" \
+            "$(to_human $(( size * DISK_SECTOR )))" "create" "$(role_label "$role")"
+    done
+    [[ -n "$ESP_NEEDS_TYPE" ]] && printf '\n      %s is retyped as an EFI System Partition\n' "$ESP_NEEDS_TYPE"
+    echo
+    echo "    Every other partition on ${DISK} is left exactly as it is."
+}
+
+# The node whose partition starts at sector $1.
+part_by_start() {
+    table_rows | awk -F'\t' -v s="$1" '$2 == s { print $1; exit }'
+}
+
+partition_manual() {
+    phase partition "Applying the partition plan to ${DISK}"
+
+    if (( ${#MANUAL_DELETE[@]} == 0 && ${#MANUAL_NEW[@]} == 0 )) && [[ -z "$ESP_NEEDS_TYPE" ]]; then
+        ok "Partition table unchanged"
+        return 0
+    fi
+
+    DISK_DIRTY=1
+    local node nums=() item start size role type name lines=""
+
+    if (( ${#MANUAL_DELETE[@]} )); then
+        for node in "${MANUAL_DELETE[@]}"; do nums+=("${node##*[!0-9]}"); done
+        sfdisk --delete --no-reread -q "$DISK" "${nums[@]}" >/dev/null 2>&1 \
+            || die "sfdisk could not delete ${MANUAL_DELETE[*]} from ${DISK}."
+        ok "Deleted ${MANUAL_DELETE[*]}"
+    fi
+
+    if (( ${#MANUAL_NEW[@]} )); then
+        for item in "${MANUAL_NEW[@]}"; do
+            read -r start size role <<< "$item"
+            case "$role" in
+                root) type="$GUID_LINUX"; name="$ROOT_LABEL" ;;
+                home) type="$GUID_LINUX"; name="$HOME_LABEL" ;;
+                swap) type="$GUID_SWAP";  name="$SWAP_LABEL" ;;
+                esp)  type="$GUID_ESP";   name="$ESP_LABEL" ;;
+            esac
+            lines+="start=${start}, size=${size}, type=${type}, name=\"${name}\""$'\n'
+        done
+        printf '%s' "$lines" \
+            | sfdisk --append --no-reread -w never -W never -q "$DISK" >/dev/null 2>&1 \
+            || die "sfdisk could not create the new partitions on ${DISK}."
+        ok "Created ${#MANUAL_NEW[@]} partition(s)"
+    fi
+
+    if [[ -n "$ESP_NEEDS_TYPE" ]]; then
+        sfdisk --part-type --no-reread -q "$DISK" "${ESP_NEEDS_TYPE##*[!0-9]}" "$GUID_ESP" >/dev/null 2>&1 \
+            || die "sfdisk could not mark ${ESP_NEEDS_TYPE} as an EFI System Partition."
+        ok "${ESP_NEEDS_TYPE} marked as an EFI System Partition"
+    fi
+
+    sync
+    partx -u "$DISK" >/dev/null 2>&1 || blockdev --rereadpt "$DISK" >/dev/null 2>&1 || true
+    have udevadm && udevadm settle --timeout=10 >/dev/null 2>&1
+
+    # New partitions are found by where they start. Their numbers are sfdisk's
+    # choice, and a GPT name is not unique when an earlier RavenLinux is kept.
+    read_disk_table "$DISK" || die "Cannot re-read ${DISK}'s partition table."
+    for item in "${MANUAL_NEW[@]}"; do
+        read -r start size role <<< "$item"
+        node="$(part_by_start "$start")"
+        [[ -n "$node" ]] || die "The new ${role} partition at sector ${start} cannot be found on ${DISK}."
+        case "$role" in
+            root) ROOT_DEV="$node" ;;
+            home) HOME_DEV="$node" ;;
+            swap) SWAP_DEV="$node" ;;
+            esp)  ESP_DEV="$node" ;;
+        esac
+    done
+
+    local waited=0 d
+    for d in "$ROOT_DEV" "$ESP_DEV" "$SWAP_DEV" "$HOME_DEV"; do
+        [[ -z "$d" ]] && continue
+        while [[ ! -b "$d" ]]; do
+            sleep 1
+            waited=$((waited + 1))
+            (( waited >= 15 )) && die "Partition node ${d} did not appear"
+        done
+    done
+    ok "Partition devices ready"
+}
+
+# /home goes on after the copy, never before it: the live tree's own /home
+# would otherwise be copied onto a partition that is being kept for its data.
+mount_home() {
+    [[ -n "${HOME_DEV:-}" ]] || return 0
+    local live="${TARGET}/home.raven-live"
+    rm -rf "$live"
+    mv "${TARGET}/home" "$live" 2>/dev/null || true
+    mkdir -p "${TARGET}/home"
+    mount "$HOME_DEV" "${TARGET}/home" || die "Cannot mount ${HOME_DEV} on /home"
+    if (( ! HOME_KEPT )) && [[ -d "$live" ]]; then
+        cp -a "${live}/." "${TARGET}/home/" 2>/dev/null || true
+    fi
+    rm -rf "$live"
+    ok "${HOME_DEV} mounted as /home$( (( HOME_KEPT )) && echo ', existing data kept')"
+}
+
+# Which of the partitioners runs. Named for what it does rather than for
 # how, so main() reads the same whichever mode it is in.
 partition_target() {
-    if [[ "$OPT_MODE" == "alongside" ]]; then
+    if [[ "$OPT_MODE" == "manual" ]]; then
+        partition_manual
+    elif [[ "$OPT_MODE" == "alongside" ]]; then
         partition_alongside
     else
         partition_disk
@@ -1809,7 +2317,14 @@ confirm() {
 
     phase confirm "Installation plan"
 
-    if [[ "$OPT_MODE" == "alongside" ]]; then
+    if [[ "$OPT_MODE" == "manual" ]]; then
+        cat <<PLAN
+
+    Disk           ${DISK} (${DISK_SIZE}${DISK_MODEL:+, ${DISK_MODEL}})
+    Partitioning   Manual
+PLAN
+        print_manual_plan
+    elif [[ "$OPT_MODE" == "alongside" ]]; then
         cat <<PLAN
 
     Disk           ${DISK} (${DISK_SIZE}${DISK_MODEL:+, ${DISK_MODEL}})
@@ -1826,7 +2341,12 @@ PLAN
             printf '\n      %s of unallocated space is used\n' "$(to_human $(( GAP_SECTORS * DISK_SECTOR )))"
         fi
 
-        printf '\n      %s  reused as the EFI System Partition (not formatted)\n' "$ESP_DEV"
+        if (( ${ESP_OWN:-0} )); then
+            printf '\n      new           %-8s EFI System Partition for RavenLinux\n' "$OPT_ESP_SIZE"
+            printf '      %s  the other OS'"'"'s ESP, too full to share -- not touched\n' "$ESP_DEV"
+        else
+            printf '\n      %s  reused as the EFI System Partition (not formatted)\n' "$ESP_DEV"
+        fi
         [[ -n "$SWAP_SIZE" ]] && printf '      new           %-8s swap\n' "$SWAP_SIZE"
         printf '      new           %-8s %s -> /\n' "$(to_human "$ROOT_ALONGSIDE_BYTES")" "$OPT_FS"
 
@@ -1856,9 +2376,18 @@ PLAN
     Locale         ${LOCALE}
     Keymap         ${KEYMAP}
     Package profile ${INSTALL_PROFILE} (applied later with raven-postinstall)
+    Optional apps  $(optional_names)
     Bootloader     RavenBoot at \\EFI\\raven and \\EFI\\BOOT\\BOOTX64.EFI$([[ $OPT_NVRAM -eq 1 ]] && echo ", plus an NVRAM entry")
 
 PLAN
+
+    if [[ "$OPT_MODE" != "wipe" ]] && disk_has_bitlocker "$DISK"; then
+        warn "Windows on ${DISK} is encrypted with BitLocker."
+        echo "        Booting it through RavenBoot changes what the TPM measured, so Windows"
+        echo "        will ask for its BitLocker recovery key once. Have the key ready"
+        echo "        (aka.ms/myrecoverykey), or suspend BitLocker in Windows before installing."
+        echo
+    fi
 
     if [[ $OPT_DRY_RUN -eq 1 ]]; then
         echo "  ${CYAN}--dry-run: stopping here. Nothing has been written.${NC}"
@@ -1881,7 +2410,9 @@ PLAN
         return 0
     fi
 
-    if [[ "$OPT_MODE" == "alongside" ]]; then
+    if [[ "$OPT_MODE" == "manual" ]]; then
+        echo "  ${YELLOW}The partitions marked delete or format above lose everything on them.${NC}"
+    elif [[ "$OPT_MODE" == "alongside" ]]; then
         if [[ -n "$SHRINK_DEV" ]]; then
             echo "  ${YELLOW}${SHRINK_DEV} will be resized. Back up anything on it you cannot lose.${NC}"
         else
@@ -1981,12 +2512,18 @@ partition_alongside() {
     # lowest free slots in the table, so a disk with a hole in its numbering
     # gets partitions whose numbers have nothing to do with where they sit.
     # They are found by the name written above instead.
+    # Found by where they start rather than by name: an earlier RavenLinux on
+    # the same disk has partitions called RAVEN_ROOT too.
     read_disk_table "$DISK" || die "Cannot re-read ${DISK}'s partition table."
-    ROOT_DEV=$(part_by_name "$ROOT_LABEL")
+    ROOT_DEV=$(part_by_start "$ROOT_START")
     [[ -n "$ROOT_DEV" ]] || die "The root partition was created but cannot be found on ${DISK}."
     if [[ -n "$SWAP_SIZE" ]]; then
-        SWAP_DEV=$(part_by_name "$SWAP_LABEL")
+        SWAP_DEV=$(part_by_start "$SWAP_START")
         [[ -n "$SWAP_DEV" ]] || die "The swap partition was created but cannot be found on ${DISK}."
+    fi
+    if (( ${ESP_OWN:-0} )); then
+        ESP_DEV=$(part_by_start "$ESP_START")
+        [[ -n "$ESP_DEV" ]] || die "The new EFI partition was created but cannot be found on ${DISK}."
     fi
 
     local waited=0
@@ -2056,7 +2593,7 @@ partition_disk() {
 format_partitions() {
     phase format "Creating filesystems"
 
-    if (( ESP_REUSED )); then
+    if (( ESP_REUSED )) && (( ! ${ESP_FORMAT:-0} )); then
         # Somebody else's ESP, holding the bootloader of the OS being installed
         # alongside. Formatting it is the one action in this whole file that
         # would make the other operating system unbootable, so it is the one
@@ -2093,10 +2630,24 @@ format_partitions() {
     esac || die "mkfs.${OPT_FS} failed on ${ROOT_DEV}"
     ok "${ROOT_DEV}: ${OPT_FS} (${ROOT_LABEL})"
 
-    if [[ -n "$SWAP_DEV" ]]; then
+    if [[ -n "$SWAP_DEV" ]] && (( ${SWAP_KEEP:-0} )); then
+        ok "${SWAP_DEV}: existing swap, kept"
+    elif [[ -n "$SWAP_DEV" ]]; then
         mkswap -L "${SWAP_LABEL}" "$SWAP_DEV" >/dev/null 2>&1 \
             || die "mkswap failed on ${SWAP_DEV}"
         ok "${SWAP_DEV}: swap (${SWAP_LABEL})"
+    fi
+
+    # /home is formatted here and mounted after the copy -- see mount_home.
+    if [[ -n "${HOME_DEV:-}" ]] && (( ! ${HOME_KEPT:-0} )); then
+        case "${OPT_FS}" in
+            ext4)  mkfs.ext4 -F -L "${HOME_LABEL}" "$HOME_DEV" >/dev/null 2>&1 ;;
+            xfs)   mkfs.xfs -f -L "${HOME_LABEL}" "$HOME_DEV" >/dev/null 2>&1 ;;
+            btrfs) mkfs.btrfs -f -L "${HOME_LABEL}" "$HOME_DEV" >/dev/null 2>&1 ;;
+        esac || die "mkfs.${OPT_FS} failed on ${HOME_DEV}"
+        ok "${HOME_DEV}: ${OPT_FS} (${HOME_LABEL}) for /home"
+    elif [[ -n "${HOME_DEV:-}" ]]; then
+        ok "${HOME_DEV}: kept as /home, not formatted"
     fi
 
     mount "$ROOT_DEV" "$TARGET" || die "Cannot mount ${ROOT_DEV} on ${TARGET}"
@@ -2218,6 +2769,13 @@ write_fstab() {
             swap_uuid=$(uuid_of "$SWAP_DEV")
             [[ -n "$swap_uuid" ]] && printf "$fmt" "UUID=${swap_uuid}" "none" "swap" "sw" 0 0
         fi
+        if [[ -n "${HOME_DEV:-}" ]]; then
+            local home_uuid home_type
+            home_uuid=$(uuid_of "$HOME_DEV")
+            home_type=$(fs_type_of "$HOME_DEV")
+            [[ -n "$home_uuid" ]] || die "Could not read the UUID of ${HOME_DEV}"
+            printf "$fmt" "UUID=${home_uuid}" "/home" "${home_type:-auto}" "rw,relatime" 0 2
+        fi
         # Redundant while raven-init mounts /tmp itself, and kept as the template
         # for anyone adding a mount by hand.
         printf "$fmt" "tmpfs" "/tmp" "tmpfs" "rw,nosuid,nodev,mode=1777" 0 0
@@ -2338,7 +2896,9 @@ create_user() {
         sed -i '/^raven:/d' "$passwd" "$shadow" 2>/dev/null || true
         sed -i '/^raven:x:1000:/d' "$group" 2>/dev/null || true
         remove_group_member raven
-        rm -rf "${TARGET}/home/raven" 2>/dev/null || true
+        # Not on a kept /home: /home/raven there is somebody's data, not the
+        # live image's placeholder -- mount_home already left that behind.
+        (( ${HOME_KEPT:-0} )) || rm -rf "${TARGET}/home/raven" 2>/dev/null || true
     fi
 
     local shell="/bin/bash"
@@ -2362,8 +2922,13 @@ create_user() {
 
     mkdir -p "${TARGET}/home/${USERNAME}"
     # Seed the home directory from /etc/skel when the image has one.
+    # -n on a kept /home: an existing .bashrc is the person's, not skel's.
     if [[ -d "${TARGET}/etc/skel" ]]; then
-        cp -a "${TARGET}/etc/skel/." "${TARGET}/home/${USERNAME}/" 2>/dev/null || true
+        if (( ${HOME_KEPT:-0} )); then
+            cp -an "${TARGET}/etc/skel/." "${TARGET}/home/${USERNAME}/" 2>/dev/null || true
+        else
+            cp -a "${TARGET}/etc/skel/." "${TARGET}/home/${USERNAME}/" 2>/dev/null || true
+        fi
     fi
     chown -R "${USER_UID}:${USER_GID}" "${TARGET}/home/${USERNAME}" 2>/dev/null || true
     chmod 0755 "${TARGET}/home/${USERNAME}"
@@ -2540,6 +3105,22 @@ set_locale_and_time() {
         warn "No zoneinfo for ${TIMEZONE} in the installed tree; leaving the clock on UTC"
     fi
 
+    # The hardware clock. Windows keeps it in local time and will not be
+    # talked out of it, so on a machine with Windows the RTC is kept in local
+    # time here too (/etc/adjtime, which raven-init and raven-timed read) --
+    # otherwise each OS shows the other's clock off by the timezone offset.
+    local rtc="${ANS[rtc]:-}"
+    if [[ -z "$rtc" ]]; then
+        if machine_has_windows; then rtc=local; else rtc=utc; fi
+    fi
+    if [[ "$rtc" == "local" ]]; then
+        printf '0.0 0 0.0\n0\nLOCAL\n' > "${TARGET}/etc/adjtime"
+        ok "Hardware clock: local time, as Windows keeps it"
+    else
+        printf '0.0 0 0.0\n0\nUTC\n' > "${TARGET}/etc/adjtime"
+        ok "Hardware clock: UTC"
+    fi
+
     {
         echo "LANG=${LOCALE}"
         echo "LC_COLLATE=C"
@@ -2671,6 +3252,108 @@ remove_graphical_installer() {
     if (( removed > 0 )); then
         ok "Graphical installer removed from the installed system (${removed} files)"
     fi
+}
+
+# =============================================================================
+# Optional applications
+# =============================================================================
+# Applications that travel on the install media without being part of the
+# system: the GUI stage builds each one into its own tree under OPTIONAL_DIR,
+# where the live session neither runs nor advertises it, and this copies the
+# trees somebody asked for onto the disk. What nobody asked for never arrives.
+#
+#   OPTIONAL_DIR/<id>/info   name=... and description=..., one per line
+#   OPTIONAL_DIR/<id>/root/  laid out like / -- copied over the target as is
+#
+# The ids are directory names, so adding an application is a build change and
+# nothing here has to learn about it.
+OPTIONAL_DIR="usr/share/raven/optional"
+OPTIONAL_APPS=()
+
+# Every id the source tree carries, one per line, sorted.
+optional_available() {
+    local d
+    [[ -n "${SRC_ROOT}" && -d "${SRC_ROOT%/}/${OPTIONAL_DIR}" ]] || return 0
+    for d in "${SRC_ROOT%/}/${OPTIONAL_DIR}"/*/; do
+        [[ -d "${d}root" ]] || continue
+        d="${d%/}"
+        echo "${d##*/}"
+    done | sort
+}
+
+# One field of an application's info file, or nothing.
+optional_field() {
+    local id="$1" key="$2" file="${SRC_ROOT%/}/${OPTIONAL_DIR}/$1/info"
+    [[ -f "$file" ]] || return 0
+    awk -v k="$key" 'index($0, k "=") == 1 { print substr($0, length(k) + 2); exit }' "$file"
+}
+
+optional_names() {
+    local id out=()
+    (( ${#OPTIONAL_APPS[@]} )) || { echo "none"; return; }
+    for id in "${OPTIONAL_APPS[@]}"; do
+        out+=("$(optional_field "$id" name || true)")
+        [[ -n "${out[-1]}" ]] || out[-1]="$id"
+    done
+    local IFS=','
+    echo "${out[*]}" | sed 's/,/, /g'
+}
+
+# The answers file's and --optional's half: validate, never guess. An id this
+# media does not carry is refused rather than dropped, for the same reason the
+# profile is -- the summary page said it would be installed.
+resolve_optional_apps() {
+    OPTIONAL_APPS=()
+    local list="${OPT_OPTIONAL// /}" id have
+    local -a ids=()
+    [[ "$list" == "none" ]] && list=""
+    local available; available="$(optional_available)"
+    IFS=',' read -r -a ids <<< "$list"
+    for id in "${ids[@]}"; do
+        [[ -z "$id" ]] && continue
+        have=0
+        grep -qxF -- "$id" <<< "$available" && have=1
+        (( have )) || die "optional: '${id}' is not on this install media (have: $(echo $available | tr ' ' ',' ))"
+        [[ " ${OPTIONAL_APPS[*]} " == *" ${id} "* ]] || OPTIONAL_APPS+=("$id")
+    done
+}
+
+# run_wizard's half: ask about each one, default no -- they are optional
+# because the system is complete without them.
+choose_optional_apps() {
+    if (( OPT_OPTIONAL_SET )); then
+        resolve_optional_apps
+        return
+    fi
+    OPTIONAL_APPS=()
+    local id name desc
+    while read -r id; do
+        [[ -z "$id" ]] && continue
+        name="$(optional_field "$id" name)"
+        desc="$(optional_field "$id" description)"
+        [[ -n "$desc" ]] && echo "  ${name:-$id}: ${desc}"
+        ask_yn "Install ${name:-$id}?" "N" && OPTIONAL_APPS+=("$id")
+    done < <(optional_available)
+}
+
+# Copies the chosen trees over the target, then removes every payload from it:
+# the directory was copied along with the rest of the live root, and an
+# installed system has no use for applications it was not asked to have.
+install_optional_apps() {
+    local id src
+    for id in "${OPTIONAL_APPS[@]}"; do
+        src="${SRC_ROOT%/}/${OPTIONAL_DIR}/${id}/root"
+        if [[ ! -d "$src" ]]; then
+            warn "Optional app ${id} is not on the install media; skipped"
+            continue
+        fi
+        if cp -a "${src}/." "${TARGET}/"; then
+            ok "Installed $(optional_field "$id" name || true) (${id})"
+        else
+            warn "Could not install optional app ${id}"
+        fi
+    done
+    rm -rf "${TARGET:?}/${OPTIONAL_DIR}"
 }
 
 # Put the seatd service definition where raven-rc can see it.
@@ -2812,6 +3495,7 @@ configure_system() {
 
     NEEDS_PASSWORD_ON_FIRST_BOOT=0
 
+    mount_home
     write_fstab
     set_hostname
     create_user
@@ -2820,10 +3504,12 @@ configure_system() {
     switch_to_raven_init
     remove_live_credentials
     remove_graphical_installer
+    install_optional_apps
     install_seat_service
     install_postinstall_service
     {
         echo "profile=${INSTALL_PROFILE}"
+        echo "optional=${OPTIONAL_APPS[*]:-}"
         echo "configured_by=raven-install"
     } > "${TARGET}/etc/raven/install-profile"
 
@@ -3120,6 +3806,15 @@ probe_alongside() {
         return 0
     fi
     pk disk.esp "$esp"
+    local esp_free esp_extra=0
+    esp_free="$(esp_free_bytes "$esp")"
+    pk disk.esp_free_bytes "${esp_free:-}"
+    if [[ -n "$esp_free" ]] && (( esp_free < ESP_MIN_FREE )); then
+        esp_extra=$(to_bytes "$OPT_ESP_SIZE")
+    fi
+    # What an ESP of our own adds to the space needed, when the existing one is
+    # too full to share. Zero when it can be shared.
+    pk disk.esp_extra_bytes "$esp_extra"
 
     local gap gap_bytes=0
     gap="$(largest_gap)"
@@ -3137,7 +3832,7 @@ probe_alongside() {
     local swap_size swap_bytes=0 min_total
     swap_size="$(resolve_swap_size)"
     [[ -n "$swap_size" ]] && swap_bytes=$(to_bytes "$swap_size")
-    min_total=$(( ALONGSIDE_MIN_ROOT + swap_bytes ))
+    min_total=$(( ALONGSIDE_MIN_ROOT + swap_bytes + esp_extra ))
     pk disk.swap_bytes "$swap_bytes"
     pk disk.min_total_bytes "$min_total"
 
@@ -3205,6 +3900,33 @@ probe_alongside() {
     fi
 }
 
+# The whole partition table, for a front-end that lets somebody lay the disk
+# out by hand. Every row, the ESP included, with where it sits in sectors --
+# the unit --new speaks -- and whether the running system is using it.
+probe_layout() {
+    local dev="$1" node start size type
+    [[ -r "$dev" ]] || return 0
+    read_disk_table "$dev" 2>/dev/null || { pk disk.label ""; return 0; }
+    pk disk.label "${DISK_LABEL,,}"
+    pk disk.sector_size "$DISK_SECTOR"
+    pk disk.first_lba "$DISK_FIRST_LBA"
+    pk disk.last_lba "$DISK_LAST_LBA"
+    pk disk.align_sectors "$(( ALIGN_BYTES / DISK_SECTOR ))"
+    while IFS=$'\t' read -r node start size type; do
+        [[ -z "$node" ]] && continue
+        pk slot.begin "$node"
+        pk slot.start "$start"
+        pk slot.sectors "$size"
+        pk slot.type "${type^^}"
+        pk slot.fstype "$(fs_type_of "$node")"
+        pk slot.label "$(fs_label_of "$node")"
+        pk slot.os "$(part_os_hint "$node")"
+        pk slot.in_use "$(part_in_use "$node" && echo 1 || echo 0)"
+        [[ "$(fs_type_of "$node")" == "vfat" ]] && pk slot.free_bytes "$(esp_free_bytes "$node")"
+        pk slot.end "$node"
+    done < <(table_rows)
+}
+
 probe_disks() {
     local line name dev size model bytes rm existing
     while read -r line; do
@@ -3243,6 +3965,8 @@ probe_disks() {
         fi
 
         probe_alongside "$dev"
+        probe_layout "$dev"
+        pk disk.bitlocker "$(disk_has_bitlocker "$dev" && echo 1 || echo 0)"
         pk disk.end "$dev"
     done < <(list_disks)
 }
@@ -3341,6 +4065,7 @@ probe_report() {
     fi
     pk source.has_desktop "$has_desktop"
 
+    pk machine.windows "$(machine_has_windows && echo 1 || echo 0)"
     pk mem.total_mb "$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
     pk swap.suggested   "$(suggested_swap)"
     pk esp.size_default "${ESP_SIZE_DEFAULT}"
@@ -3371,6 +4096,17 @@ probe_report() {
         # profile directory to read them from.
         for p in minimal desktop developer; do pk profile "$p"; done
     fi
+
+    # The optional applications this media carries, for the front-end's
+    # switches. Nothing here is installed unless the answers name it.
+    local id
+    while read -r id; do
+        [[ -z "$id" ]] && continue
+        pk optional.begin "$id"
+        pk optional.name "$(optional_field "$id" name)"
+        pk optional.description "$(optional_field "$id" description)"
+        pk optional.end "$id"
+    done < <(optional_available)
 
     local k
     for k in "${ANSWER_KEYS[@]}";     do pk answers.key "$k"; done

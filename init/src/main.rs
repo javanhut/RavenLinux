@@ -27,6 +27,7 @@ mod control;
 mod overrides;
 mod power;
 mod reexec;
+mod rtc;
 mod service;
 mod timeline;
 mod user;
@@ -952,7 +953,7 @@ fn seed_random() -> Result<()> {
 fn set_system_clock() {
     // Try to set system clock from RTC
     let _ = Command::new("/sbin/hwclock")
-        .args(["--hctosys", "--utc"])
+        .args(["--hctosys", rtc::hwclock_flag()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -1398,7 +1399,6 @@ fn wait_for_seat(services: &HashMap<String, Service>) {
     // anybody has logged in, and that compositor needs the seat just as much
     // as a session's does.
     let needs_seat = services.contains_key("wayland-session")
-        || services.contains_key("raven-compositor")
         || services.contains_key("ravend");
     if !needs_seat || !services.contains_key("seatd") {
         return;

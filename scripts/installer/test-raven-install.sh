@@ -84,6 +84,7 @@ info() { :; }
 step() { :; }
 have() { command -v "$1" >/dev/null 2>&1; }
 die()  { echo "unexpected die: $*" >&2; exit 9; }
+declare -A ANS=()
 
 import_fn install_postinstall_service decide_postinstall have_default_route
 import_fn initrd_cat initrd_root_support
@@ -91,7 +92,7 @@ import_fn partdev valid_username valid_hostname \
           ensure_group add_group_member remove_group_member next_free_uid \
           create_user grant_sudo open_local_prefix set_hostname set_locale_and_time \
           switch_to_raven_init remove_live_credentials \
-          remove_graphical_installer
+          remove_graphical_installer machine_has_windows
 
 # =============================================================================
 # Partition device naming
@@ -233,6 +234,19 @@ lacks   "placeholder gone from passwd"    '^raven:' "$TARGET/etc/passwd"
 lacks   "placeholder gone from shadow"    '^raven:' "$TARGET/etc/shadow"
 lacks   "placeholder gone from group"     'raven'   "$TARGET/etc/group"
 absent  "placeholder home removed"        "$TARGET/home/raven"
+
+# The hardware clock: UTC unless Windows is here, and an answer overrides it.
+machine_has_windows() { return 1; }
+set_locale_and_time
+matches "RTC is UTC without Windows"      '^UTC$' "$TARGET/etc/adjtime"
+machine_has_windows() { return 0; }
+set_locale_and_time
+matches "RTC is local time with Windows"  '^LOCAL$' "$TARGET/etc/adjtime"
+ANS[rtc]=utc
+set_locale_and_time
+matches "rtc=utc overrides that"          '^UTC$' "$TARGET/etc/adjtime"
+unset 'ANS[rtc]'
+
 
 matches "added to wheel"                  '^wheel:x:10:javan$' "$TARGET/etc/group"
 # The gids are pinned deliberately. They are Arch's canonical numbers, and a
@@ -1007,7 +1021,7 @@ else
 # The constants the planner reads, taken from the installer rather than
 # restated, so a change to the minimum root size does not quietly stop being
 # the size these tests assert about.
-eval "$(grep -E '^(ALIGN_BYTES|GUID_[A-Z]+|ALONGSIDE_MIN_[A-Z]+|ROOT_LABEL|SWAP_LABEL)=' "$INSTALLER")"
+eval "$(grep -E '^(ALIGN_BYTES|GUID_[A-Z]+|ALONGSIDE_MIN_[A-Z]+|ROOT_LABEL|SWAP_LABEL|ESP_LABEL)=' "$INSTALLER")"
 DISK_TABLE=""; DISK_SECTOR=512; DISK_FIRST_LBA=2048; DISK_LAST_LBA=0; DISK_LABEL=""
 ESP_DEV=""; SWAP_DEV=""; ROOT_DEV=""; ROOT_ALONGSIDE_BYTES=0
 ESP_REUSED=0; SHRINK_DEV=""; SHRINK_OLD_SECTORS=0; SHRINK_NEW_SECTORS=0
@@ -1041,6 +1055,8 @@ fs_type_of()    { echo ntfs; }
 fs_label_of()   { echo "Windows"; }
 fs_shrinkable() { return 0; }
 fs_min_bytes()  { echo $(( 20 * 1024 * 1024 * 1024 )); }   # 20 GiB in use
+esp_free_bytes() { :; }   # unknown: the ESP is shared, as when it cannot be mounted
+ESP_MIN_FREE=$(( 120 * 1024 * 1024 )); OPT_ESP_SIZE=512M; ESP_OWN=0
 findmnt()       { return 1; }
 # The partitions of an image file are not block devices and not mounted; the
 # real code's guards for both are exercised by the refusal tests below.
@@ -1264,7 +1280,7 @@ eq "a disk with no ESP holds no UEFI OS" \
 # what is under test is the decision rather than the listing.
 other_esp_disks() { [[ "$DISK" == "$BLANK" ]] && echo "$OTHER"; return 0; }
 
-OPT_NVRAM=0; NVRAM_DECLINED=0; DISK="$BLANK"
+OPT_NVRAM=0; NVRAM_DECLINED=0; DISK="$BLANK"; OPT_MODE=wipe; ESP_OWN=0
 info() { :; }
 decide_nvram
 eq "installing elsewhere registers a boot entry" "$OPT_NVRAM" "1"
@@ -1278,13 +1294,136 @@ decide_nvram
 eq "and efi_nvram=0 is not overruled" "$OPT_NVRAM" "0"
 OPT_NVRAM=0; NVRAM_DECLINED=0
 
+# Next to another OS on the same disk, its boot entry comes first -- so ours
+# is needed there too, not only across disks.
+OPT_MODE=alongside; DISK="$OTHER"
+decide_nvram
+eq "installing alongside on the same disk registers one" "$OPT_NVRAM" "1"
+OPT_NVRAM=0; OPT_MODE=manual
+decide_nvram
+eq "and so does a manual layout next to another OS" "$OPT_NVRAM" "1"
+
+# An ESP of our own is only reachable through an entry: declining is refused.
+OPT_NVRAM=0; NVRAM_DECLINED=1; ESP_OWN=1
+eq "own ESP refuses efi_nvram=0" \
+   "$( die() { echo "DIE"; exit 1; }; decide_nvram 2>&1 | grep -c DIE )" "1"
+OPT_NVRAM=0; NVRAM_DECLINED=0; ESP_OWN=0; OPT_MODE=wipe
+
 # The same gap, with swap turned off, is enough.
 DISK="$SMALL"; OPT_SHRINK_PART=""; OPT_ALONGSIDE_SIZE=""; SWAP_SIZE=""
 unset -f die; die() { echo "unexpected die: $*" >&2; exit 9; }
 plan_alongside
 eq "and takes it once swap is off" \
    "$(to_human "$ROOT_ALONGSIDE_BYTES")" "21.0 GiB"
+
+# Windows' 100 MB ESP, nearly full: not shared. RavenLinux gets its own in
+# the same gap, planned before anything is written, and the root pays for it.
+esp_free_bytes() { echo $(( 40 * 1024 * 1024 )); }
+plan_alongside
+eq "a full ESP is not reused"         "${ESP_OWN}:${ESP_REUSED}" "1:0"
+eq "an ESP of our own is planned first" \
+   "$(head -n 1 <<< "$ALONGSIDE_PARTS" | grep -o 'type=[^,]*')" "type=${GUID_ESP}"
+eq "and the root is 512 MiB smaller" \
+   "$(to_human "$ROOT_ALONGSIDE_BYTES")" "20.5 GiB"
+esp_free_bytes() { :; }; ESP_OWN=0
 SWAP_SIZE=""
+
+fi
+
+# =============================================================================
+# Manual partitioning. Same approach as the alongside section: a real GPT in a
+# plain file, the installer's own planner and partitioner run against it, and
+# the table read back. The block-device wait at the end of partition_manual is
+# the one part that needs a kernel, so it is cut off where it starts.
+section "manual partitioning: plan and table"
+
+if ! command -v sfdisk >/dev/null 2>&1; then
+    echo "  SKIP  sfdisk is not installed"
+else
+
+eval "$(grep -E '^(ALIGN_BYTES|GUID_[A-Z]+|ALONGSIDE_MIN_[A-Z]+|MANUAL_MIN_ESP|(ROOT|SWAP|HOME|ESP)_LABEL)=' "$INSTALLER")"
+DISK_TABLE=""; DISK_SECTOR=512; DISK_FIRST_LBA=2048; DISK_LAST_LBA=0; DISK_LABEL=""
+ESP_DEV=""; SWAP_DEV=""; ROOT_DEV=""; HOME_DEV=""; ROOT_ALONGSIDE_BYTES=0
+ESP_REUSED=0; ESP_FORMAT=0; SWAP_KEEP=0; HOME_KEPT=0; ESP_NEEDS_TYPE=""; SWAP_SIZE=""
+MANUAL_DELETE=(); MANUAL_NEW=(); MANUAL_USE=(); SRC_ROOT=""; OPT_FS=ext4; DISK_DIRTY=0
+OPT_MANUAL_DELETE=""; OPT_MANUAL_NEW=""; OPT_MANUAL_USE=""
+
+import_fn to_bytes to_human read_disk_table table_rows part_field \
+          manual_kept_rows role_label plan_manual part_by_start
+pm_body="$(awk '$0 ~ "^partition_manual\\(\\) \\{" {p=1} p {print} p && /^\}$/ {exit}' "$INSTALLER")"
+# Stop before the wait for device nodes, which an image file never grows.
+eval "${pm_body%%    local waited=0 d*}
+}"
+
+IMG="${WORKDIR}/manual.img"
+truncate -s 64G "$IMG"
+sfdisk -q "$IMG" >/dev/null 2>&1 <<'PARTS'
+label: gpt
+start=2048, size=512MiB, type=uefi, name="EFI"
+size=16MiB, type=E3C9E316-0B5C-4DB8-817D-F92DF00215AE, name="MSR"
+size=30GiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name="Windows"
+size=10GiB, type=linux, name="old-linux"
+PARTS
+DISK="$IMG"
+before_win="$(sfdisk -d "$IMG" | grep 'name="Windows"')"
+
+fs_type_of()  { case "$1" in *1) echo vfat ;; *3) echo ntfs ;; *4) echo ext4 ;; esac; }
+part_in_use() { return 1; }
+part_os_hint() { echo "test"; }
+partx() { :; }; udevadm() { :; }; blockdev() { :; }; sync() { :; }
+phase() { :; }
+
+# Every refusal is a die; each is run in a subshell so it can be caught.
+refuses() { # refuses DESC DELETE NEW USE PATTERN
+    local out
+    out="$(OPT_MANUAL_DELETE="$2" OPT_MANUAL_NEW="$3" OPT_MANUAL_USE="$4";
+           die() { echo "DIE: $*"; exit 1; }; plan_manual 2>&1)"
+    if [[ "$out" == *"DIE:"*$5* ]]; then pass "$1"; else failed "$1" "want a refusal matching: $5" "got: ${out:-nothing}"; fi
+}
+P4=$(( 2048 + 1048576 + 32768 + 62914560 ))
+FREE=$(( P4 + 20971520 ))
+
+refuses "no root is refused"            "" "" "${IMG}1:esp:keep" "exactly one partition must be the root"
+refuses "no ESP is refused"             "" "$FREE:25165824:root" "" "EFI System Partition"
+refuses "overlapping Windows is refused" "" "4096:25165824:root" "${IMG}1:esp:keep" "overlaps"
+refuses "an unaligned start is refused" "" "$((FREE + 1)):25165824:root" "${IMG}1:esp:keep" "1 MiB boundary"
+refuses "running off the disk is refused" "" "$FREE:99999999999:root" "${IMG}1:esp:keep" "outside"
+refuses "keeping the root is refused"   "" "" "${IMG}4:root:keep;${IMG}1:esp:keep" "always formatted"
+refuses "NTFS kept as /home is refused" "" "$FREE:25165824:root" "${IMG}3:home:keep;${IMG}1:esp:keep" "Linux filesystem"
+refuses "a deleted partition cannot be used" "${IMG}4" "" "${IMG}4:root:format;${IMG}1:esp:keep" "also being deleted"
+refuses "keeping a non-FAT ESP is refused" "" "$FREE:25165824:root" "${IMG}4:esp:keep" "not FAT"
+refuses "two roots are refused"         "" "$FREE:25165824:root" "${IMG}4:root:format;${IMG}1:esp:keep" "exactly one partition must be the root"
+
+# The plan somebody dual-booting Windows would make: keep the ESP, delete the
+# old Linux, put root and swap where it was and past it.
+OPT_MANUAL_DELETE="${IMG}4"
+OPT_MANUAL_NEW="${P4}:25165824:root;$(( P4 + 25165824 )):4194304:swap"
+OPT_MANUAL_USE="${IMG}1:esp:keep"
+plan_manual
+eq "the shared ESP is reused, not formatted" "${ESP_REUSED}:${ESP_FORMAT}" "1:0"
+eq "root size comes from the plan" "$(to_human "$ROOT_ALONGSIDE_BYTES")" "12.0 GiB"
+partition_manual
+read_disk_table "$IMG"
+eq "the old Linux partition is gone"    "$(sfdisk -d "$IMG" | grep -c 'old-linux')" "0"
+eq "root is where the plan put it"      "$(part_by_start "$P4")" "${IMG}4"
+eq "and is named as ours"               "$(sfdisk -d "$IMG" | grep "start= *${P4}," | grep -o 'name="[^"]*"')" "name=\"${ROOT_LABEL}\""
+eq "swap follows it"                    "$(part_field "$(part_by_start $(( P4 + 25165824 )))" type)" "$GUID_SWAP"
+eq "Windows is untouched, byte for byte" "$(sfdisk -d "$IMG" | grep 'name="Windows"')" "$before_win"
+eq "the ESP is untouched"               "$(part_field "${IMG}1" start):$(part_field "${IMG}1" size)" "2048:1048576"
+if sfdisk --verify "$IMG" 2>&1 | grep -q "No errors detected"; then
+    pass "the resulting table verifies"
+else
+    failed "the resulting table verifies" "$(sfdisk --verify "$IMG" 2>&1 | head -3)"
+fi
+
+# An existing partition made the ESP is retyped as one.
+OPT_MANUAL_DELETE=""; OPT_MANUAL_NEW=""
+OPT_MANUAL_USE="${IMG}4:root:format;${IMG}5:esp:format"
+plan_manual
+eq "a partition not typed as an ESP is noticed" "$ESP_NEEDS_TYPE" "${IMG}5"
+partition_manual
+read_disk_table "$IMG"
+eq "and retyped" "$(part_field "${IMG}5" type)" "$GUID_ESP"
 
 fi
 

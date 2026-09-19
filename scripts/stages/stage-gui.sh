@@ -126,6 +126,10 @@
 #   CAMERA_OFFLINE=1           as GUI_OFFLINE, for the camera app alone
 #   CAMERA_REF=<git-ref>       build a particular RavenCamera ref
 #
+#   TUTORIAL_SKIP=1            don't carry Raven Tutorial for the installer
+#   ORACLE_SKIP=1              don't carry Oracle for the installer
+#   TUTORIAL_/ORACLE_OFFLINE=1, _REF=<git-ref>   as for the apps above
+#
 #   LOGIN_OFFLINE=1            as GUI_OFFLINE, for the login screen alone
 #   LOGIN_REF=<git-ref>        build a particular RavenLogin ref
 #   CANVAS_SKIP=1              skip RavenCanvas; the desktop draws huginn's own
@@ -279,6 +283,15 @@ PLAYER_APPID="com.owlplayer.Raven"
 raven_gui_app_vars CAMERA
 CAMERA_BIN="${CAMERA_BINARIES}"
 CAMERA_APPID="com.ravencamera.Raven"
+
+# The installer's optional applications -- see OPTIONAL_APPS in
+# scripts/lib/components.sh and stage_optional_apps().
+raven_gui_app_vars TUTORIAL
+raven_gui_app_vars ORACLE
+ORACLE_APPID="com.ravenoracle.Raven"
+# Where the ISO carries them: one tree per installer id, never on PATH and
+# never in XDG_DATA_DIRS, so the live session does not have them.
+OPTIONAL_PAYLOAD_DIR="${SYSROOT_DIR}/usr/share/raven/optional"
 
 # What it claims. This is crates/owl-player/src/main.rs's MIME_TYPES -- the
 # same list the application's own `owl-player set-default` writes into a user's
@@ -2284,6 +2297,166 @@ stage_eagleeye() {
 }
 
 # =============================================================================
+# Optional applications (offered by the installer, not part of the system)
+# =============================================================================
+# Each is built like any other application here, but installed into
+#   ${OPTIONAL_PAYLOAD_DIR}/<id>/root/...   laid out like /, under /usr/local
+#   ${OPTIONAL_PAYLOAD_DIR}/<id>/info       name= and description=
+# and nowhere else. The live session cannot see them; raven-install lists them
+# with --probe, the graphical installer shows a switch for each, and only a
+# switched-on tree is copied onto the disk (install_optional_apps there).
+# Libraries they link are staged into the sysroot as usual: harmless to the
+# live system, and what makes a copied tree run on the installed one.
+#
+#   TUTORIAL_SKIP=1 / ORACLE_SKIP=1   leave it off the ISO
+#   <KEY>_OFFLINE=1, <KEY>_REF=<ref>  as for every other application
+
+# optional_payload_info <id> <name> <description>
+optional_payload_info() {
+    printf 'name=%s\ndescription=%s\n' "$2" "$3" \
+        > "${OPTIONAL_PAYLOAD_DIR}/$1/info"
+}
+
+stage_optional_tutorial() {
+    local id=tutorial root="${OPTIONAL_PAYLOAD_DIR}/tutorial/root"
+    if [[ "${TUTORIAL_SKIP:-0}" == "1" ]]; then
+        log_info "  TUTORIAL_SKIP=1: the installer will not offer Raven Tutorial"
+        return 0
+    fi
+    command -v go &>/dev/null || {
+        log_warn "  go not found; Raven Tutorial will not be offered by the installer"
+        return 0
+    }
+    # Fyne's Wayland backend is the same GLFW the terminal builds, so the
+    # same headers -- see stage_terminal() for why each is probed.
+    local -a missing=()
+    local mod
+    for mod in wayland-client wayland-cursor wayland-egl xkbcommon gl; do
+        pkg-config --exists "${mod}" 2>/dev/null || missing+=("${mod}")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        log_warn "  missing build dependencies for Raven Tutorial: ${missing[*]}"
+        return 0
+    fi
+
+    local dest="${GUI_SRC_DIR}/${TUTORIAL_REPO}"
+    if ! fetch_repo "${TUTORIAL_REPO}" "${TUTORIAL_URL}" "${dest}" \
+            "${TUTORIAL_REF:-}" "${TUTORIAL_OFFLINE:-${GUI_OFFLINE:-0}}" "${TUTORIAL_MANIFEST}"; then
+        log_warn "  RavenTutorial source unavailable; not offered by the installer"
+        return 0
+    fi
+
+    log_info "  building Raven Tutorial (wayland backend)..."
+    if ! ( cd "${dest}" && CGO_ENABLED=1 go build -tags wayland -o raven-tutorial . ); then
+        log_warn "  Raven Tutorial build failed; not offered by the installer"
+        return 0
+    fi
+    local out="${dest}/raven-tutorial"
+    [[ -x "${out}" ]] || { log_warn "  Raven Tutorial produced no binary"; return 0; }
+
+    install -Dm 0755 "${out}" "${root}/usr/local/bin/raven-tutorial"
+    stage_gui_libraries "${out}"
+
+    # The repository ships no entry or icon; the window's icon is embedded.
+    install -d "${root}/usr/local/share/applications"
+    cat > "${root}/usr/local/share/applications/raven-tutorial.desktop" << 'ENTRY'
+[Desktop Entry]
+Type=Application
+Name=Raven Tutorial
+GenericName=Tutorial
+Comment=A guided tour of Raven Linux
+Exec=raven-tutorial
+Icon=help-browser
+Terminal=false
+Categories=Utility;Documentation;
+Keywords=tutorial;help;tour;guide;welcome;getting started;
+ENTRY
+    optional_payload_info "${id}" "Raven Tutorial" \
+        "A guided first tour of the desktop, its apps and its shortcuts."
+    log_success "  raven-tutorial staged for the installer ($(du -h "${out}" | cut -f1))"
+}
+
+stage_optional_oracle() {
+    local id=oracle root="${OPTIONAL_PAYLOAD_DIR}/oracle/root"
+    if [[ "${ORACLE_SKIP:-0}" == "1" ]]; then
+        log_info "  ORACLE_SKIP=1: the installer will not offer Oracle"
+        return 0
+    fi
+    command -v cargo &>/dev/null || {
+        log_warn "  cargo not found; Oracle will not be offered by the installer"
+        return 0
+    }
+    local -a missing=()
+    local mod
+    for mod in gtk4 libadwaita-1 glib-2.0 gio-2.0; do
+        pkg-config --exists "${mod}" 2>/dev/null || missing+=("${mod}")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        log_warn "  missing build dependencies for Oracle: ${missing[*]}"
+        return 0
+    fi
+
+    local dest="${GUI_SRC_DIR}/${ORACLE_REPO}"
+    if ! fetch_repo "${ORACLE_REPO}" "${ORACLE_URL}" "${dest}" \
+            "${ORACLE_REF:-}" "${ORACLE_OFFLINE:-${GUI_OFFLINE:-0}}" "${ORACLE_MANIFEST}"; then
+        log_warn "  Oracle source unavailable; not offered by the installer"
+        return 0
+    fi
+
+    log_info "  building Oracle for ${GUI_TARGET}..."
+    local -a cargo_args=(build --release --target "${GUI_TARGET}")
+    [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
+    if ! ( cd "${dest}" && cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}" ); then
+        log_warn "  Oracle build failed; not offered by the installer"
+        return 0
+    fi
+
+    # Both or neither, like every multi-binary component here.
+    local rel="${dest}/target/${GUI_TARGET}/release" bin
+    local -a bins=()
+    raven_split_list bins "${ORACLE_BINARIES}"
+    for bin in "${bins[@]}"; do
+        [[ -x "${rel}/${bin}" ]] || { log_warn "  Oracle produced no ${bin}"; return 0; }
+    done
+    for bin in "${bins[@]}"; do
+        install -Dm 0755 "${rel}/${bin}" "${root}/usr/local/bin/${bin}"
+        stage_gui_libraries "${rel}/${bin}"
+    done
+
+    local share="${root}/usr/local/share"
+    install -Dm 0644 "${dest}/data/${ORACLE_APPID}.desktop" \
+        "${share}/applications/${ORACLE_APPID}.desktop" 2>/dev/null \
+        || log_warn "    no launcher entry in the checkout"
+    install -Dm 0644 "${dest}/data/${ORACLE_APPID}.metainfo.xml" \
+        "${share}/metainfo/${ORACLE_APPID}.metainfo.xml" 2>/dev/null || true
+    install -Dm 0644 "${dest}/data/icons/hicolor/scalable/apps/${ORACLE_APPID}.svg" \
+        "${share}/icons/hicolor/scalable/apps/${ORACLE_APPID}.svg" 2>/dev/null || true
+
+    optional_payload_info "${id}" "Oracle" \
+        "A local troubleshooting companion: checks the machine and explains what is wrong. Runs only when opened."
+    log_success "  oracle and raven-oracle staged for the installer"
+
+    if declare -F stage_gtk_runtime &>/dev/null; then
+        stage_gtk_runtime
+    fi
+}
+
+stage_optional_apps() {
+    # Rebuilt from nothing every time: a payload left by an earlier build is
+    # an application the installer would offer whether or not it still builds.
+    rm -rf "${OPTIONAL_PAYLOAD_DIR}"
+    mkdir -p "${OPTIONAL_PAYLOAD_DIR}"
+    stage_optional_tutorial
+    stage_optional_oracle
+    # A tree whose build failed half way has no info file; drop it.
+    local d
+    for d in "${OPTIONAL_PAYLOAD_DIR}"/*/; do
+        [[ -d "${d}" && ! -f "${d}info" ]] && rm -rf "${d}"
+    done
+    rmdir "${OPTIONAL_PAYLOAD_DIR}" 2>/dev/null || true
+}
+
+# =============================================================================
 # Raven Camera
 # =============================================================================
 # stage_viewer's shape: GTK4, optional, and every failure warns and returns 0.
@@ -3664,7 +3837,7 @@ main() {
     done < <(raven_gui_binaries)
     local source_spec source_key source_repo
     rm -f "${SYSROOT_DIR}/usr/share/raven/build/sources/RavenGUI.tsv"
-    for source_spec in "${GUI_APPS[@]}"; do
+    for source_spec in "${GUI_APPS[@]}" "${OPTIONAL_APPS[@]}"; do
         IFS='|' read -r source_key source_repo _ <<< "$source_spec"
         rm -f "${SYSROOT_DIR}/usr/share/raven/build/sources/${source_repo}.tsv"
     done
@@ -3801,6 +3974,11 @@ main() {
     # daemon that /etc/raven/init.toml starts as the `controlsd` service.
     log_step "Staging keyboard-light and fan control..."
     stage_controls
+
+    # Not part of the system: built into their own trees for the installer to
+    # offer. Anywhere after the toolkit is staged; nothing below depends on it.
+    log_step "Staging the installer's optional applications..."
+    stage_optional_apps
 
     # Before install_desktop_entries like every other application, and last
     # among them because it is the only one whose absence costs nothing: the

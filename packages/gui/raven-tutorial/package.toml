@@ -1,0 +1,35 @@
+[package]
+name = "raven-tutorial"
+version = "0.1.0"
+description = "Raven Tutorial - a guided first tour of the desktop"
+license = "MIT"
+homepage = "https://github.com/javanhut/RavenTutorial"
+repository = "https://github.com/javanhut/RavenTutorial"
+maintainers = ["RavenLinux Team"]
+categories = ["gui", "wayland", "application", "optional"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/RavenTutorial.git"
+# Unpinned: nothing has been tagged in that repository yet. A `commit` added
+# here is read by the GUI stage through raven_resolve_ref.
+
+[build]
+system = "go"
+# Fyne on its native Wayland backend, with cgo, exactly like RavenTerminal:
+# `CGO_ENABLED=1 go build -tags wayland`. See stage_optional_tutorial().
+build_flags = ["-tags", "wayland"]
+
+[dependencies]
+runtime = ["wayland", "libxkbcommon", "mesa"]
+build = ["go", "pkg-config", "wayland", "libxkbcommon", "mesa"]
+
+# Optional: not on the live system and not installed by default. The GUI stage
+# builds it into /usr/share/raven/optional/tutorial/root on the ISO, and
+# raven-install copies that tree onto the disk only when the installer's
+# "Optional applications" switch for it is on. Paths below are where it lands.
+[install]
+files = [
+    { src = "raven-tutorial", dest = "/usr/local/bin/raven-tutorial", mode = 755 },
+]
+symlinks = []

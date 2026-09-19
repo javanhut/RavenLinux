@@ -628,3 +628,29 @@ actions, "Take a Screenshot" and "Stop Recording", which the dock's right-click
 menu offers -- the second is the way back to a recording whose window was
 minimised out of it. It claims no MIME type: it makes files, and the videos it
 saves are Owl Player's to open.
+
+## Optional Applications (offered by the installer)
+
+| Status | Binary | Repo |
+|--------|--------|------|
+| **optional** | `raven-tutorial` | [javanhut/RavenTutorial](https://github.com/javanhut/RavenTutorial) |
+| **optional** | `oracle`, `raven-oracle` | [javanhut/Oracle](https://github.com/javanhut/Oracle) |
+
+Built by `stage_optional_apps()` in `stage-gui.sh` (rows in `OPTIONAL_APPS` in
+`scripts/lib/components.sh`), but not installed into the live system. Each goes
+into its own tree, `/usr/share/raven/optional/<id>/root`, with an `info` file
+naming it; nothing there is on `PATH` or in `XDG_DATA_DIRS`.
+
+`raven-install --probe` lists them as `optional.*` records, the graphical
+installer shows a switch for each on the Profile page (off by default), and the
+answers file carries `optional=tutorial,oracle`. `install_optional_apps()`
+copies only the chosen trees onto the disk -- into `/usr/local`, where Oracle's
+own Makefile and uninstall instructions expect it -- then removes the whole
+payload directory from the installed system. The terminal wizard asks the same
+question, and `--optional LIST` (or `none`) answers it on the command line.
+
+RavenTutorial is Go and Fyne on the Wayland backend, built like RavenTerminal
+(`CGO_ENABLED=1 go build -tags wayland`); the stage writes its launcher entry,
+since the repository has none. Oracle is Rust, both of its front ends, the
+command line and the GTK4 app. `TUTORIAL_SKIP=1` / `ORACLE_SKIP=1` leave either
+off the ISO.

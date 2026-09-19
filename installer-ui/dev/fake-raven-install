@@ -1,0 +1,113 @@
+#!/bin/sh
+# A stand-in for raven-install, for working on the installer window without a
+# live image or a disk to lose. --probe describes a laptop with Windows on it;
+# anything else refuses, so pressing Install here writes nothing anywhere.
+#
+#   RAVEN_INSTALL=installer-ui/dev/fake-raven-install \
+#   RAVEN_INSTALLER_UI_NO_PRIVESC=1 installer-ui/target/debug/raven-installer-ui
+if [ "$1" != "--probe" ]; then
+    echo "fake-raven-install: not installing anything (args: $*)" >&2
+    exit 1
+fi
+cat <<'PROBE'
+probe.protocol=1
+probe.installer_version=fake
+probe.euid=0
+probe.ok=1
+preflight.firmware=uefi
+preflight.secureboot=off
+preflight.tools_missing=
+preflight.fs=ext4
+preflight.fs=btrfs
+preflight.chpasswd=1
+preflight.mkswap=1
+preflight.efibootmgr=1
+preflight.resize2fs=1
+preflight.ntfsresize=1
+source.kind=squashfs
+source.size_mb=1400
+source.has_desktop=1
+machine.windows=1
+mem.total_mb=16000
+swap.suggested=16G
+esp.size_default=512M
+disk.begin=/dev/nvme0n1
+disk.size=476.9G
+disk.bytes=512110190592
+disk.model=Fake NVMe (Windows laptop)
+disk.removable=0
+disk.live_media=0
+disk.part=nvme0n1p1|260M|vfat|SYSTEM
+disk.part=nvme0n1p2|16M||
+disk.part=nvme0n1p3|400G|ntfs|Windows
+disk.part=nvme0n1p4|40G|ext4|old-linux
+disk.windows=1
+disk.alongside=0
+disk.alongside_why=BitLocker cannot be shrunk here
+disk.esp=/dev/nvme0n1p1
+disk.esp_free_bytes=41943040
+disk.esp_extra_bytes=536870912
+disk.free_bytes=35000000000
+disk.min_root_bytes=12884901888
+disk.min_headroom_bytes=4294967296
+disk.swap_bytes=17179869184
+disk.min_total_bytes=30601641984
+disk.label=gpt
+disk.sector_size=512
+disk.first_lba=2048
+disk.last_lba=1000215182
+disk.align_sectors=2048
+slot.begin=/dev/nvme0n1p1
+slot.start=2048
+slot.sectors=532480
+slot.type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+slot.fstype=vfat
+slot.label=SYSTEM
+slot.os=EFI System Partition
+slot.in_use=0
+slot.free_bytes=41943040
+slot.end=/dev/nvme0n1p1
+slot.begin=/dev/nvme0n1p2
+slot.start=534528
+slot.sectors=32768
+slot.type=E3C9E316-0B5C-4DB8-817D-F92DF00215AE
+slot.fstype=
+slot.os=Microsoft Reserved
+slot.in_use=0
+slot.end=/dev/nvme0n1p2
+slot.begin=/dev/nvme0n1p3
+slot.start=567296
+slot.sectors=838860800
+slot.type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7
+slot.fstype=BitLocker
+slot.os=BitLocker
+slot.in_use=0
+slot.end=/dev/nvme0n1p3
+slot.begin=/dev/nvme0n1p4
+slot.start=839428096
+slot.sectors=83886080
+slot.type=0FC63DAF-8483-4772-8E79-3D69D8477DE4
+slot.fstype=ext4
+slot.label=old-linux
+slot.os=ext4 (old-linux)
+slot.in_use=0
+slot.end=/dev/nvme0n1p4
+disk.bitlocker=1
+disk.end=/dev/nvme0n1
+tz=UTC
+tz=America/New_York
+profile=minimal
+profile=desktop
+profile=developer
+optional.begin=tutorial
+optional.name=Raven Tutorial
+optional.description=A guided first tour of the desktop, its apps and its shortcuts.
+optional.end=tutorial
+optional.begin=oracle
+optional.name=Oracle
+optional.description=A local troubleshooting companion. Runs only when opened.
+optional.end=oracle
+answers.key=disk
+answers.required=disk
+probe.end=1
+PROBE

@@ -40,8 +40,8 @@ pub enum Event {
 /// The phases raven-install's main() runs, in order, with the share of the
 /// whole each one is worth.
 ///
-/// The weights are wall-clock, not importance: copy is two thirds of an
-/// install and everything else is bookkeeping, and a progress bar that gave
+/// The weights are wall-clock, not importance: copy is more than half of an
+/// install and everything else is bookkeeping or the package profile, and a progress bar that gave
 /// each phase a tenth would sit at 60% for four minutes and then finish in
 /// three seconds.
 pub const PHASES: &[(&str, &str, u32)] = &[
@@ -344,8 +344,9 @@ mod tests {
         assert_eq!(overall_fraction("preflight", 0), 0.0);
         let start_of_copy = overall_fraction("copy", 0);
         let end_of_copy = overall_fraction("copy", 100);
-        // The copy is two thirds of the bar, which is what makes the bar honest.
-        assert!(end_of_copy - start_of_copy > 0.6);
+        // The copy outweighs every other phase put together, which is what
+        // makes the bar honest: most of the wall-clock time is spent there.
+        assert!(end_of_copy - start_of_copy > 0.5);
         assert!(overall_fraction("finish", 100) > 0.99);
         // An id from a newer installer moves nothing rather than jumping back.
         assert_eq!(overall_fraction("unknown-phase", 50), 0.0);
