@@ -13,86 +13,118 @@ run = "RAVEN_IMAGE='{{image}}' RAVEN_ENGINE='{{engine}}' ./scripts/docker-build.
 flags = "-j {{jobs}} -a {{arch}}"
 rootfs_image = "ravenlinux:latest"
 
+# The VCS checkout doesn't preserve the executable bit on scripts/, so the
+# tasks that run a script fail with "Permission denied". They all depend on
+# this. Scripts call each other across subdirectories and not all end in .sh,
+# so anything with a shebang is marked. No elevation needed: the files belong
+# to the user.
+[commands.permission]
+desc = "Make every script under scripts/ (anything with a #! line) executable"
+run = ["""
+find scripts -type f | while read -r f; do
+  if head -n1 "$f" | grep -q '^#!'; then chmod +x "$f" || exit 1; fi
+done
+"""]
+
 [commands.help]
 desc = "Show RavenLinux build commands"
 run = ["imlazy list"]
 
 [commands.image]
 desc = "Build the containerized RavenLinux build environment"
+dep = ["permission"]
 run = ["{{run}} image"]
 
 [commands.build]
 desc = "Build RavenLinux and produce the ISO"
+dep = ["permission"]
 run = ["{{run}} {{flags}} all"]
 alias = ["all"]
 
 [commands.rebuild]
 desc = "Discard cached output and perform a complete build"
+dep = ["permission"]
 run = ["{{run}} {{flags}} --clean all"]
 
 [commands.rootfs]
 desc = "Package the built sysroot as a container image"
+dep = ["permission"]
 run = ["RAVEN_IMAGE='{{image}}' RAVEN_ENGINE='{{engine}}' RAVEN_ROOTFS_IMAGE='{{rootfs_image}}' ./scripts/export-rootfs.sh"]
 
 [commands.stage0]
 desc = "Build the musl cross toolchain"
+dep = ["permission"]
 run = ["{{run}} {{flags}} stage0"]
 
 [commands.stage1]
 desc = "Cross-build the base system, kernel, and initramfs"
+dep = ["permission"]
 run = ["{{run}} {{flags}} stage1"]
 
 [commands.stage2]
 desc = "Populate the native runtime sysroot"
+dep = ["permission"]
 run = ["{{run}} {{flags}} stage2"]
 
 [commands.stage3]
 desc = "Build base libraries, shells, and RavenBoot"
+dep = ["permission"]
 run = ["{{run}} {{flags}} stage3"]
 
 [commands.raven]
 desc = "Build the Raven application layer"
+dep = ["permission"]
 run = ["{{run}} {{flags}} raven"]
 
 [commands.gui]
 desc = "Build Huginn and the Raven graphical session"
+dep = ["permission"]
 run = ["{{run}} {{flags}} gui"]
 
 [commands.session]
 desc = "Update only the Raven graphical session wiring"
+dep = ["permission"]
 run = ["GUI_SESSION_ONLY=1 {{run}} {{flags}} gui"]
 
 [commands.dev]
 desc = "Build the repo's own pieces natively and install them into this running Raven system"
+dep = ["permission"]
 run = ["./scripts/dev-install.sh"]
 
 [commands.dev-diff]
 desc = "Show what 'dev' would change on this running Raven system, without writing"
+dep = ["permission"]
 run = ["./scripts/dev-install.sh all --dry-run"]
 
 [commands.dev-configs]
 desc = "dev's configs target alone: new /etc/raven and /etc/wireplumber files land, edited ones are shown as diffs"
+dep = ["permission"]
 run = ["./scripts/dev-install.sh configs"]
 
 [commands.dev-ui]
 desc = "dev's installer-ui target alone: build the graphical installer and install it here"
+dep = ["permission"]
 run = ["./scripts/dev-install.sh installer-ui"]
 
 [commands.dev-all]
 desc = "dev plus /etc/raven configs (overwrites machine-local edits)"
+dep = ["permission"]
 run = ["./scripts/dev-install.sh all --force-configs"]
 
 [commands.iso]
 desc = "Regenerate the ISO from the existing sysroot"
+dep = ["permission"]
 run = ["{{run}} {{flags}} stage4"]
 alias = ["stage4"]
 
 [commands.initramfs]
 desc = "Rebuild only the early userspace image"
+dep = ["permission"]
 run = ["{{run}} {{flags}} initramfs"]
 
 [commands.test]
 desc = "Run manifest, init, installer, and console-font tests"
+dep = ["permission"]
 run = [
   "./scripts/check-manifests.sh",
   "python3 ./scripts/test-desktop-build.py",
@@ -106,42 +138,52 @@ run = [
 
 [commands.qemu]
 desc = "Boot the ISO on a serial console"
+dep = ["permission"]
 run = ["./scripts/test-qemu.sh --console"]
 
 [commands.qemu-uefi]
 desc = "Boot the ISO through UEFI firmware"
+dep = ["permission"]
 run = ["./scripts/test-qemu.sh --console --uefi"]
 
 [commands.qemu-desktop]
 desc = "Boot the Huginn desktop with a virtio GPU"
+dep = ["permission"]
 run = ["./scripts/test-qemu.sh --desktop"]
 
 [commands.smoke]
 desc = "Run an unattended serial boot smoke test"
+dep = ["permission"]
 run = ["./scripts/test-qemu.sh --console --timeout 180"]
 
 [commands.shell]
 desc = "Open a shell in the build environment"
+dep = ["permission"]
 run = ["{{run}} shell"]
 
 [commands.manifests]
 desc = "Check package manifests for self-referential usr-merge symlinks"
+dep = ["permission"]
 run = ["./scripts/check-manifests.sh"]
 
 [commands.layout]
 desc = "Check the sysroot layout: usr-merge, then completeness"
+dep = ["permission"]
 run = ["./scripts/check-layout.sh"]
 
 [commands.skeleton]
 desc = "Create missing rootfs directories, symlinks and accounts in the sysroot"
+dep = ["permission"]
 run = ["./scripts/apply-skeleton.sh"]
 
 [commands.clean]
 desc = "Remove build output"
+dep = ["permission"]
 run = ["./scripts/clean-build.sh"]
 
 [commands.clean-image]
 desc = "Remove the containerized build environment"
+dep = ["permission"]
 run = ["RAVEN_IMAGE='{{image}}' RAVEN_ENGINE='{{engine}}' ./scripts/clean-image.sh"]
 
 [commands.distclean]
