@@ -135,7 +135,6 @@ fn main() {
 /// after the console has moved on -- fbcon has had no scrollback since kernel
 /// 5.9, so a message that leaves the screen is otherwise simply gone.
 struct DualLogger {
-    file: std::sync::Mutex<Option<std::fs::File>>,
     path: std::path::PathBuf,
 }
 
@@ -164,7 +163,10 @@ impl log::Log for DualLogger {
         if record.level() <= log::Level::Warn {
             eprint!("{}", line);
         }
-        if let Ok(mut guard) = self.file.lock() {
+        if let Ok(mut guard) = LOG_FILE.lock() {
+            if LOG_FILE_CLOSED.load(Ordering::SeqCst) {
+                return;
+            }
             // Opened lazily: /var/log may not be writable until the root is
             // mounted rw, and boot must not wait on it.
             if guard.is_none() {
@@ -187,13 +189,30 @@ impl log::Log for DualLogger {
     fn flush(&self) {}
 }
 
+/// init.log, once opened. A static rather than a field of the logger so
+/// shutdown can let go of it: the boxed logger is unreachable once installed.
+static LOG_FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+
+/// Set once shutdown needs `/` read-only: from then on the log goes to the
+/// console alone and its file is never reopened.
+static LOG_FILE_CLOSED: AtomicBool = AtomicBool::new(false);
+
+/// Stop writing init.log and let go of it. The closing line is written first,
+/// so the file says why it ends where it does.
+fn close_log_file() {
+    log::info!("Closing init.log; anything further goes to the console only");
+    LOG_FILE_CLOSED.store(true, Ordering::SeqCst);
+    if let Ok(mut guard) = LOG_FILE.lock() {
+        guard.take();
+    }
+}
+
 fn init_logging() {
     init_logging_at(std::path::PathBuf::from("/var/log/raven/init.log"));
 }
 
 fn init_logging_at(path: std::path::PathBuf) {
     let logger = Box::new(DualLogger {
-        file: std::sync::Mutex::new(None),
         path,
     });
     if log::set_boxed_logger(logger).is_ok() {
@@ -469,18 +488,75 @@ fn run_init() -> Result<()> {
     // service manager instead of an absent one.
     fs::remove_file(control::SOCKET_PATH).ok();
 
+    // Services are only part of what runs: the session under a getty -- the
+    // compositor, its clients, shells -- belongs to no service, and each of
+    // them can hold a file open for write on `/`. Left alive, they are why
+    // the read-only remount below failed with EBUSY and every reboot came
+    // back to a journal replay and a pile of orphan inodes.
+    kill_remaining_processes();
+
     // Determine shutdown mode
-    if REBOOT_REQUESTED.load(Ordering::SeqCst) {
+    let mode = if REBOOT_REQUESTED.load(Ordering::SeqCst) {
         log::info!("Rebooting system...");
-        quiesce_filesystems();
-        let _ = reboot(RebootMode::RB_AUTOBOOT);
+        RebootMode::RB_AUTOBOOT
     } else {
         log::info!("Powering off system...");
-        quiesce_filesystems();
-        let _ = reboot(RebootMode::RB_POWER_OFF);
-    }
+        RebootMode::RB_POWER_OFF
+    };
+    quiesce_filesystems();
+    let Err(e) = reboot(mode);
 
-    Ok(())
+    // reboot(2) returning at all is the failure. Returning from here would
+    // end PID 1 and panic the kernel, which reports nothing; a shell on the
+    // console at least says what went wrong and lets someone retry.
+    log::error!("reboot({:?}) failed: {}", mode, e);
+    emergency_shell();
+}
+
+/// Send every process except init SIGTERM, then SIGKILL what is left.
+///
+/// PID 1 only: `kill(-1, ...)` from anywhere else would take down whatever
+/// the caller happens to be able to signal, which is why this is not part of
+/// `shutdown_services`, which user mode shares.
+///
+/// Everything that survives its parent is reparented to init, so an ECHILD
+/// from `waitpid` means there is nothing left to wait for. Kernel threads
+/// ignore the signals and are not our children, so they never hold it up.
+fn kill_remaining_processes() {
+    use nix::errno::Errno;
+    use nix::sys::signal::{kill, Signal};
+
+    for (signal, grace) in [
+        (Signal::SIGTERM, Duration::from_secs(5)),
+        (Signal::SIGKILL, Duration::from_secs(2)),
+    ] {
+        match kill(Pid::from_raw(-1), signal) {
+            // ESRCH: nobody to signal, so nobody to wait for.
+            Err(Errno::ESRCH) => return,
+            Err(e) => log::warn!("kill(-1, {:?}) failed: {}", signal, e),
+            Ok(()) => log::info!("Sent {:?} to all remaining processes", signal),
+        }
+
+        let deadline = Instant::now() + grace;
+        loop {
+            match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+                Err(Errno::ECHILD) => return,
+                Ok(WaitStatus::StillAlive) => {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                // Reaped one; there may be more ready right now.
+                Ok(_) | Err(Errno::EINTR) => {}
+                Err(e) => {
+                    log::warn!("waitpid during shutdown failed: {}", e);
+                    break;
+                }
+            }
+        }
+    }
+    log::warn!("Some processes survived SIGKILL; continuing shutdown");
 }
 
 /// Take over the services a previous raven-init handed us, then start
@@ -1593,6 +1669,9 @@ fn run_shutdown_scripts() {
 fn quiesce_filesystems() {
     sync_filesystems();
     unmount_filesystems();
+    // init.log is itself a file open for write on `/`, so it would keep the
+    // remount busy even with every other process gone.
+    close_log_file();
     remount_readonly();
     sync_filesystems();
 }
