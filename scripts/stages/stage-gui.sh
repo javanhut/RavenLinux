@@ -3252,6 +3252,14 @@ export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 # DesktopNames in the huginn.desktop session entry; the two must agree.
 export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-Huginn:Raven}"
 
+# Routes open/save dialogs through xdg-desktop-portal, and with it to the
+# FileChooser backend raven-portals.conf names -- RavenFileManager. Chromium
+# browsers already prefer the portal when one answers; GTK3 applications and
+# Firefox ("auto" file-picker mode) only do when this is set, and otherwise
+# draw their own GTK dialog, so a browser's "Save as" would depend on which
+# browser it is.
+export GTK_USE_PORTAL="${GTK_USE_PORTAL:-1}"
+
 # The pointer. huginn falls back to the theme literally named "default", which
 # is a two-line index.theme that says `Inherits=Adwaita` -- naming Adwaita
 # outright drops that indirection, and is one less file whose absence produces
@@ -3484,9 +3492,21 @@ fi
     # the FileChooser portal -- inherits no WAYLAND_DISPLAY and dies with
     # "Failed to open display": no browser download dialog, no "Show in
     # folder". Hand the bus the display now that there is one.
+    #
+    # Retried rather than fired once: the bus was backgrounded a moment
+    # before the compositor, and an update sent before it answers fails --
+    # silently, with the session looking fine until the first file dialog.
+    # GTK_USE_PORTAL goes too, so a GTK3 program the bus starts behaves like
+    # one started from the launcher.
     if command -v dbus-update-activation-environment >/dev/null 2>&1; then
-        dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP \
-            >/dev/null 2>&1 || true
+        i=0
+        until dbus-update-activation-environment WAYLAND_DISPLAY \
+                XDG_CURRENT_DESKTOP XDG_SESSION_TYPE GTK_USE_PORTAL \
+                >/dev/null 2>&1; do
+            i=$((i + 1))
+            [ $i -ge 50 ] && break
+            sleep 0.1
+        done
     fi
     user_d="${XDG_CONFIG_HOME:-$HOME/.config}/raven/session.d"
     for f in /etc/raven/session.d/* "$user_d"/*; do

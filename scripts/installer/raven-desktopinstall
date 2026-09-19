@@ -219,6 +219,10 @@ EOF
 # xdg-desktop-portal-gtk is what answers a file-chooser or "open with" request
 # from a sandboxed or portal-using client. Nothing on the image fails without
 # it; a dialog just never appears, which is the quietest failure in this file.
+#
+# xdg-utils is xdg-open, the command nearly every program -- a browser opening
+# a download, a terminal opening a link -- runs to hand a URL or file to its
+# default application. Without it those clicks do nothing at all.
 set_portals() {
     cat <<'EOF'
 dbus
@@ -226,6 +230,7 @@ dbus-broker
 dbus-broker-units
 xdg-desktop-portal
 xdg-desktop-portal-gtk
+xdg-utils
 glib-networking
 libsecret
 EOF
