@@ -32,7 +32,7 @@ use std::env;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Duration;
 
@@ -480,18 +480,55 @@ fn send_command(cmd: &str) {
     println!("Command sent to init.");
 }
 
+/// The binary PID 1 was started from, resolved as far as this process is
+/// allowed to look.
+///
+/// /proc/1/exe is the authoritative answer and is root-only: resolving that
+/// link needs PTRACE_MODE_READ, so for an ordinary user every operation on it
+/// -- including Path::exists() -- fails with EACCES. /proc/1/cmdline is
+/// world-readable, so fall back to argv[0] and canonicalize it: the kernel
+/// boots /sbin/init, which is a symlink onto the real binary.
+fn pid1_exe() -> Option<PathBuf> {
+    if let Ok(exe) = fs::read_link("/proc/1/exe") {
+        return Some(exe);
+    }
+
+    let cmdline = fs::read_to_string("/proc/1/cmdline").ok()?;
+    let argv0 = Path::new(cmdline.split('\0').next()?);
+    if !argv0.is_absolute() {
+        return None;
+    }
+    fs::canonicalize(argv0).ok()
+}
+
 /// What PID 1 actually is, for diagnostics.
+///
+/// The binary's name rather than comm: the kernel sets comm from the basename
+/// of the path it exec'd and it exec's /sbin/init, so a running raven-init
+/// calls itself "init" and never "raven-init". comm is the last resort, for
+/// when neither /proc/1/exe nor /proc/1/cmdline can be read.
 fn pid1_name() -> String {
+    if let Some(name) = pid1_exe()
+        .as_deref()
+        .and_then(Path::file_name)
+        .map(|n| n.to_string_lossy().into_owned())
+    {
+        return name;
+    }
+
     fs::read_to_string("/proc/1/comm")
         .map(|c| c.trim().to_string())
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
 /// True when raven-init is PID 1.
+///
+/// Answering "no" when the answer is really "cannot tell" is the safe way to
+/// be wrong: it sends a shutdown to the reboot syscall instead of through
+/// init. Answering "yes" wrongly would hand the command file to a supervisor
+/// that never reads it.
 fn init_is_raven() -> bool {
-    fs::read_to_string("/proc/1/comm")
-        .map(|c| c.trim() == "raven-init")
-        .unwrap_or(false)
+    pid1_name() == "raven-init"
 }
 
 /// Ask the kernel to reboot or power off, with no init involved.
@@ -551,17 +588,19 @@ fn do_system_status() {
     println!("======================");
     println!();
 
-    // Check if init is running
-    if Path::new("/proc/1/exe").exists() {
-        println!("Init process: Running (PID 1)");
+    // Something is always PID 1 or this process would not be running, so the
+    // question is not whether init is there but which init it is. Name the
+    // binary: on a system whose PID 1 is not raven-init, that is the first
+    // thing worth knowing, and it explains every "unavailable" below it.
+    match pid1_name().as_str() {
+        "raven-init" => println!("Init process: raven-init (PID 1)"),
+        "unknown" => println!("Init process: unknown -- /proc/1 is unreadable"),
+        other => println!("Init process: {} (PID 1) -- not raven-init", other),
+    }
 
-        // Try to read init's cmdline
-        if let Ok(cmdline) = fs::read_to_string("/proc/1/cmdline") {
-            let cmd = cmdline.replace('\0', " ");
-            println!("Init command: {}", cmd.trim());
-        }
-    } else {
-        println!("Init process: Unknown");
+    if let Ok(cmdline) = fs::read_to_string("/proc/1/cmdline") {
+        let cmd = cmdline.replace('\0', " ");
+        println!("Init command: {}", cmd.trim());
     }
 
     // System uptime
