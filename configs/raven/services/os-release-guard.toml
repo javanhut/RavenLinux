@@ -1,0 +1,40 @@
+# raven-os-release-guard -- hold the line on this machine's identity.
+#
+# Raven describes itself in /etc/os-release: ID=raven, and ID_LIKE=arch so that
+# every installer and build script keying off "arch-like packaging" keeps
+# working. No Arch package claims that path -- see the note in
+# scripts/lib/skeleton.sh about why it is a real file and not a symlink -- so
+# it survives everything, and the guard derives the rest from it. A version
+# bump is edited there and nowhere else.
+#
+# It keeps two files in step. /usr/lib/os-release is owned by `filesystem`,
+# which is a dependency of essentially every Arch package and ships ID=arch, so
+# the first `rvn install <anything>` hands Raven's identity back to Arch for
+# anything reading that path directly; rvn honours no NoUpgrade to pin it with,
+# so it is mirrored from /etc. /etc/raven-release is written from PRETTY_NAME,
+# in the /etc/redhat-release idiom -- the affirmative signal /etc/arch-release
+# cannot give, since a bare existence flag can only say "is Arch" and never
+# "resembles Arch". arch-release itself stays, for the older scripts that stat
+# it. stage2 writes both into the image; this keeps them right afterwards.
+#
+# restart = true and not a one-shot, for the reason fstrim is a daemon: there
+# is no cron here, and the overwrite happens whenever somebody updates, not at
+# boot. The script sleeps between comparisons of two short files and does
+# nothing at all until `filesystem` moves, which is a few times a year.
+#
+# No `after`, deliberately. It reads /etc and writes /etc and /usr, all mounted
+# before any service starts, and raven-init treats `after` as a dependency it
+# must start -- naming something here would drag that service onto every boot
+# for no reason.
+#
+# critical = false: a machine that calls itself Arch in one file is wrong, not
+# broken, and should not fail to boot over it.
+[[services]]
+name = "os-release-guard"
+description = "Keep /usr/lib/os-release and /etc/raven-release identifying this system as Raven"
+exec = "/usr/bin/raven-os-release-guard"
+args = []
+after = []
+restart = true
+enabled = true
+critical = false

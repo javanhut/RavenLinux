@@ -1,0 +1,109 @@
+#!/bin/sh
+# =============================================================================
+# raven-os-release-guard -- keep this machine describing itself as Raven
+# =============================================================================
+#
+# Ships at /usr/bin/raven-os-release-guard and runs as the `os-release-guard`
+# raven-init service.
+#
+# Raven's identity lives in /etc/os-release, at a path no Arch package claims
+# -- see the long note in scripts/lib/skeleton.sh about why it is a real file
+# and not the symlink the UAPI spec asks for. stage2 writes it, and everything
+# below is derived from it, so a version bump is edited in exactly one place.
+#
+# Two files are kept in step with it.
+#
+# /usr/lib/os-release is the one the spec calls canonical, and Arch's
+# `filesystem` package owns it and ships ID=arch in it. `filesystem` is a
+# dependency of essentially every Arch package, so the first `rvn install
+# <anything>` overwrites it and anything reading that path directly -- rather
+# than letting /etc win, as the spec says it should -- sees an Arch box.
+# Not shipping the symlink protected /etc; nothing protected /usr/lib. This
+# does, by mirroring /etc back over it.
+#
+# /etc/raven-release is the affirmative half. /etc/arch-release ships out of
+# the same `filesystem` payload and stays, because older scripts stat it and
+# nothing else tells them this box is alpm-based -- but a bare existence flag
+# can only say "is Arch", never "resembles Arch", so it leaves nothing a way
+# to detect *Raven*. This is that way, in the /etc/redhat-release idiom: one
+# line, PRETTY_NAME. stage2 writes it into the image; this keeps it current.
+#
+# What is deliberately NOT changed: ID_LIKE=arch. That field means "closely
+# related in packaging and programming interfaces", which is true -- Raven is
+# alpm-based -- and it is what install scripts read to stay compatible. ID is
+# the field that asserts identity, and it already says raven. Dropping ID_LIKE
+# would not make anything see Raven; it would only make things see nothing.
+#
+# Polling rather than inotify: there are no inotify tools in the image, and
+# the event this waits for happens when a human runs an update. Comparing two
+# short files once a minute costs less than the watch would.
+set -eu
+
+src=/etc/os-release
+dst=/usr/lib/os-release
+rel=/etc/raven-release
+interval="${RAVEN_OS_RELEASE_INTERVAL:-60}"
+
+# Read a file, or nothing at all if it is missing. Command substitution strips
+# trailing newlines, so two reads compared as strings is an exact content test
+# for the text files this deals in.
+#
+# Not cmp(1): diffutils is not in the base image (stage2's tool list ships
+# mktemp and sleep, but no cmp), and a missing cmp fails OPEN -- `cmp -s a b &&
+# return` short-circuits on exit 127 and the file gets rewritten on every tick,
+# churning mtimes and the log forever. A builtin cannot go missing.
+slurp() {
+	cat "$1" 2>/dev/null || true
+}
+
+# Write beside the target and rename. Nothing must ever observe a half-written
+# os-release: it is parsed by shell `.` in places that would inherit whatever a
+# truncated read left behind.
+install_atomically() {
+	_target=$1
+	_tmp=$(mktemp "${_target}.XXXXXX") || return 1
+	if cat > "$_tmp" 2>/dev/null; then
+		chmod 0644 "$_tmp"
+		mv -f "$_tmp" "$_target"
+		return 0
+	fi
+	rm -f "$_tmp"
+	return 1
+}
+
+sync_os_release() {
+	[ "$(slurp "$dst")" = "$(slurp "$src")" ] && return 0
+	install_atomically "$dst" < "$src" &&
+		echo "raven-os-release-guard: restored Raven identity in $dst" >&2
+	return 0
+}
+
+sync_raven_release() {
+	# Subshell: os-release is KEY="value" throughout, but sourcing it must not
+	# leak NAME/VERSION/etc. into this script's own environment.
+	_want=$( . "$src" 2>/dev/null; printf '%s' "${PRETTY_NAME:-${NAME:-Raven Linux}}" ) || return 0
+	[ -n "$_want" ] || return 0
+	[ "$(slurp "$rel")" = "$_want" ] && return 0
+	printf '%s\n' "$_want" | install_atomically "$rel" &&
+		echo "raven-os-release-guard: wrote $rel ($_want)" >&2
+	return 0
+}
+
+sync_once() {
+	[ -r "$src" ] || return 0
+	sync_os_release
+	sync_raven_release
+}
+
+# Once up front: this is the boot-time pass, and it is also what makes the
+# script useful when run by hand after an update.
+sync_once
+
+case "${1:-}" in
+	--once) exit 0 ;;
+esac
+
+while :; do
+	sleep "$interval"
+	sync_once
+done

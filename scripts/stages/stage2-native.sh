@@ -1046,6 +1046,30 @@ install_raven_fstrim() {
     fi
 }
 
+install_raven_os_release_guard() {
+    local src="${PROJECT_ROOT}/configs/raven-os-release-guard"
+
+    if [[ ! -f "${src}" ]]; then
+        log_warn "  configs/raven-os-release-guard is missing; /usr/lib/os-release reverts to ID=arch on the first rvn install"
+        return 0
+    fi
+
+    # The os-release-guard template names /usr/bin/raven-os-release-guard;
+    # stage4's activate_service_templates turns it into a drop-in once this
+    # exists. /usr/bin and not /usr/local/bin: /usr/local is the operator's,
+    # and stage-gui hands it to wheel group-writable.
+    install -D -m 0755 "${src}" "${SYSROOT_DIR}/usr/bin/raven-os-release-guard"
+    log_info "  Installed raven-os-release-guard"
+
+    # The guard rewrites os-release through a temp file so nothing ever sources
+    # a truncated one. Everything else it runs is a shell builtin or already in
+    # copy_system_utils' list; mktemp is the one that would leave it unable to
+    # write at all.
+    if [[ ! -x "${SYSROOT_DIR}/usr/bin/mktemp" ]]; then
+        log_warn "  mktemp is not in the sysroot; raven-os-release-guard cannot write atomically"
+    fi
+}
+
 install_raven_console_font() {
     local src="${PROJECT_ROOT}/configs/raven-console-font"
 
@@ -2601,6 +2625,27 @@ LOGO=raven-logo
 EOF
     sed -i "s/@RAVEN_VERSION@/${RAVEN_VERSION:-2026.08}/g" "${SYSROOT_DIR}/etc/os-release"
 
+    # /etc/raven-release
+    #
+    # The affirmative half of the identity. /etc/arch-release ships too, out of
+    # Arch's `filesystem` payload, and stays: a pile of older scripts stat it,
+    # and nothing else tells them this box is alpm-based. But a bare existence
+    # flag can only ever say "is Arch", never "resembles Arch", so it leaves
+    # nothing a way to detect *Raven*. This is that way, in the
+    # /etc/redhat-release idiom: one line, PRETTY_NAME.
+    #
+    # Read back out of the os-release written just above rather than templated
+    # a second time. The note on that heredoc records what three hardcoded
+    # copies of the version number cost; this is the same number, so it gets
+    # the same single source. No Arch package claims this path, so unlike
+    # /usr/lib/os-release nothing overwrites it on the first `rvn install`.
+    (
+        # shellcheck disable=SC1091
+        . "${SYSROOT_DIR}/etc/os-release"
+        printf '%s\n' "${PRETTY_NAME}"
+    ) > "${SYSROOT_DIR}/etc/raven-release"
+    chmod 644 "${SYSROOT_DIR}/etc/raven-release"
+
     # Create uname wrapper to show raven-linux
     # Remove existing symlink first (stage1 creates /bin/uname -> coreutils)
     rm -f "${SYSROOT_DIR}/usr/bin/uname"
@@ -3745,6 +3790,7 @@ main() {
     install_raven_console_font
     install_raven_firmware
     install_raven_fstrim
+    install_raven_os_release_guard
     copy_networking
     setup_pam_and_nss
     if [[ "${RAVEN_ENABLE_SUDO}" == "1" ]]; then
