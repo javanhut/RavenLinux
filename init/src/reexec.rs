@@ -14,8 +14,13 @@
 //! # What is and is not carried across
 //!
 //! Carried: each service's definition, pid, restart count, "stopped by
-//! request" flag, and how long it has been up. That is everything the
-//! supervisor needs to keep behaving as it was.
+//! request" flag, when it started and when it became ready -- and the boot
+//! milestones init passed on its way up. That is everything the supervisor
+//! needs to keep behaving as it was, plus everything `raven-rc blame` needs to
+//! keep answering the question it is for. The milestones are the part that is
+//! purely a report: without them the new image's timeline began at the moment
+//! somebody typed `reexec`, and a machine that had been up for a day appeared
+//! to have booted in four milliseconds.
 //!
 //! Not carried: the control socket (the new image binds it afresh; a
 //! `raven-rc` that connects in the gap gets ECONNREFUSED and can try again),
@@ -62,6 +67,21 @@ fn state_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(STATE_PATH))
 }
 
+/// One milestone on its way through the hand-off file.
+///
+/// A named struct rather than the `(String, f64)` the timeline keeps, because
+/// this one is written into a file an operator may well read: `[[milestones]]`
+/// with `name` and `at` beneath it says what it is, where `[["main loop",
+/// 7.001]]` would need explaining.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MilestoneRecord {
+    pub name: String,
+    /// Seconds since the kernel started -- CLOCK_MONOTONIC, which belongs to
+    /// the boot rather than to the process and so means the same number to the
+    /// image that reads this file as to the one that wrote it.
+    pub at: f64,
+}
+
 /// Everything one supervisor hands to the next.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Handoff {
@@ -70,20 +90,43 @@ pub struct Handoff {
     /// than adopt nothing.
     #[serde(default = "Handoff::current_version")]
     pub version: u32,
+    /// The boot milestones so far. Before `services`, because TOML wants its
+    /// plain values before its tables and serde writes these fields in the
+    /// order they are declared.
+    #[serde(default)]
+    pub milestones: Vec<MilestoneRecord>,
     #[serde(default)]
     pub services: Vec<ServiceSnapshot>,
 }
 
 impl Handoff {
+    /// Still 1 with the milestones and the per-service timings added, and
+    /// deliberately: every field is `#[serde(default)]` and unknown keys are
+    /// ignored, so a file written by either image parses in the other. Bumping
+    /// it would make the *old* image refuse a file it can in fact read, and
+    /// the refusal path adopts nothing -- which means starting every daemon a
+    /// second time on a machine where they are all still running. A version
+    /// that costs that much is for a change that truly cannot be read across,
+    /// not for a change that merely carries more.
     const VERSION: u32 = 1;
 
     fn current_version() -> u32 {
         Self::VERSION
     }
 
+    /// The hand-off for a supervisor about to be replaced.
+    ///
+    /// The milestones are collected here rather than passed in because they
+    /// are not the caller's to remember: there is exactly one boot timeline in
+    /// this process, `timeline` owns it, and a hand-off built without it is a
+    /// hand-off that silently loses the boot.
     pub fn new(services: Vec<ServiceSnapshot>) -> Self {
         Self {
             version: Self::VERSION,
+            milestones: crate::timeline::milestones()
+                .into_iter()
+                .map(|(name, at)| MilestoneRecord { name, at })
+                .collect(),
             services,
         }
     }
@@ -179,6 +222,14 @@ fn write_state(path: &Path, handoff: &Handoff) -> Result<()> {
 /// `None` on a normal boot. The file is removed on the way out, so a crash
 /// after this point cannot leave a hand-off lying around for a later image
 /// to adopt pids that by then belong to something else.
+///
+/// Taking the hand-off also puts the previous supervisor's boot milestones
+/// back into [`crate::timeline`], which is a side effect and is here on
+/// purpose: this is the one moment in the process's life at which there is a
+/// previous supervisor to inherit a boot from, and the alternative -- asking
+/// every caller to remember to restore them -- is how the timeline came to be
+/// lost in the first place. The services are restored by the caller, from the
+/// value returned; the timeline has one global home and is restored into it.
 pub fn take() -> Option<Handoff> {
     if std::env::var_os(ENV_MARK).is_none() {
         return None;
@@ -191,7 +242,16 @@ pub fn take() -> Option<Handoff> {
     std::env::remove_var("RAVEN_INIT_REEXEC_STATE");
 
     match text.map_err(anyhow::Error::from).and_then(|t| Handoff::from_toml(&t)) {
-        Ok(handoff) => Some(handoff),
+        Ok(handoff) => {
+            crate::timeline::restore(
+                handoff
+                    .milestones
+                    .iter()
+                    .map(|m| (m.name.clone(), m.at))
+                    .collect(),
+            );
+            Some(handoff)
+        }
         Err(e) => {
             // The services are still running whether or not we can read
             // about them. Adopt nothing, and let the start path find each
@@ -212,29 +272,17 @@ mod tests {
         ServiceSnapshot {
             config: ServiceConfig {
                 name: name.to_string(),
-                description: String::new(),
                 exec: "/bin/true".to_string(),
-                args: Vec::new(),
                 restart: true,
-                enabled: true,
-                critical: false,
-                environment: Default::default(),
-                pre_exec: Vec::new(),
-                tty: None,
-                user: None,
-                runtime_dirs: Vec::new(),
-                after: Vec::new(),
-                ready_path: None,
-                ready_timeout: 5,
-                stop_exec: None,
-                stop_args: Vec::new(),
-                stop_timeout: 5,
+                ..ServiceConfig::default()
             },
             pid,
+            started_mono: Some(3.5),
+            first_started_mono: Some(3.5),
             uptime_secs: 42,
             restart_count: 3,
             manually_stopped: pid.is_none(),
-            ready_secs_ago: None,
+            ..ServiceSnapshot::default()
         }
     }
 
@@ -251,6 +299,37 @@ mod tests {
         let text = "version = 99\n";
         let err = Handoff::from_toml(text).unwrap_err();
         assert!(err.to_string().contains("version 99"), "{err}");
+    }
+
+    /// The boot timeline is the half of the hand-off that no service needs
+    /// and `blame` cannot do without. It goes through the file with the
+    /// services, and it comes back out in the order it was recorded.
+    #[test]
+    fn the_boot_timeline_crosses_with_the_services() {
+        crate::timeline::mark("handoff test milestone");
+        let h = Handoff::new(vec![snap("a", Some(1234))]);
+        let carried = h
+            .milestones
+            .iter()
+            .any(|m| m.name == "handoff test milestone");
+        assert!(carried, "milestones must be collected by Handoff::new");
+
+        let back = Handoff::from_toml(&h.to_toml().unwrap()).unwrap();
+        assert_eq!(h.milestones, back.milestones);
+        let names: Vec<&str> = back.milestones.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"handoff test milestone"), "{names:?}");
+    }
+
+    /// A hand-off written before the timings existed still adopts. The fields
+    /// it does not have default, and the ones it does are read.
+    #[test]
+    fn an_older_handoff_still_parses() {
+        let text = "version = 1\n\n[[services]]\npid = 7\nuptime_secs = 42\n\n                    [services.config]\nname = \"old\"\nexec = \"/bin/true\"\n";
+        let h = Handoff::from_toml(text).expect("an older hand-off must still be readable");
+        let svc = h.services.first().expect("one service");
+        assert_eq!(svc.uptime_secs, 42);
+        assert_eq!(svc.started_mono, None);
+        assert!(h.milestones.is_empty());
     }
 
     #[test]

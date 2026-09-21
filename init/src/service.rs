@@ -168,7 +168,7 @@ pub enum ServiceState {
 /// here is an `Instant` or a `Child`: the first does not mean anything in
 /// another process and the second cannot be sent to one -- the new supervisor
 /// tracks the process by pid alone, which is all `waitpid(-1)` needs.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceSnapshot {
     /// The definition this process was started from. Kept even when the new
     /// supervisor's config no longer lists it, for the same reason `reload`
@@ -177,16 +177,63 @@ pub struct ServiceSnapshot {
     pub config: ServiceConfig,
     /// Live pid, or `None` for a service that is not running.
     pub pid: Option<i32>,
-    /// Seconds the current run has been up, so a crash right after the swap
-    /// is still recognised as the end of a long stable run.
+    /// When the current run started, and when its ready path was first seen,
+    /// as CLOCK_MONOTONIC readings -- seconds since the kernel started, the
+    /// same scale `blame` prints and `timeline::monotonic_secs` reads.
+    ///
+    /// Absolute rather than "how long ago", and floating point rather than
+    /// whole seconds, for one reason each. The pair of `u64` seconds these
+    /// replaced was written with `as_secs()`, which floors, so every re-exec
+    /// quantised every service's times to the second -- in a supervisor whose
+    /// `blame` prints three decimal places and exists to attribute tens of
+    /// milliseconds. And a "how long ago" has to be turned back into a time by
+    /// the reader, which adds the wall time of the hand-off itself -- write
+    /// the file, exec, read it back, adopt -- to every service's age, once per
+    /// re-exec, forever. An absolute reading needs no `now` to reconstruct it
+    /// and so carries neither error.
+    ///
+    /// CLOCK_MONOTONIC is a property of the boot and not of the process, and
+    /// is the clock `Instant` is built on, so the number means exactly the
+    /// same thing on both sides of the exec.
     #[serde(default)]
-    pub uptime_secs: u64,
+    pub started_mono: Option<f64>,
+    #[serde(default)]
+    pub ready_mono: Option<f64>,
+    /// The first start and the first ready of this service *in this boot*,
+    /// which no restart moves. What `raven-rc blame` reports; see
+    /// [`Service::first_started_at`] for why they are separate fields.
+    #[serde(default)]
+    pub first_started_mono: Option<f64>,
+    #[serde(default)]
+    pub first_ready_mono: Option<f64>,
+    /// When the supervisor last restarted this service, so `raven-rc status`
+    /// can still say when it last came back after the supervisor itself has
+    /// been replaced.
+    #[serde(default)]
+    pub last_restart_mono: Option<f64>,
     #[serde(default)]
     pub restart_count: u32,
     #[serde(default)]
     pub manually_stopped: bool,
-    /// Seconds since the service's ready path was first seen, if it has one
-    /// and it has appeared. Carried across so `blame` keeps its numbers.
+    /// The seconds-since-then fields this file carried before the readings
+    /// above. Still written, and still read when the reading beside them is
+    /// absent.
+    ///
+    /// Still written because the raven-init on disk can be older than the one
+    /// writing the file: `raven-rc reexec` is how a new image is tried out,
+    /// and the first thing anybody does with a bad one is re-exec back to the
+    /// installed one. Still read because the image being replaced is usually
+    /// the older one, and without this the re-exec onto the new format would
+    /// report every service as having started at no time at all.
+    ///
+    /// Both floor to whole seconds, which is the entire reason they were
+    /// replaced, so they are consulted only when the precise field is missing.
+    /// When no raven-init old enough to write them is installed anywhere they
+    /// can go, and `Handoff::VERSION` need not move for that or for their
+    /// arrival: unknown keys are ignored and missing keys default, so a file
+    /// written by either image parses in the other.
+    #[serde(default)]
+    pub uptime_secs: u64,
     #[serde(default)]
     pub ready_secs_ago: Option<u64>,
 }
@@ -212,8 +259,32 @@ pub struct Service {
     /// When the current run was started, for measuring how long it lasted.
     started_at: Option<Instant>,
     /// When `config.ready_path` was first seen to exist for this run, if
-    /// ever. What `raven-rc blame` reports as the service's ready time.
+    /// ever. What `raven-rc status` reports about the run it is describing.
     ready_at: Option<Instant>,
+    /// When this service first started in this boot -- a time no restart
+    /// moves.
+    ///
+    /// `started_at` above is the *current run*, and `do_start` resets it every
+    /// time. That is right for the restart backoff, which asks how long the
+    /// run that just died lasted, and it is wrong for `raven-rc blame`, which
+    /// asks what the boot looked like. Reading the current run there produced
+    /// a boot timeline in which obexd started at 97618s and cawd at 2751s: a
+    /// suspend and two restarts, reported under a heading that says "seconds
+    /// since the kernel started" above milestones that end at seven. The
+    /// footer folded the same numbers into `span 97613.069s`, which is the
+    /// machine's uptime wearing a boot time's clothes.
+    ///
+    /// So the two questions get two fields. This one is set the first time the
+    /// service starts and then only carried -- through every restart, and
+    /// through a re-exec in the snapshot -- until the machine reboots and the
+    /// whole supervisor begins again from nothing.
+    first_started_at: Option<Instant>,
+    /// When this service was first seen ready in this boot, on the same terms.
+    ///
+    /// `None` while `config.ready_path` names a file that has never appeared,
+    /// which is a different state from having no ready path at all and is
+    /// reported as one.
+    first_ready_at: Option<Instant>,
     /// When the current run died, for the same measurement.
     exited_at: Option<Instant>,
     /// When the pending restart is due, once the backoff has been decided.
@@ -248,6 +319,8 @@ impl Service {
             last_restart: None,
             started_at: None,
             ready_at: None,
+            first_started_at: None,
+            first_ready_at: None,
             exited_at: None,
             retry_at: None,
             manually_stopped: false,
@@ -266,12 +339,19 @@ impl Service {
             } else {
                 None
             },
+            started_mono: self.started_at.map(crate::timeline::instant_secs),
+            ready_mono: self.ready_at.map(crate::timeline::instant_secs),
+            first_started_mono: self.first_started_at.map(crate::timeline::instant_secs),
+            first_ready_mono: self.first_ready_at.map(crate::timeline::instant_secs),
+            last_restart_mono: self.last_restart.map(crate::timeline::instant_secs),
+            restart_count: self.restart_count,
+            manually_stopped: self.manually_stopped,
+            // Written for an older raven-init that reads nothing else; see
+            // `ServiceSnapshot::uptime_secs`.
             uptime_secs: self
                 .started_at
                 .map(|t| t.elapsed().as_secs())
                 .unwrap_or(0),
-            restart_count: self.restart_count,
-            manually_stopped: self.manually_stopped,
             ready_secs_ago: self.ready_at.map(|t| t.elapsed().as_secs()),
         }
     }
@@ -296,10 +376,33 @@ impl Service {
             .map(Pid::from_raw)
             .filter(|pid| signal::kill(*pid, None).is_ok());
 
-        let started_at = now.checked_sub(Duration::from_secs(snapshot.uptime_secs));
-        let ready_at = snapshot
-            .ready_secs_ago
-            .and_then(|s| now.checked_sub(Duration::from_secs(s)));
+        // Every time in the snapshot is an absolute CLOCK_MONOTONIC reading,
+        // so adopting one is a conversion and not a reconstruction: nothing
+        // here depends on how long the hand-off took.
+        let at = |mono: Option<f64>| mono.and_then(crate::timeline::instant_from_secs);
+
+        // The seconds-since-then fields are the fallback for a hand-off
+        // written by a raven-init that predates the readings. `uptime_secs` is
+        // zero both for "not running" and for "started half a second ago", so
+        // it is believed only when it is not zero -- otherwise a service that
+        // has never run would be adopted as having started exactly now, and
+        // that invented time would go straight into the boot timeline.
+        let started_at = at(snapshot.started_mono).or_else(|| {
+            (snapshot.uptime_secs > 0)
+                .then(|| now.checked_sub(Duration::from_secs(snapshot.uptime_secs)))
+                .flatten()
+        });
+        let ready_at = at(snapshot.ready_mono).or_else(|| {
+            snapshot
+                .ready_secs_ago
+                .and_then(|s| now.checked_sub(Duration::from_secs(s)))
+        });
+        // An older hand-off says nothing about the first start of this boot,
+        // and the run it does describe is the earliest this supervisor can
+        // honestly claim to know about.
+        let first_started_at = at(snapshot.first_started_mono).or(started_at);
+        let first_ready_at = at(snapshot.first_ready_mono).or(ready_at);
+        let last_restart = at(snapshot.last_restart_mono);
 
         match alive {
             Some(pid) => Self {
@@ -310,9 +413,11 @@ impl Service {
                 exit_status: None,
                 exit_signal: None,
                 restart_count: snapshot.restart_count,
-                last_restart: None,
+                last_restart,
                 started_at,
                 ready_at,
+                first_started_at,
+                first_ready_at,
                 exited_at: None,
                 retry_at: None,
                 manually_stopped: false,
@@ -329,9 +434,19 @@ impl Service {
                 exit_status: None,
                 exit_signal: None,
                 restart_count: snapshot.restart_count,
-                last_restart: None,
+                last_restart,
                 started_at,
-                ready_at: None,
+                // Kept, where this branch used to drop it. The run that ended
+                // in the hand-off window did become ready, and the moment it
+                // did is a fact about this boot that nothing else records --
+                // throwing it away made a service that died during a re-exec
+                // report "exited before ready" about a run that had been ready
+                // for a day. `note_ready_if_present` will not restamp it (it
+                // refuses a service that is not running) and the next start
+                // clears it, which is what `started_at` does too.
+                ready_at,
+                first_started_at,
+                first_ready_at,
                 exited_at: if snapshot.pid.is_some() { Some(now) } else { None },
                 retry_at: None,
                 manually_stopped: snapshot.manually_stopped,
@@ -416,6 +531,51 @@ impl Service {
         // negative pid without ever signalling init's own process group.
         cmd.process_group(0);
 
+        // Resource control, in two halves. The cgroup directory and the limits
+        // that belong to it (memory.max, cpu.weight, io.weight) are set here,
+        // in the parent, because they are properties of the directory and can
+        // be written before there is a process to put in it. The per-process
+        // half -- joining the cgroup, nice, oom_score_adj and the rlimits --
+        // is packed up now and applied in the child below.
+        //
+        // A machine without cgroup2, or with a read-only /sys/fs/cgroup, gets
+        // `None` here and a warning once from the cgroup module; the service
+        // then starts unconfined, which is the only acceptable failure mode
+        // for a supervisor that is also the only way to reach a shell.
+        let cgroup = crate::cgroup::Cgroup::for_service(&self.config.name);
+        if let Some(cg) = &cgroup {
+            cg.apply(&self.config);
+        }
+        let resources = crate::cgroup::ChildResources::prepare(&self.config, cgroup.as_ref());
+
+        // Registered BEFORE the credential drop below, and the order is not
+        // incidental: `std` runs pre_exec closures in registration order, and
+        // every one of these settings needs privilege the closure after it
+        // gives away. Writing to a cgroup.procs init owns, lowering
+        // oom_score_adj below zero, asking for a negative nice value and
+        // raising a hard rlimit all require root or a capability that comes
+        // with it, and `apply_credentials` calls setuid. Swap the two and the
+        // service starts anyway, with none of its limits and nothing said
+        // about it -- the same invisible failure the tty path refuses `user =`
+        // over.
+        if !resources.is_empty() {
+            // SAFETY: the closure runs in the forked child between `fork` and
+            // `exec`, where only async-signal-safe work is permitted. It
+            // allocates nothing, takes no lock and logs nothing: every path it
+            // opens was turned into a CString in this parent, every number it
+            // writes was formatted here, and the calls it makes are open,
+            // write, close, setpriority and setrlimit, all raw syscalls. See
+            // `ChildResources::apply_in_child` for the per-call argument, and
+            // `apply_credentials` below for the same reasoning applied to the
+            // credential syscalls.
+            unsafe {
+                cmd.pre_exec(move || {
+                    resources.apply_in_child();
+                    Ok(())
+                });
+            }
+        }
+
         // Add arguments
         cmd.args(&self.config.args);
 
@@ -465,10 +625,14 @@ impl Service {
 
         let pid = Pid::from_raw(child.id() as i32);
 
+        let now = Instant::now();
         self.child = Some(child);
         self.pid = Some(pid);
         self.state = ServiceState::Running;
-        self.started_at = Some(Instant::now());
+        self.started_at = Some(now);
+        // Set once and then carried, restart after restart, because this is
+        // the number `blame` reports; see `Service::first_started_at`.
+        self.first_started_at.get_or_insert(now);
         self.ready_at = None;
         self.exited_at = None;
         self.exit_status = None;
@@ -523,12 +687,33 @@ impl Service {
 
         let tty_path_owned = tty_path.to_string();
 
+        // Resource control, prepared before the fork for the same reason the
+        // argument vector is: after `fork` this child may not allocate, and
+        // after `execvp` there is no longer anything of ours running to do it.
+        //
+        // This path is a hand-rolled fork/execvp and gets none of `Command`'s
+        // pre_exec machinery, so everything `do_start` registers as a closure
+        // has to be repeated here by hand. It is repeated rather than refused
+        // -- unlike `user =` above -- because unlike a privilege drop, a
+        // limit that silently did not apply to the gettys would be a gap in
+        // exactly the services most likely to be left running a runaway
+        // program somebody typed.
+        let cgroup = crate::cgroup::Cgroup::for_service(&self.config.name);
+        if let Some(cg) = &cgroup {
+            cg.apply(&self.config);
+        }
+        let resources = crate::cgroup::ChildResources::prepare(&self.config, cgroup.as_ref());
+
         // Fork the process
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child }) => {
                 // Parent process - just record the child PID
+                let now = Instant::now();
                 self.pid = Some(child);
-                self.started_at = Some(Instant::now());
+                self.started_at = Some(now);
+                // As in `do_start`: the boot's first start, kept across every
+                // restart of this getty.
+                self.first_started_at.get_or_insert(now);
                 self.ready_at = None;
                 self.exited_at = None;
                 self.child = None; // We don't have a Child handle when using fork directly
@@ -552,6 +737,20 @@ impl Service {
                 if let Err(e) = setsid() {
                     log::error!("setsid() failed: {}", e);
                     std::process::exit(1);
+                }
+
+                // 1b. Join the cgroup and take the configured limits.
+                //
+                // Before the TTY is opened, so that a `nofile` limit is in
+                // force for every descriptor this child goes on to acquire,
+                // and while the process is still root -- which on this path it
+                // stays, since `user =` is refused above.
+                //
+                // SAFETY: this is the child of a `fork` and has not yet
+                // exec'd, which is exactly the window `apply_in_child`
+                // documents. Nothing it touches was allocated after the fork.
+                unsafe {
+                    resources.apply_in_child();
                 }
 
                 // 2. Open the TTY device
@@ -706,6 +905,7 @@ impl Service {
         self.exited_at = Some(Instant::now());
         self.pid = None;
         self.child = None;
+        self.release_cgroup();
 
         log::info!("Service {} exited with status {}", self.config.name, status);
     }
@@ -717,6 +917,7 @@ impl Service {
         self.exited_at = Some(Instant::now());
         self.pid = None;
         self.child = None;
+        self.release_cgroup();
 
         log::info!("Service {} killed by signal {:?}", self.config.name, signal);
     }
@@ -815,12 +1016,54 @@ impl Service {
     /// [`Service::stop_by_request`] for an operator-initiated stop.
     pub fn stop(&mut self) {
         if let Some(pid) = self.pid {
-            log::debug!(
-                "Sending SIGTERM to {} (process group {})",
-                self.config.name,
-                pid
-            );
-            signal_service_group(pid, Signal::SIGTERM);
+            log::debug!("Sending SIGTERM to {} (leader {})", self.config.name, pid);
+            self.signal_everything(pid, Signal::SIGTERM);
+        }
+    }
+
+    /// Send one signal to every process this service still has.
+    ///
+    /// The cgroup is asked first and the process group is the fallback, in
+    /// that order and for that reason: a service's cgroup holds everything it
+    /// forked, including the daemons that called `setsid` and left the process
+    /// group init put them in, while the process group holds only what stayed.
+    /// Before the slice existed, `raven-rc stop bluetoothd` reached bluetoothd
+    /// and left whatever it had daemonised behind, still holding its sockets,
+    /// until the next reboot.
+    ///
+    /// The fallback is not vestigial and must stay. A service adopted across a
+    /// re-exec from a raven-init old enough to have had no cgroups is in no
+    /// cgroup at all -- cgroup membership is a property of the process, so the
+    /// exec that replaced the supervisor could not have changed it -- and a
+    /// machine with no cgroup2 mounted has nothing but process groups from
+    /// boot to shutdown. In both cases [`Cgroup::existing`] finds nothing and
+    /// says so, and this is exactly the code that ran before.
+    ///
+    /// What does *not* change here is escalation. This sends the one signal it
+    /// is given; SIGTERM first and SIGKILL after `stop_timeout` remains the
+    /// caller's sequence, in `wait_for_exit` and in `shutdown_services`.
+    fn signal_everything(&self, pid: Pid, signal_to_send: Signal) {
+        if let Some(cgroup) = crate::cgroup::Cgroup::existing(&self.config.name) {
+            if cgroup.signal_all(signal_to_send) {
+                return;
+            }
+        }
+        signal_service_group(pid, signal_to_send);
+    }
+
+    /// Give a dead service's cgroup directory back to the kernel.
+    ///
+    /// Called from the two places a service is recorded as having died, which
+    /// is the only moment the answer can be known: while the leader lives the
+    /// directory is in use by definition, and afterwards it is in use only if
+    /// something the service forked outlived it -- in which case the rmdir
+    /// fails with EBUSY, the directory stays, and that surviving process
+    /// remains visible to `raven-rc status` and reachable by the next `stop`.
+    /// See [`Cgroup::remove`] for why that failure is neither retried nor
+    /// waited on.
+    fn release_cgroup(&self) {
+        if let Some(cgroup) = crate::cgroup::Cgroup::existing(&self.config.name) {
+            cgroup.remove();
         }
     }
 
@@ -897,7 +1140,7 @@ impl Service {
                             self.config.name,
                             timeout
                         );
-                        signal_service_group(pid, Signal::SIGKILL);
+                        self.signal_everything(pid, Signal::SIGKILL);
                         let _ = waitpid(pid, None);
                         self.state = ServiceState::Stopped;
                         self.pid = None;
@@ -975,11 +1218,37 @@ impl Service {
         self.ready_at
     }
 
+    /// When this service first started in this boot, restarts notwithstanding.
+    /// The boot timeline's start column; see the field for why it is not
+    /// [`Service::started_at`].
+    pub fn first_started_at(&self) -> Option<Instant> {
+        self.first_started_at
+    }
+
+    /// When this service was first ready in this boot, restarts
+    /// notwithstanding. `None` for a service that has never been ready, with
+    /// or without a ready path to be ready at -- [`Service::ready_path`] is
+    /// what tells those two apart.
+    pub fn first_ready_at(&self) -> Option<Instant> {
+        self.first_ready_at
+    }
+
+    /// When the supervisor last restarted this service, if it ever has.
+    ///
+    /// A lifetime fact rather than a boot one, which is why it is reported by
+    /// `raven-rc status` and not by `blame`: the count says a service has been
+    /// coming back, and this says whether that was all morning or just now.
+    pub fn last_restart_at(&self) -> Option<Instant> {
+        self.last_restart
+    }
+
     /// Record that the ready path has been seen. Idempotent: the first time
     /// wins, because that is the number a boot timeline wants.
     pub fn mark_ready(&mut self) {
         if self.ready_at.is_none() {
-            self.ready_at = Some(Instant::now());
+            let now = Instant::now();
+            self.ready_at = Some(now);
+            self.first_ready_at.get_or_insert(now);
         }
     }
 
@@ -992,7 +1261,11 @@ impl Service {
         }
         match self.config.ready_path.as_deref() {
             Some(path) if std::path::Path::new(path).exists() => {
-                self.ready_at = Some(Instant::now());
+                let now = Instant::now();
+                self.ready_at = Some(now);
+                // The boot's first ready, which a later restart of this
+                // service must not move: see `Service::first_ready_at`.
+                self.first_ready_at.get_or_insert(now);
                 true
             }
             _ => false,
@@ -1011,12 +1284,8 @@ impl Service {
     /// Kill the service (SIGKILL)
     pub fn kill(&mut self) {
         if let Some(pid) = self.pid {
-            log::debug!(
-                "Sending SIGKILL to {} (process group {})",
-                self.config.name,
-                pid
-            );
-            signal_service_group(pid, Signal::SIGKILL);
+            log::debug!("Sending SIGKILL to {} (leader {})", self.config.name, pid);
+            self.signal_everything(pid, Signal::SIGKILL);
         }
         self.state = ServiceState::Stopped;
         self.pid = None;
@@ -1025,6 +1294,13 @@ impl Service {
 }
 
 /// Signal a service and every child that stayed in its process group.
+///
+/// The fallback for a service with no cgroup -- see
+/// [`Service::signal_everything`], which reaches for this only when the slice
+/// holds nothing for the service. It is the whole of what stopping a service
+/// used to be, and it is kept verbatim because the cases it covers are real:
+/// no cgroup2 on the machine, and a service adopted from a raven-init that
+/// predates the slice.
 ///
 /// Fresh services always have `pgid == pid`, but a service adopted across an
 /// init re-exec may have been started by an older raven-init that did not make

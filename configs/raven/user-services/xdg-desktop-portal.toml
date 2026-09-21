@@ -1,0 +1,70 @@
+# xdg-desktop-portal -- the portal frontend: file dialogs, screenshots,
+# screencasts, "open this link", "remember this permission".
+#
+# Every flatpak, every browser's download dialog and every GTK program started
+# with GTK_USE_PORTAL=1 talks to org.freedesktop.portal.Desktop rather than
+# opening a file chooser of its own. This is the process that owns that name.
+# It implements none of the dialogs itself: it routes each request to a
+# backend, which on this desktop is ravenfilemanager for the file chooser and
+# xdg-desktop-portal-gtk for the rest.
+#
+# It was not supervised by anything. The session bus starts it on demand from
+# /usr/share/dbus-1/services/org.freedesktop.portal.Desktop.service, whose
+# SystemdService= line is ignored here for the obvious reason, and then the
+# bus forgets about it -- activation is a way of starting something once, not
+# a way of keeping it running. What that looked like on a live machine was two
+# portal processes with uptimes that did not match: the gtk backend had been
+# up a day and five hours, the frontend two. One of them had been restarted
+# in the middle of a session and nothing had recorded why, or that it had
+# happened at all. That is the whole case for this file.
+#
+# Ordering is what keeps this from fighting the bus, and it is not an
+# accident. dbus-daemon activates a name only when nobody owns it. The
+# launcher starts the session bus, then backgrounds `raven-init --user`, then
+# execs the compositor, so this service claims org.freedesktop.portal.Desktop
+# before the first application exists to ask for it and activation never
+# fires. Should something ever beat it to the name the supervised copy exits,
+# the backoff picks it up and it takes the name when the activated one goes
+# idle -- noisy in the log, not broken. Masking the .service file is the
+# clean answer and it belongs to whoever owns /usr/share/dbus-1/services,
+# which is not this repository.
+#
+# No ready_path: the portal's readiness is ownership of a D-Bus name, and
+# init's only readiness primitive is a file existing. Inventing a path here
+# would mean a dependant waiting ready_timeout for something that never
+# arrives and then being skipped, which is worse than no answer. Nothing
+# declares `after = ["xdg-desktop-portal"]` and nothing should until the
+# frontend has a file to touch.
+#
+# The backends are deliberately not listed in `after`. This process does not
+# need one at startup -- it reads the .portal files, works out which backend
+# implements what, and activates it on the first request that needs it. An
+# `after` naming a backend that is not installed would take the frontend down
+# with it, and a desktop with no screenshot portal is still a desktop with a
+# working file dialog.
+#
+# ---------------------------------------------------------------------------
+#
+# What is deliberately NOT here, and why it is a line rather than an
+# oversight: dconf-service, at-spi-bus-launcher and at-spi2-registryd stay
+# D-Bus activated. They are on-demand helpers, not session infrastructure.
+# dconf-service starts when something reads or writes the settings database
+# and is expected to be absent the rest of the time; the at-spi pair exists
+# only because a toolkit asked for an accessibility bus, and on a session with
+# no screen reader and no assistive client attached nothing is lost by their
+# not running. Supervising them would invert both properties: every session
+# would carry the accessibility stack whether or not anyone uses it, and a
+# helper whose correct behaviour is to exit when idle would be restarted for
+# doing exactly that -- a restart loop generated entirely by the supervisor's
+# opinion of it. The portals are different because they are long-lived by
+# design and because something being wrong with them is invisible until
+# somebody tries to save a file.
+[[services]]
+name = "xdg-desktop-portal"
+description = "Desktop portal frontend: file dialogs, screenshots, permissions"
+exec = "/usr/lib/xdg-desktop-portal"
+args = []
+after = []
+restart = true
+enabled = true
+critical = false

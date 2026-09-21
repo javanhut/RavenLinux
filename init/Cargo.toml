@@ -10,7 +10,14 @@ license = "MIT"
 # Unix/Linux system calls
 # "user" is what setgroups/setgid/setuid live behind -- see apply_credentials
 # in service.rs, which drops a service to its configured account.
-nix = { version = "0.28", features = ["signal", "process", "mount", "fs", "hostname", "reboot", "term", "ioctl", "user", "poll"] }
+#
+# "inotify" is what readiness.rs waits on: a service's ready path appearing
+# used to be discovered by a timer, which made every number in `raven-rc blame`
+# a measurement of the tick rather than of the service. The feature is a gate
+# over a module nix already ships -- it pulls in no new crate and leaves
+# Cargo.lock untouched, which is worth knowing before anyone tries to remove it
+# on the grounds that a dependency was added.
+nix = { version = "0.28", features = ["signal", "process", "mount", "fs", "hostname", "reboot", "term", "ioctl", "user", "poll", "inotify"] }
 
 # Direct libc access for sync()
 libc = "0.2"

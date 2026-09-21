@@ -1,0 +1,61 @@
+# roostbar -- the status bar, supervised.
+#
+# This lived in /etc/raven/session.d/50-roostbar, a two-line shell script whose
+# entire body was `exec /usr/bin/roostbar`. session.d is fire and forget by
+# design: the launcher starts each file with setsid, sends its stdio to
+# /dev/null and never looks at it again. So a bar that died at nine in the
+# morning was still gone at five, with nothing anywhere recording that it had
+# ever run -- the only evidence was an empty strip along the top of the screen
+# and a session that had to be logged out of to get it back.
+#
+# raven-init --user is the supervisor those programs were missing. It restarts
+# what dies, with a backoff that doubles from one second to a minute so a bar
+# that cannot start does not spin the machine, and it keeps the output in
+# $XDG_STATE_HOME/raven/log/roostbar.log, which is now the first thing to read
+# when the bar is missing rather than the last thing to wish for.
+#
+# Which leaves session.d for what it is actually good at: one-shot session
+# setup. A program that runs, does its work and exits -- loading an xrdb
+# database, importing a keyring, setting a tablet's mapping -- wants no
+# supervisor, because a supervisor's whole job is to notice that it stopped
+# and start it again. Put those in session.d. Put anything that is supposed
+# to still be running an hour later here.
+#
+# Two things about this service are not what they look like, and both are
+# written down rather than discovered.
+#
+# The first is the environment. The launcher backgrounds `raven-init --user`
+# before it execs the compositor (stage-gui.sh does the supervisor at line
+# 3358 and the compositor at 3530), so a session service starts in an
+# environment that has no WAYLAND_DISPLAY in it -- the session.d subshell is
+# the only thing that ever sets that variable, and it sets it locally for
+# itself. A wayland client started from here therefore has to find the
+# compositor socket the way ravencanvasd does, by scanning $XDG_RUNTIME_DIR
+# for wayland-* and retrying the connect. Until RoostBar does that, its first
+# few starts fail, the backoff absorbs them, and the bar appears a handful of
+# seconds into the session instead of instantly. That is a worse first second
+# than session.d gave and a far better hour two. `after = []` cannot help:
+# init waits on a DEPENDENCY's ready_path, and no service owns the compositor
+# socket to hang one off.
+#
+# The second is ready_path, which names a file that nothing creates yet. It is
+# the contract, not an observation: RoostBar is asked to touch this path once
+# its layer surface is mapped, and the directory is made here so there is
+# somewhere to touch. ready_path is read by a service's DEPENDANTS and never
+# as its own precondition, so an unfulfilled one costs this service nothing --
+# but it would cost a dependant everything, because init waits ready_timeout
+# for the file and then skips whatever declared `after = ["roostbar"]`
+# entirely. Nothing declares it today. Nothing may declare it until RoostBar
+# touches the file.
+[[services]]
+name = "roostbar"
+description = "Status bar"
+exec = "/usr/bin/roostbar"
+args = []
+after = []
+runtime_dirs = ["${XDG_RUNTIME_DIR}/roostbar"]
+ready_path = "${XDG_RUNTIME_DIR}/roostbar/ready"
+ready_timeout = 20
+restart = true
+enabled = true
+critical = false

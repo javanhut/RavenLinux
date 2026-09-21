@@ -4,6 +4,28 @@
 # Session-scoped in BlueZ's own units, but there is no systemd --user here, and
 # a system-wide instance is what makes the transfer land somewhere the desktop
 # can see.
+#
+# Deliberately NOT marked `type = "oneshot"`, although `raven-rc list` shows
+# it `exited` beside udev and network, which are. It is not a one-shot and it
+# has not finished: it is in a crash loop, and the roster's shared word for
+# "done" and "dead" is what makes the two look alike. On the development
+# machine the service record read `exit status 1`, `restarts 1663`, `next
+# restart in 55s` -- the backoff at its ceiling, a minute apart, since boot.
+# /var/log/raven/obexd.log says why, twice per attempt:
+#
+#   Using X11 for dbus-daemon autolaunch was disabled at compile time, set
+#   your DBUS_SESSION_BUS_ADDRESS instead
+#   obexd[9786]: manager_init failed
+#
+# obexd binds org.bluez.obex on the SESSION bus. A service started by PID 1
+# has no session bus and cannot be given one, because there is no session yet
+# when it starts and there may be several later. Marking it a one-shot would
+# make the loop look intentional in the roster, which is the opposite of what
+# the type is for; the honest fix is to move it to user-services, where every
+# instance has exactly one session bus and dies with its session, and that is
+# a change with a user-visible half (where a received file lands) that does
+# not belong in the same pass as marking the true one-shots. Left exactly as
+# it was, and written down so the next person does not mark it and move on.
 [[services]]
 name = "obexd"
 description = "Bluetooth file transfer"

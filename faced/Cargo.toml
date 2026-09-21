@@ -1,0 +1,46 @@
+[package]
+name = "raven-faced"
+version = "0.1.0"
+edition = "2021"
+authors = ["RavenLinux Team"]
+description = "RavenLinux face unlock: the one process that touches the camera"
+license = "MIT"
+
+[[bin]]
+name = "raven-faced"
+path = "src/main.rs"
+
+[dependencies]
+# V4L2 ioctls and mmap'd capture buffers. There is no crate between this and
+# the kernel for the camera, on purpose and for the reason RavenCamera gives:
+# the ioctl surface a webcam needs is a dozen structs that have not changed in
+# a decade, and a binding crate would be a second thing to audit in a process
+# that decides who may log in. SO_PEERCRED comes from here too.
+libc = "0.2"
+
+# ONNX inference, in Rust, with no C++ runtime and no GPU. A login screen is
+# not a throughput problem -- one face, a handful of frames -- and what matters
+# instead is that the thing deciding who gets in is a dependency somebody can
+# read. `ort` would be faster and would link the ONNX Runtime and its FFI into
+# this process.
+tract-onnx = "0.23"
+
+# Webcams deliver MJPEG; this is the decoder, pure Rust and nothing else.
+zune-jpeg = "0.4"
+
+# /etc/raven/face.toml. The same pair init parses its own config with.
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1.0"
+
+[profile.release]
+# Unlike init, this one is not optimised for size: the whole cost of a face
+# unlock is the two models' forward passes, and an unoptimised build of them is
+# slow enough to be felt by somebody standing at the screen.
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

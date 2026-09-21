@@ -68,6 +68,62 @@ manage_wakeup = true
 # energy-performance preference and the preset goes there; older AMD and
 # anything on acpi-cpufreq gets the schedutil governor. raven-powerd works out
 # which it has.
+#
+# What each preset actually writes, which until now was recorded only in
+# init/src/profile.rs and therefore only legible to somebody reading Rust:
+#
+#                         performance      balanced              power-saver
+#   ---------------------------------------------------------------------------
+#   governor, with EPP    performance      powersave             powersave
+#   EPP                   performance      balance_performance   balance_power
+#   governor, no EPP      performance      schedutil             schedutil
+#   platform_profile      performance      balanced              low-power
+#   PCIe ASPM policy      firmware default firmware default      powersave
+#   snd_hda_intel idle    0 (stay awake)   0 (stay awake)        10 seconds
+#
+# Reading the table:
+#
+# `governor, with EPP` looks wrong and is not. On a CPU with an
+# energy-performance preference the firmware chooses the frequency and
+# `powersave` is the governor that lets it -- it is the name of "hand the
+# decision to the hardware", not the name of "go slowly". The preference beside
+# it is the actual policy. On performance the governor is pinned instead,
+# because there the point is to stop anything below from choosing at all.
+#
+# `governor, no EPP` is the fallback for older AMD and acpi-cpufreq. Each cell
+# is the first governor the kernel offers from an ordered list, so a kernel
+# without schedutil gets ondemand, then conservative, then -- for balanced and
+# power-saver only, and only when nothing that scales exists -- performance. A
+# pinned top clock is at least honest. `userspace` is never chosen under any
+# preset: it is the same pinned clock waiting for a daemon that is not coming.
+#
+# `platform_profile` is the vendor's own switch -- the file
+# /sys/firmware/acpi/platform_profile -- and it is where the fans and the
+# power limits live. Only a value the firmware
+# lists is written, so each preset has an ordered preference and takes the
+# first match: performance falls back to balanced-performance and then to
+# balanced; balanced falls back to balanced-performance; power-saver tries
+# low-power, then the name Lenovo and others use for it, `quiet`, then
+# balanced. A machine whose firmware offers none of them keeps whatever it
+# booted with, and the governor half above still applies.
+#
+# The last two rows are power-saver's alone. Letting idle PCIe links drop to L1
+# saves real power on battery and costs a latency nobody notices; keeping the
+# HDA codec awake on mains avoids the pop some codecs make coming back, which
+# is a thing you hear every time rather than a number on a graph.
+#
+# None of this is symmetrical with what the preset does NOT do, which is worth
+# repeating because `performance` sounds like it should: it does not raise a
+# power limit past the firmware's, unlock turbo that firmware has capped, or
+# change a thermal target. It stops the machine idling down between bursts and
+# asks the platform for its performance mode. On a laptop that is largely a
+# decision about fan noise and skin temperature.
+#
+# `ac = "performance"` is a valid value today and always has been -- the preset
+# exists in raven-powerd, it is only not the shipped default. If you change
+# what ships here, note that init/src/profile.rs has a test asserting the
+# shipped file's ac and battery presets by name, and it fails the build on the
+# next line rather than at the next boot.
 [profile]
 # Set to false to leave the governor alone, if you run TLP or something else
 # for this.

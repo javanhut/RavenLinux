@@ -8,10 +8,15 @@
 //! interesting half can be tested without PID 1.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 #[path = "../src/config.rs"]
 mod config;
+// service.rs puts every service into a cgroup and applies its rlimits through
+// `crate::cgroup`, so that module has to exist under this crate root too.
+#[path = "../src/cgroup.rs"]
+mod cgroup;
 // service.rs resolves a `user =` account through `crate::user`, so that module
 // has to exist under this test binary's crate root too.
 #[path = "../src/service.rs"]
@@ -32,8 +37,33 @@ mod timeline;
 // The `reexec` verb checks its target through `crate::reexec` before replying.
 #[path = "../src/reexec.rs"]
 mod reexec;
+// `start` waits for a dependency's ready path through `crate::readiness`, which
+// arms an inotify watch instead of sleeping on a timer.
+#[path = "../src/readiness.rs"]
+mod readiness;
 #[path = "../src/control.rs"]
 mod control;
+
+/// Serialises the tests that point `$RAVEN_CGROUP_ROOT` at a tree of their own.
+///
+/// An environment variable is process-global and `cargo test` runs these in
+/// threads of one process, so two tests each setting it to their own temporary
+/// directory is two tests reading each other's cgroup trees -- and the one
+/// that loses fails somewhere unrelated, with a message about a missing file.
+/// The module's own unit tests take `ensure_slice_at` and `Cgroup::*_in`
+/// instead and need none of this; these two cannot, because what they are
+/// testing is the path `Service::start` and `control::dispatch` take by
+/// themselves, and that path reads the variable.
+static CGROUP_ROOT_ENV: Mutex<()> = Mutex::new(());
+
+/// The same treatment for `$RAVEN_INIT_EXE`, and for the same reason.
+///
+/// Without it these two tests failed together about one run in six: one sets
+/// the variable to a path that does not exist and removes it two lines later,
+/// and the other asks what `reexec` would target in between, gets the missing
+/// path and reports a refusal where it expected a plan. The failure names the
+/// wrong test and looks like a broken `reexec`.
+static INIT_EXE_ENV: Mutex<()> = Mutex::new(());
 
 use config::{InitConfig, ServiceConfig, SystemConfig};
 use control::Action;
@@ -47,19 +77,7 @@ fn sleeper(name: &str) -> ServiceConfig {
         exec: "/bin/sleep".to_string(),
         args: vec!["300".to_string()],
         restart: true,
-        enabled: true,
-        critical: false,
-        environment: HashMap::new(),
-        pre_exec: Vec::new(),
-        tty: None,
-        user: None,
-        runtime_dirs: Vec::new(),
-        after: Vec::new(),
-        ready_path: None,
-        ready_timeout: 5,
-        stop_exec: None,
-        stop_args: Vec::new(),
-        stop_timeout: 5,
+        ..ServiceConfig::default()
     }
 }
 
@@ -1002,20 +1020,8 @@ fn runtime_dirs_are_created_and_output_goes_to_the_log() {
             "-c".to_string(),
             "echo to-stdout; echo to-stderr >&2".to_string(),
         ],
-        restart: false,
-        enabled: true,
-        critical: false,
-        environment: HashMap::new(),
-        pre_exec: Vec::new(),
-        tty: None,
-        user: None,
         runtime_dirs: vec![rundir.display().to_string()],
-        after: Vec::new(),
-        ready_path: None,
-        ready_timeout: 5,
-        stop_exec: None,
-        stop_args: Vec::new(),
-        stop_timeout: 5,
+        ..ServiceConfig::default()
     };
 
     let mut svc = Service::start(&cfg_svc).expect("starts");
@@ -1035,6 +1041,241 @@ fn runtime_dirs_are_created_and_output_goes_to_the_log() {
         "stderr must reach the log too: {text}"
     );
 
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Resource control end to end, which is the only way to test it: everything
+/// interesting happens in a child process between `fork` and `exec`, where
+/// nothing can be asserted and nothing can be logged, so the proof has to be
+/// what the exec'd program sees.
+///
+/// The cgroup root is a temporary directory rather than /sys/fs/cgroup --
+/// `ensure_slice` accepts any directory holding a `cgroup.controllers` file,
+/// and the kernel's own semantics are not this test's business. What is this
+/// test's business is that init writes the right number into the right file,
+/// that the child joins its cgroup before it execs, and that an rlimit and a
+/// nice value survive into the program: all four have silent failure modes
+/// where the service starts, looks perfectly healthy, and has none of the
+/// limits its definition asked for.
+#[test]
+fn a_service_is_started_inside_its_cgroup_and_under_its_limits() {
+    let _env = CGROUP_ROOT_ENV
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = std::env::temp_dir().join(format!("raven-svc-cgroup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let cgroup_root = root.join("cgroup");
+    let out = root.join("seen-by-the-service");
+
+    std::fs::create_dir_all(&cgroup_root).expect("temp cgroup root");
+    std::fs::write(
+        cgroup_root.join("cgroup.controllers"),
+        "cpu io memory pids\n",
+    )
+    .expect("the probe cgroup2 is recognised by");
+
+    // The kernel creates a cgroup's attribute files when the directory is
+    // made; a temporary directory does not. `cgroup.procs` has to exist
+    // beforehand because the child opens it without O_CREAT -- which is
+    // exactly right against the real filesystem, where creating a file in a
+    // cgroup directory is not a thing that can happen.
+    //
+    // $RAVEN_CGROUP_ROOT is what points the module at this tree rather than at
+    // the machine's, and it is set before `ensure_slice` so that the entry
+    // point init itself calls is the one under test here.
+    std::env::set_var("RAVEN_CGROUP_ROOT", &cgroup_root);
+    assert!(cgroup::ensure_slice(), "a tree with cgroup.controllers is usable");
+    let svc_cgroup = cgroup_root.join(cgroup::SLICE_NAME).join("limited");
+    std::fs::create_dir_all(&svc_cgroup).expect("service cgroup");
+    std::fs::write(svc_cgroup.join("cgroup.procs"), "").expect("procs file");
+
+    // Field 19 of /proc/self/stat is the nice value. The shell reports the
+    // soft RLIMIT_NOFILE it inherited; 512 is below every default this can
+    // run under, so the call is a lowering and needs no privilege.
+    let cfg_svc = ServiceConfig {
+        name: "limited".to_string(),
+        exec: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            format!(
+                "ulimit -n > {out}; cut -d' ' -f19 /proc/self/stat >> {out}",
+                out = out.display()
+            ),
+        ],
+        nice: 5,
+        memory_max: Some("256M".to_string()),
+        cpu_weight: Some(200),
+        limits: config::ResourceLimits {
+            nofile: Some(512),
+            ..Default::default()
+        },
+        ..ServiceConfig::default()
+    };
+
+    let mut svc = Service::start(&cfg_svc).expect("starts");
+    svc.wait_for_exit(Duration::from_secs(5));
+    std::env::remove_var("RAVEN_CGROUP_ROOT");
+
+    let attr = |file: &str| {
+        std::fs::read_to_string(svc_cgroup.join(file))
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    assert_eq!(attr("memory.max"), (256 * 1024 * 1024).to_string());
+    assert_eq!(attr("cpu.weight"), "200");
+    // "0" is how a process names itself to cgroup.procs; that the write
+    // happened at all is what says the service did not exec outside its
+    // cgroup, which is the failure nobody can see from the outside.
+    assert_eq!(
+        attr("cgroup.procs"),
+        "0",
+        "the service must join its cgroup before it execs"
+    );
+
+    let seen = std::fs::read_to_string(&out).expect("the service wrote what it saw");
+    let mut lines = seen.lines();
+    assert_eq!(lines.next(), Some("512"), "RLIMIT_NOFILE: {seen}");
+    assert_eq!(lines.next(), Some("5"), "nice value: {seen}");
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Stopping a service must reach the processes that left its process group,
+/// and the only way to prove which of the two paths did the stopping is to
+/// make them disagree: the cgroup here lists a process that is *not* in the
+/// service's process group, and nothing else is listed at all. A stop that
+/// went out to the process group would kill the leader and leave that process
+/// running, which is precisely the bluetoothd failure the slice was built for.
+#[test]
+fn stopping_a_service_signals_its_cgroup_and_falls_back_to_the_group() {
+    let _env = CGROUP_ROOT_ENV
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let root = std::env::temp_dir().join(format!("raven-svc-stop-cg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let cgroup_root = root.join("cgroup");
+    std::fs::create_dir_all(&cgroup_root).expect("temp cgroup root");
+    std::fs::write(cgroup_root.join("cgroup.controllers"), "cpu io memory pids\n")
+        .expect("the probe cgroup2 is recognised by");
+    let svc_cgroup = cgroup_root.join(cgroup::SLICE_NAME).join("escapee");
+    std::fs::create_dir_all(&svc_cgroup).expect("service cgroup");
+    std::fs::write(svc_cgroup.join("cgroup.procs"), "").expect("procs file");
+
+    std::env::set_var("RAVEN_CGROUP_ROOT", &cgroup_root);
+
+    // The stand-in for a daemon that called `setsid` and walked out of the
+    // group init put it in: started separately, so it shares neither the
+    // service's process group nor its session, and known to the supervisor
+    // only through the cgroup.
+    let mut escaped = std::process::Command::new("/bin/sleep")
+        .arg("300")
+        .spawn()
+        .expect("a process outside the service's group");
+    let escaped_pid = escaped.id() as i32;
+
+    let cfg_svc = sleeper("escapee");
+    let mut cfg = config_with(vec![cfg_svc.clone()]);
+    let mut services = HashMap::new();
+    let svc = Service::start(&cfg_svc).expect("starts");
+    let leader = svc.pid().expect("leader pid").as_raw();
+    services.insert("escapee".to_string(), svc);
+
+    // Written after the start, because joining the cgroup is what the child
+    // does to this file and the service's own "0" would otherwise be here.
+    std::fs::write(svc_cgroup.join("cgroup.procs"), format!("{escaped_pid}\n"))
+        .expect("procs file");
+
+    let (reply, _) = control::dispatch("stop escapee", &mut services, &mut cfg);
+    assert!(reply.contains("Stopping"), "{reply}");
+    assert!(
+        wait_gone(escaped_pid, Duration::from_secs(5)),
+        "the stop must reach a process that is only in the cgroup"
+    );
+    escaped.wait().ok();
+    assert!(
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(leader), None).is_ok(),
+        "this stop went to the cgroup, so it cannot also have gone to the process group"
+    );
+
+    // With the cgroup emptied -- a machine with no cgroup2, or a service
+    // adopted from a raven-init that predates the slice -- the same stop has
+    // to go back to the process group, which is what the fallback is for.
+    std::fs::write(svc_cgroup.join("cgroup.procs"), "").expect("procs file");
+    services.get_mut("escapee").expect("still there").stop();
+    assert!(
+        wait_gone(leader, Duration::from_secs(5)),
+        "with nothing in the cgroup, the stop falls back to the process group"
+    );
+
+    std::env::remove_var("RAVEN_CGROUP_ROOT");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// `raven-rc status` has to answer "what is this service using", and the
+/// published copy under /run has to not answer it: the publisher writes a file
+/// whenever the text it renders differs from last time, so a memory counter in
+/// that text is a write to /run every time a daemon touches a page. Both
+/// halves are asserted here because the churn only shows up in production, as
+/// a machine that writes to /run several times a second while doing nothing.
+#[test]
+fn status_reports_what_a_service_is_using_but_the_published_copy_does_not() {
+    let _env = CGROUP_ROOT_ENV
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let root = std::env::temp_dir().join(format!("raven-svc-status-cg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let cgroup_root = root.join("cgroup");
+    let published = root.join("run");
+    std::fs::create_dir_all(&cgroup_root).expect("temp cgroup root");
+    std::fs::write(cgroup_root.join("cgroup.controllers"), "cpu io memory pids\n")
+        .expect("the probe cgroup2 is recognised by");
+    let svc_cgroup = cgroup_root.join(cgroup::SLICE_NAME).join("measured");
+    std::fs::create_dir_all(&svc_cgroup).expect("service cgroup");
+    std::fs::write(svc_cgroup.join("cgroup.procs"), "").expect("procs file");
+    std::fs::write(svc_cgroup.join("memory.current"), "149118976\n").expect("memory.current");
+    std::fs::write(svc_cgroup.join("pids.current"), "4\n").expect("pids.current");
+    std::fs::write(
+        svc_cgroup.join("cpu.stat"),
+        "usage_usec 3104000\nuser_usec 2900000\nsystem_usec 204000\n",
+    )
+    .expect("cpu.stat");
+
+    std::env::set_var("RAVEN_CGROUP_ROOT", &cgroup_root);
+
+    let cfg_svc = sleeper("measured");
+    let mut cfg = config_with(vec![cfg_svc.clone()]);
+    let mut services = HashMap::new();
+    services.insert(
+        "measured".to_string(),
+        Service::start(&cfg_svc).expect("starts"),
+    );
+
+    let (reply, _) = control::dispatch("status measured", &mut services, &mut cfg);
+    assert!(reply.contains("memory       142.2M"), "{reply}");
+    assert!(
+        reply.contains("cpu          3.104s (2.900s user, 0.204s system)"),
+        "{reply}"
+    );
+    assert!(reply.contains("processes    4"), "{reply}");
+    // Tracked since the supervisor was written and shown nowhere until now.
+    assert!(reply.contains("restarts     0"), "{reply}");
+
+    let mut publisher = control::StatusPublisher::at(&published);
+    publisher.publish(&services, &cfg);
+    let one = std::fs::read_to_string(published.join("services").join("measured"))
+        .expect("service published");
+    assert!(one.contains("state        running"), "{one}");
+    assert!(one.contains("restarts     0"), "{one}");
+    assert!(
+        !one.contains("memory") && !one.contains("cpu"),
+        "the published copy must carry nothing that moves by itself: {one}"
+    );
+
+    services.get_mut("measured").expect("still there").kill();
+    std::env::remove_var("RAVEN_CGROUP_ROOT");
     std::fs::remove_dir_all(&root).ok();
 }
 
@@ -1544,6 +1785,9 @@ fn a_service_without_a_user_still_starts() {
 fn reexec_is_an_action_that_names_its_target() {
     let mut services = HashMap::new();
     let mut cfg = config_with(Vec::new());
+    let _env = INIT_EXE_ENV
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (reply, action) = control::dispatch("reexec", &mut services, &mut cfg);
     assert_eq!(action, Action::Reexec, "{reply}");
     assert!(reply.starts_with("Re-executing /"), "{reply}");
@@ -1555,6 +1799,9 @@ fn reexec_is_an_action_that_names_its_target() {
 fn reexec_refuses_a_missing_binary() {
     let mut services = HashMap::new();
     let mut cfg = config_with(Vec::new());
+    let _env = INIT_EXE_ENV
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     std::env::set_var("RAVEN_INIT_EXE", "/nonexistent/raven-init");
     let (reply, action) = control::dispatch("reexec", &mut services, &mut cfg);
     std::env::remove_var("RAVEN_INIT_EXE");
@@ -1789,6 +2036,124 @@ fn blame_reports_start_and_ready_times_slowest_first() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `raven-rc blame` reported powerd, controlsd, timed and fprintd all ready at
+/// exactly 6.789s, each "taking" exactly 1.120s. None of them was slow and none
+/// of them had anything to do with the others: readiness was noticed when the
+/// main loop next looked, all four were looked at inside one `for` loop, and
+/// the loop's idle sleep is two seconds. Every digit after the decimal point
+/// was a property of the tick.
+///
+/// This drives the three pieces main_loop_at now wires together -- arm the
+/// watches, sleep in poll, look again -- and asserts the sleep ends when the
+/// file appears rather than when the timer runs out.
+#[test]
+fn a_ready_file_appearing_wakes_the_supervisor_rather_than_a_tick() {
+    use std::os::fd::AsFd;
+
+    let dir = format!(
+        "{}/raven-init-test-watch-{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    let ready_file = format!("{dir}/ready.sock");
+
+    let mut cfg_svc = sleeper("watched-ready");
+    cfg_svc.ready_path = Some(ready_file.clone());
+    let mut services = HashMap::new();
+    services.insert(
+        "watched-ready".to_string(),
+        Service::start(&cfg_svc).expect("starts"),
+    );
+
+    let mut watcher = readiness::Watcher::new().expect("inotify");
+
+    // Exactly what the main loop does at the top of each pass, in the order it
+    // does it: arm every directory still being waited on, then look. Nothing
+    // is there yet, so nothing is ready.
+    assert!(
+        watcher.arm(
+            services
+                .values()
+                .filter(|svc| svc.is_running() && svc.ready_at().is_none())
+                .filter_map(|svc| svc.ready_path()),
+        ),
+        "the directory exists, so it must be watchable"
+    );
+    control::observe_readiness(&mut services);
+    assert!(services["watched-ready"].ready_at().is_none());
+
+    // With the watch armed, waiting for a ready path is no longer time-driven
+    // work, so the loop is allowed to sleep for its full idle interval instead
+    // of waking ten times a second to stat a file.
+    assert!(
+        !control::wants_quick_tick(&services, true),
+        "a watched ready path must not hold the loop at the busy tick"
+    );
+    assert!(
+        control::wants_quick_tick(&services, false),
+        "an unwatchable ready path must still keep the old timer"
+    );
+
+    // The daemon creates its socket while the supervisor is asleep.
+    let writer = ready_file.clone();
+    let hand = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(60));
+        std::fs::write(&writer, b"").expect("ready file");
+    });
+
+    let began = Instant::now();
+    {
+        use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+        // Two seconds is the loop's IDLE interval. Before the watch existed
+        // this is how long the four services above waited to be noticed.
+        let mut fds = [PollFd::new(watcher.as_fd(), PollFlags::POLLIN)];
+        poll(&mut fds, PollTimeout::from(2000u16)).expect("poll");
+    }
+    let woke = began.elapsed();
+    watcher.drain();
+    control::observe_readiness(&mut services);
+    hand.join().expect("writer");
+
+    assert!(
+        woke >= Duration::from_millis(50),
+        "woke before the file was written: {woke:?}"
+    );
+    assert!(
+        woke < Duration::from_millis(1500),
+        "the poll waited out its timeout instead of being woken: {woke:?}"
+    );
+
+    let ready_at = services["watched-ready"]
+        .ready_at()
+        .expect("the event must have produced a ready time");
+    assert!(
+        ready_at.elapsed() < Duration::from_millis(500),
+        "the ready time must be stamped when the event arrived, not later"
+    );
+    let started = services["watched-ready"].started_at().expect("started");
+    let took = ready_at.duration_since(started);
+    assert!(
+        took >= Duration::from_millis(50) && took < Duration::from_millis(1500),
+        "took should be about the write, not about a tick: {took:?}"
+    );
+
+    // Once the service is ready nothing is waiting on that directory, so the
+    // watch goes away and a settled machine is woken by nothing.
+    assert!(watcher.arm(
+        services
+            .values()
+            .filter(|svc| svc.is_running() && svc.ready_at().is_none())
+            .filter_map(|svc| svc.ready_path()),
+    ));
+
+    for svc in services.values_mut() {
+        svc.kill();
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn ready_time_survives_a_snapshot() {
     let dir = format!(
@@ -1818,4 +2183,449 @@ fn ready_time_survives_a_snapshot() {
     assert!(adopted.ready_at().is_some(), "ready time lost across adopt");
     svc.kill();
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The bug `blame` was reported for, in miniature.
+///
+/// On the live machine the table was headed "seconds since the kernel
+/// started", its milestones ended at seven, and obexd's row said 97618 --
+/// because obexd had restarted after a resume, and the column was reading the
+/// current run. cawd said 2751 for the same reason, and the footer folded them
+/// both into `span 97613.069s`, which is the machine's uptime with a boot
+/// time's name on it.
+///
+/// A restart must move nothing in this table: the boot happened when it
+/// happened.
+#[test]
+fn blame_reports_the_first_start_not_the_latest_restart() {
+    let dir = format!(
+        "{}/raven-init-test-blame-first-{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    let ready_file = format!("{dir}/ready.sock");
+
+    let mut cfg_svc = sleeper("blame-restarted");
+    cfg_svc.ready_path = Some(ready_file.clone());
+    let mut cfg = config_with(vec![cfg_svc.clone()]);
+    let mut services = HashMap::new();
+    services.insert(
+        "blame-restarted".to_string(),
+        Service::start(&cfg_svc).expect("starts"),
+    );
+
+    // It comes up and becomes ready, as it would at boot.
+    std::fs::write(&ready_file, b"").unwrap();
+    control::observe_readiness(&mut services);
+    let first_started = services["blame-restarted"]
+        .first_started_at()
+        .expect("a first start");
+    let first_ready = services["blame-restarted"]
+        .first_ready_at()
+        .expect("a first ready");
+
+    // Much later -- here, 80ms later -- it dies and the supervisor brings it
+    // back. On the machine this was a suspend and a day.
+    std::thread::sleep(Duration::from_millis(80));
+    let svc = services.get_mut("blame-restarted").unwrap();
+    let pid = svc.pid().expect("pid").as_raw();
+    svc.kill();
+    assert!(wait_gone(pid, Duration::from_secs(5)));
+    svc.restart().expect("comes back");
+
+    // The current run moved; the boot did not.
+    assert!(
+        svc.started_at().expect("a current run") > first_started,
+        "the restart must move the current run's start"
+    );
+    assert_eq!(svc.first_started_at(), Some(first_started));
+    assert_eq!(svc.first_ready_at(), Some(first_ready));
+    assert!(
+        svc.ready_at().is_none(),
+        "the new run has not reached its ready path yet"
+    );
+
+    let (reply, _) = control::dispatch("blame", &mut services, &mut cfg);
+    let row = reply
+        .lines()
+        .find(|l| l.starts_with("blame-restarted"))
+        .expect("a row for the restarted service")
+        .to_string();
+    let cols: Vec<&str> = row.split_whitespace().collect();
+    let started: f64 = cols[1].parse().expect("started is a number");
+    let ready: f64 = cols[2].parse().expect("ready is a number");
+    assert!(
+        (started - timeline::instant_secs(first_started)).abs() < 0.002,
+        "blame must report the first start: {row}"
+    );
+    assert!(
+        (ready - timeline::instant_secs(first_ready)).abs() < 0.002,
+        "blame must report the first ready: {row}"
+    );
+    assert!(
+        !row.contains("not ready yet"),
+        "a service that was ready at boot is not 'not ready yet': {row}"
+    );
+
+    // And the footer measures the boot, not the afternoon.
+    let footer = reply
+        .lines()
+        .find(|l| l.starts_with("services:"))
+        .expect("a summary");
+    let span: f64 = footer
+        .rsplit_once("span ")
+        .and_then(|(_, s)| s.trim_end_matches("s").parse().ok())
+        .expect("a span");
+    assert!(
+        span < 1.0,
+        "the span is the boot's, and this one took milliseconds: {footer}"
+    );
+
+    for svc in services.values_mut() {
+        svc.kill();
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// "This service has nothing to wait for" and "this service has something to
+/// wait for and it has never happened" are different machines to be standing
+/// in front of, and used to print the same bare dash.
+#[test]
+fn a_service_that_was_never_ready_reads_differently_from_one_with_no_ready_path() {
+    let dir = format!(
+        "{}/raven-init-test-blame-never-{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut waiting = sleeper("never-ready");
+    waiting.ready_path = Some(format!("{dir}/never.sock"));
+    let plain = sleeper("no-ready-path");
+    let mut cfg = config_with(vec![waiting.clone(), plain.clone()]);
+
+    let mut services = HashMap::new();
+    services.insert(
+        "never-ready".to_string(),
+        Service::start(&waiting).expect("starts"),
+    );
+    services.insert(
+        "no-ready-path".to_string(),
+        Service::start(&plain).expect("starts"),
+    );
+    control::observe_readiness(&mut services);
+
+    let row_of = |reply: &str, name: &str| -> String {
+        reply
+            .lines()
+            .find(|l| l.starts_with(name))
+            .unwrap_or_else(|| panic!("a row for {name}"))
+            .to_string()
+    };
+
+    let (reply, _) = control::dispatch("blame", &mut services, &mut cfg);
+    let waiting_row = row_of(&reply, "never-ready");
+    let plain_row = row_of(&reply, "no-ready-path");
+    assert_eq!(
+        waiting_row.split_whitespace().nth(2),
+        Some("waiting"),
+        "{waiting_row}"
+    );
+    assert!(waiting_row.contains("not ready yet"), "{waiting_row}");
+    assert_eq!(
+        plain_row.split_whitespace().nth(2),
+        Some("-"),
+        "{plain_row}"
+    );
+    assert!(plain_row.contains("no ready path"), "{plain_row}");
+
+    // Nothing became ready, so there is no span to report -- and the start
+    // times must not be folded in as though there were one.
+    let footer = reply
+        .lines()
+        .find(|l| l.starts_with("services:"))
+        .expect("a summary");
+    assert!(footer.contains("nothing ready yet"), "{footer}");
+    assert!(!footer.contains("span"), "{footer}");
+
+    // It dies without ever having been ready, which is a third thing again.
+    services.get_mut("never-ready").unwrap().kill();
+    let (reply, _) = control::dispatch("blame", &mut services, &mut cfg);
+    let waiting_row = row_of(&reply, "never-ready");
+    assert_eq!(
+        waiting_row.split_whitespace().nth(2),
+        Some("never"),
+        "{waiting_row}"
+    );
+    assert!(waiting_row.contains("exited before ready"), "{waiting_row}");
+
+    for svc in services.values_mut() {
+        svc.kill();
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A daemon somebody starts by hand at lunchtime is not part of how long the
+/// machine took to boot. It belongs in the table -- it is running, and `blame`
+/// lists what is running -- but folding it into the summary is how `span` came
+/// to be reported in five figures.
+///
+/// The boundary is passed in rather than marked, because the milestone list is
+/// process-wide and `cargo test` runs these in threads of one process.
+#[test]
+fn a_service_started_after_boot_is_marked_and_left_out_of_the_span() {
+    let dir = format!(
+        "{}/raven-init-test-blame-late-{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut early = sleeper("booted-with-the-machine");
+    early.ready_path = Some(format!("{dir}/early.sock"));
+    let mut late = sleeper("started-at-lunchtime");
+    late.ready_path = Some(format!("{dir}/late.sock"));
+    let cfg = config_with(vec![early.clone(), late.clone()]);
+
+    let mut services = HashMap::new();
+    services.insert(
+        "booted-with-the-machine".to_string(),
+        Service::start(&early).expect("starts"),
+    );
+    std::fs::write(format!("{dir}/early.sock"), b"").unwrap();
+    control::observe_readiness(&mut services);
+
+    // Boot ends here -- a clear 20ms after the early service became ready,
+    // because the footer prints to three decimal places and a boundary drawn
+    // within half a millisecond of a time it is compared against is a test
+    // that fails on rounding a run in ten.
+    std::thread::sleep(Duration::from_millis(20));
+    let boot_done = timeline::monotonic_secs();
+    std::thread::sleep(Duration::from_millis(40));
+
+    services.insert(
+        "started-at-lunchtime".to_string(),
+        Service::start(&late).expect("starts"),
+    );
+    std::fs::write(format!("{dir}/late.sock"), b"").unwrap();
+    control::observe_readiness(&mut services);
+
+    let text = control::blame_services(&services, &cfg, Some(boot_done));
+    let late_row = text
+        .lines()
+        .find(|l| l.starts_with("started-at-lunchtime"))
+        .expect("the late service is still listed")
+        .to_string();
+    assert!(late_row.contains("started after boot"), "{late_row}");
+    let early_row = text
+        .lines()
+        .find(|l| l.starts_with("booted-with-the-machine"))
+        .expect("a row")
+        .to_string();
+    assert!(!early_row.contains("started after boot"), "{early_row}");
+
+    let footer = text
+        .lines()
+        .find(|l| l.starts_with("services:"))
+        .expect("a summary");
+    let last_ready: f64 = footer
+        .rsplit_once("last ready ")
+        .and_then(|(_, s)| s.split(',').next())
+        .and_then(|s| s.trim().parse().ok())
+        .expect("a last ready");
+    assert!(
+        last_ready < boot_done,
+        "the span must end where boot ended: {footer}"
+    );
+
+    // With no boundary -- an init that never reached its main loop, or a test
+    // driving this by hand -- everything counts, because there is nothing to
+    // say otherwise.
+    let text = control::blame_services(&services, &cfg, None);
+    assert!(
+        !text.contains("started after boot"),
+        "nothing can be after a boundary that does not exist: {text}"
+    );
+
+    for svc in services.values_mut() {
+        svc.kill();
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `blame` prints three decimal places, and across a re-exec every one of them
+/// used to be invented: the hand-off carried whole seconds, written with
+/// `as_secs()`, which floors. A service that started at 3.998 came back as one
+/// that started at 3.000, and `took` was the difference of two such numbers.
+#[test]
+fn a_reexec_keeps_the_milliseconds_blame_prints() {
+    let dir = format!(
+        "{}/raven-init-test-precision-{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    let ready_file = format!("{dir}/ready.sock");
+
+    let mut cfg_svc = sleeper("precise");
+    cfg_svc.ready_path = Some(ready_file.clone());
+    let mut svc = Service::start(&cfg_svc).expect("starts");
+    std::fs::write(&ready_file, b"").unwrap();
+    assert!(svc.note_ready_if_present());
+
+    let started = timeline::instant_secs(svc.first_started_at().expect("a first start"));
+    let ready = timeline::instant_secs(svc.first_ready_at().expect("a first ready"));
+
+    // The hand-off is written some time after the service started, which is
+    // where the old format lost a second of the fraction.
+    std::thread::sleep(Duration::from_millis(120));
+    let text = reexec::Handoff::new(vec![svc.snapshot()])
+        .to_toml()
+        .expect("serialises");
+    let snapshot = reexec::Handoff::from_toml(&text)
+        .expect("parses")
+        .services
+        .into_iter()
+        .next()
+        .expect("one service");
+    assert!(
+        snapshot.started_mono.is_some(),
+        "an absolute start is carried"
+    );
+    assert!(snapshot.first_ready_mono.is_some(), "so is the first ready");
+
+    let adopted = Service::adopt(snapshot, cfg_svc);
+    let adopted_started =
+        timeline::instant_secs(adopted.first_started_at().expect("first start survives"));
+    let adopted_ready =
+        timeline::instant_secs(adopted.first_ready_at().expect("first ready survives"));
+    assert!(
+        (adopted_started - started).abs() < 0.002,
+        "start moved by {}s across the hand-off",
+        adopted_started - started
+    );
+    assert!(
+        (adopted_ready - ready).abs() < 0.002,
+        "ready moved by {}s across the hand-off",
+        adopted_ready - ready
+    );
+
+    svc.kill();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The hand-off written by the raven-init already installed on a machine has
+/// no absolute readings in it, and a re-exec onto this image has to adopt it
+/// anyway. The whole seconds are believed when there is nothing better -- and
+/// not believed when they say nothing, because `uptime_secs = 0` means both
+/// "started this instant" and "never started at all".
+#[test]
+fn an_older_handoff_still_gives_a_service_a_start_time() {
+    let cfg_svc = sleeper("from-an-older-init");
+
+    let carried = service::ServiceSnapshot {
+        config: cfg_svc.clone(),
+        pid: None,
+        uptime_secs: 5,
+        ..Default::default()
+    };
+    let adopted = Service::adopt(carried, cfg_svc.clone());
+    let age = adopted
+        .first_started_at()
+        .expect("an older hand-off still dates the run it describes")
+        .elapsed()
+        .as_secs_f64();
+    assert!((age - 5.0).abs() < 0.5, "adopted as {age}s old");
+
+    let silent = service::ServiceSnapshot {
+        config: cfg_svc.clone(),
+        pid: None,
+        ..Default::default()
+    };
+    assert!(
+        Service::adopt(silent, cfg_svc).first_started_at().is_none(),
+        "a service that has never run must not be given a start time of now"
+    );
+}
+
+/// Restarts are a fact about a service's life rather than about the boot, so
+/// `status` is where they are counted -- and a count with no date on it cannot
+/// tell a service that flapped last Tuesday from one flapping now.
+#[test]
+fn status_says_when_a_service_last_came_back() {
+    let dir = format!(
+        "{}/raven-init-test-last-restart-{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+
+    let cfg_svc = sleeper("comeback");
+    let mut cfg = config_with(vec![cfg_svc.clone()]);
+    let mut svc = Service::start(&cfg_svc).expect("starts");
+    let pid = svc.pid().expect("pid").as_raw();
+    svc.kill();
+    assert!(wait_gone(pid, Duration::from_secs(5)));
+    svc.restart().expect("comes back");
+
+    let mut services = HashMap::new();
+    services.insert("comeback".to_string(), svc);
+
+    let (reply, _) = control::dispatch("status comeback", &mut services, &mut cfg);
+    assert!(reply.contains("restarts     1"), "{reply}");
+    assert!(reply.contains("last restart"), "{reply}");
+    assert!(reply.contains("into this boot"), "{reply}");
+    // Asked over the socket, the answer carries the live reading too.
+    assert!(reply.contains(" ago)"), "{reply}");
+    // And the current run is dated, which is the number `blame` does not show.
+    assert!(reply.contains("started      "), "{reply}");
+
+    // The published copy is written whenever its text changes, so it carries
+    // the boot-clock time and not the "four minutes ago" that would differ on
+    // every tick for as long as the machine is up.
+    let mut publisher = control::StatusPublisher::at(format!("{dir}/pub"));
+    publisher.publish(&services, &cfg);
+    let published =
+        std::fs::read_to_string(format!("{dir}/pub/services/comeback")).expect("status published");
+    assert!(published.contains("last restart"), "{published}");
+    assert!(!published.contains(" ago)"), "{published}");
+
+    for svc in services.values_mut() {
+        svc.kill();
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A re-exec replaces the supervisor and nothing else, so the boot it is
+/// supervising is still the same boot. The milestones come back in front of
+/// this image's own, and a name that now appears twice resolves to the first
+/// of the two -- which is the one that says where boot ended.
+#[test]
+fn the_boot_timeline_comes_back_in_front_of_this_images_own() {
+    timeline::mark("carried-milestone-test");
+    let mine = timeline::first_milestone("carried-milestone-test").expect("just marked");
+
+    timeline::restore(vec![("carried-milestone-test".to_string(), 0.5)]);
+
+    let all = timeline::milestones();
+    let first = all
+        .iter()
+        .position(|(n, _)| n == "carried-milestone-test")
+        .expect("in the list");
+    assert_eq!(all[first].1, 0.5, "the carried one comes first");
+    assert!(
+        all.iter()
+            .any(|(n, at)| n == "carried-milestone-test" && *at == mine),
+        "this image's own milestone is still there"
+    );
+    assert_eq!(
+        timeline::first_milestone("carried-milestone-test"),
+        Some(0.5),
+        "the original boot's is the one a boundary is taken from"
+    );
 }

@@ -39,11 +39,27 @@ log_level = "info"
 #
 # restart = false: raven-udev daemonises udevd and the coldplug is a one-shot,
 # so nothing is left in the foreground to supervise.
+#
+# `type = "oneshot"` says the same thing the other way round, and says it to
+# the supervisor rather than to the reader. restart = false only tells init
+# not to start the process again; it does not tell it that the process
+# finishing is the service succeeding. So a one-shot that has done its job
+# sits in the roster as `exited`, which is the same word `raven-rc list`
+# prints for obexd, a daemon that has failed 1663 times -- and a status
+# display where success and permanent failure share a word is a status
+# display nobody reads. The type is what lets init tell those two apart.
+#
+# Every one-shot in this tree is marked: udev, console-font and network here,
+# postinstall in its template. The key is named `type` on the assumption that
+# the field lands in ServiceConfig with that name; init ignores keys it does
+# not know, so this is inert either way, and if the field arrives called
+# something else these four lines are the ones to change.
 [[services]]
 name = "udev"
 description = "Device manager: start udevd and coldplug attached hardware"
 exec = "/usr/sbin/raven-udev"
 args = []
+type = "oneshot"
 restart = false
 enabled = true
 critical = false
@@ -53,11 +69,14 @@ critical = false
 # restart = false makes this a one-shot: setfont loads the font into the console
 # driver and exits, and there is nothing to supervise afterwards. It is not
 # critical -- a console on the kernel's built-in font is ugly, not broken.
+# `type = "oneshot"` is the declared half of that; see the note on udev above
+# for why the two are not the same statement.
 [[services]]
 name = "console-font"
 description = "Load the JetBrains Mono Nerd Font console font"
 exec = "/usr/sbin/raven-console-font"
 args = []
+type = "oneshot"
 restart = false
 enabled = true
 critical = false
@@ -220,17 +239,86 @@ restart = true
 enabled = true
 critical = false
 
+# The firewall, before anything can ask the network for an address.
+#
+# `nft -f` reads /etc/nftables.conf, hands the whole ruleset to the kernel in
+# one atomic transaction and exits. The ruleset lives in the kernel afterwards,
+# not in a process, so there is nothing to supervise: this is a one-shot, and
+# `exited` in `raven-rc list` is what success looks like. That is the whole
+# reason `type = "oneshot"` is written here as well as restart = false -- see
+# the note on the udev service above for why the two are not the same
+# statement.
+#
+# It is in THIS file rather than in configs/raven/services because of where it
+# sits in the list, and that is not a filing preference. Drop-ins from
+# /etc/raven/init.d are appended after init.toml's own services
+# (init/src/config.rs:369-380), and start_services resolves `after` first but
+# keeps configuration order as the tie-breaker (init/src/main.rs:1052-1058).
+# So no template can be made to run before `network`, and `network` is
+# raven-dhcp bringing up every wired link and taking an address. A firewall
+# loaded after that point has left the machine addressable and unfiltered for
+# the length of a DHCP exchange on whatever network it just joined -- a small
+# window, but the one window a laptop opens in every unfamiliar place it is
+# carried to. Putting the entry immediately above `network` closes it.
+#
+# after = ["udev"] for the module path: nf_tables and its expression modules
+# are loaded on demand when nft asks for them, and the udev stage is what
+# makes on-demand module loading work at all this early. The ruleset itself
+# needs no hardware -- it names exactly one interface, `lo`, which exists
+# before anything is probed. It names no other, deliberately: nft resolves an
+# interface name to an index when the rule is loaded, so a rule mentioning the
+# wifi or the dock would fail to load on a boot where that device is not
+# plugged in yet.
+#
+# SHIPPED DISABLED, and it has to be, for three reasons that will not go away
+# in the same commit. There is no nft binary in the image (nftables is in the
+# repositories as extra/nftables and is not staged). The kernel does not
+# support nftables: configs/kernel/config-6.17-raven still says
+# `# CONFIG_NF_TABLES is not set`, so `nft -f` would fail on any ruleset at
+# all. And scripts/check-desktop-image.py requires the exec of every ENABLED
+# service to exist in the image, so enabling this before the binary is staged
+# fails the build rather than the boot. Once all three are settled:
+#
+#   raven-rc start nftables     # load the ruleset now
+#   raven-rc enable nftables    # load it at every boot
+#
+# critical = false is a deliberate choice against the instinct. A critical
+# service that fails takes the boot down with it, and a machine that will not
+# boot is not a machine that failed closed -- it is a machine its owner boots
+# from a USB stick to fix, with the firewall no more loaded than before. So a
+# failure here leaves the system up and unfiltered, which means the failure
+# must be visible: `raven-rc status nftables` carries the exit status, and
+# /var/log/raven/nftables.log carries nft's own complaint about whichever line
+# of the ruleset it refused.
+[[services]]
+name = "nftables"
+description = "Firewall: load the ruleset from /etc/nftables.conf"
+exec = "/usr/bin/nft"
+args = ["-f", "/etc/nftables.conf"]
+after = ["udev"]
+type = "oneshot"
+restart = false
+enabled = false
+critical = false
+
 # Network manager (when available)
 #
 # Still handles wired interfaces at boot. cawd runs DHCP itself on the links it
 # brings up, but only after `caw connect`, so the two do not race: by the time
 # cawd touches the wifi interface this has long since finished.
+#
+# A one-shot, and one whose exit is easy to misread: raven-dhcp configures
+# every wired link it finds and returns, leaving the dhcpcd it started
+# behind as a child of init in no roster at all. So this service being
+# `exited` means the addresses are up, not that networking stopped -- which
+# is precisely the confusion `type = "oneshot"` exists to end.
 [[services]]
 name = "network"
 description = "Network management"
 exec = "/bin/raven-dhcp"
 args = ["--all", "-q"]
 after = ["udev"]
+type = "oneshot"
 restart = false
 enabled = true
 critical = false

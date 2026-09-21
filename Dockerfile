@@ -95,6 +95,19 @@ RUN pacman -Syu --noconfirm --needed \
         # these from the build host, and without this package that host is this
         # container, which had no /lib/firmware at all.
         linux-firmware \
+        # CPU microcode. scripts/build-initramfs.sh prepends these to the front
+        # of initramfs.img as an uncompressed cpio, which is the only way in:
+        # the kernel is built CONFIG_MICROCODE=y with late loading off, so a
+        # revision that is not in the initrd is a revision the machine never
+        # gets, and dmesg says "x86/CPU: Running old microcode" on hardware
+        # whose vendor shipped the fix years ago. Arch splits the two vendors
+        # into separate packages and both go into the one archive -- the kernel
+        # reads the member matching the CPUID vendor and ignores the other, so
+        # one ISO installs correctly on either. Unlike the firmware above this
+        # is not needed to make a device work; it is the errata and the
+        # speculative-execution mitigations, which is free protection that a
+        # machine only gets if the image it was installed from carried it.
+        intel-ucode amd-ucode \
         # NTFS, for the installer. raven-install --alongside shrinks the
         # partition the other OS lives on to make room, and on any machine that
         # ships with Windows that partition is NTFS -- ntfsresize is the whole

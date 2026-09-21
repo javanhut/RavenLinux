@@ -75,19 +75,8 @@ impl Default for InitConfig {
                         "linux".to_string(),
                     ],
                     restart: true,
-                    enabled: true,
-                    critical: false,
-                    environment: HashMap::new(),
-                    pre_exec: Vec::new(),
                     tty: Some("/dev/tty1".to_string()),
-                    user: None,
-                    stop_exec: None,
-                    stop_args: Vec::new(),
-                    stop_timeout: 5,
-                    runtime_dirs: Vec::new(),
-                    after: Vec::new(),
-                    ready_path: None,
-                    ready_timeout: 5,
+                    ..ServiceConfig::default()
                 },
             ],
             mounts: Vec::new(),
@@ -277,6 +266,207 @@ pub struct ServiceConfig {
     /// How long to wait for `stop_exec` before moving on to SIGTERM, seconds.
     #[serde(default = "default_stop_timeout")]
     pub stop_timeout: u32,
+
+    /// Scheduling priority, -20 (most favoured) to 19 (least), as `nice(1)`
+    /// spells it.
+    ///
+    /// Zero, the default, is what a child of init inherits and what almost
+    /// every service should keep: a daemon that is idle most of the time costs
+    /// nothing at any priority, and one that is busy is usually busy because
+    /// somebody is waiting for it. The field exists for the handful that are
+    /// neither -- a package indexer, a thumbnailer, anything that will happily
+    /// eat every core it is given for work nobody is watching -- where a
+    /// positive value keeps the desktop responsive while it runs.
+    ///
+    /// Negative values need CAP_SYS_NICE, which init has and the service's
+    /// account may not; they are applied before any `user =` drop for exactly
+    /// that reason. Use them sparingly: a daemon at -5 competes with the
+    /// compositor, and a compositor that misses its frame deadline is more
+    /// visible than anything a negative nice value was meant to fix.
+    #[serde(default)]
+    pub nice: i8,
+
+    /// The kernel's out-of-memory killer score adjustment, -1000 to 1000.
+    ///
+    /// When memory runs out the kernel picks a victim by score, and the score
+    /// is dominated by how much memory the process is using -- which means the
+    /// thing that dies is usually the largest innocent bystander. This is the
+    /// thumb on that scale: a positive value volunteers a service as the first
+    /// to be killed, a negative one asks the kernel to look elsewhere.
+    ///
+    /// Zero, the default, leaves a service exactly where the kernel's own
+    /// accounting puts it, and that is the right answer for nearly everything.
+    /// The cases worth setting it for are the two extremes: a cache or an
+    /// indexer that can be killed and restarted without anyone noticing
+    /// (positive), and a daemon whose death takes the session with it
+    /// (negative). Note that a service with `memory_max` is usually better
+    /// served by that, because it is killed for its own consumption instead of
+    /// being chosen when something else exhausts the machine.
+    ///
+    /// Lowering the score below zero needs privilege, so like `nice` it is
+    /// applied before the process drops to its account.
+    #[serde(default)]
+    pub oom_score_adj: i32,
+
+    /// Hard memory limit for the service and everything it forks, written as
+    /// a size: "512M", "2G", or "max" for no limit.
+    ///
+    /// This is a cgroup limit, not an rlimit, and the difference is the whole
+    /// point: RLIMIT_AS makes one process's `mmap` fail, which most daemons
+    /// respond to by crashing in whatever way their least-tested error path
+    /// crashes. `memory.max` counts the service and its children together and
+    /// makes the kernel reclaim first and OOM-kill second, so a daemon that
+    /// slowly leaks is killed and restarted by the supervisor instead of
+    /// taking the machine's last free page with it.
+    ///
+    /// `None` -- the default -- means no limit, which is correct for a service
+    /// whose working set nobody has measured. A limit guessed too low is worse
+    /// than none: it turns a daemon that works into one that is killed under
+    /// exactly the load it was installed to handle, and the evidence is a
+    /// SIGKILL with no message.
+    #[serde(default)]
+    pub memory_max: Option<String>,
+
+    /// Relative share of CPU time when the machine is oversubscribed, 1 to
+    /// 10000. The kernel's default is 100.
+    ///
+    /// A weight is not a cap. A service at 50 is not limited to half a core --
+    /// it gets every idle cycle it asks for, exactly as it would with no
+    /// setting at all, and the number only decides who yields when two
+    /// services want the same core at the same moment. That is almost always
+    /// the behaviour wanted from a supervisor: capping a daemon that is not
+    /// competing with anything wastes the machine.
+    ///
+    /// `None` leaves the service at the kernel's 100, which is what every
+    /// service that has not been deliberately ranked should have.
+    #[serde(default)]
+    pub cpu_weight: Option<u32>,
+
+    /// Relative share of disk bandwidth, 1 to 10000, under the same rules as
+    /// `cpu_weight`.
+    ///
+    /// Only effective where the kernel has a weight-capable I/O policy for the
+    /// device (BFQ, or iocost with a cost model); on a machine using
+    /// mq-deadline the `io.weight` file does not exist and the setting is
+    /// reported once and ignored. It is kept as a field anyway because the
+    /// failure is a warning in a log rather than a service that does not
+    /// start, and because the case it is for -- an indexer starving the rest
+    /// of the machine of disk -- is real on the hardware that has BFQ.
+    #[serde(default)]
+    pub io_weight: Option<u32>,
+
+    /// Per-process resource limits, applied with `setrlimit(2)` between fork
+    /// and exec. See [`ResourceLimits`].
+    #[serde(default)]
+    pub limits: ResourceLimits,
+}
+
+/// The `setrlimit(2)` limits a service definition can ask for.
+///
+/// Written as its own table rather than as flat `limit_nofile`-style keys so
+/// that a definition reads as `[services.limits]` with the relevant lines
+/// under it, and so that adding a limit later does not add another prefix to
+/// the top level of every service block.
+///
+/// Deliberately short. These four are the ones that have actually mattered on
+/// this system; a daemon that needs RLIMIT_STACK or RLIMIT_RTPRIO set from
+/// outside is rare enough that the field can be added when it appears, and a
+/// full table of every rlimit the kernel has would be sixteen fields, fifteen
+/// of which nobody would ever set.
+///
+/// Each limit sets the soft and the hard value together -- see
+/// `crate::cgroup::rlimits_for` for why.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResourceLimits {
+    /// Maximum open file descriptors (RLIMIT_NOFILE), as a count.
+    ///
+    /// The one limit worth knowing about. The kernel's default soft limit is
+    /// 1024, which is fine for a daemon holding a few sockets and completely
+    /// wrong for one holding a descriptor per client; the symptom is `accept`
+    /// returning EMFILE and a daemon that stops answering without dying, which
+    /// looks like a hang rather than a limit. `None` keeps whatever init
+    /// inherited from the kernel.
+    #[serde(default)]
+    pub nofile: Option<u64>,
+
+    /// Maximum processes and threads for this service's *user* (RLIMIT_NPROC),
+    /// as a count.
+    ///
+    /// Note the "for this user" part, which is the trap in this limit and the
+    /// reason it is rarely the right tool: RLIMIT_NPROC is counted per uid
+    /// across the whole system, not per service, so setting it on a service
+    /// that runs as root counts every root process on the machine. It is
+    /// useful on a service with an account of its own -- and misleading
+    /// anywhere else. `pids.current` in the service's cgroup is the number
+    /// that actually describes the service.
+    #[serde(default)]
+    pub nproc: Option<u64>,
+
+    /// Maximum locked (unswappable) memory, as a size such as "64M".
+    ///
+    /// For daemons that lock secrets into memory so they cannot be written to
+    /// swap. The default is small -- 8MB on most kernels -- and a daemon that
+    /// needs more fails its `mlock` and usually carries on with the secret in
+    /// swappable memory, which is the failure nobody notices.
+    #[serde(default)]
+    pub memlock: Option<String>,
+
+    /// Maximum core dump size, as a size; "0" disables core dumps entirely.
+    ///
+    /// Worth setting to 0 on any service that handles credentials, because a
+    /// core dump is a copy of everything it had in memory written to disk by
+    /// the kernel, with no say from the program. Worth setting high on a
+    /// daemon that is being debugged, which is the other half of why this is a
+    /// per-service setting rather than a global one.
+    #[serde(default)]
+    pub core: Option<String>,
+}
+
+/// Every field at the value `#[serde(default)]` would give it.
+///
+/// This exists so that the places that build a `ServiceConfig` in code --
+/// init's fallback getty, the services `overrides.rs` synthesizes from the
+/// kernel command line, and the fixtures in the tests -- can name the three or
+/// four fields they care about and inherit the rest. Before it, every one of
+/// those sites listed all eighteen fields by hand, so adding a field to this
+/// struct was a compile error in eight files at once and an invitation to fix
+/// it by copying a neighbouring value rather than by thinking about what the
+/// new field should be.
+///
+/// It must agree with serde, field for field, or a service built in code and
+/// the same service written out in TOML would behave differently -- and the
+/// one that differs would be the one nobody can read. `enabled` is the case
+/// that matters: it defaults to *true* here, as `default_true` makes it in a
+/// file, because a service block somebody wrote is a service they want.
+impl Default for ServiceConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            exec: String::new(),
+            args: Vec::new(),
+            restart: false,
+            enabled: true,
+            critical: false,
+            environment: HashMap::new(),
+            pre_exec: Vec::new(),
+            tty: None,
+            user: None,
+            runtime_dirs: Vec::new(),
+            after: Vec::new(),
+            ready_path: None,
+            ready_timeout: default_ready_timeout(),
+            stop_exec: None,
+            stop_args: Vec::new(),
+            stop_timeout: default_stop_timeout(),
+            nice: 0,
+            oom_score_adj: 0,
+            memory_max: None,
+            cpu_weight: None,
+            io_weight: None,
+            limits: ResourceLimits::default(),
+        }
+    }
 }
 
 /// Long enough for a deauthentication to reach the AP, short enough that a

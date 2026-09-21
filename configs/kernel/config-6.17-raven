@@ -916,6 +916,47 @@ CONFIG_MODULE_FORCE_UNLOAD=y
 # CONFIG_MODULE_UNLOAD_TAINT_TRACKING is not set
 # CONFIG_MODVERSIONS is not set
 # CONFIG_MODULE_SRCVERSION_ALL is not set
+
+# Module signing stays off, and that is a decision rather than an oversight.
+#
+# Turning it on is not one symbol. It is the signing option below plus
+# MODULE_SIG_ALL (so modules are signed during `make modules_install` instead
+# of being installed unsigned), a hash choice (MODULE_SIG_SHA512), and
+# MODULE_SIG_KEY pointing at a private key that has to exist before the build
+# starts. Leave MODULE_SIG_KEY at its default and the kernel generates
+# certs/signing_key.pem itself, fresh, on every clean tree -- so every rebuild
+# produces a kernel that distrusts the modules the previous build installed,
+# and the build stops being reproducible.
+#
+# Then there is the out-of-tree half, which is where it actually breaks.
+# scripts/build-evdi.sh builds evdi against the same tree in the same session,
+# so modfinal would sign it on the way out and it would load. DKMS on an
+# installed machine would not. install_headers() in scripts/build-kernel.sh
+# ships scripts/ into lib/modules/<release>/build so external module builds
+# work on the target, and it must never ship certs/signing_key.pem with it --
+# the private half of a signing key on every user's disk is not a signing key.
+# So a module the user rebuilds on their own machine (evdi after a DisplayLink
+# update, nvidia, anything DKMS touches) comes out unsigned. Without
+# MODULE_SIG_FORCE it still loads and taints the kernel with "module
+# verification failed: signature and/or required key missing"; with
+# MODULE_SIG_FORCE it does not load at all, and the DisplayLink dock stops
+# working the first time the user updates the module.
+#
+# And MODULE_SIG_FORCE is the only setting that makes any of this enforce
+# anything. The other enforcement path is lockdown in integrity mode, which
+# needs SECURITY_LOCKDOWN_LSM (off, down in Security options) and a Secure
+# Boot chain to trigger it. RavenLinux has no such chain: raven-install writes
+# an unsigned raven-boot.efi to \EFI\BOOT\BOOTX64.EFI and the installer's
+# preflight tells the user to turn Secure Boot off. Signing modules under an
+# unsigned bootloader and an unsigned kernel changes a taint flag and nothing
+# else.
+#
+# The order to do this in, when it is done: sign raven-boot.efi and the kernel
+# first, then the signing option below plus MODULE_SIG_ALL with a persistent
+# key kept outside this repository and injected by the build, and only then
+# MODULE_SIG_FORCE -- and only once a user can enrol their own key (MOK,
+# sbctl) so DKMS still works on their machine. Until the first of those
+# exists, this is off on purpose. See docs/kernel-hardening.md.
 # CONFIG_MODULE_SIG is not set
 # CONFIG_MODULE_COMPRESS is not set
 # CONFIG_MODULE_ALLOW_MISSING_NAMESPACE_IMPORTS is not set
@@ -1007,8 +1048,24 @@ CONFIG_ZSMALLOC=y
 CONFIG_SLUB=y
 CONFIG_KVFREE_RCU_BATCHED=y
 CONFIG_SLAB_MERGE_DEFAULT=y
-# CONFIG_SLAB_FREELIST_RANDOM is not set
-# CONFIG_SLAB_FREELIST_HARDENED is not set
+
+# Both of these were off, and both are on in the Arch kernel this replaced.
+#
+# SLAB_FREELIST_RANDOM shuffles the free list inside each new slab page, so
+# the address of the next object out of kmalloc() is not the address the
+# previous free just made obvious. SLAB_FREELIST_HARDENED XORs the freelist
+# "next" pointer with a per-cache random value and with the pointer's own
+# address, and adds the cheap sanity checks that catch a double free before it
+# corrupts the list. Together they turn the most common heap-overflow
+# primitive -- overwrite one object's freelist pointer, then get the allocator
+# to hand you an arbitrary address on the next call -- from reliable into a
+# guess.
+#
+# The cost is an XOR and a shift on the allocator fast path plus a one-time
+# shuffle per slab page. The kernel's own help text calls it a minor
+# performance penalty and every distribution kernel ships both.
+CONFIG_SLAB_FREELIST_RANDOM=y
+CONFIG_SLAB_FREELIST_HARDENED=y
 # CONFIG_SLAB_BUCKETS is not set
 # CONFIG_SLUB_STATS is not set
 CONFIG_SLUB_CPU_PARTIAL=y
@@ -3730,7 +3787,33 @@ CONFIG_X86_PKG_TEMP_THERMAL=m
 
 # CONFIG_INTEL_PCH_THERMAL is not set
 # CONFIG_INTEL_TCC_COOLING is not set
-# CONFIG_INTEL_HFI_THERMAL is not set
+
+# Intel Hardware Feedback Interface -- the export side of Thread Director.
+#
+# The reference machine is a Meteor Lake Core Ultra 5 135U: two P-cores with
+# SMT, eight E-cores, two low-power E-cores on the SoC die, fourteen threads,
+# three different performance classes among them. The firmware maintains a
+# table in memory saying which class is currently the fastest and which is
+# currently the most efficient, and it rewrites that table as the package
+# heats up, throttles, or has its power limit changed. With this off the
+# kernel never reads the table, and the only hybrid signal anything gets is
+# the static CPPC highest_perf the firmware reported once at boot -- 55 for
+# the P-cores, 36 for the E-cores, 21 for the low-power pair on this machine
+# (/sys/devices/system/cpu/cpu*/acpi_cppc/highest_perf) -- which is a fixed
+# ranking that cannot notice a P-core that is currently the slow one.
+#
+# Be precise about what this buys, because it is easy to over-claim. Mainline
+# has no in-kernel consumer of HFI: intel_hfi.c turns the firmware's updates
+# into thermal-netlink events for user space, which is what thermald and
+# intel-lpmd act on, and RavenLinux ships neither yet. The scheduler's own
+# hybrid awareness is ITMT asym-packing, and that is fed by CPPC through
+# intel_pstate, not by HFI. So this is the half that makes the data exist and
+# be readable; a consumer is a separate piece of work. It costs one more
+# thermal driver and an interrupt each time the firmware updates the table.
+#
+# Kconfig: depends on CPU_SUP_INTEL (y) and X86_THERMAL_VECTOR (y, above), and
+# selects THERMAL_NETLINK, which is already y -- so nothing else has to move.
+CONFIG_INTEL_HFI_THERMAL=y
 # end of Intel thermal drivers
 
 # CONFIG_GENERIC_ADC_THERMAL is not set
@@ -7313,10 +7396,25 @@ CONFIG_SECURITY_APPARMOR_HASH_DEFAULT=y
 CONFIG_SECURITY_APPARMOR_EXPORT_BINARY=y
 CONFIG_SECURITY_APPARMOR_PARANOID_LOAD=y
 # CONFIG_SECURITY_LOADPIN is not set
-# CONFIG_SECURITY_YAMA is not set
+
+# Yama: ptrace_scope. The default it installs (kernel.yama.ptrace_scope = 1)
+# stops one unprivileged process attaching to another that is not its own
+# child. That is the step between "a browser tab got code execution" and "it
+# read the session keys out of every other process you are running". It needs
+# no policy, no userspace and no configuration, and a debugger still works on
+# processes it started, which is the case that matters. Was off; the Arch
+# kernel this replaced has it.
+CONFIG_SECURITY_YAMA=y
 # CONFIG_SECURITY_SAFESETID is not set
 # CONFIG_SECURITY_LOCKDOWN_LSM is not set
-# CONFIG_SECURITY_LANDLOCK is not set
+
+# Landlock: unprivileged sandboxing. It enforces nothing at all until a
+# process asks for it with landlock_create_ruleset(2), so on a system where
+# nothing asks its cost is a handful of hooks that return immediately -- and
+# the day something does ask (a browser, a container runtime, a service that
+# wants to drop its own filesystem access), it is there rather than being a
+# kernel rebuild away. It selects SECURITY_PATH, which is already y.
+CONFIG_SECURITY_LANDLOCK=y
 # CONFIG_SECURITY_IPE is not set
 CONFIG_INTEGRITY=y
 # CONFIG_INTEGRITY_SIGNATURE is not set
@@ -7327,7 +7425,36 @@ CONFIG_INTEGRITY_AUDIT=y
 CONFIG_DEFAULT_SECURITY_SELINUX=y
 # CONFIG_DEFAULT_SECURITY_APPARMOR is not set
 # CONFIG_DEFAULT_SECURITY_DAC is not set
-CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,ipe,bpf"
+# The active LSM list, and the reason it is short.
+#
+# It was the kernel's full default -- every LSM the kernel knows about, in the
+# canonical order. That list is not wrong so much as aspirational. selinux and
+# apparmor are both compiled in here and both do nothing without a policy to
+# load, and RavenLinux ships neither a policy nor the tools to load one: there
+# is no /etc/selinux, no apparmor_parser, no profiles directory and no service
+# that would load them. An LSM that initialises with an empty policy costs its
+# hooks on every syscall path it registered for and enforces nothing. The rest
+# of the names in that string were not even built (lockdown, loadpin,
+# safesetid, smack, tomoyo, ipe, and bpf -- BPF_SYSCALL is off here).
+#
+# So the list is the two that need no policy and no userspace: landlock, which
+# is inert until a process opts into it, and yama, whose default ptrace_scope
+# is useful the moment it is loaded. Both are documented at their own symbols
+# above.
+#
+# capability is not listed because it is LSM_ORDER_FIRST and always loads, and
+# integrity is LSM_ORDER_LAST for the same reason; naming either here would be
+# noise. selinux and apparmor stay compiled in deliberately rather than being
+# switched off: `lsm=` on the kernel command line replaces this string
+# entirely, so a machine that does grow a policy can turn one on without a
+# kernel rebuild.
+#
+# None of this is inspectable until something mounts securityfs.
+# /sys/kernel/security is empty on the running machine because nothing does --
+# raven-init knows the name but never mounts it -- so there is no
+# /sys/kernel/security/lsm to read the active list back from. See
+# docs/kernel-hardening.md.
+CONFIG_LSM="landlock,yama"
 
 #
 # Kernel hardening options
@@ -7343,7 +7470,30 @@ CONFIG_CC_HAS_AUTO_VAR_INIT_ZERO=y
 # CONFIG_INIT_STACK_ALL_PATTERN is not set
 CONFIG_INIT_STACK_ALL_ZERO=y
 # CONFIG_KSTACK_ERASE is not set
-# CONFIG_INIT_ON_ALLOC_DEFAULT_ON is not set
+# Zero on allocate, and why zero on free stays off.
+#
+# INIT_ON_ALLOC_DEFAULT_ON zeroes every page and every heap object as it is
+# handed out, so a fresh allocation can never contain the previous owner's
+# data. It closes the whole class of "uninitialised kernel memory leaked to
+# userspace" bugs without needing a single annotation anywhere, and
+# init_on_alloc=0 on the command line turns it off again if it ever has to be.
+# The memory being zeroed is about to be written by its new owner anyway,
+# which is why upstream measures the cost at under one percent.
+CONFIG_INIT_ON_ALLOC_DEFAULT_ON=y
+
+# INIT_ON_FREE_DEFAULT_ON stays off, and this is the argument for leaving it.
+# It zeroes the same memory a second time on the way back to the allocator,
+# and that pass is the one people notice -- upstream's own help text puts it
+# at 3-5%, and it is worse on allocation-heavy work because the zeroing is no
+# longer overlapped with a write that was going to happen regardless. What it
+# buys over init-on-alloc is narrow: it shortens the window in which freed
+# data sits in a slab nothing has reallocated yet. That helps against a
+# use-after-free *read*; it does nothing extra against the leak-to-userspace
+# class, which the allocation side already covers, and the double free that
+# makes use-after-free reliable in the first place is what
+# SLAB_FREELIST_HARDENED catches. A few percent of a laptop's CPU, always, for
+# that remainder is the wrong trade. init_on_free=1 on the kernel command line
+# is there for anyone who disagrees on a particular machine.
 # CONFIG_INIT_ON_FREE_DEFAULT_ON is not set
 CONFIG_CC_HAS_ZERO_CALL_USED_REGS=y
 # CONFIG_ZERO_CALL_USED_REGS is not set
@@ -7353,7 +7503,22 @@ CONFIG_CC_HAS_ZERO_CALL_USED_REGS=y
 # Bounds checking
 #
 # CONFIG_FORTIFY_SOURCE is not set
-# CONFIG_HARDENED_USERCOPY is not set
+
+# Bounds-check every copy_to_user() and copy_from_user().
+#
+# It checks that the kernel-side address of a user copy lies inside exactly
+# one object -- within a slab object's real size, within a page allocation,
+# not straddling the stack frame boundary, not pointing into kernel text --
+# and kills the offending task through usercopy_abort() instead of letting the
+# copy run off the end. That is the difference between a one-byte length bug
+# in some ioctl handler and an arbitrary kernel memory read.
+#
+# The running 6.17.11-raven kernel has neither __check_heap_object nor
+# usercopy_abort in /proc/kallsyms, which is how this was confirmed to be
+# genuinely absent from the shipped build rather than merely unset in a file
+# nobody applied. The cost is one size lookup per user copy. Every
+# distribution kernel, including the Arch one this replaced, ships it on.
+CONFIG_HARDENED_USERCOPY=y
 # end of Bounds checking
 
 #

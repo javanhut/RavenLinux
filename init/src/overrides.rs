@@ -237,19 +237,9 @@ pub(crate) fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<
             exec: seatd_path.unwrap_or_else(|| "/sbin/seatd".to_string()),
             args: vec!["-g".to_string(), "video".to_string()],
             restart: true,
-            enabled: true,
-            critical: false,
-            environment: HashMap::new(),
-            pre_exec: Vec::new(),
-            tty: None,
-            user: None,
-            runtime_dirs: Vec::new(),
             after: vec!["udev".to_string()],
             ready_path: Some("/run/seatd.sock".to_string()),
-            ready_timeout: 5,
-            stop_exec: None,
-            stop_args: Vec::new(),
-            stop_timeout: 5,
+            ..ServiceConfig::default()
         },
     );
 
@@ -359,7 +349,6 @@ pub(crate) fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<
                 // drops privilege itself once it knows whose session it is
                 // starting. Handing it an account here would defeat the point.
                 user: None,
-                runtime_dirs: Vec::new(),
                 after: vec!["udev".to_string(), "seatd".to_string()],
                 // The greeter socket (raven-greet-proto's SOCKET_PATH). It is
                 // bound before the greeter compositor starts, so "ready" here
@@ -367,11 +356,10 @@ pub(crate) fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<
                 // blame` should count as the login screen's arrival.
                 ready_path: Some("/run/raven-login/greet.sock".to_string()),
                 ready_timeout: 15,
-                stop_exec: None,
-                stop_args: Vec::new(),
                 // Longer than the session's: SIGTERM has to reach the greeter,
                 // its compositor, and whatever session is running behind them.
                 stop_timeout: 10,
+                ..ServiceConfig::default()
             },
         );
         return Ok(());
@@ -393,19 +381,11 @@ pub(crate) fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<
                 exec: session_exec.clone(),
                 args: Vec::new(),
                 restart: true,
-                enabled: true,
-                critical: false,
                 environment: env,
                 pre_exec: udev_settle.clone(),
-                tty: None,
                 user: session_account.clone(),
-                runtime_dirs: Vec::new(),
                 after: vec!["udev".to_string(), "seatd".to_string()],
-                ready_path: None,
-                ready_timeout: 5,
-                stop_exec: None,
-                stop_args: Vec::new(),
-                stop_timeout: 5,
+                ..ServiceConfig::default()
             },
         );
     } else {
@@ -436,6 +416,18 @@ fn ensure_service(services: &mut Vec<ServiceConfig>, desired: ServiceConfig) {
     existing.enabled = desired.enabled;
     existing.critical = desired.critical;
     existing.environment = desired.environment;
+    // Everything else is deliberately left alone, and the resource fields
+    // (nice, oom_score_adj, memory_max, cpu_weight, io_weight, limits) are the
+    // clearest case for why. A definition reaching this function already
+    // exists in init.toml, where somebody wrote it; the one being merged in was
+    // synthesized from the kernel command line and carries defaults for every
+    // field it does not care about. Copying those over would quietly undo an
+    // operator's `memory_max` every boot, and the evidence would be a limit
+    // that works in the file and not on the machine. The same argument covers
+    // after, ready_path, runtime_dirs, user and the stop_* fields.
+    //
+    // A service that is *not* already in init.toml is pushed whole above, so a
+    // synthesized seatd or session still gets the synthesized values.
 }
 
 #[cfg(test)]

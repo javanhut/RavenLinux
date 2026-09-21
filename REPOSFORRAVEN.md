@@ -654,3 +654,92 @@ RavenTutorial is Go and Fyne on the Wayland backend, built like RavenTerminal
 since the repository has none. Oracle is Rust, both of its front ends, the
 command line and the GTK4 app. `TUTORIAL_SKIP=1` / `ORACLE_SKIP=1` leave either
 off the ISO.
+
+## Build Profiles
+
+What optimization settings a Raven component ships with, and why they differ.
+There is no shared answer anywhere in the source: RavenLinux has no root
+`Cargo.toml`, every repository above is its own independent cargo root, and no
+`.cargo/config.toml` in any of them sets a profile key. Cargo also ignores
+`[profile.*]` in a workspace *member* manifest, so the only place a setting
+takes effect is the workspace root. `stage-gui.sh` builds every component with
+a plain `cargo build --release --target "${GUI_TARGET}"` — roughly fifteen
+identical call sites, the first at `stage-gui.sh:624` — and never exports
+optimization `RUSTFLAGS`. Whatever a repository's own manifest says is
+therefore exactly what lands on the ISO, which is why this table has to live
+here rather than in a build script.
+
+| Component | Binaries | `[profile.release]` | Tier |
+|---|---|---|---|
+| RavenGUI | `huginn`, plus the `raven-rec`/`raven-h264`/`raven-aac`/`raven-mp4` crates | `opt-level = 3`, `lto = "fat"`, `codegen-units = 1` | per frame |
+| RavenFileManager | `ravenfilemanager` | `opt-level = 3`, `lto = "fat"`, `codegen-units = 1` | per frame |
+| RavenCanvas | `ravencanvasd`, `ravencanvas` | `opt-level = 3`, `lto = true`, `strip = true` | per frame (measured) |
+| CrowTextEditor | `crow` | `opt-level = 3`, `lto = true` | per frame |
+| OwlPlayer | `owl-player` | `opt-level = 3`, `lto = "thin"`, `codegen-units = 1`, `panic = "abort"`, `debug = 1` | soft-realtime |
+| RavenStore | `raven-store` | `lto = "thin"`, `codegen-units = 1` | warm client |
+| RavenSettingsUI | `raven-settings`, `raven-keycast` | `lto = "thin"`, `codegen-units = 1` | warm client |
+| RavenViewer | `raven-viewer` | `lto = "thin"`, `codegen-units = 1`, `strip = true` | warm client |
+| RavenCamera | `raven-camera` | `lto = "thin"`, `codegen-units = 1` | warm client |
+| AirMail | `airmail` | `opt-level = 3`, `lto = "thin"`, `codegen-units = 1` | warm client |
+| HuginnKeyring | `huginn-keyringd`, `huginn-keyring`, and the dlopen()ed PKCS#11 and PAM modules | `opt-level = "s"`, `lto = true`, `strip = true` | resident and idle |
+| RavenLogin | `ravend`, `raven-greeter` | `opt-level = "s"`, `lto = true`, `strip = true` | boot path |
+| Oracle | `oracle`, `raven-oracle` | `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `strip = true`, `panic = "abort"` | one-shot |
+| `init/` | `raven-init`, `raven-rc`, `raven-powerd`, `raven-ports`, `raven-timed`, `raven-mount`, `raven-fprintd` | `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `strip = true`, `panic = "abort"` | initramfs |
+| `bootloader/` | the UEFI `.efi` | `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"` | firmware |
+| `installer-ui/` | `raven-installer-ui` | `lto = true`, `codegen-units = 1`, `strip = true` | one-shot |
+| RavenTerminal | `raven-terminal` | Go — not applicable | see below |
+
+Three tiers, and the tier is decided by what the program is doing when a person
+is looking at it. **Per frame, or between a keystroke and a repaint**, gets
+`opt-level = 3` and fat LTO: huginn and the codec crates it owns, the file
+manager, the wallpaper daemon, crow. These are multi-crate workspaces whose hot
+path crosses their own crate boundaries several times per frame, which is the
+one case where fat LTO buys something thin does not, and their link time is
+paid once on a build host against frame time paid on every machine that boots
+the image. **Warm clients** — the store, the settings app, the viewer, the
+camera, the mail client — get thin LTO and one codegen unit: they are fast
+enough already, they spend their time in GTK and in the network, and the
+setting is there for binary size and for consistency more than for speed.
+**Resident-and-idle daemons, greeters, one-shot installers and anything in the
+initramfs** get `"s"` or `"z"`: the keyring daemon, the greeter, Oracle,
+raven-init and the bootloader.
+
+**`raven-init` keeps `opt-level = "z"`, and nothing should copy that profile.**
+It is PID 1. It and its six sibling daemons are in the initramfs, which is read
+off disk in full during the busiest part of boot, before anything is cached and
+while the kernel is still bringing up the devices those bytes came from — every
+byte saved there is a byte not read at the worst possible moment. And nothing
+in it is hot: init forks, execs, mounts, handles signals and reads
+`init.toml`, and then sleeps for the life of the machine. There is no loop
+anywhere in it that `opt-level = 3` would make faster, so size is free. Its
+`panic = "abort"` follows from the same fact rather than from taste — PID 1
+cannot unwind into a state anyone can use, and the kernel panics either way.
+The bootloader is the same argument with a harder limit, since it is a UEFI
+image built with `--target x86_64-unknown-uefi`.
+
+That is the opposite of what a compositor wants, for the opposite reason, and
+mixing the two up is the mistake this section exists to prevent. RavenCanvas
+has the measurement that settles it: the wallpaper daemon *was* at `"s"` on the
+resident-and-idle argument until a motion wallpaper was timed, and on an Intel
+N97 one 1080p VP8 frame took 119 ms at `"s"` against 81 ms at `3`. Anything on
+the graphics path pays that thirty percent for its size saving.
+
+Two standing exceptions to read before changing a table row. `panic = "abort"`
+is **not** a default here: crow's profile refuses it because its panic hook
+restores the terminal, the file manager's refuses it because
+`crates/raven-preview/src/pdf.rs` contains a malformed PDF's panic with
+`catch_unwind` and an abort cannot be caught, and huginn's refuses it because
+`LibSeatSession` releases the seat and the DRM master from `Drop`. It belongs
+only on programs with nothing to do on the way out. And RavenCamera patches
+RavenGUI's four codec crates to `../RavenGUI` in its own `.cargo/config.toml`,
+so those crates are built under RavenCamera's thin-LTO profile there and under
+RavenGUI's fat-LTO profile here; a change to one does not reach the other.
+
+RavenTerminal is Go and has no `Cargo.toml` at all, so none of this applies to
+it. Its nearest equivalent knob is the `go build` line, which exists twice —
+`Makefile:77` and `lazy.toml:47` — and is deliberately left without
+`-ldflags "-s -w"`: it is CGO_ENABLED against GLFW and OpenGL and is debugged
+against a nested huginn, so the symbols are worth more than the bytes. If that
+is ever revisited, both lines change together; `lazy.toml:1-7` warns that
+`imlazy migrate` regenerates the file from the Makefile and declares
+`lazy.toml` the source of truth.

@@ -2743,6 +2743,23 @@ copy_system() {
 
 uuid_of() { blkid -o value -s UUID "$1" 2>/dev/null; }
 
+# The swap partition's UUID, published by write_fstab for install_bootloader.
+#
+# ROOT_UUID has always been handed on this way, and for a good reason: the
+# fstab and the boot entries have to name the same root, and reading it twice
+# is two chances to disagree -- on an alongside install the partition numbers
+# are sfdisk's to choose, so a second blkid sweep is not self-evidently looking
+# at the same partition as the first. SWAP_UUID exists for that reason and a
+# sharper one. install_bootloader turns it into resume=, and a resume= that
+# names a different partition from the one fstab swapons is a machine that
+# writes its hibernation image into one place and then looks for it in
+# another: it boots fresh, says nothing, and the session is gone.
+#
+# Empty is a legitimate value here -- --swap none is a supported answer -- so
+# unlike ROOT_UUID this one carries a default rather than being left to `set
+# -u` as a tripwire.
+SWAP_UUID=""
+
 write_fstab() {
     local root_uuid esp_uuid swap_uuid
     root_uuid=$(uuid_of "$ROOT_DEV")
@@ -2760,7 +2777,33 @@ write_fstab() {
         # The header's first column is two narrower to pay for the "# " prefix.
         printf '# %-39s %-10s %-6s %-33s %s %s\n' \
             "<device>" "<mount>" "<type>" "<options>" "<dump>" "<pass>"
-        printf "$fmt" "UUID=${root_uuid}" "/" "${OPT_FS}" "rw,relatime" 0 1
+        # noatime, not the kernel's relatime, on both Linux filesystems here.
+        #
+        # relatime is already a large improvement on strictatime: it writes an
+        # access time only when the stored one is older than the file's mtime
+        # or ctime, or older than a day. But "older than a day" is the part
+        # that costs. On a desktop that is used every morning, the first read
+        # of every file that day still turns into a metadata write and a
+        # journal transaction -- the dynamic linker walking the library path,
+        # the compositor reading its themes and icons, a browser opening its
+        # profile -- and none of it is read back by anything. Nothing in this
+        # tree consumes atime. There is no mutt-style unread-mail check, no
+        # tmpwatch sweeping /tmp by access time, and the one consumer people
+        # reach for, a backup tool deciding what changed, uses mtime and ctime
+        # here as everywhere else. So the writes buy nothing, and what they
+        # cost is SSD erase cycles and a disk wakeup on a laptop that would
+        # otherwise have been allowed to stay idle.
+        #
+        # This line does not by itself change how the root is mounted, and it
+        # is important not to think it does. raven-init's mount_fstab skips
+        # the root on purpose -- the initramfs already mounted it, and
+        # changing a live root's flags underneath the system is worse than
+        # leaving them alone -- so the root's real options come from
+        # rootflags= on the kernel command line, which install_bootloader
+        # writes. The two are kept saying the same thing so that a later
+        # `mount -o remount /`, which reads this file, cannot quietly put
+        # relatime back.
+        printf "$fmt" "UUID=${root_uuid}" "/" "${OPT_FS}" "rw,noatime" 0 1
         if [[ -n "$esp_uuid" ]]; then
             printf "$fmt" "UUID=${esp_uuid}" "/boot/efi" "vfat" \
                 "rw,noatime,fmask=0077,dmask=0077" 0 2
@@ -2768,17 +2811,49 @@ write_fstab() {
         if [[ -n "$SWAP_DEV" ]]; then
             swap_uuid=$(uuid_of "$SWAP_DEV")
             [[ -n "$swap_uuid" ]] && printf "$fmt" "UUID=${swap_uuid}" "none" "swap" "sw" 0 0
+            # Read once, used twice: see SWAP_UUID above. A brace group with a
+            # redirection runs in this shell, not a subshell, so the
+            # assignment survives the end of the block.
+            SWAP_UUID="$swap_uuid"
         fi
         if [[ -n "${HOME_DEV:-}" ]]; then
             local home_uuid home_type
             home_uuid=$(uuid_of "$HOME_DEV")
             home_type=$(fs_type_of "$HOME_DEV")
             [[ -n "$home_uuid" ]] || die "Could not read the UUID of ${HOME_DEV}"
-            printf "$fmt" "UUID=${home_uuid}" "/home" "${home_type:-auto}" "rw,relatime" 0 2
+            # noatime for the same reasons as the root, and this one does
+            # take effect from here: /home is not the root, so mount_fstab
+            # mounts it with exactly the options on this line. An NTFS or
+            # vfat /home carried over from another OS ignores the flag
+            # harmlessly rather than refusing to mount.
+            printf "$fmt" "UUID=${home_uuid}" "/home" "${home_type:-auto}" "rw,noatime" 0 2
         fi
         # Redundant while raven-init mounts /tmp itself, and kept as the template
         # for anyone adding a mount by hand.
-        printf "$fmt" "tmpfs" "/tmp" "tmpfs" "rw,nosuid,nodev,mode=1777" 0 0
+        #
+        # size=50% is the cap, and it is worth being exact about what adding it
+        # does. tmpfs with no size= is not unbounded: the kernel already
+        # defaults it to half of physical RAM. So this is not a new limit, it
+        # is the same limit written down. That is the point. A default is not
+        # a decision -- nothing in this tree said what /tmp was allowed to
+        # cost, so nobody could argue the figure up or down without first
+        # going to read mm/shmem.c to find out what it currently was -- and a
+        # mount whose ceiling is implicit moves if the kernel ever moves its
+        # default.
+        #
+        # Half of RAM is also the right figure to pin, not just the
+        # conventional one. /tmp here is swap-backed, so the pages a runaway
+        # parks in it can be pushed out to the swap partition this installer
+        # just created instead of sitting pinned in memory; and a build that
+        # genuinely needs more than half of RAM in /tmp wants /var/tmp, which
+        # is on the root filesystem and bounded by the disk.
+        #
+        # Like the root line above, this one is a statement of intent rather
+        # than the thing that takes effect. raven-init mounts /tmp during
+        # mount_essential_filesystems, before it has read this file at all,
+        # and mount_fstab then skips any target that is already mounted. The
+        # size has to be on init's own mount to matter.
+        printf "$fmt" "tmpfs" "/tmp" "tmpfs" "rw,nosuid,nodev,mode=1777,size=50%" 0 0
     } > "${TARGET}/etc/fstab"
 
     ROOT_UUID="$root_uuid"
@@ -3565,7 +3640,72 @@ install_bootloader() {
     cp "$SRC_KERNEL" "${TARGET}/boot/vmlinuz" 2>/dev/null || true
     cp "$SRC_INITRD" "${TARGET}/boot/initramfs.img" 2>/dev/null || true
 
-    local base_cmdline="root=UUID=${ROOT_UUID} rw"
+    # rootflags= carries the root's mount options, because nothing else can.
+    #
+    # /etc/fstab cannot: raven-init's mount_fstab skips the root outright, on
+    # the grounds that the initramfs mounted it already and remounting a live
+    # root to change its flags is a worse idea than leaving them. The
+    # initramfs can, and this is how it is told -- raven_root_from_cmdline
+    # parses rootflags= and raven_mount_disk_root appends it to the mount, so
+    # the root comes up noatime from its very first mount rather than being
+    # corrected later, which means not even the boot's own reads write an
+    # atime. write_fstab's root line says the same thing so that a later
+    # `mount -o remount /` agrees with this; see the reasoning there for why
+    # noatime and not relatime.
+    local base_cmdline="root=UUID=${ROOT_UUID} rw rootflags=noatime"
+
+    # resume=: without it, hibernation on the installed machine is a trap.
+    #
+    # The kernel is perfectly willing to hibernate as things stand.
+    # CONFIG_HIBERNATION is on, and `echo disk > /sys/power/state` finds the
+    # swap partition, writes the whole suspend image into it and powers the
+    # machine off. What does not happen is the other half. Nothing reads that
+    # image back unless the boot that follows is told which device to look in,
+    # so the machine comes up fresh, the image is abandoned, and every unsaved
+    # thing in that session is gone with no error printed anywhere. That
+    # asymmetry -- the dangerous half works, the recovering half silently does
+    # not -- is why init/src/power.rs leaves `disk` out of its sleep states
+    # and offers only mem and freeze. This line is what unblocks that.
+    #
+    # It goes on every entry, which is deliberate and not just tidiness. A
+    # suspend image is only valid against the filesystem exactly as it stood
+    # when the snapshot was taken. Booting the verbose or the rescue entry
+    # after a hibernate would mount the same root rw and start writing to it,
+    # and a resume attempted after that hands the resumed kernel a page cache
+    # describing a filesystem that has since moved. Since base_cmdline is
+    # shared by all of them, every entry either resumes or refuses to; none of
+    # them can half-do it.
+    #
+    # UUID= rather than PARTUUID= or a device node is a choice with a
+    # consequence, so it is worth stating. The kernel's own resume= parser
+    # understands PARTUUID=, PARTLABEL=, major:minor and /dev/ names, but not
+    # a filesystem UUID, which needs a superblock read. Writing PARTUUID=
+    # here would therefore resume with no help from userspace at all -- and it
+    # would do it from a late initcall, which on NVMe regularly runs before
+    # the disk has finished probing. That race is exactly what
+    # raven_mount_disk_root polls thirty seconds to avoid, and a resume that
+    # silently does not happen is the failure being removed here, not one to
+    # reintroduce in a new place. So the resolution belongs where the root's
+    # already is: /init must parse resume=, put it through raven_resolve_root
+    # -- which handles UUID= via blkid and polls until the node exists -- and
+    # write the resulting device to /sys/power/resume BEFORE it mounts the
+    # root rw. Resuming after the root has been mounted writable is how the
+    # filesystem gets corrupted rather than merely stale.
+    #
+    # If an initramfs does not do that, this is inert and not harmful: the
+    # kernel cannot parse a filesystem UUID, says so once, and the machine
+    # boots fresh exactly as it does today.
+    if [[ -n "${SWAP_UUID:-}" ]]; then
+        base_cmdline+=" resume=UUID=${SWAP_UUID}"
+        info "Hibernate will resume from UUID=${SWAP_UUID}"
+    elif [[ -n "$SWAP_DEV" ]]; then
+        # write_fstab leaves SWAP_UUID empty only when blkid could not read
+        # the partition it had just run mkswap over, which is strange enough
+        # to say out loud -- the same condition drops the swap line from the
+        # fstab, so this machine has no swap at all and the install is
+        # otherwise fine.
+        warn "No UUID for ${SWAP_DEV}; no resume= written and hibernate will not work"
+    fi
 
     # Dell firmware can hang on the kernel's default ACPI reset: a Latitude
     # 5350 went to a black screen with the backlight on and never reached
@@ -3672,7 +3812,7 @@ install_bootloader() {
         echo "type = shutdown"
     } > "${esp}/EFI/raven/boot.cfg"
 
-    ok "boot.cfg written (root=UUID=${ROOT_UUID})"
+    ok "boot.cfg written (root=UUID=${ROOT_UUID}${SWAP_UUID:+, resume=UUID=${SWAP_UUID}})"
 
     if [[ $OPT_NVRAM -eq 1 ]]; then
         register_nvram_entry

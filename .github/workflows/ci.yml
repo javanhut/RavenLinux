@@ -122,3 +122,15 @@ jobs:
 
       - name: Test desktop build contract (offline)
         run: python3 scripts/test-desktop-build.py
+
+      # The kernel config is a full 216 KB .config that build-kernel.sh applies
+      # verbatim, so an option that falls out of that file is an option that
+      # falls out of the shipped kernel -- which is how 6.17.11-raven came to
+      # ship with HARDENED_USERCOPY, both SLAB_FREELIST options,
+      # INIT_ON_ALLOC_DEFAULT_ON and SECURITY_YAMA all off. This reads the
+      # checked-in file and needs no kernel tree, which is why it belongs in
+      # the quick job rather than in build.yml's kernel build. Not
+      # continue-on-error: a dropped hardening option is a regression, not a
+      # style note.
+      - name: Check kernel hardening floor (offline)
+        run: ./scripts/check-kernel-hardening.sh

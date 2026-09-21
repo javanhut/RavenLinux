@@ -3,3 +3,10 @@ in. Same schema as /etc/raven/init.d, plus ${VAR} expansion from the session's
 environment. Shipped to /usr/share/raven/user-services; a template is taken
 when its `exec` exists. A user's own ~/.config/raven/services/*.toml overrides
 by name, and can set `enabled = false` to opt out of a shipped one.
+
+A program belongs here if it is supposed to still be running later in the
+session: a status bar, an audio server, a portal. A program belongs in
+session.d if it runs, does its work and exits -- loading a database, importing
+a keyring, mapping a tablet. The difference is not where it starts but whether
+anything should care that it stopped, and session.d cannot care: the launcher
+starts each file with setsid, discards its stdio and never asks again.

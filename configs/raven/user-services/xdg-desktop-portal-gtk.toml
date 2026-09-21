@@ -1,0 +1,55 @@
+# xdg-desktop-portal-gtk -- the GTK backend behind the portal frontend.
+#
+# xdg-desktop-portal routes a request to whichever backend implements it;
+# this is the one that draws the actual window for the print dialog, the
+# appchooser, the screenshot confirmation and the settings portal. On this
+# desktop ravenfilemanager takes the file chooser and this takes the rest.
+#
+# It has the same problem the frontend had -- started once by the session bus
+# and then unwatched, which is how the machine ended up with a backend that
+# had been up a day and five hours next to a frontend that had been up two --
+# and one more that the frontend does not have, which is why this ships
+# disabled and the frontend does not.
+#
+# This is a GTK3 program. It links libgtk-3 and libwayland-client and it
+# opens the display at startup, not at the first dialog. A session service
+# inherits raven-init --user's environment, and that environment has no
+# WAYLAND_DISPLAY in it: the launcher backgrounds the supervisor before it
+# execs the compositor, and the only thing that ever sets that variable is
+# the session.d subshell, which sets it for itself and then hands it to the
+# bus with dbus-update-activation-environment. So a supervised copy of this
+# would die with "cannot open display" on every start, for the whole life of
+# the session, at the backoff's ceiling of once a minute -- the exact shape
+# of the obexd loop already in /var/log/raven, 1663 restarts of a daemon that
+# could never have worked. A crash loop is not supervision. Enabling this
+# before the supervisor has a display to give it converts a process nobody
+# was watching into a process that is watched failing.
+#
+# Which leaves it activated, and correctly so for now: the bus starts it
+# lazily, with WAYLAND_DISPLAY in the activation environment, at the moment a
+# dialog is actually wanted. The frontend above is supervised and will
+# activate this the first time a request needs it.
+#
+# To turn this on, in this order:
+#
+#   1. The launcher must export WAYLAND_DISPLAY into the supervisor's
+#      environment, which today means finding the compositor socket before
+#      `raven-init --user` is backgrounded rather than after.
+#   2. /usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.gtk
+#      .service must be masked, or the bus and the supervisor will both have
+#      a claim on org.freedesktop.impl.portal.desktop.gtk.
+#   3. enabled = true here.
+#
+#   raven-rc --user start xdg-desktop-portal-gtk     # once 1 and 2 are true
+#
+# No ready_path, for the reason the frontend gives: readiness here is a D-Bus
+# name, and a ready_path that never appears costs a dependant its start.
+[[services]]
+name = "xdg-desktop-portal-gtk"
+description = "GTK backend for the desktop portals"
+exec = "/usr/lib/xdg-desktop-portal-gtk"
+args = []
+after = []
+restart = true
+enabled = false
+critical = false

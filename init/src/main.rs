@@ -22,10 +22,12 @@ use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use std::os::fd::AsFd;
 
+mod cgroup;
 mod config;
 mod control;
 mod overrides;
 mod power;
+mod readiness;
 mod reexec;
 mod rtc;
 mod service;
@@ -730,6 +732,18 @@ fn mount_essential_filesystems() -> Result<()> {
         mount_fs("cgroup2", "/sys/fs/cgroup", "cgroup2", MsFlags::empty(), "").ok();
     }
 
+    // ...and give the services somewhere to live inside it. Done here, while
+    // the filesystem that was just mounted is still the subject, so that the
+    // one warning a machine without cgroup2 deserves is printed once at boot
+    // rather than by whichever service happens to start first.
+    //
+    // This is not the only caller: `Cgroup::for_service` ensures the slice
+    // again on every start, because `early_boot` -- and therefore this
+    // function -- is skipped entirely after `raven-rc reexec`, and a
+    // re-executed init that assumed the slice existed would put every service
+    // started from then on into no cgroup at all, silently.
+    cgroup::ensure_slice();
+
     log::info!("Essential filesystems mounted");
     timeline::mark("filesystems mounted");
     Ok(())
@@ -1060,6 +1074,22 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
         let mut progressed = false;
         let mut index = 0;
         while index < pending.len() {
+            // Look at the services already started before considering the next
+            // one. The main loop is what watches ready paths, and it does not
+            // exist yet: without this, every daemon that became ready while
+            // the rest of the boot was still being started would be stamped
+            // with the single moment this function returned, which is how
+            // powerd, controlsd, timed and fprintd came to report the same
+            // ready time to the millisecond in `raven-rc blame`.
+            //
+            // One stat per service that has a ready path and has not answered
+            // yet, a dozen times over a boot. The residual error is the time
+            // it takes to start one service, and the one case it cannot reach
+            // is a file that appears while this function is blocked waiting
+            // for somebody else's dependency below -- that service is stamped
+            // when the wait ends rather than when its file appeared.
+            control::observe_readiness(&mut services);
+
             let svc_config = pending[index];
             if svc_config.after.iter().any(|d| unavailable.contains(d)) {
                 log::error!(
@@ -1081,7 +1111,16 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
             for dependency in &svc_config.after {
                 if let Some(dep_cfg) = config.services.iter().find(|s| &s.name == dependency) {
                     if let Some(path) = dep_cfg.ready_path.as_deref() {
-                        let ready = wait_for_ready_path(path, dep_cfg.ready_timeout);
+                        // Blocks on an inotify watch rather than on a 50ms
+                        // timer. The dependency chain on this machine is four
+                        // deep in places, and a timer charged every link in it
+                        // up to a tick of pure waiting on every boot even when
+                        // the socket was there in a millisecond. The timeout
+                        // and the meaning of the answer are unchanged.
+                        let ready = readiness::wait_for_path(
+                            path,
+                            Duration::from_secs(dep_cfg.ready_timeout as u64),
+                        );
                         if ready {
                             if let Some(dep) = services.get_mut(dependency) {
                                 dep.mark_ready();
@@ -1171,19 +1210,8 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
                 "linux".to_string(),
             ],
             restart: true,
-            enabled: true,
-            critical: false,
-            environment: HashMap::new(),
-            pre_exec: Vec::new(),
             tty: Some("/dev/tty1".to_string()),
-            user: None,
-            stop_exec: None,
-            stop_args: Vec::new(),
-            stop_timeout: 5,
-            runtime_dirs: Vec::new(),
-            after: Vec::new(),
-            ready_path: None,
-            ready_timeout: 5,
+            ..ServiceConfig::default()
         };
 
         // Try agetty first, fall back to direct shell
@@ -1194,19 +1222,8 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
                 exec: "/bin/sh".to_string(),
                 args: vec![],
                 restart: true,
-                enabled: true,
-                critical: false,
-                environment: HashMap::new(),
-                pre_exec: Vec::new(),
                 tty: Some("/dev/tty1".to_string()),
-                user: None,
-                stop_exec: None,
-                stop_args: Vec::new(),
-                stop_timeout: 5,
-                runtime_dirs: Vec::new(),
-                after: Vec::new(),
-                ready_path: None,
-                ready_timeout: 5,
+                ..ServiceConfig::default()
             };
             Service::start(&shell_config)
         });
@@ -1218,17 +1235,6 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
     }
 
     Ok(services)
-}
-
-fn wait_for_ready_path(path: &str, timeout: u32) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(timeout as u64);
-    while Instant::now() < deadline {
-        if Path::new(path).exists() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    Path::new(path).exists()
 }
 
 fn print_welcome() {
@@ -1374,6 +1380,12 @@ fn main_loop_at(
     if child_wake.is_none() {
         log::warn!("Could not set up the SIGCHLD wakeup; the main loop will tick every 100 ms");
     }
+
+    // The third thing this loop sleeps on, beside the SIGCHLD pipe and the
+    // control socket: a ready path appearing. See readiness.rs for why the
+    // watch goes on the parent directory and why an event is only ever a
+    // wakeup. `None` means no inotify, and the loop keeps the timer it had.
+    let mut ready_watch = readiness::Watcher::new();
     // How long to sleep with nothing pending. Bounded so a wake that was
     // missed (a signal before the handler was installed, a client that raced
     // the poll) costs at most this, and so the command-file fallback and the
@@ -1400,25 +1412,78 @@ fn main_loop_at(
         // Check service status and restart if needed
         check_services(services, config);
 
-        // Sleep until something happens, or until pending work is due.
-        let wait = if control::wants_quick_tick(services) { BUSY } else { IDLE };
-        match (&child_wake, &control) {
-            (Some(pipe), listener) => {
-                use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-                let mut fds = vec![PollFd::new(pipe.as_fd(), PollFlags::POLLIN)];
-                if let Some(l) = listener {
-                    fds.push(PollFd::new(l.as_fd(), PollFlags::POLLIN));
-                }
-                let timeout = PollTimeout::try_from(wait.as_millis() as u16).unwrap_or(PollTimeout::MAX);
+        // Arm a watch on the parent directory of every ready path still being
+        // waited for, and drop the ones nothing waits on any more. This runs
+        // before the look below and before the sleep, which is the ordering
+        // the whole thing depends on: a watch armed after a check misses
+        // exactly the services fast enough to answer in between.
+        //
+        // The answer is whether every waiting path is covered. It is not
+        // always yes -- a daemon that creates its own runtime directory has no
+        // directory to watch until it does -- and where it is no, the loop
+        // keeps the short timer for that service rather than sleeping through
+        // an event that will never come.
+        let readiness_watched = match ready_watch.as_mut() {
+            Some(watcher) => watcher.arm(
+                services
+                    .values()
+                    .filter(|svc| svc.is_running() && svc.ready_at().is_none())
+                    .filter_map(|svc| svc.ready_path()),
+            ),
+            None => false,
+        };
+
+        // Look once with the watch already armed, so a path that appeared
+        // before this pass is recorded now rather than slept through.
+        control::observe_readiness(services);
+
+        // Sleep until something happens, or until pending work is due. The
+        // SIGCHLD pipe is what makes IDLE safe: without it nothing wakes this
+        // loop when a child dies, so a machine that could not set it up keeps
+        // the short timer it had before there was anything to poll at all.
+        let wait = if child_wake.is_none() || control::wants_quick_tick(services, readiness_watched)
+        {
+            BUSY
+        } else {
+            IDLE
+        };
+        {
+            use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+            let mut fds = Vec::with_capacity(3);
+            if let Some(pipe) = &child_wake {
+                fds.push(PollFd::new(pipe.as_fd(), PollFlags::POLLIN));
+            }
+            if let Some(l) = &control {
+                fds.push(PollFd::new(l.as_fd(), PollFlags::POLLIN));
+            }
+            if let Some(watcher) = &ready_watch {
+                fds.push(PollFd::new(watcher.as_fd(), PollFlags::POLLIN));
+            }
+            if fds.is_empty() {
+                // No pipe, no socket, no inotify: nothing to wait on but the
+                // clock. This is the degraded path the SIGCHLD warning above
+                // describes, and it is why BUSY still exists.
+                std::thread::sleep(BUSY);
+            } else {
+                let timeout =
+                    PollTimeout::try_from(wait.as_millis() as u16).unwrap_or(PollTimeout::MAX);
                 match poll(&mut fds, timeout) {
                     Ok(_) | Err(nix::errno::Errno::EINTR) => {}
                     Err(e) => log::warn!("poll: {e}"),
                 }
-                // Drain whatever the handler wrote; the count is not the point.
-                let mut buf = [0u8; 64];
-                while nix::unistd::read(std::os::fd::AsRawFd::as_raw_fd(pipe), &mut buf).is_ok_and(|n| n == buf.len()) {}
             }
-            (None, _) => std::thread::sleep(BUSY),
+        }
+        // Drain whatever the handler wrote; the count is not the point.
+        if let Some(pipe) = &child_wake {
+            let mut buf = [0u8; 64];
+            while nix::unistd::read(std::os::fd::AsRawFd::as_raw_fd(pipe), &mut buf)
+                .is_ok_and(|n| n == buf.len())
+            {}
+        }
+        // Likewise for the watch: a readable inotify fd that is never read
+        // makes the next poll return immediately, forever.
+        if let Some(watcher) = ready_watch.as_mut() {
+            watcher.drain();
         }
 
         // Serve any waiting raven-rc clients.
@@ -1452,7 +1517,16 @@ fn main_loop_at(
             }
         }
 
-        // Ready paths nobody waited on still get a time in `blame`.
+        // The event side of readiness. The poll above returned because a file
+        // appeared in a watched directory (or because a child died, or a
+        // client connected), and this is the stat that turns that into a
+        // `ready_at`. Microseconds after the event rather than at whatever
+        // moment the next tick happened to fall, which is the difference
+        // between `blame` measuring a service and `blame` measuring itself.
+        //
+        // Still the only path for a service nobody lists in `after`, and still
+        // the safety net for an event that was lost, coalesced or never
+        // delivered because there was no inotify to deliver it.
         control::observe_readiness(services);
 
         // After poll, so a start or stop just requested is visible at once.
@@ -1480,15 +1554,15 @@ fn wait_for_seat(services: &HashMap<String, Service>) {
         return;
     }
 
-    let socket = Path::new("/run/seatd.sock");
-    let deadline = Instant::now() + Duration::from_secs(5);
-
-    while Instant::now() < deadline {
-        if socket.exists() {
-            log::info!("seatd is ready on /run/seatd.sock");
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    // The same watch every other ready path gets. This one is hardcoded
+    // rather than read from a definition because seatd's socket path is fixed
+    // by libseat, not by init's configuration -- but there is no reason for it
+    // to have been the one wait on the machine still done with a timer, and it
+    // sits directly in front of the compositor starting, where half a tick of
+    // delay is half a tick the greeter is not on screen.
+    if readiness::wait_for_path("/run/seatd.sock", Duration::from_secs(5)) {
+        log::info!("seatd is ready on /run/seatd.sock");
+        return;
     }
 
     log::warn!("seatd did not create /run/seatd.sock within 5s;");

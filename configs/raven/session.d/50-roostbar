@@ -1,4 +1,30 @@
 #!/bin/sh
-# Machine-wide RoostBar autostart. A per-user file with this same name masks or
-# replaces it through raven-wayland-session's session.d precedence rules.
-exec /usr/bin/roostbar
+# RoostBar is not started from here any more, and this file does nothing.
+#
+# It used to be `exec /usr/bin/roostbar`, and that was the whole problem.
+# session.d is a launcher loop, not a supervisor: raven-wayland-session waits
+# for the compositor socket, starts every executable in this directory with
+# setsid, discards stdout and stderr, and never asks again. A bar that
+# crashed stayed crashed until the next login, silently, because there was
+# nobody left holding its exit status. RoostBar is a user service now --
+# /usr/share/raven/user-services/roostbar.toml, supervised by
+# `raven-init --user`, restarted when it dies, logged to
+# $XDG_STATE_HOME/raven/log/roostbar.log -- and starting it here as well
+# would put two bars on the screen, one of them unsupervised.
+#
+# The file remains, executable and empty of work, because three other places
+# still name it: stage-gui.sh installs it by path after building RoostBar,
+# its build summary prints "session.d enabled" when it is executable, and
+# check-desktop-image.py fails the image if it is not. Removing the file
+# without those is a build that stops with `install: cannot stat`, which is a
+# worse outcome than one no-op exec per login. It goes when they do.
+#
+# What session.d is still the right answer for is genuinely one-shot session
+# setup: a program that runs, does its work and exits. Loading an xrdb
+# database, unlocking or importing a keyring, mapping a tablet to a screen,
+# nudging a device that needs nudging once per login -- none of those want a
+# supervisor, because a supervisor's entire job is to notice that something
+# stopped and start it again, and stopping is what these are supposed to do.
+# Anything expected to still be running an hour into the session belongs in
+# /usr/share/raven/user-services instead, where something is watching it.
+exit 0

@@ -1,0 +1,35 @@
+# raven-faced -- face unlock.
+#
+# As with fprintd.toml: on an image built from this tree you do not need this
+# file, because /etc/raven/init.toml defines the service itself. It is shipped
+# for an already-installed machine whose init.toml predates raven-faced, where
+# `dev` installs the binary but never adds the service that runs it.
+#
+#   cp /usr/share/raven/services/faced.toml /etc/raven/init.d/
+#   raven-rc reload
+#   raven-rc start faced
+#
+# Leaving it there afterwards is safe: when an init.toml that defines faced
+# does arrive, init keeps its own definition and logs that this drop-in was
+# ignored.
+#
+# It runs on machines with no camera, and on machines with no models. Both are
+# answers a settings page needs to be given, and a daemon that is not running
+# cannot give either -- it looks exactly like a daemon that crashed.
+[[services]]
+name = "faced"
+description = "Face unlock"
+exec = "/usr/bin/raven-faced"
+args = []
+# udev, so the video nodes exist to be found.
+after = ["udev"]
+runtime_dirs = ["/run/raven-face"]
+# The socket is the proof it is serving; it binds before opening any device.
+# Its timeout is longer than fprintd's because this one optimises two ONNX
+# graphs before it binds -- a second or two on a laptop, and longer on the
+# slowest machine this runs on.
+ready_path = "/run/raven-face/camera.sock"
+ready_timeout = 30
+restart = true
+enabled = true
+critical = false

@@ -1,0 +1,81 @@
+# DisplayLinkManager -- the userspace half of a DisplayLink dock.
+#
+# evdi, the kernel half, is built from packages/raven/evdi and ships in the
+# image; it creates a DRM device per attached screen and waits to be fed.
+# What feeds it is this daemon, which decodes DisplayLink's proprietary USB
+# stream. Its EULA does not permit redistribution, so the image cannot carry
+# it and this file is a template for the machine where somebody installed
+# DisplayLink's own package. Until that binary exists the template stays
+# inert: the ISO promotes a template into /etc/raven/init.d only when its
+# `exec` is present in the sysroot, and rvn does the same on install.
+#
+# Before this file there was no supervised way to run it at all. DisplayLink
+# ships a udev rule at /usr/lib/udev/rules.d/99-displaylink.rules whose
+# start_service() is literally `systemctl start --no-block displaylink`,
+# which on a machine running raven-init does nothing and says nothing while
+# doing it -- there is a systemctl binary in the image with no systemd behind
+# it, so the rule succeeds and no daemon starts. What people do instead is
+# type it, and what that leaves behind was visible on the development machine
+# for two days: pid 1091 `sudo`, pid 1108 `sudo` again, pid 1109 the manager,
+# all started from a pts that had since been closed, all reparented to init,
+# in no roster, restarted by nothing, logging into a directory nobody thinks
+# to look in. A dock that stops working after a crash is then a dock that
+# needs the same command typed again by somebody who remembers it.
+#
+# What this definition changes, point by point:
+#
+# Root, directly. The manager needs the evdi device and the USB endpoint, so
+# it does run as root -- but init is PID 1 and therefore already root, and a
+# service with no `user =` simply stays that way. The two sudo processes in
+# the chain above existed only because a person typed the command; they cost
+# a terminal that the daemon then outlives, and a signal sent to the daemon
+# that does not reach it through them cleanly. There is no sudo here and no
+# tty to be orphaned from.
+#
+# Restart. restart = true, with the standard backoff: one second doubling to
+# a minute, reset once a run has lasted a minute. The manager dying on a
+# cable event is the case this exists for.
+#
+# Logging to /var/log/raven/displaylink.log. There is no key for that, and
+# there does not need to be one: every service's stdout and stderr go to
+# /var/log/raven/<name>.log, so the file name follows from `name` being
+# "displaylink". That is beside init's own log rather than in DisplayLink's
+# /var/log/displaylink, which holds its internal traces and EDIDs and is the
+# package's business, not the supervisor's.
+#
+# pre_exec loads evdi. The systemd unit spells this ExecStartPre and it is
+# the same idea: the module is not autoloaded by anything on the path from
+# boot to here, and the manager with no evdi fails in a way that reads like a
+# broken dock. modprobe on an already-loaded module is a no-op, which is what
+# pre_exec requires -- it runs before every start, including each restart.
+#
+# Ships disabled, deliberately, and this is the one thing to argue with.
+# Installing a daemon is not a decision to run it: sshd.toml ships disabled
+# for that reason and this follows it. Enabling this is the moment to delete
+# whatever ad-hoc launcher the machine has picked up -- the typed sudo, an
+# entry somebody added to session.d, a line in a shell profile -- because two
+# managers on one evdi device is a worse failure than none, and the point of
+# moving it here is that there is exactly one thing starting it and one place
+# that says so.
+#
+#   raven-rc start displaylink      # run it now
+#   raven-rc enable displaylink     # and at every boot
+#
+# One unresolved thing, written down rather than guessed at. DisplayLink's
+# unit sets WorkingDirectory=/usr/lib/displaylink, and that directory holds
+# the firmware packages the manager loads into the dock -- ella-dock,
+# navarro-dock, ridge-dock, firefly-monitor. ServiceConfig has no key for a
+# working directory, so this service starts with init's. If the manager
+# resolves those by relative path it will not find them, and the symptom will
+# be a dock that enumerates and stays dark rather than an error. Confirm it
+# on a machine with a dock before enabling this anywhere it matters.
+[[services]]
+name = "displaylink"
+description = "DisplayLink USB graphics: feed the evdi devices a dock creates"
+exec = "/usr/lib/displaylink/DisplayLinkManager"
+args = []
+after = ["udev"]
+pre_exec = ["/sbin/modprobe", "evdi"]
+restart = true
+enabled = false
+critical = false

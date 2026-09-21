@@ -233,7 +233,13 @@ pub fn dispatch(
         "list" => (list_services(services, config), Action::None),
 
         "status" => match target {
-            Some(name) => (status_one(name, services, config), Action::None),
+            // A question asked over the socket is asked once, by a person
+            // waiting for the answer, so it is worth reading the live
+            // resource counters for -- unlike the published copy below.
+            Some(name) => (
+                status_one(name, services, config, Counters::Read),
+                Action::None,
+            ),
             // Bare `status` means the whole system, which is what an operator
             // asking "what is going on" wants.
             None => (list_services(services, config), Action::None),
@@ -242,7 +248,14 @@ pub fn dispatch(
         "enable" => with_target(target, verb, |name| set_enabled(name, true, config)),
         "disable" => with_target(target, verb, |name| set_enabled(name, false, config)),
 
-        "blame" => (blame_services(services, config), Action::None),
+        "blame" => (
+            blame_services(
+                services,
+                config,
+                crate::timeline::first_milestone("main loop"),
+            ),
+            Action::None,
+        ),
 
         "reload" => (reload_config(services, config), Action::None),
 
@@ -370,19 +383,39 @@ fn list_services(services: &HashMap<String, Service>, config: &InitConfig) -> St
 }
 
 /// Whether the main loop has time-driven work pending: a running service
-/// whose ready path has not appeared yet, or a dead one with a restart due.
-/// When neither, the loop can sleep until a child exits or a client
-/// connects, instead of waking ten times a second to look.
-pub fn wants_quick_tick(services: &HashMap<String, Service>) -> bool {
+/// whose ready path has not appeared yet and cannot be watched for, or a dead
+/// one with a restart due. When neither, the loop can sleep until a child
+/// exits, a client connects or a ready path appears, instead of waking ten
+/// times a second to look.
+///
+/// `readiness_watched` is the main loop's answer to "is every ready path I am
+/// still waiting on covered by an inotify watch" (see readiness.rs). When it
+/// is, waiting for a ready path is no longer time-driven work at all: the
+/// kernel wakes the poll the moment the file appears, so the loop can go idle
+/// instead of spinning at ten looks a second for the whole of boot. When it is
+/// not -- no inotify, or a daemon that has not created its own runtime
+/// directory yet -- this falls back to exactly the condition it always had,
+/// because a service whose readiness nothing can notify us about must still be
+/// looked at on a timer.
+pub fn wants_quick_tick(services: &HashMap<String, Service>, readiness_watched: bool) -> bool {
     services.values().any(|svc| {
-        (svc.is_running() && svc.ready_path().is_some() && svc.ready_at().is_none())
+        (!readiness_watched
+            && svc.is_running()
+            && svc.ready_path().is_some()
+            && svc.ready_at().is_none())
             || (!svc.is_running() && svc.retry_at().is_some())
     })
 }
 
 /// Look at every running service's ready path once and record the ones that
-/// have appeared. Called once per main-loop tick, so a service nobody waits
-/// on (nothing lists it in `after`) still gets a ready time.
+/// have appeared. Called twice per main-loop pass -- once with the watches
+/// freshly armed and once after the sleep they woke from -- so a service
+/// nobody waits on (nothing lists it in `after`) still gets a ready time, and
+/// so does one whose file appeared while the watch was being set up.
+///
+/// This stays the only caller of `note_ready_if_present`, and that function
+/// stays the only place `ready_at` is written. An inotify event is a reason to
+/// call this; it is never itself the evidence that a service is ready.
 pub fn observe_readiness(services: &mut HashMap<String, Service>) {
     for (name, svc) in services.iter_mut() {
         if svc.note_ready_if_present() {
@@ -395,13 +428,34 @@ pub fn observe_readiness(services: &mut HashMap<String, Service>) {
     }
 }
 
-/// The boot timeline: when init got where, and when each service started
-/// and became ready, slowest first. Seconds since the kernel started, so
-/// the numbers line up with dmesg.
-fn blame_services(services: &HashMap<String, Service>, config: &InitConfig) -> String {
+/// The boot timeline: when init got where, and when each service first
+/// started and first became ready, slowest first. Seconds since the kernel
+/// started, so the numbers line up with dmesg.
+///
+/// Every service time here is its *first* in this boot. A service that has
+/// restarted since -- after a resume, after a crash, after `raven-rc restart`
+/// -- keeps the times it had at boot, because this table answers "why was the
+/// machine slow to come up" and a restart eight hours later is not an answer
+/// to it. How often a service has come back, and when it last did, belong to
+/// `raven-rc status NAME`, and that is where they are.
+///
+/// `boot_done` is when init reached its main loop, if it has, and is taken as
+/// an argument rather than read here so the boundary can be driven from a test
+/// without writing into the process-wide milestone list -- the same reason
+/// `Service::should_restart_at` takes a clock. Rows that first started after
+/// it are shown, because they are part of what is running, but they are left
+/// out of the summary: a daemon somebody started by hand at lunchtime is not
+/// part of how long the machine took to boot.
+pub(crate) fn blame_services(
+    services: &HashMap<String, Service>,
+    config: &InitConfig,
+    boot_done: Option<f64>,
+) -> String {
     let mut out = String::new();
-    out.push_str("Seconds since the kernel started. Milestones are this raven-init's; a\n");
-    out.push_str("re-exec restarts them, service times carry across.\n\n");
+    out.push_str("Seconds since the kernel started. Each service is timed from its first\n");
+    out.push_str("start in this boot; restarts since are in `raven-rc status NAME`.\n");
+    out.push_str("Milestones cross a re-exec: a name that appears twice marks one, and\n");
+    out.push_str("the rows above the second `init started` are the original boot's.\n\n");
 
     for (name, at) in crate::timeline::milestones() {
         out.push_str(&format!("  {:<22} {:>9.3}\n", name, at));
@@ -412,8 +466,14 @@ fn blame_services(services: &HashMap<String, Service>, config: &InitConfig) -> S
         name: String,
         started: Option<f64>,
         ready: Option<f64>,
+        /// What goes in the READY column, which is not always a number: see
+        /// where it is built below.
+        ready_text: String,
         took: Option<f64>,
-        note: &'static str,
+        /// This service first started after init reached its main loop, so it
+        /// is not part of the boot the summary measures.
+        after_boot: bool,
+        note: String,
     }
 
     let mut rows: Vec<Row> = Vec::new();
@@ -429,23 +489,50 @@ fn blame_services(services: &HashMap<String, Service>, config: &InitConfig) -> S
         let Some(svc) = services.get(&name) else {
             continue;
         };
-        let started = svc.started_at().map(crate::timeline::instant_secs);
-        let ready = svc.ready_at().map(crate::timeline::instant_secs);
+        let started = svc.first_started_at().map(crate::timeline::instant_secs);
+        let ready = svc.first_ready_at().map(crate::timeline::instant_secs);
         let took = match (started, ready) {
             (Some(s), Some(r)) => Some((r - s).max(0.0)),
             _ => None,
         };
-        let note = match (svc.ready_path(), ready, svc.is_running()) {
+        // A service with a ready path that has never been reached is not the
+        // same thing as a service with no ready path, and the two used to
+        // print an identical bare dash in this column and be told apart only
+        // by a note at the end of a wide line. A dash now means the definition
+        // names nothing to wait for; `waiting` means it does and the file has
+        // not appeared yet; `never` means it does, the file never appeared,
+        // and the service is not running any more to make it.
+        let ready_text = match (svc.ready_path(), ready) {
+            (_, Some(at)) => format!("{at:.3}"),
+            (Some(_), None) if svc.is_running() => "waiting".to_string(),
+            (Some(_), None) => "never".to_string(),
+            (None, None) => "-".to_string(),
+        };
+        let mut note = match (svc.ready_path(), ready, svc.is_running()) {
             (None, _, _) => "no ready path",
             (Some(_), Some(_), _) => "",
             (Some(_), None, true) => "not ready yet",
             (Some(_), None, false) => "exited before ready",
-        };
+        }
+        .to_string();
+        let after_boot = matches!((started, boot_done), (Some(s), Some(done)) if s > done);
+        if after_boot {
+            // Without this the row is simply baffling: one line reading 2751
+            // in a table whose other rows are all under ten, and nothing
+            // saying why.
+            note = if note.is_empty() {
+                "started after boot".to_string()
+            } else {
+                format!("started after boot, {note}")
+            };
+        }
         rows.push(Row {
             name,
             started,
             ready,
+            ready_text,
             took,
+            after_boot,
             note,
         });
     }
@@ -472,19 +559,24 @@ fn blame_services(services: &HashMap<String, Service>, config: &InitConfig) -> S
             "{:<20} {:>9}  {:>9}  {:>9}  {}\n",
             r.name,
             fmt(r.started),
-            fmt(r.ready),
+            r.ready_text,
             fmt(r.took),
             r.note
         ));
     }
 
-    let first = rows
-        .iter()
+    // First start to last ready, over this boot and nothing else. Both halves
+    // of that were wrong: the times were the current run's, so one obexd
+    // restart after a resume reported `span 97613.069s` on a machine that
+    // booted in seven seconds, and the fold read `ready.or(started)`, which
+    // let a service that never became ready contribute its start time as
+    // though it were a ready time and quietly overstate the boot.
+    let boot_rows = || rows.iter().filter(|r| !r.after_boot);
+    let first = boot_rows()
         .filter_map(|r| r.started)
         .fold(f64::INFINITY, f64::min);
-    let last = rows
-        .iter()
-        .filter_map(|r| r.ready.or(r.started))
+    let last = boot_rows()
+        .filter_map(|r| r.ready)
         .fold(f64::NEG_INFINITY, f64::max);
     if first.is_finite() && last.is_finite() {
         out.push_str(&format!(
@@ -492,6 +584,13 @@ fn blame_services(services: &HashMap<String, Service>, config: &InitConfig) -> S
             first,
             last,
             last - first
+        ));
+    } else if first.is_finite() {
+        // Nothing has been ready: either no service names a ready path or
+        // none has reached one yet. A span folded over start times alone
+        // would be a measurement of nothing, printed to three decimal places.
+        out.push_str(&format!(
+            "\nservices: first start {first:.3}, nothing ready yet\n"
         ));
     }
     out
@@ -507,7 +606,44 @@ fn format_row(name: &str, state: &str, pid: Option<i32>, boot: &str, description
     )
 }
 
-fn status_one(name: &str, services: &HashMap<String, Service>, config: &InitConfig) -> String {
+/// Whether a status rendering may read the service's live resource counters.
+///
+/// This exists because of the status publisher, not because of the status
+/// command. [`StatusPublisher`] re-renders this text on every main-loop tick
+/// and writes the file whenever the text differs from last time, which is what
+/// makes a quiet machine cost no I/O at all. `memory.current` is not quiet: a
+/// daemon that is merely alive moves it by a page here and there, so a status
+/// text carrying it would differ on nearly every tick and turn an idle machine
+/// into a process that writes several files a second to /run, forever, to
+/// record that nothing happened.
+///
+/// Rounding the numbers until they stop moving was the alternative and it is
+/// not one: rounding hard enough to be stable (whole gigabytes, whole minutes
+/// of CPU) leaves a figure too coarse to answer the question anybody asks it,
+/// and rounding gently enough to be useful still churns under load -- exactly
+/// when a supervisor should be writing least.
+///
+/// So the counters are read on demand, for a request that came over the
+/// socket, and left out of the published copy. The visible consequence is that
+/// `raven-rc status NAME` shows memory and CPU for root, who is served from
+/// the socket, and not for an unprivileged caller, who is served from
+/// /run/raven-init/services/NAME (see `read_published` in rc.rs). The
+/// alternative was to make every idle machine pay for a number almost nobody
+/// reads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Counters {
+    /// Read `memory.current`, `cpu.stat` and `pids.current` from the cgroup.
+    Read,
+    /// Leave them out, because this text is about to be written to a file.
+    Skip,
+}
+
+fn status_one(
+    name: &str,
+    services: &HashMap<String, Service>,
+    config: &InitConfig,
+    counters: Counters,
+) -> String {
     let cfg = config.services.iter().find(|c| c.name == name);
 
     let Some(svc) = services.get(name) else {
@@ -541,12 +677,32 @@ fn status_one(name: &str, services: &HashMap<String, Service>, config: &InitConf
         None => out.push_str("  pid          -\n"),
     }
 
+    // The run that is happening now, which is not the number `blame` prints.
+    // `blame` reports a service's first start in this boot and holds it still
+    // through every restart, because it is describing the boot; this is the
+    // current run, and on a service that has restarted the two differ by
+    // however long the machine has been up. Between them they answer "when
+    // did this come up" and "when did it last come back", which used to be
+    // one number pretending to be both.
+    if svc.is_running() {
+        if let Some(at) = svc.started_at() {
+            out.push_str(&format!("  started      {}\n", boot_clock(at, counters)));
+        }
+    }
+
+    if counters == Counters::Read {
+        out.push_str(&resource_usage(name));
+    }
+
     if let Some(code) = svc.exit_status() {
         if !svc.is_running() {
             out.push_str(&format!("  exit status  {}\n", code));
         }
     }
 
+    // The restart count is the number that turns "this service is running"
+    // into "this service has been dying and coming back all afternoon", which
+    // is a different machine to be standing in front of.
     out.push_str(&format!(
         "  restarts     {}{}\n",
         svc.restart_count(),
@@ -556,6 +712,16 @@ fn status_one(name: &str, services: &HashMap<String, Service>, config: &InitConf
             " (restart disabled in config)"
         }
     ));
+
+    // The count says a service has been coming back; this says whether that
+    // was all through the morning or in the last minute, which is the
+    // difference between a problem somebody already fixed and one that is
+    // happening now. It is here rather than in `blame` because a restart is a
+    // fact about a service's life, not about the boot -- `blame` reports the
+    // boot and says so.
+    if let Some(at) = svc.last_restart_at() {
+        out.push_str(&format!("  last restart {}\n", boot_clock(at, counters)));
+    }
 
     if let Some(at) = svc.retry_at() {
         if !svc.is_running() {
@@ -569,6 +735,120 @@ fn status_one(name: &str, services: &HashMap<String, Service>, config: &InitConf
     }
 
     out
+}
+
+/// What the service's cgroup can say about it right now, as status lines.
+///
+/// Empty for a service with no cgroup, which is not an error and not worth a
+/// line saying so: a machine with no cgroup2 would otherwise repeat the same
+/// apology in every status it printed, having already said it once at boot.
+/// It is likewise empty for a service that has exited, because the reaper
+/// removes the directory -- except where something the service forked outlived
+/// it, and then these lines are the only place that shows it.
+fn resource_usage(name: &str) -> String {
+    let Some(cgroup) = crate::cgroup::Cgroup::existing(name) else {
+        return String::new();
+    };
+
+    let mut out = String::new();
+
+    if let Some(bytes) = cgroup.memory_current() {
+        out.push_str(&format!("  memory       {}\n", format_bytes(bytes)));
+    }
+
+    if let Some(cpu) = cgroup.cpu_stat() {
+        // Total first, because that is the number being looked for, and the
+        // split after it, because a daemon burning its time in the kernel is
+        // a different problem from one burning it in its own code -- and the
+        // two are told apart by nothing else raven-rc prints.
+        out.push_str(&format!(
+            "  cpu          {} ({} user, {} system)\n",
+            format_cpu(cpu.usage_usec),
+            format_cpu(cpu.user_usec),
+            format_cpu(cpu.system_usec)
+        ));
+    }
+
+    if let Some(count) = cgroup.pids_current() {
+        // Not "children": this counts the leader too, and it counts the ones
+        // that daemonised out of the process group, which is the reason the
+        // number is worth printing at all.
+        out.push_str(&format!("  processes    {}\n", count));
+    }
+
+    out
+}
+
+/// A byte count as an operator would write it.
+///
+/// Binary multiples, matching `cgroup::parse_size` and the kernel: a status
+/// line reading 256M for a limit written as `memory_max = "256M"` is the
+/// whole point, and a decimal megabyte would make the two disagree by 5% for
+/// no reason anybody could see.
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    let value = bytes as f64;
+    if bytes < 1024 {
+        format!("{}B", bytes)
+    } else if value < KIB * KIB {
+        format!("{:.1}K", value / KIB)
+    } else if value < KIB * KIB * KIB {
+        format!("{:.1}M", value / (KIB * KIB))
+    } else {
+        format!("{:.2}G", value / (KIB * KIB * KIB))
+    }
+}
+
+/// A moment, on the boot clock, and -- when this text is not about to be
+/// written to a file -- how long ago it was.
+///
+/// The absolute half is the stable one: seconds since the kernel started,
+/// which is what `blame` prints and what a kernel log line carries, and which
+/// does not change no matter how often this text is re-rendered. The relative
+/// half is a live reading in exactly the sense [`Counters`] is about -- it
+/// differs on every tick simply because time passed -- so it is left out of
+/// the published copy, where it would make the supervisor rewrite a file every
+/// second for every service that has ever restarted, on an idle machine, to
+/// record that nothing had happened.
+fn boot_clock(at: std::time::Instant, counters: Counters) -> String {
+    let secs = crate::timeline::instant_secs(at);
+    match counters {
+        Counters::Read => format!(
+            "{:.3}s into this boot ({} ago)",
+            secs,
+            format_ago(at.elapsed())
+        ),
+        Counters::Skip => format!("{secs:.3}s into this boot"),
+    }
+}
+
+/// How long ago, as somebody standing at the machine would say it.
+///
+/// Coarse on purpose and coarser the further back it goes: the question this
+/// answers is "was that just now?", and three decimal places on a restart that
+/// happened last Tuesday would answer a question nobody asked. The exact
+/// second is on the same line, on the boot clock, for anyone reading this
+/// against a log.
+fn format_ago(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else if secs < 86_400 {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d{:02}h", secs / 86_400, (secs % 86_400) / 3600)
+    }
+}
+
+/// CPU microseconds as seconds, to the millisecond.
+///
+/// The same three decimal places `blame` prints, so the two tables can be read
+/// against each other, and enough resolution to see that a one-shot used 40ms
+/// rather than "0s".
+fn format_cpu(usec: u64) -> String {
+    format!("{:.3}s", usec as f64 / 1_000_000.0)
 }
 
 pub(crate) fn start_service(
@@ -603,12 +883,20 @@ pub(crate) fn start_service(
 
         if let Some(dep_cfg) = config.services.iter().find(|c| &c.name == dependency) {
             if let Some(path) = dep_cfg.ready_path.as_deref() {
-                let deadline =
-                    std::time::Instant::now() + Duration::from_secs(dep_cfg.ready_timeout as u64);
-                while std::time::Instant::now() < deadline && !std::path::Path::new(path).exists() {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                if !std::path::Path::new(path).exists() {
+                // The third of the three readiness waits this codebase had,
+                // and the last one still spending a timer on it. It was a 20ms
+                // sleep loop; it is now the same inotify wait boot uses, which
+                // matters more here than it looks: this runs on PID 1's own
+                // thread while a raven-rc client holds the socket, so every
+                // millisecond of it is a millisecond the supervisor is not
+                // reaping children or answering anyone else.
+                //
+                // `ready_timeout` still bounds it and the error below is still
+                // reached on exactly the same schedule.
+                if !crate::readiness::wait_for_path(
+                    path,
+                    Duration::from_secs(dep_cfg.ready_timeout as u64),
+                ) {
                     return format!(
                         "error: cannot start {}: dependency {} was not ready at {}\n",
                         name, dependency, path
@@ -1114,6 +1402,11 @@ fn write_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> 
 /// I/O. Files are written whole and installed by rename, so a reader never
 /// sees a partial one. A service that leaves the configuration has its file
 /// removed.
+///
+/// "The same text the socket would return" has one deliberate exception: the
+/// live resource counters are left out here, because a number that moves by
+/// itself would defeat the comparison above and make an idle machine write to
+/// /run several times a second. [`Counters`] has the full argument.
 pub struct StatusPublisher {
     dir: PathBuf,
     list: Option<String>,
@@ -1170,7 +1463,11 @@ impl StatusPublisher {
             self.list = Some(list);
         }
 
-        let blame = blame_services(services, config);
+        let blame = blame_services(
+            services,
+            config,
+            crate::timeline::first_milestone("main loop"),
+        );
         if self.blame.as_deref() != Some(blame.as_str()) {
             write_published(&self.dir.join("blame"), &blame)?;
             self.blame = Some(blame);
@@ -1191,7 +1488,10 @@ impl StatusPublisher {
             if name.is_empty() || name.contains('/') || name.starts_with('.') {
                 continue;
             }
-            let text = status_one(name, services, config);
+            // Counters::Skip: this text is compared against the last one and
+            // written when it differs, so anything in it that moves on its own
+            // is a write to /run on every tick. See `Counters`.
+            let text = status_one(name, services, config, Counters::Skip);
             if self.services.get(name) != Some(&text) {
                 write_published(&services_dir.join(name), &text)?;
                 self.services.insert(name.clone(), text);

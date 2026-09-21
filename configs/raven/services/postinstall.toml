@@ -20,12 +20,21 @@
 # `after` as a dependency it must start, and a system whose network comes from
 # something other than raven-dhcp would then never get its packages. The
 # script waits for the route itself.
+#
+# A one-shot in the strongest sense in the image: it runs at most once per
+# machine, and on most boots it is a no-op that exits before anything has
+# happened. `type = "oneshot"` is what stops that reading as a failure --
+# without it the roster shows `exited` for a service that did exactly what
+# it was meant to, next to `exited` for services that could not start at all.
+# The key is named `type` on the assumption ServiceConfig lands the field
+# with that name; unknown keys are ignored, so this is inert until it does.
 [[services]]
 name = "postinstall"
 description = "Install the package profile chosen at install time"
 exec = "/usr/bin/raven-postinstall"
 args = ["--auto"]
 after = ["udev"]
+type = "oneshot"
 restart = false
 enabled = false
 critical = false

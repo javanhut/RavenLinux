@@ -489,6 +489,107 @@ else
 fi
 
 # =============================================================================
+# Mount options, and the resume= that makes hibernate possible
+# =============================================================================
+#
+# Three facts about this machine are load-bearing and none of them is visible
+# from the fstab alone, which is why they are pinned here.
+#
+# The root's options do NOT come from /etc/fstab. raven-init's mount_fstab
+# skips the root, so the only thing that decides how the root is mounted is
+# rootflags= on the kernel command line. A change that edits the fstab line
+# and stops there looks right in every review and does nothing on the machine,
+# so both are checked, and they are checked against each other: if they ever
+# disagree, a `mount -o remount /` silently reverts the boot-time choice.
+#
+# resume= is the same shape of problem in the other direction. Hibernation
+# needs no configuration to write an image and all of it to read one back, so
+# a missing resume= does not fail -- it loses the session and says nothing.
+#
+# These are source greps rather than a run of install_bootloader, which copies
+# EFI binaries and a kernel and cannot be exercised without a target tree.
+section "mount options and resume="
+
+FSTAB_T="${WORKDIR}/fstab-target"
+mkdir -p "${FSTAB_T}/etc"
+
+(
+    # Scoped to a subshell: write_fstab needs a uuid_of, and nothing else in
+    # this file wants one. The assertions are made in here too, against a
+    # FAILURES that the parent cannot see -- so the fstab is written out and
+    # the checks below run in the parent against the file.
+    TARGET="${FSTAB_T}"
+    ROOT_DEV="/dev/mock3"; ESP_DEV="/dev/mock1"
+    SWAP_DEV="/dev/mock2"; HOME_DEV="/dev/mock4"
+    OPT_FS="ext4"
+    SWAP_UUID=""
+    uuid_of() {
+        case "$1" in
+            /dev/mock1) echo "1234-ABCD" ;;
+            /dev/mock2) echo "5wapffff-0000-0000-0000-000000000002" ;;
+            /dev/mock3) echo "r00tffff-0000-0000-0000-000000000003" ;;
+            /dev/mock4) echo "h0meffff-0000-0000-0000-000000000004" ;;
+        esac
+    }
+    fs_type_of() { echo ext4; }
+    import_fn write_fstab
+    write_fstab
+    # Published for install_bootloader; the parent checks the value by proxy,
+    # so record it next to the fstab rather than trying to export it.
+    echo "${SWAP_UUID}" > "${FSTAB_T}/swap-uuid"
+)
+
+FSTAB="${FSTAB_T}/etc/fstab"
+
+if [[ -f "$FSTAB" ]]; then
+    matches "the root is mounted noatime"   '^UUID=r00tffff\S* +/ +ext4 +rw,noatime ' "$FSTAB"
+    matches "/home is mounted noatime"      '^UUID=h0meffff\S* +/home +ext4 +rw,noatime ' "$FSTAB"
+    lacks   "no relatime is left in the fstab" 'relatime' "$FSTAB"
+    matches "/tmp carries a size cap"       '^tmpfs +/tmp +tmpfs +rw,nosuid,nodev,mode=1777,size=50%' "$FSTAB"
+    matches "/tmp is still nosuid and nodev" '^tmpfs +/tmp +tmpfs +rw,nosuid,nodev,' "$FSTAB"
+    matches "the swap partition is in the fstab" '^UUID=5wapffff\S* +none +swap +sw ' "$FSTAB"
+    eq "write_fstab publishes the swap UUID for the bootloader" \
+       "$(cat "${FSTAB_T}/swap-uuid" 2>/dev/null)" \
+       "5wapffff-0000-0000-0000-000000000002"
+else
+    failed "write_fstab wrote no fstab"
+fi
+
+# The half the fstab cannot do. Both boot-entry strings are built from one
+# base_cmdline, so pinning that one line pins every entry.
+base_line="$(grep -E 'local base_cmdline=' "$INSTALLER" || true)"
+if [[ "$base_line" == *"rootflags=noatime"* ]]; then
+    pass "the kernel command line carries rootflags=noatime"
+else
+    failed "base_cmdline does not set rootflags=noatime" \
+           "without it the fstab's noatime never reaches the root mount" \
+           "got: ${base_line:-<no base_cmdline>}"
+fi
+
+if grep -q 'base_cmdline+=" resume=UUID=${SWAP_UUID}"' "$INSTALLER"; then
+    pass "a swap partition puts resume=UUID= on the command line"
+else
+    failed "install_bootloader writes no resume=" \
+           "hibernate writes an image and then boots fresh without it"
+fi
+
+# resume= must be reachable by every entry, not bolted onto one of them. That
+# is true exactly as long as it is appended to base_cmdline, which the check
+# above already establishes -- what this one catches is somebody later giving
+# the normal entry a resume= of its own and leaving rescue without one.
+stray_resume="$(grep -n 'resume=' "$INSTALLER" \
+                 | grep -vE '^[0-9]+: *#' \
+                 | grep -E 'cmdline' \
+                 | grep -vF 'base_cmdline+=" resume=UUID=${SWAP_UUID}"' || true)"
+if [[ -z "$stray_resume" ]]; then
+    pass "resume= is set in one place, so every boot entry inherits it"
+else
+    failed "resume= appears outside base_cmdline" \
+           "an entry that boots without it after a hibernate corrupts the image" \
+           "${stray_resume}"
+fi
+
+# =============================================================================
 # The live desktop runs as root; the installed one does not
 # =============================================================================
 #
