@@ -182,3 +182,4 @@ init/target/x86_64-unknown-linux-musl
 # PNGs rendered by bootloader/preview so the boot menu can be looked at without
 # booting. Build artifacts: regenerate with `cargo run` in that directory.
 bootloader/preview/out/
+*target/*
