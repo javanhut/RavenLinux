@@ -15,15 +15,18 @@
 # Usage:
 #   scripts/dev-install.sh [target ...] [options]
 #
-# Targets (default: init installer tools):
+# Targets (default: init faced installer tools):
 #   init        build init/ natively; install raven-init, raven-rc,
 #               raven-powerd, raven-ports, raven-timed, raven-mount,
 #               raven-fprintd, raven-firewall to /usr/bin
 #               (stage-raven.sh:build_raven_init)
 #   faced       build faced/ natively; install raven-faced to /usr/bin and
-#               fetch-models.sh to /usr/share/raven-face. Not in the default
-#               set: it builds an inference engine and takes a few minutes the
-#               first time. (stage-raven.sh:build_raven_faced)
+#               fetch-models.sh to /usr/share/raven-face. It builds an
+#               inference engine, so the first run takes a few minutes; every
+#               run after that is a cargo no-op and it is in the default set
+#               because a dev install that silently leaves out face unlock
+#               looks exactly like a faced that will not start.
+#               (stage-raven.sh:build_raven_faced)
 #   installer-ui  build installer-ui/ natively; install raven-installer-ui and
 #               its launcher entry, icon and metainfo. Not in the default set:
 #               it is a GTK4 build, and it is only worth waiting for when the
@@ -83,7 +86,7 @@ for arg in "$@"; do
         *) log_error "unknown argument: $arg"; exit 2 ;;
     esac
 done
-(( ${#TARGETS[@]} )) || TARGETS=(init installer tools)
+(( ${#TARGETS[@]} )) || TARGETS=(init faced installer tools)
 
 # -----------------------------------------------------------------------------
 # Are we on the system we are about to write into?
