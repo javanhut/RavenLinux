@@ -21,11 +21,12 @@
 #               raven-fprintd, raven-firewall to /usr/bin
 #               (stage-raven.sh:build_raven_init)
 #   faced       build faced/ natively; install raven-faced to /usr/bin and
-#               fetch-models.sh to /usr/share/raven-face. It builds an
-#               inference engine, so the first run takes a few minutes; every
-#               run after that is a cargo no-op and it is in the default set
-#               because a dev install that silently leaves out face unlock
-#               looks exactly like a faced that will not start.
+#               fetch-models.sh to /usr/share/raven-face, then install the two
+#               ONNX models (37 MB), fetching them by hash into faced/models/
+#               -- the same cache the ISO build uses -- if they are not there.
+#               It builds an inference engine, so the first run takes a few
+#               minutes and reaches the network once; every run after that is
+#               a cargo no-op with nothing to download.
 #               (stage-raven.sh:build_raven_faced)
 #   installer-ui  build installer-ui/ natively; install raven-installer-ui and
 #               its launcher entry, icon and metainfo. Not in the default set:
@@ -52,6 +53,8 @@
 #   -n, --dry-run        build, then report what would change; install nothing
 #   --force-configs      actually overwrite config files under /etc/raven
 #   --no-restart         install but do not restart services or reload init
+#   --no-models          do not fetch the face unlock models; install the
+#                        binary and leave face unlock answering "nomodel"
 #   --allow-non-raven    skip the "am I on Raven?" check (for testing the script)
 #
 # Service handling after install: a changed raven-powerd is restarted through
@@ -71,6 +74,7 @@ source "${SCRIPT_DIR}/lib/logging.sh"
 DRY_RUN=0
 FORCE_CONFIGS=0
 NO_RESTART=0
+NO_MODELS=0
 ALLOW_NON_RAVEN=0
 TARGETS=()
 
@@ -79,6 +83,7 @@ for arg in "$@"; do
         -n|--dry-run)      DRY_RUN=1 ;;
         --force-configs)   FORCE_CONFIGS=1 ;;
         --no-restart)      NO_RESTART=1 ;;
+        --no-models)       NO_MODELS=1 ;;
         --allow-non-raven) ALLOW_NON_RAVEN=1 ;;
         -h|--help)         sed -n '2,/^# ====.*$/{/^# ====/d;s/^# \{0,1\}//p}' "$0"; exit 0 ;;
         init|faced|installer|installer-ui|tools|configs) TARGETS+=("$arg") ;;
@@ -202,13 +207,40 @@ do_faced() {
     }
     install_file "${src}/target/release/raven-faced" /usr/bin/raven-faced 0755
     install_file "${src}/fetch-models.sh" /usr/share/raven-face/fetch-models.sh 0755
-    # The models are not installed here and are not in this repository: they
-    # are 37 MB, they are fetched by hash, and doing it here would mean every
-    # dev-install reaching the network. The daemon says "nomodel" without them
-    # and the settings page says what to run.
-    if [[ ! -f /usr/share/raven-face/models/face_recognition_sface_2021dec.onnx ]]; then
-        log_warn "face unlock has no models yet; run: sudo /usr/share/raven-face/fetch-models.sh"
+
+    # The models are 37 MB and are not in this repository, so they are fetched
+    # by hash -- into faced/models/, the same cache stage-raven.sh fills for the
+    # ISO, so a machine that has built an image does not download them twice.
+    # They are installed here rather than left to the user because a dev install
+    # that stops at the binary leaves face unlock inert: the daemon starts,
+    # answers "nomodel", and looks from the outside like a daemon with a bug.
+    #
+    # Only the first run on a machine reaches the network. --no-models skips the
+    # fetch for a run that has to stay offline.
+    local cache="${src}/models"
+    local yunet=face_detection_yunet_2023mar.onnx
+    local sface=face_recognition_sface_2021dec.onnx
+    if [[ ! -f "${cache}/${yunet}" || ! -f "${cache}/${sface}" ]]; then
+        if (( NO_MODELS )); then
+            log_warn "  --no-models: face unlock stays inactive until you run"
+            log_warn "    sudo /usr/share/raven-face/fetch-models.sh"
+            return 0
+        fi
+        if (( DRY_RUN )); then
+            log_info "  would fetch the face unlock models (37 MB) into ${cache}"
+            return 0
+        fi
+        if ! "${BUILD_AS[@]}" sh "${src}/fetch-models.sh" "${cache}"; then
+            # Not fatal. The binary and everything else this run installed are
+            # in; only face unlock is short a file, and the fetch is rerunnable.
+            log_warn "  could not fetch the models (offline?); face unlock stays inactive"
+            log_warn "    rerun: sudo /usr/share/raven-face/fetch-models.sh"
+            return 0
+        fi
     fi
+    install_file "${cache}/${yunet}" "/usr/share/raven-face/models/${yunet}" 0644
+    install_file "${cache}/${sface}" "/usr/share/raven-face/models/${sface}" 0644
+    return 0
 }
 
 do_installer() {

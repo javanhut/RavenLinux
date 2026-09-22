@@ -1310,11 +1310,20 @@ build_raven_init() {
 # 1 builds should have to compile that -- see faced/src/main.rs for why it is
 # not part of ravend either.
 #
-# Its models are not installed here and are not in this repository. They are
-# 37 MB and they are fetched by hash: /usr/share/raven-face/fetch-models.sh is
-# what does it, and until somebody runs it the daemon answers "no models" and
-# the settings page says so. An image that silently downloaded a model it then
-# trusted with logins would be an image nobody can reproduce.
+# Its models are fetched rather than built: they are 37 MB and are not in this
+# repository, so fetch-models.sh pulls them by pinned SHA-256. They go into the
+# image, because face unlock is part of Raven and an image carrying the daemon
+# without them is a login screen that cannot use the camera until somebody
+# finds a command to run.
+#
+# The pin is what keeps this reproducible. The fetch is not "whatever is at
+# that URL today" -- it is those two exact files or a failure, and a failure
+# skips the whole component rather than shipping a package whose file list
+# claims models that are not there.
+#
+# faced/models/ is the cache. It survives between builds, so only the first
+# build on a machine reaches the network, and it is the path the package
+# manifest installs from.
 build_raven_faced() {
     local src="${PROJECT_ROOT}/faced"
 
@@ -1338,14 +1347,28 @@ build_raven_faced() {
         return 0
     fi
 
-    mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/usr/share/raven-face"
+    # Before anything lands in the sysroot, because the manifest installs the
+    # models alongside the binary: a raven-faced packaged without them is a
+    # package whose file list is a lie, which is the same all-or-nothing the
+    # component table applies to binaries.
+    local models="${src}/models"
+    if ! sh "${src}/fetch-models.sh" "${models}"; then
+        log_warn "  raven-faced: could not fetch the models, skipping (face unlock will be unavailable)"
+        log_warn "    the fetch needs the network once; its cache is ${models}"
+        RAVEN_FAILED+=("raven-faced")
+        return 0
+    fi
+
+    mkdir -p "${SYSROOT_DIR}/usr/bin" "${SYSROOT_DIR}/usr/share/raven-face/models"
     install -m 0755 "${outdir}/raven-faced" "${SYSROOT_DIR}/usr/bin/raven-faced"
     install -m 0755 "${src}/fetch-models.sh" \
         "${SYSROOT_DIR}/usr/share/raven-face/fetch-models.sh"
+    install -m 0644 "${models}"/*.onnx \
+        "${SYSROOT_DIR}/usr/share/raven-face/models/"
 
     RAVEN_BUILT+=("raven-faced")
     log_success "  raven-faced installed ($(du -h "${outdir}/raven-faced" | cut -f1))"
-    log_info "  models are not in the image; run /usr/share/raven-face/fetch-models.sh"
+    log_success "  models installed ($(du -sh "${models}" | cut -f1 | tr -d ' ') in /usr/share/raven-face/models)"
 }
 
 build_all_components() {

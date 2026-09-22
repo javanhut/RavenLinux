@@ -183,3 +183,7 @@ init/target/x86_64-unknown-linux-musl
 # booting. Build artifacts: regenerate with `cargo run` in that directory.
 bootloader/preview/out/
 *target/*
+
+# raven-faced models: fetched by hash into a build cache, not source.
+# See faced/fetch-models.sh and stage-raven.sh:build_raven_faced.
+faced/models/

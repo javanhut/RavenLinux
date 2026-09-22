@@ -95,8 +95,8 @@ RAVEN_INIT_BINARIES="raven-init,raven-rc,raven-powerd,raven-ports,raven-timed,ra
 
 # Face unlock. Local to this repository like the init crate, and in a crate of
 # its own rather than a binary of init's: it links an ONNX inference engine,
-# and nothing that PID 1 builds should have to compile that. Its models are not
-# in the image -- see faced/fetch-models.sh.
+# and nothing that PID 1 builds should have to compile that. Its models are
+# fetched by hash into the image alongside it -- see faced/fetch-models.sh.
 RAVEN_FACED_BINARIES="raven-faced"
 
 # =============================================================================

@@ -731,10 +731,11 @@ core = "0"
 # settings panel needs, and a daemon that is not running cannot give either.
 # It opens the device lazily.
 #
-# The models are not on the image. /usr/share/raven-face/fetch-models.sh
-# downloads them by hash; until then this answers "no models" and the settings
-# page says what to run. ready_timeout is longer than fprintd's because this
-# optimises both graphs before it binds.
+# The models ship in /usr/share/raven-face/models. fetch-models.sh, next to
+# them, is how one is replaced or repaired; if they are missing or fail their
+# hash this answers "no models" and the settings page says what to run.
+# ready_timeout is longer than fprintd's because this optimises both graphs
+# before it binds.
 [[services]]
 name = "faced"
 description = "Face unlock"

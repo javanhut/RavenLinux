@@ -32,18 +32,29 @@ build_flags = ["--release", "--locked"]
 
 [dependencies]
 # Nothing at runtime, and no libfprint-shaped library either: the V4L2 ioctls,
-# the MJPEG decode and the inference are all in the binary. What it does need
-# is a model, and a model is not a package -- see the note at the end.
+# the MJPEG decode and the inference are all in the binary. The models it needs
+# are files this package carries, not a package of their own -- see [install].
 runtime = []
 build = ["rust", "cargo"]
 
 [install]
 files = [
     { src = "faced/target/x86_64-unknown-linux-musl/release/raven-faced", dest = "/usr/bin/raven-faced", mode = 755 },
-    # How the models get onto a machine. It is a shipped program rather than a
-    # build step because the models are 37 MB and fetched by hash: an image
-    # that silently downloaded something it then trusted with logins would be
-    # an image nobody can reproduce.
+    # The models. Not in this repository -- they are 37 MB and come from the
+    # OpenCV Zoo -- so stage-raven.sh:build_raven_faced fetches them by pinned
+    # SHA-256 into faced/models/ before it packages this, and `rvn build
+    # --srcdir` over a checkout needs that same fetch run first:
+    #
+    #   sh faced/fetch-models.sh faced/models
+    #
+    # They are owned by this package because they are not optional: face unlock
+    # without them is a daemon that answers "nomodel", which is a working
+    # daemon and a broken feature.
+    { src = "faced/models/face_detection_yunet_2023mar.onnx", dest = "/usr/share/raven-face/models/face_detection_yunet_2023mar.onnx", mode = 644 },
+    { src = "faced/models/face_recognition_sface_2021dec.onnx", dest = "/usr/share/raven-face/models/face_recognition_sface_2021dec.onnx", mode = 644 },
+    # Kept on the machine even though the image now ships the models: it is how
+    # a model is replaced or repaired in place, and it is what the settings
+    # page names when a hash check fails.
     { src = "faced/fetch-models.sh", dest = "/usr/share/raven-face/fetch-models.sh", mode = 755 },
     # The drop-in template, for an already-installed machine whose init.toml
     # predates this daemon: the binary arrives and nothing starts it. Inert
@@ -60,10 +71,6 @@ symlinks = []
 
 # What this manifest does NOT describe, and why:
 #
-#   - the models under /usr/share/raven-face. They are not in this repository
-#     and they are not in the image. Until somebody runs fetch-models.sh the
-#     daemon answers "no models" and the settings page says so, which is a
-#     better answer than a login screen that cannot explain itself.
 #   - /etc/raven/face.toml. configs/raven/face.toml exists in this tree and no
 #     stage installs it, so it is not claimed here: a manifest that shipped a
 #     file the image build does not would make `rvn build` and stage-raven.sh
