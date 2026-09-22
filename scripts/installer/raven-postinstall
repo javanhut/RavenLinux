@@ -117,6 +117,92 @@ have_default_route() {
     [ -r /proc/net/route ] && awk 'NR > 1 && $2 == "00000000" { found = 1 } END { exit !found }' /proc/net/route
 }
 
+# --------------------------------------------------------------- firmware
+# Images built before stage2 learned to keep firmware directory symlinks
+# copied them with `cp -aL`, so nvidia/ad103 -- upstream a link to ad102 --
+# landed as a real directory holding a second copy. No package owns it, and
+# linux-firmware-nvidia wants a symlink there, so rvn refuses the whole
+# transaction: "usr/lib/firmware/nvidia/ad103 would be a symlink to ad102,
+# but a directory with 1 entry is already there". The desktop profile pulls
+# linux-firmware in, so on those images the profile never installed.
+#
+# rvn names each such path and its target in that message; there is no
+# structured form of it, but the wording is fixed by a test in rvn
+# (src/extract.rs). A directory is swapped for the link only when no package
+# owns it and every file in it is also in the target, compared decompressed
+# because the copy kept .zst names the target's copy had dropped. Then the
+# swap loses nothing -- the kernel's lookup through the link finds the same
+# bytes -- and rvn replaces an unowned link without complaint. Anything else
+# is left alone and the failure stands.
+FIRMWARE_ROOT="${RAVEN_FIRMWARE_ROOT:-/}"
+
+fw_sum() { # fw_sum FILE: checksum of the decompressed contents
+    case "$1" in
+        *.zst) zstd -dcq -- "$1" ;;
+        *.xz) xz -dc -- "$1" ;;
+        *) cat -- "$1" ;;
+    esac | cksum
+}
+
+fw_copy_covered() { # fw_copy_covered COPY TARGET
+    find "$1" ! -type d | while IFS= read -r f; do
+        [ -f "$f" ] && [ ! -L "$f" ] || exit 1
+        rel="${f#"$1"/}"
+        base="${rel%.zst}"
+        base="${base%.xz}"
+        match=
+        for t in "$2/$base" "$2/$base.zst" "$2/$base.xz"; do
+            [ -f "$t" ] && { match="$t"; break; }
+        done
+        [ -n "$match" ] && [ "$(fw_sum "$f")" = "$(fw_sum "$match")" ] || exit 1
+    done
+}
+
+repair_firmware_links() { # repair_firmware_links RVN_OUTPUT; true if it changed anything
+    tally=$(mktemp)
+    fw_top="${FIRMWARE_ROOT%/}/usr/lib/firmware"
+    fw_real=$(cd "$fw_top" 2>/dev/null && pwd -P) || { rm -f "$tally"; return 1; }
+    # tr first: a NUL anywhere in the output and grep calls the file binary
+    # and stops printing matches.
+    tr -d '\000' < "$1" 2>/dev/null |
+        grep -oE 'usr/lib/firmware/[^ ]+ would be a symlink to [^ ]+, but a directory' |
+        sort -u |
+        while read -r path _ _ _ _ _ target _; do
+            target="${target%,}"
+            dir="${FIRMWARE_ROOT%/}/${path}"
+            case "/${path}/" in */../*) continue ;; esac
+            [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+            if rvn owns "/${path}" >/dev/null 2>&1; then
+                echo "  ${path}: owned by a package; left alone"
+                continue
+            fi
+            resolved=$(cd "$(dirname "$dir")/${target}" 2>/dev/null && pwd -P) || continue
+            case "${resolved}/" in "${fw_real}/"*) ;; *) continue ;; esac
+            if ! fw_copy_covered "$dir" "$resolved"; then
+                echo "  ${path}: holds files ${target} does not; left alone"
+                continue
+            fi
+            rm -rf -- "$dir" && ln -s -- "$target" "$dir" || continue
+            echo "  ${path}: image copy replaced by the link to ${target}"
+            echo x >> "$tally"
+        done
+    changed=$(wc -l < "$tally")
+    rm -f "$tally"
+    [ "$changed" -gt 0 ]
+}
+
+# Runs rvn with its output teed to RVN_OUT, and returns rvn's status. Only
+# for -y and --auto: with stderr on a pipe rvn stops prompting and takes each
+# question's default, which is what those modes already ask for.
+RVN_OUT=
+run_rvn_captured() {
+    rc_file=$(mktemp)
+    { rvn "$@" 2>&1; echo $? > "$rc_file"; } | tee "$RVN_OUT"
+    rc=$(cat "$rc_file")
+    rm -f "$rc_file"
+    return "${rc:-1}"
+}
+
 # --------------------------------------------------------------- /usr/local
 # /usr/local belongs to wheel, mode 2775: setgid so that anything created
 # inside inherits the group, group-writable so that a wheel member can
@@ -242,13 +328,24 @@ if [ "$auto" -eq 1 ]; then
     done
     echo "Network is up; installing."
 
+    RVN_OUT=$(mktemp)
+    trap 'rm -f "$RVN_OUT"' EXIT
     n=1
+    repaired=0
     while :; do
         # shellcheck disable=SC2086 -- profile words intentionally become argv
-        if rvn install -y $packages; then
+        if run_rvn_captured install -y $packages; then
             mark_done
             echo "Profile ${profile} installed."
             exit 0
+        fi
+        # Not an attempt spent: the network is fine and the same run can go
+        # straight back in. Once only, so a repair rvn still disagrees with
+        # cannot loop.
+        if [ "$repaired" -eq 0 ] && repair_firmware_links "$RVN_OUT"; then
+            repaired=1
+            echo "Firmware left by the image is out of the way; retrying now."
+            continue
         fi
         if [ "$n" -ge "$attempts" ]; then
             echo "rvn failed ${attempts} times; giving up until the next boot."
@@ -267,11 +364,22 @@ fi
 # on a second question -- which is exactly the case that has nobody at the
 # keyboard.
 if [ "$assume_yes" -eq 1 ]; then
+    RVN_OUT=$(mktemp)
+    trap 'rm -f "$RVN_OUT"' EXIT
     # shellcheck disable=SC2086 -- profile words intentionally become argv
-    rvn install -y $packages
+    if ! run_rvn_captured install -y $packages; then
+        repair_firmware_links "$RVN_OUT" || exit 1
+        echo "Firmware left by the image is out of the way; retrying now."
+        # shellcheck disable=SC2086
+        run_rvn_captured install -y $packages
+    fi
 else
     # shellcheck disable=SC2086 -- profile words intentionally become argv
-    rvn install $packages
+    rvn install $packages || {
+        echo "rvn failed. If it named firmware directories in the way," >&2
+        echo "  sudo raven-postinstall -y  clears the ones the image left there and retries." >&2
+        exit 1
+    }
 fi
 # Only reached on success: set -e ends the script on a failing rvn.
 mark_done

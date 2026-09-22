@@ -37,9 +37,32 @@ lacks() { if grep -qE "$2" "$3" 2>/dev/null; then failed "$1" "unexpected /$2/ i
 
 # A fake rvn that records its argv and exits as told.
 mkdir -p "$W/bin" "$W/profiles"
+#
+# `owns` answers from FAKE_RVN_OWNED. `install` also plays rvn's file
+# conflict check when FAKE_FW_LINKS lists "path target" pairs: any path that
+# is still a real directory is reported in rvn's own wording -- ASCII tree
+# glyphs, as rvn prints them with stderr on a pipe -- and the install fails.
 cat > "$W/bin/rvn" <<'RVN'
 #!/bin/sh
 echo "rvn $*" >> "${FAKE_RVN_LOG}"
+if [ "$1" = owns ]; then
+    grep -qxF "$2" "${FAKE_RVN_OWNED:-/dev/null}"
+    exit
+fi
+if [ "$1" = install ] && [ -n "${FAKE_FW_LINKS:-}" ]; then
+    bad=0
+    while read -r p t; do
+        d="${RAVEN_FIRMWARE_ROOT}/$p"
+        if [ -d "$d" ] && [ ! -L "$d" ]; then
+            echo "     |- $p would be a symlink to $t, but a directory with 1 entry is already there" >&2
+            bad=1
+        fi
+    done < "$FAKE_FW_LINKS"
+    if [ "$bad" = 1 ]; then
+        echo "  x  linux-firmware-nvidia conflicts with what is already on disk" >&2
+        exit 1
+    fi
+fi
 exit "$(cat "${FAKE_RVN_EXIT}")"
 RVN
 chmod +x "$W/bin/rvn"
@@ -56,6 +79,9 @@ export RAVEN_POSTINSTALL_FAILED="$W/failed"
 export RAVEN_MOTD="$W/motd"
 export RAVEN_POSTINSTALL_RETRY_DELAY=0
 export RAVEN_POSTINSTALL_REQUIRE_ROOT=0
+# Never the host's /usr/lib/firmware, even from a test that does not mean to
+# reach the repair.
+export RAVEN_FIRMWARE_ROOT="$W/fwroot"
 # The /usr/local step works on a private tree, never the host's. reset()
 # removes it, so the profile tests below see the step as a silent no-op; the
 # "/usr/local" section builds it closed on purpose. The group is one this user
@@ -68,7 +94,8 @@ export RAVEN_LOCAL_GROUP="${alt_gid:-$(id -g)}"
 
 reset() {
     rm -f "$W/rvn.log" "$W/done" "$W/pending" "$W/failed" "$W/motd" "$W/install-profile"
-    rm -rf "$W/local"
+    rm -rf "$W/local" "$W/fwroot"
+    unset FAKE_FW_LINKS FAKE_RVN_OWNED
     echo 0 > "$W/rvn.exit"
     : > "$W/rvn.log"
 }
@@ -202,6 +229,69 @@ reset; echo 1 > "$W/rvn.exit"
 "$POSTINSTALL" -y --profile desktop > "$W/out" 2>&1; rc=$?
 eq      "-y with rvn failing: non-zero"     "$rc" "1"
 absent  "-y with rvn failing: not done"     "$W/done"
+
+section "firmware the image copied where linux-firmware wants links"
+# What stage2 used to ship: nvidia/ad103 and ga103/gsp as real directories
+# holding .zst copies of what ad102 and ga102/gsp hold decompressed.
+fw_image() {
+    local fw="$W/fwroot/usr/lib/firmware/nvidia"
+    rm -rf "$W/fwroot"
+    mkdir -p "$fw/ad102/gsp" "$fw/ad103/gsp" "$fw/ga102/gsp" "$fw/ga103/gsp"
+    printf 'booter ad102\n' > "$fw/ad102/gsp/booter.bin"
+    zstd -qf "$fw/ad102/gsp/booter.bin" -o "$fw/ad103/gsp/booter.bin.zst"
+    printf 'gsp ga102\n' > "$fw/ga102/gsp/gsp.bin"
+    zstd -qf "$fw/ga102/gsp/gsp.bin" -o "$fw/ga103/gsp/gsp.bin.zst"
+    printf '%s\n' "usr/lib/firmware/nvidia/ad103 ad102" \
+                  "usr/lib/firmware/nvidia/ga103/gsp ../ga102/gsp" > "$W/fwlinks"
+    export FAKE_FW_LINKS="$W/fwlinks"
+}
+FW="$W/fwroot/usr/lib/firmware/nvidia"
+installs() { grep -c '^rvn install' "$W/rvn.log"; }
+
+if ! command -v zstd >/dev/null 2>&1; then
+    echo "  skip  no zstd on this host"
+else
+    reset; fw_image
+    "$POSTINSTALL" -y --profile desktop > "$W/out" 2>&1; rc=$?
+    eq      "-y: exit 0 after the repair"          "$rc" "0"
+    eq      "-y: ad103 is now the link"            "$(readlink "$FW/ad103")" "ad102"
+    eq      "-y: ga103/gsp is now the link"        "$(readlink "$FW/ga103/gsp")" "../ga102/gsp"
+    eq      "-y: firmware still reachable"         "$(cat "$FW/ad103/gsp/booter.bin")" "booter ad102"
+    eq      "-y: rvn retried once"                 "$(installs)" "2"
+    matches "-y: says what it replaced"            'ad103: image copy replaced' "$W/out"
+    exists  "-y: recorded as done"                 "$W/done"
+
+    reset; fw_image
+    zstd -qf <(printf 'only here\n') -o "$FW/ad103/gsp/extra.bin.zst"
+    "$POSTINSTALL" -y --profile desktop > "$W/out" 2>&1; rc=$?
+    eq      "extra file: non-zero"                 "$rc" "1"
+    exists  "extra file: ad103 kept"               "$FW/ad103/gsp/extra.bin.zst"
+    matches "extra file: says why"                 'ad103: holds files ad102 does not' "$W/out"
+    absent  "extra file: not done"                 "$W/done"
+
+    reset; fw_image
+    zstd -qf <(printf 'a different build\n') -o "$FW/ad103/gsp/booter.bin.zst"
+    "$POSTINSTALL" -y --profile desktop > "$W/out" 2>&1; rc=$?
+    eq      "different bytes: non-zero"            "$rc" "1"
+    eq      "different bytes: ad103 still a dir"   "$(test -L "$FW/ad103" && echo link || echo dir)" "dir"
+
+    reset; fw_image
+    echo /usr/lib/firmware/nvidia/ad103 > "$W/owned"; export FAKE_RVN_OWNED="$W/owned"
+    "$POSTINSTALL" -y --profile desktop > "$W/out" 2>&1; rc=$?
+    eq      "owned: non-zero"                      "$rc" "1"
+    eq      "owned: ad103 still a dir"             "$(test -L "$FW/ad103" && echo link || echo dir)" "dir"
+    matches "owned: says so"                       'ad103: owned by a package' "$W/out"
+
+    if have_route; then
+        reset; fw_image; echo "profile=desktop" > "$W/install-profile"
+        "$POSTINSTALL" --auto --wait 0 > "$W/out" 2>&1; rc=$?
+        eq      "boot: exit 0 after the repair"    "$rc" "0"
+        eq      "boot: repaired and retried once"  "$(installs)" "2"
+        exists  "boot: recorded as done"           "$W/done"
+    else
+        echo "  skip  boot-mode repair: no default route on this host"
+    fi
+fi
 
 echo
 if (( FAILURES == 0 )); then
