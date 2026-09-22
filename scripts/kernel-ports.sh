@@ -146,6 +146,23 @@ y MARVELL_PHY BROADCOM_PHY MICREL_PHY AQUANTIA_PHY
 # command line turns it back on for a machine that wants it.
 n BT_HCIBTUSB_AUTOSUSPEND
 
+# --- Bluetooth: radio drivers are modules ------------------------------------
+# Every Bluetooth radio worth having uploads firmware at probe: Intel wants
+# intel/ibt-*.sfi, Realtek rtl_bt/, Broadcom brcm/*.hcd, MediaTek mediatek/.
+# Built in, btusb probes during USB enumeration inside the initramfs, where
+# none of that is, and the vendor setup gives up for good. hci0 exists in
+# sysfs but never registers with mgmt, so bluetoothd sees no controller and
+# the settings panel reports "no Bluetooth adapter" on a laptop that has one
+# (an AX211, 8087:0033, was the one that showed it). As modules they load
+# from the mounted root like iwlwifi does.
+#
+# The vendor helpers have to go too: a =y driver that selects BT_INTEL (or
+# BCM/RTL/QCA/MTK) forces the helper back to =y, so every selector is listed.
+# The BT core stays built in; it asks for no firmware.
+m BT_HCIBTUSB BT_HCIUART BT_INTEL_PCIE BT_MTKUART BT_NXPUART
+m BT_HCIBCM203X BT_HCIBFUSB
+m BT_INTEL BT_BCM BT_RTL BT_QCA BT_MTK
+
 # --- Mobile broadband: the WWAN card in a business laptop --------------------
 # Without the WWAN class the modem enumerates and stops there: no /dev/wwan*,
 # no control port, nothing for a userspace dialler to talk to. The USB side

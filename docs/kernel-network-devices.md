@@ -139,10 +139,20 @@ CONFIG_BT_HS=y           # High Speed (802.11 PAL)
 CONFIG_BT_LEDS=y         # LED triggers
 ```
 
+### Radio drivers are modules
+
+Every radio driver below uploads firmware at probe, so it is `=m` and loads
+from the mounted root. Built in, it probes inside the initramfs, finds no
+`intel/ibt-*` (or `rtl_bt/`, `brcm/`, `mediatek/`) blob, and never retries:
+`hci0` shows up in `/sys/class/bluetooth` but `btmgmt info` lists no
+controller and bluetoothd reports none. `scripts/kernel-ports.sh` holds the
+floor, vendor helpers (`BT_INTEL`, `BT_BCM`, `BT_RTL`, `BT_QCA`, `BT_MTK`)
+included, since a built-in selector forces them back to `=y`.
+
 ### USB Bluetooth Adapters
 
 ```
-CONFIG_BT_HCIBTUSB=y           # HCI USB driver (most USB dongles)
+CONFIG_BT_HCIBTUSB=m           # HCI USB driver (most USB dongles)
 CONFIG_BT_HCIBTUSB_BCM=y       # Broadcom protocol support
 CONFIG_BT_HCIBTUSB_MTK=y       # MediaTek protocol support
 CONFIG_BT_HCIBTUSB_RTL=y       # Realtek protocol support
@@ -151,7 +161,7 @@ CONFIG_BT_HCIBTUSB_RTL=y       # Realtek protocol support
 ### UART Bluetooth (Integrated)
 
 ```
-CONFIG_BT_HCIUART=y            # HCI UART driver
+CONFIG_BT_HCIUART=m            # HCI UART driver
 CONFIG_BT_HCIUART_INTEL=y      # Intel (integrated in laptops)
 CONFIG_BT_HCIUART_BCM=y        # Broadcom
 CONFIG_BT_HCIUART_RTL=y        # Realtek
@@ -163,11 +173,11 @@ CONFIG_BT_HCIUART_MRVL=y       # Marvell
 ### Platform-Specific Bluetooth
 
 ```
-CONFIG_BT_INTEL_PCIE=y         # Intel PCIe Bluetooth (newer laptops)
-CONFIG_BT_MTKSDIO=y            # MediaTek SDIO Bluetooth
-CONFIG_BT_MTKUART=y            # MediaTek UART Bluetooth
-CONFIG_BT_HCIBCM203X=y         # Broadcom BCM203x USB
-CONFIG_BT_NXPUART=y            # NXP Bluetooth
+CONFIG_BT_INTEL_PCIE=m         # Intel PCIe Bluetooth (newer laptops)
+CONFIG_BT_MTKSDIO=m            # MediaTek SDIO Bluetooth
+CONFIG_BT_MTKUART=m            # MediaTek UART Bluetooth
+CONFIG_BT_HCIBCM203X=m         # Broadcom BCM203x USB
+CONFIG_BT_NXPUART=m            # NXP Bluetooth
 ```
 
 ## Troubleshooting
