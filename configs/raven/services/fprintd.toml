@@ -14,6 +14,13 @@
 #   raven-rc reload
 #   raven-rc start fprintd
 #
+# You should not have to do any of this by hand any more. `rvn install` copies
+# this file into /etc/raven/init.d when it installs the binary, then tells
+# raven-init to reload and starts the service; and Raven Settings has a switch
+# for it, which goes through rvnd rather than through a terminal. The commands
+# above are what those two do, written down for the machine that is in this
+# state already and for anyone reading to find out what the switch does.
+#
 # Leaving it there afterwards is safe. When an init.toml that defines fprintd
 # does arrive, init keeps its own definition and logs that this drop-in was
 # ignored -- it cannot end up defined twice.
