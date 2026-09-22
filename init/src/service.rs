@@ -794,17 +794,46 @@ impl Service {
         // Standard service spawning (no TTY)
         let mut cmd = Command::new(&self.config.exec);
 
-        // Give every service a process group of its own. Daemons such as
-        // ravend supervise a compositor, a greeter and eventually a complete
-        // desktop session beneath one PID. Signalling only that PID leaves
-        // those children alive -- and, for a compositor, still holding DRM
-        // master and the seat -- while init proceeds with shutdown.
+        // Give every service a session of its own, which also gives it a
+        // process group of its own -- `setsid` makes the caller leader of
+        // both, so pgid == sid == pid. Daemons such as ravend supervise a
+        // compositor, a greeter and eventually a complete desktop session
+        // beneath one PID. Signalling only that PID leaves those children
+        // alive -- and, for a compositor, still holding DRM master and the
+        // seat -- while init proceeds with shutdown. Addressing the service
+        // by a negative pid still reaches all of it, and still never reaches
+        // init's own process group.
         //
-        // `process_group(0)` asks the child to make its pid its pgid between
-        // fork and exec. It must happen before the privilege drop registered
-        // below, and lets stop/kill address the complete service with a
-        // negative pid without ever signalling init's own process group.
-        cmd.process_group(0);
+        // The session half is not decoration. init is pid 1 and never called
+        // `setsid` itself, so its session is 0 -- a session whose leader is
+        // pid 0, which does not exist and has no `/proc` entry. A service
+        // left in it passes that session on to everything it starts, which on
+        // a graphical boot is the entire desktop: `wayland-session`, huginn,
+        // the bar, and every application launched from them. Anything that
+        // asks the kernel who a caller's session leader is then finds nobody
+        // there. rvnd does exactly that before it prompts for an install, and
+        // refused every install from the store with "the process that asked
+        // is no longer there to be asked back" while the same command in a
+        // terminal worked -- a terminal calls `setsid` for its pty and so has
+        // a leader that exists.
+        //
+        // Registered as a `pre_exec` closure rather than through
+        // `Command::process_group`, and the two cannot be combined: std sets
+        // the process group before it runs any closure, and `setsid` fails
+        // with EPERM when the caller is already a process group leader.
+        //
+        // SAFETY: the closure runs in the forked child between `fork` and
+        // `exec`, where only async-signal-safe work is permitted. It
+        // allocates nothing, takes no lock, logs nothing and cannot panic;
+        // `setsid` is a raw syscall.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
 
         // Resource control, in two halves. The cgroup directory and the limits
         // that belong to it (memory.max, cpu.weight, io.weight) are set here,

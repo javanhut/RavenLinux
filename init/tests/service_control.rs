@@ -3537,3 +3537,43 @@ fn a_tty_service_execs_with_a_standard_signal_state() {
     assert!(seen.contains("env=arrived"), "{seen}");
     assert!(seen.contains("path=set"), "{seen}");
 }
+
+/// A service leads its own session, not init's.
+///
+/// init is pid 1 and never called `setsid`, so its session is 0 -- a session
+/// whose leader is a pid that does not exist. A service left in it hands that
+/// session to every process it starts, which on a graphical boot is the whole
+/// desktop, and anything that asks who a caller's session leader is finds
+/// nobody. rvnd asks exactly that before prompting for an install, and
+/// refused every install started from the store because of it.
+///
+/// The process group is checked in the same breath: `setsid` replaced an
+/// explicit `process_group(0)`, and `stop` signals a service by negative pid,
+/// which only reaches its children while pgid == pid.
+#[test]
+fn a_service_leads_its_own_session_and_process_group() {
+    let cfg_svc = sleeper("own-session");
+    let mut svc = Service::start(&cfg_svc).expect("starts");
+    let pid = svc.pid().expect("has a pid").as_raw();
+
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("stat");
+    // comm can contain spaces and parens; the fields after the closing paren
+    // are state, ppid, pgrp, session.
+    let fields: Vec<&str> = stat
+        .rsplit_once(')')
+        .expect("stat has a comm")
+        .1
+        .split_whitespace()
+        .collect();
+    let pgrp: i32 = fields[2].parse().expect("pgrp");
+    let session: i32 = fields[3].parse().expect("session");
+
+    assert_eq!(session, pid, "the service must lead its own session");
+    assert_eq!(pgrp, pid, "and its own process group");
+    assert!(
+        std::path::Path::new(&format!("/proc/{session}")).exists(),
+        "the session leader must be a process that exists"
+    );
+
+    svc.kill();
+}
