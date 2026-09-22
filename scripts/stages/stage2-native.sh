@@ -2020,14 +2020,50 @@ copy_firmware() {
         return 0
     }
 
+    # A symlink to a directory stays a symlink. linux-firmware ships
+    # nvidia/ad103 as a link to ad102 (and ga103/gsp to ../ga102/gsp, and a
+    # dozen more), and `cp -aL` turned each into a real directory holding a
+    # second copy. On an installed machine no package owns that directory and
+    # linux-firmware-nvidia wants its link there, so rvn refused the whole
+    # desktop profile: "would be a symlink to ad102, but a directory ... is
+    # already there". An unowned link where the package wants a link is one
+    # rvn simply replaces. raven-postinstall repairs machines installed from
+    # an image built before this.
+    local -a dir_links=()
     local copied=0 dir f rel
-    for dir in "${fw_dirs[@]}"; do
-        [[ -d "${host_firmware}/${dir}" ]] || continue
+    _sweep_fw_dir() {
+        local swept="$1"
         while IFS= read -r f; do
             rel="${f#${host_firmware}/}"
+            if [[ -L "$f" && -d "$f" ]]; then
+                mkdir -p "$(dirname "${SYSROOT_DIR}/usr/lib/firmware/${rel}")"
+                ln -sfn "$(readlink "$f")" "${SYSROOT_DIR}/usr/lib/firmware/${rel}"
+                dir_links+=("$rel")
+                continue
+            fi
             _install_fw "$f" "${SYSROOT_DIR}/usr/lib/firmware/${rel}" && copied=$((copied + 1))
-        done < <(find "${host_firmware}/${dir}" -type f -o -type l 2>/dev/null)
+        done < <(find "${host_firmware}/${swept}" -type f -o -type l 2>/dev/null)
+    }
+    for dir in "${fw_dirs[@]}"; do
+        [[ -d "${host_firmware}/${dir}" ]] || continue
+        _sweep_fw_dir "$dir"
         log_info "  Added ${dir} firmware"
+    done
+
+    # A link whose target is outside every directory above would dangle.
+    # Sweep the target into its own place rather than copy it under the
+    # link's name, which would bring the conflict back.
+    local link target
+    for link in "${dir_links[@]}"; do
+        [[ -e "${SYSROOT_DIR}/usr/lib/firmware/${link}" ]] && continue
+        target="$(cd "${host_firmware}/$(dirname "$link")" && cd "$(readlink "${host_firmware}/${link}")" 2>/dev/null && pwd -P)" || target=""
+        case "$target" in
+            "$(cd "$host_firmware" && pwd -P)"/*)
+                _sweep_fw_dir "${target#"$(cd "$host_firmware" && pwd -P)"/}"
+                log_info "  Added ${link}'s target for its link"
+                ;;
+            *) log_warn "  ${link} points outside the firmware tree; the link dangles" ;;
+        esac
     done
 
     # iwlwifi asks for "iwlwifi-<name>.ucode" at the firmware root. Arch keeps
