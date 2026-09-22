@@ -391,6 +391,13 @@ raven_gui_app_vars CANVAS
 raven_gui_app_vars ROOSTBAR
 ROOSTBAR_BIN="${ROOSTBAR_BINARIES}"
 
+# HuginnKeyring: the login keyring, an SSH agent, and the Secret Service and
+# PKCS#11 surfaces applications actually talk to. See its GUI_APPS row in
+# components.sh for why a daemon with no window is staged here rather than in
+# the Raven layer, and stage_huginn_keyring() below for what it installs
+# beyond the two binaries this gives their environment variables.
+raven_gui_app_vars KEYRING
+
 # Huginn links glibc, unlike everything in the Raven layer. The host target is
 # the right one: the sysroot carries the host's glibc and its dynamic linker,
 # which is how the Xorg and Mesa binaries stage2 copies already work.
@@ -1376,6 +1383,96 @@ stage_controls() {
 # answer is not a login screen, it is a wall. The daemon is shipped here for the
 # machine this ISO installs, which gets a root= on its command line and a
 # password the installer set; see booted_live() in init/src/overrides.rs.
+stage_huginn_keyring() {
+    if [[ "${KEYRING_SKIP:-0}" == "1" ]]; then
+        log_warn "  KEYRING_SKIP=1: the image will have no keyring daemon"
+        return 0
+    fi
+
+    local dest="${GUI_SRC_DIR}/${KEYRING_REPO}"
+    if ! fetch_repo "${KEYRING_REPO}" "${KEYRING_URL}" "${dest}" \
+            "${KEYRING_REF:-}" "${KEYRING_OFFLINE:-${GUI_OFFLINE:-0}}" "${KEYRING_MANIFEST}"; then
+        log_warn "  HuginnKeyring source unavailable; the image will have no keyring daemon"
+        return 0
+    fi
+
+    log_info "  building HuginnKeyring for ${GUI_TARGET}..."
+    local -a cargo_args=(
+        build --release --target "${GUI_TARGET}"
+        -p huginn-keyring -p huginn-keyringd -p huginn-pam -p huginn-pkcs11
+    )
+    [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
+    if ! ( cd "${dest}" && cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}" ); then
+        log_warn "  HuginnKeyring build failed; the image will have no keyring daemon"
+        return 0
+    fi
+
+    # The daemon and the CLI, all or none: a keyring nothing can query or
+    # relock from a terminal is not the thing this is meant to ship. The same
+    # -p list just built both by name, so a missing one here means the build
+    # silently produced less than it was asked for rather than that either
+    # was forgotten.
+    local built="${dest}/target/${GUI_TARGET}/release"
+    local -a keyring_bins
+    raven_split_list keyring_bins "${KEYRING_BINARIES}"
+    local binary
+    for binary in "${keyring_bins[@]}"; do
+        if [[ ! -x "${built}/${binary}" ]]; then
+            log_warn "  ${binary} was not produced by the build; the image will have no keyring daemon"
+            return 0
+        fi
+    done
+
+    for binary in "${keyring_bins[@]}"; do
+        install -m 0755 "${built}/${binary}" "${SYSROOT_DIR}/usr/bin/${binary}"
+        log_success "  ${binary} installed ($(du -h "${built}/${binary}" | cut -f1))"
+    done
+
+    # The two C-ABI modules, outside the all-or-none above -- the same shape
+    # raven-finger-auth gets in stage_login, and for the same reason: each is
+    # dlopen()ed by something else entirely and a daemon that works without it
+    # is still worth shipping. Without pam_huginn_keyring.so, what is lost is
+    # the PAM fallback docs/pam.md describes for a login that does not go
+    # through ravend -- ravend's own handoff (RavenLogin's
+    # session::handoff_keyring) does not need it. Without huginn-pkcs11.so,
+    # Firefox and GnuTLS lose the keyring as a certificate store; Secret
+    # Service and the SSH agent are unaffected either way.
+    if [[ -f "${built}/libpam_huginn_keyring.so" ]]; then
+        # libpam looks for the module under the name in the PAM stack, with no
+        # `lib` prefix -- the same rename HuginnKeyring's own
+        # scripts/install.sh does by hand.
+        install -Dm 0755 "${built}/libpam_huginn_keyring.so" \
+            "${SYSROOT_DIR}/usr/lib/security/pam_huginn_keyring.so"
+        log_success "  pam_huginn_keyring.so installed"
+    else
+        log_warn "  the PAM module was not produced; the non-ravend PAM fallback will not be offered"
+    fi
+
+    if [[ -f "${built}/libhuginn_pkcs11.so" ]]; then
+        install -Dm 0755 "${built}/libhuginn_pkcs11.so" \
+            "${SYSROOT_DIR}/usr/lib/pkcs11/huginn-pkcs11.so"
+        install -Dm 0644 "${dest}/data/huginn-keyring.module" \
+            "${SYSROOT_DIR}/usr/share/p11-kit/modules/huginn-keyring.module"
+        log_success "  huginn-pkcs11.so installed; p11-kit will find it"
+    else
+        log_warn "  the PKCS#11 module was not produced; Firefox and GnuTLS will not see the keyring"
+    fi
+
+    # Bus activation and the Secret portal backend: installed regardless of
+    # whether the two modules above built, since neither needs them. Not
+    # gated on `[[ -f ... ]]` the way the modules are -- these ship with the
+    # checkout rather than being built, so their absence would mean a
+    # HuginnKeyring release that dropped a file this stage already names, and
+    # that is worth failing loudly on rather than warning past.
+    install -Dm 0644 "${dest}/data/org.freedesktop.secrets.service" \
+        "${SYSROOT_DIR}/usr/share/dbus-1/services/org.freedesktop.secrets.service"
+    install -Dm 0644 "${dest}/data/org.freedesktop.impl.portal.desktop.huginn.service" \
+        "${SYSROOT_DIR}/usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.huginn.service"
+    install -Dm 0644 "${dest}/data/huginn.portal" \
+        "${SYSROOT_DIR}/usr/share/xdg-desktop-portal/portals/huginn.portal"
+    log_success "  Secret Service and Secret portal activation installed"
+}
+
 stage_login() {
     if [[ "${LOGIN_SKIP:-0}" == "1" ]]; then
         log_warn "  LOGIN_SKIP=1: the image will autologin with no password prompt"
@@ -4084,6 +4181,15 @@ main() {
 
     log_step "Staging the status bar..."
     stage_roostbar
+
+    # Before the login screen and on purpose: ravend's handoff looks for
+    # /usr/bin/huginn-keyringd the moment somebody authenticates, so the
+    # daemon should already be in the sysroot by the time the thing that
+    # starts it is. The dependency is soft either way -- see
+    # session::handoff_keyring in RavenLogin -- but this ordering is the one
+    # that matches it.
+    log_step "Staging the keyring daemon..."
+    stage_huginn_keyring
 
     # Last, and after the session launcher on purpose: ravend starts that
     # launcher once somebody has authenticated, so installing the login screen

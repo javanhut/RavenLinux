@@ -210,6 +210,38 @@ declare -a GUI_APPS=(
     "LOGIN|RavenLogin|ravend,raven-greeter,raven-lock|gui/ravenlogin|Raven Login - the display manager, its greeter and the lock screen"
     "CANVAS|RavenCanvas|ravencanvasd,ravencanvas|gui/ravencanvas|Raven Canvas - the wallpaper daemon and its CLI"
     "ROOSTBAR|RoostBar|roostbar|gui/roostbar|RoostBar - the layer-shell status bar"
+
+    # HuginnKeyring: Secret Service on D-Bus, an SSH agent, the Secret portal
+    # backend and a PKCS#11 token. Draws nothing and has no window -- the only
+    # entry in this table that is not part of the desktop in the sense the rest
+    # are.
+    #
+    # WHY IT IS HERE AND NOT IN THE RAVEN LAYER
+    #
+    # By linkage it would seem to qualify, the way RavenCanvas's own comment
+    # above explains it qualifies and stays here anyway: huginn-keyringd is
+    # zbus and tokio and RustCrypto, none of it C, and would be a static musl
+    # binary as happily as anything RAVEN_COMPONENTS builds. Two of this
+    # workspace's other three crates are why it cannot be. huginn-pam and
+    # huginn-pkcs11 are cdylibs a glibc process dlopen()s -- libpam's stack,
+    # and p11-kit's, which GnuTLS and NSS load on the same glibc this layer
+    # links -- and a musl-built .so loaded into a glibc process is two
+    # incompatible libc runtimes in one address space, not a supported
+    # combination. A cargo workspace builds against one target per invocation,
+    # so the two crates that must be glibc decide it for the daemon and the
+    # CLI as well. See packages/raven/huginn-keyring/package.toml for the same
+    # argument made for `rvn build`, and stage_huginn_keyring() in
+    # stage-gui.sh for where this actually builds.
+    #
+    # `password` is the other half of why it is staged here rather than left
+    # to `rvn install huginn-keyring` after the fact: RavenLogin's ravend
+    # starts this daemon itself, as the account that just authenticated, and
+    # hands it the login password in the same step -- see
+    # crates/ravend/src/session.rs's handoff_keyring in that repository. A
+    # login screen that ships and a keyring daemon it silently cannot find is
+    # a worse failure than either being absent on its own, so the two are
+    # built by the same stage and checked by the same table.
+    "KEYRING|HuginnKeyring|huginn-keyring,huginn-keyringd|raven/huginn-keyring|HuginnKeyring - Secret Service, SSH agent, Secret portal and PKCS#11 token"
 )
 
 # Applications the ISO carries for the installer to offer, and nothing else.

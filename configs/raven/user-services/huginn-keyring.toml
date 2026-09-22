@@ -1,0 +1,47 @@
+# HuginnKeyring -- Secret Service on D-Bus, an SSH agent, the Secret portal
+# backend and a PKCS#11 token, all served by one daemon: huginn-keyringd. See
+# https://github.com/javanhut/HuginnKeyring.
+#
+# One per login session, never one for the machine -- the daemon holds every
+# key this session has unlocked, and that memory has to die with the session
+# rather than outlive it for the next person to sit down at the same seat.
+#
+# `enabled = false`, and not for the reason a freshly-added template usually
+# is. On any session that went through ravend and its greeter, ravend has
+# already started this daemon by the time raven-init --user reads this file --
+# see ARCHITECTURE.md in RavenLogin for "Why ravend starts the keyring daemon"
+# -- and it hands over the login password in the same step, which this
+# template has no password to do. Leaving this enabled there would not merely
+# be redundant: huginn-keyringd's own paths::bind_socket refuses to take over
+# a socket something is already listening on and exits immediately, so a
+# second copy of this service would crash-loop against raven-init's restart
+# backoff for the rest of the session, for no benefit -- unlike the D-Bus
+# activation files this package also installs, where a name race has a
+# graceful loser, a bind conflict does not.
+#
+# What this template is for is the session that does not go through ravend at
+# all: raven-init's own kernel-cmdline autologin path
+# (apply_kernel_cmdline_overrides in init/src/main.rs), which exists precisely
+# for a machine with no login daemon installed. Nothing performs the handoff
+# there, so a copy of this file in ~/.config/raven/services with
+# `enabled = true` is the fallback docs/pam.md describes for "everywhere
+# else": the daemon comes up, unlocked or not, and the first application that
+# wants a secret prompts for it same as it would anywhere HuginnKeyring's own
+# systemd unit (data/huginn-keyring.service) is the thing starting it instead.
+#
+# No ready_path naming the D-Bus name itself -- init's only readiness
+# primitive is a file existing, and a bus name is not one. The SSH agent
+# socket is, and it is the one thing every client of this daemon can wait on
+# with a plain stat(), so it stands in for "the daemon is up" the same way
+# ssh-agent.toml's own ready_path does for the agent it replaces.
+[[services]]
+name = "huginn-keyring"
+description = "Keyring daemon: Secret Service, SSH agent, Secret portal, PKCS#11"
+exec = "/usr/bin/huginn-keyringd"
+args = []
+after = []
+ready_path = "${XDG_RUNTIME_DIR}/huginn-keyring/ssh"
+ready_timeout = 5
+restart = true
+enabled = false
+critical = false

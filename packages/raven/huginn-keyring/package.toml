@@ -1,0 +1,126 @@
+# The keyring: Secret Service on D-Bus, an SSH agent, the Secret portal and a
+# PKCS#11 token, served by one daemon per login session.
+#
+# Raven had no secret service at all before this. libsecret was on every
+# desktop image and nothing owned org.freedesktop.secrets, so an application
+# that wanted to save a password either stored it in plaintext or refused.
+# See https://github.com/javanhut/HuginnKeyring for what it replaces and how.
+[package]
+name = "huginn-keyring"
+# The upstream version only, and the base a build appends a revision to, same
+# as every other component cloned from its own repository -- see ravenlogin's
+# manifest for the fuller version of this note.
+version = "0.0.1"
+description = "HuginnKeyring - Secret Service, SSH agent, Secret portal and PKCS#11 token"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/javanhut/HuginnKeyring"
+repository = "https://github.com/javanhut/HuginnKeyring.git"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "security"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/HuginnKeyring.git"
+# Deliberately unpinned, as ravenlogin and ravengui are too: nothing has been
+# tagged in that repository yet. A hash added here is now the hash a build
+# checks out -- see those two manifests' own notes on the same field.
+
+[build]
+system = "cargo"
+# NOT the musl target every other packages/raven/* manifest uses. Two of this
+# workspace's four crates are cdylibs a glibc process dlopen()s through a C
+# ABI -- huginn-pam into libpam's stack (login, sudo, any PAM-using service),
+# huginn-pkcs11 into p11-kit's, which GnuTLS and NSS load on the same glibc
+# this image's desktop layer already links. A musl-built .so loaded into a
+# glibc process is two incompatible libc runtimes -- malloc, pthreads, TLS --
+# sharing one address space, which is not a supported combination and not one
+# worth being the first build to find the edges of. huginn-keyringd and
+# huginn-keyring would happily be static musl binaries on their own -- the
+# crate table has no C dependency beyond the `libc` crate the two C-ABI
+# members use for the calls that need it -- but a workspace builds against one
+# target per manifest, and the two that must be glibc decide it for all four.
+# This is the same tradeoff ravenlogin's manifest makes for the same reason,
+# with the same caveat: it does mean this package is not the static,
+# no-runtime-dependency binary raven-os-release-guard or caw are.
+target = "x86_64-unknown-linux-gnu"
+build_flags = [
+    "--release", "--locked",
+    "-p", "huginn-keyring", "-p", "huginn-keyringd", "-p", "huginn-pam", "-p", "huginn-pkcs11",
+]
+
+[dependencies]
+# dbus for dbus-daemon, which three of the four protocols this serves need: the
+# Secret Service and the Secret portal are both D-Bus activated, and the SSH
+# agent and PKCS#11 do not touch the bus at all. Already present, unowned, on
+# every Raven image -- RAVEN_BASE_BINARIES in scripts/lib/components.sh has the
+# story -- so this puts it under package management the same way desktop's
+# nftables and procps-ng entries do, rather than assuming it is there.
+runtime = ["dbus"]
+build = ["rust", "cargo"]
+optional = [
+    "p11-kit: PKCS#11 token discovery, so GnuTLS and NSS find huginn-pkcs11 without being told where it is",
+    "xdg-desktop-portal: the Secret portal backend, for Flatpak and other sandboxed applications",
+]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-gnu/release/huginn-keyringd", dest = "/usr/bin/huginn-keyringd", mode = 755 },
+    { src = "target/x86_64-unknown-linux-gnu/release/huginn-keyring",  dest = "/usr/bin/huginn-keyring",  mode = 755 },
+
+    # libpam looks for the module under the name in the PAM stack, with no
+    # `lib` prefix, so the cdylib is renamed on the way in -- same rename
+    # HuginnKeyring's own scripts/install.sh does by hand.
+    { src = "target/x86_64-unknown-linux-gnu/release/libpam_huginn_keyring.so", dest = "/usr/lib/security/pam_huginn_keyring.so", mode = 755 },
+    { src = "target/x86_64-unknown-linux-gnu/release/libhuginn_pkcs11.so",      dest = "/usr/lib/pkcs11/huginn-pkcs11.so",        mode = 755 },
+
+    # p11-kit finds the token through this, GnuTLS and NSS through p11-kit.
+    { src = "data/huginn-keyring.module", dest = "/usr/share/p11-kit/modules/huginn-keyring.module", mode = 644 },
+
+    # Bus activation, so a machine where nothing started the daemon at login
+    # still works the first time something opens a browser. See the file's
+    # own comment for why a daemon started this way still needs the session
+    # to start it too, rather than relying on activation alone.
+    { src = "data/org.freedesktop.secrets.service",                    dest = "/usr/share/dbus-1/services/org.freedesktop.secrets.service",                    mode = 644 },
+    { src = "data/org.freedesktop.impl.portal.desktop.huginn.service", dest = "/usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.huginn.service", mode = 644 },
+    { src = "data/huginn.portal",                                      dest = "/usr/share/xdg-desktop-portal/portals/huginn.portal",                            mode = 644 },
+]
+
+# No entry here for the session template. It is not this manifest's to
+# install: configs/raven/user-services/huginn-keyring.toml lives in this
+# repository, not HuginnKeyring's, and every *.toml under that directory
+# reaches /usr/share/raven/user-services on every image by way of stage2's own
+# copy loop, ahead of and independent of whatever packages are installed --
+# the same "shipped ahead of its package" arrangement xdg-desktop-portal.toml's
+# own comment documents for the same reason: raven-init drops a template whose
+# `exec` does not exist rather than erroring, so the template can ship before
+# this package does and take effect the moment it lands. A files entry
+# pointing back into this repository would also be the wrong root for
+# `--srcdir`, which every other path above is relative to HuginnKeyring's own
+# checkout.
+
+# No /bin aliases: this root is usr-merged, so /bin IS /usr/bin and a link at
+# /bin/<name> pointing to /usr/bin/<name> replaces the binary with a symlink to
+# itself. See scripts/lib/usrmerge.sh.
+symlinks = []
+
+# What this manifest deliberately does NOT do, on purpose and for the same
+# reason HuginnKeyring's own scripts/install.sh gives at the end of its run:
+#
+#   PAM is not touched. Wiring pam_huginn_keyring.so into /etc/pam.d/system-
+#   login from a package script is how people end up unable to log in, and the
+#   failure shows up at the next login -- behind the thing that broke. Add it
+#   by hand, after whatever module authenticates:
+#
+#       session  optional  pam_huginn_keyring.so
+#       password optional  pam_huginn_keyring.so
+#
+#   and keep a root shell open until a fresh login in another VT has been
+#   tested. See docs/pam.md in the HuginnKeyring repository for the whole
+#   argument, including why `optional` is the correct control and not merely
+#   the conventional one.
+#
+# There is also no [install] `script` here for the same reason raven-os-
+# release-guard's manifest gives for what it leaves out of its own: a package
+# script is not the place to make a change that can leave the machine unable
+# to log in, and printing the two lines above is what upstream's own installer
+# does instead of running them.
