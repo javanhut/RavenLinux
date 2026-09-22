@@ -90,12 +90,13 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 mod profile;
+mod sleepmark;
 
 /// Where raven-init listens. Must match control::SOCKET_PATH.
 const SOCKET_PATH: &str = "/run/raven-init.sock";
 
 /// Where the desktop asks us. Under the directory init already publishes the
-/// sleep marker in (see `power::RUN_DIR`), so a session that watches one can
+/// sleep marker in (see `sleepmark::RUN_DIR`), so a session that watches one can
 /// find the other without a second path to know.
 const CTL_SOCKET_PATH: &str = "/run/raven-power/ctl";
 
@@ -708,9 +709,17 @@ fn suspend_directly() -> bool {
         return false;
     };
 
+    // The same handshake init does: without it the fallback is a suspend
+    // with the desktop still on the glass, shown again the moment the lid
+    // opens. See `sleepmark`.
+    sleepmark::prepare();
+
     unsafe { libc::sync() };
 
-    match fs::write(STATE_PATH, state) {
+    let result = fs::write(STATE_PATH, state);
+    sleepmark::awake();
+
+    match result {
         Ok(()) => true,
         Err(e) => {
             log::error!("Suspend refused: {}", e);

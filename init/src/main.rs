@@ -29,6 +29,7 @@ mod demand;
 mod logrotate;
 mod overrides;
 mod power;
+mod sleepmark;
 mod readiness;
 mod reexec;
 mod rtc;

@@ -19,12 +19,14 @@
 //!
 //! # The marker file
 //!
-//! `/run/raven-power/state` holds one word, `sleeping` or `awake`, rewritten
-//! either side of the sleep. It exists because a Wayland compositor that held
-//! DRM master across a suspend has to re-take the device and repaint: without
-//! logind there is no `PrepareForSleep` to tell it so, and a file it can watch
-//! with the inotify it already runs is the cheapest signal that does not
-//! involve giving an unprivileged session a socket into PID 1. It is
+//! `/run/raven-power/state` holds `sleeping <token>` or `awake`, rewritten
+//! either side of the sleep, and the sleep waits (briefly) for the compositor
+//! to answer the first -- see `sleepmark`, which owns both. It exists because
+//! a Wayland compositor has to lock and darken its screens before a suspend
+//! and re-take the device after one: without logind there is no
+//! `PrepareForSleep` to tell it so, and a file it can watch with the inotify
+//! it already runs is the cheapest signal that does not involve giving an
+//! unprivileged session a socket into PID 1. It is
 //! world-readable on purpose -- the session runs as a normal user. It is
 //! written for a hibernation exactly as it is for a suspend: from the
 //! compositor's side the two are the same event, a machine that stopped and
@@ -56,6 +58,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
+
+use crate::sleepmark;
 
 /// The kernel's sleep entry point. A write here blocks until we are back.
 const STATE_PATH: &str = "/sys/power/state";
@@ -97,12 +101,6 @@ const CMDLINE_PATH: &str = "/proc/cmdline";
 /// Scripts run either side of the sleep, with `pre` or `post` as argv[1].
 const HOOK_DIR: &str = "/etc/raven/sleep.d";
 
-/// Directory holding the marker file. A tmpfs, so it never survives a boot.
-const RUN_DIR: &str = "/run/raven-power";
-
-/// The marker itself. See the module docs.
-pub const STATE_MARKER: &str = "/run/raven-power/state";
-
 /// Publish `awake` at boot, so the marker exists before anything watches it.
 ///
 /// Without this the file appears for the first time halfway through the first
@@ -110,7 +108,7 @@ pub const STATE_MARKER: &str = "/run/raven-power/state";
 /// watch and gave up. Cheap, and it makes the marker's absence mean one thing
 /// only: this machine is not running raven-init.
 pub fn publish_at_boot() {
-    publish("awake");
+    sleepmark::awake();
 }
 
 /// Sleep, and return once the machine is awake again.
@@ -161,8 +159,12 @@ pub fn hibernate() -> Result<()> {
 /// interrupted by a person with a power button. Keeping it in one function is
 /// what stops the two from drifting into doing different amounts of that.
 fn enter(state: &str) -> Result<()> {
+    // The desktop first, before the hooks. Locking the session and turning
+    // its screens off is what stops the resume from showing the desktop (see
+    // `sleepmark`), and it is the one step here that must not be left to
+    // whatever time a `pre` hook leaves over.
+    sleepmark::prepare();
     run_hooks("pre");
-    publish("sleeping");
 
     // Dirty pages first. The kernel syncs on its own before a suspend, but it
     // does that after the hooks and after the freeze has already started; this
@@ -173,10 +175,10 @@ fn enter(state: &str) -> Result<()> {
     let result = write_state(state);
 
     // Before the hooks, deliberately. The compositor is watching this file and
-    // the screen is black until it repaints, so the marker is what should
-    // reach it first -- not whatever a `post` hook decides to spend a second
-    // doing.
-    publish("awake");
+    // the screen is dark until it relights it with the lock screen, so the
+    // marker is what should reach it first -- not whatever a `post` hook
+    // decides to spend a second doing.
+    sleepmark::awake();
     run_hooks("post");
 
     match result {
@@ -303,32 +305,6 @@ fn write_state(state: &str) -> Result<()> {
     Ok(())
 }
 
-/// Write one word to the marker file, for whoever is watching it.
-///
-/// Failure here is logged and swallowed. A compositor that misses a repaint is
-/// a bad frame; refusing to suspend the machine over it would be worse.
-fn publish(phase: &str) {
-    if let Err(e) = publish_inner(phase) {
-        log::warn!("Could not update {}: {:#}", STATE_MARKER, e);
-    }
-}
-
-fn publish_inner(phase: &str) -> Result<()> {
-    if !Path::new(RUN_DIR).is_dir() {
-        fs::create_dir_all(RUN_DIR).with_context(|| format!("Cannot create {}", RUN_DIR))?;
-        fs::set_permissions(RUN_DIR, fs::Permissions::from_mode(0o755)).ok();
-    }
-
-    // Written whole and replaced by rename, so a watcher that wakes on the
-    // event never reads a half-written or empty file.
-    let tmp = format!("{}.new", STATE_MARKER);
-    fs::write(&tmp, format!("{}\n", phase)).with_context(|| format!("Cannot write {}", tmp))?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644)).ok();
-    fs::rename(&tmp, STATE_MARKER).with_context(|| format!("Cannot install {}", STATE_MARKER))?;
-
-    Ok(())
-}
-
 /// Run `/etc/raven/sleep.d/*` in name order, with the phase as argv[1].
 ///
 /// Same shape as the shutdown hooks: executable files only, output discarded,
@@ -385,11 +361,6 @@ mod tests {
     fn preferred_states_are_ordered_deep_first() {
         // If this ever flips, every laptop starts "sleeping" at full power.
         assert_eq!(PREFERRED_STATES[0], "mem");
-    }
-
-    #[test]
-    fn the_marker_lives_under_the_run_dir() {
-        assert!(STATE_MARKER.starts_with(RUN_DIR));
     }
 
     /// `disk` must never be something a suspend can fall into. A lid close
