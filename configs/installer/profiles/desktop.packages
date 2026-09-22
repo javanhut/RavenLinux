@@ -159,3 +159,17 @@ procps-ng
 polkit
 flatpak
 sbctl
+
+# The assembler, linker and object tools: as, ld, ar, strip, objcopy, objdump,
+# readelf, nm. Nothing Raven ships calls them, but a good share of what a
+# person installs afterwards does. rvn's AUR path builds on this machine, and
+# makepkg links with ld and strips every binary it packages; an out-of-tree
+# kernel module has to be linked against the running kernel; and readelf and
+# objdump are how you answer "why won't this binary load". stage2 copies ldd
+# onto the image but none of these, so without this line the first AUR build
+# fails on a desktop install.
+#
+# Declared here and not copied onto the image by copy_system_utils: rvn will
+# not install over a file it does not own, so an image-side copy would make
+# `rvn install base-devel` refuse on binutils's own files later.
+binutils
