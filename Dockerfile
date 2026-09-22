@@ -70,6 +70,56 @@ RUN pacman -Syu --noconfirm --needed \
         # into the sysroot, so a host without them ships an ISO that cannot
         # install itself.
         parted gptfdisk efibootmgr \
+        # Encryption and the two filesystems beyond ext4/vfat that
+        # raven-install offers. Same rule as the three names above -- the build
+        # copies each of these binaries into something it ships -- but these
+        # were missing entirely, and the consequence is a feature that is
+        # written, documented and permanently refused:
+        #
+        #   cryptsetup      scripts/build-initramfs.sh puts it in the initramfs
+        #                   (host_bins, ~l.314) because an encrypted root has to
+        #                   be unlocked before there is a root to unlock it
+        #                   from, and stage2 stages it for raven-install. With
+        #                   no cryptsetup in this container the initramfs build
+        #                   printed "this image CANNOT boot an encrypted disk"
+        #                   and shipped the image anyway, while raven-install's
+        #                   preflight reported cryptsetup 0 and refused
+        #                   --encrypt on 100% of images. Both halves empty, so
+        #                   nothing ever disagreed and nothing failed.
+        #   device-mapper   dmsetup, which is what cryptsetup's mappings are
+        #                   made of. The initramfs lists it beside cryptsetup
+        #                   for the same reason; it is also what makes a failed
+        #                   unlock diagnosable from the rescue shell.
+        #   btrfs-progs     mkfs.btrfs AND the `btrfs` multicall binary. The
+        #                   subvolume layout, raven-snapshot and rvn's
+        #                   pre-transaction snapshot hook are all `btrfs`
+        #                   subcommands, not mkfs, so an image with only the
+        #                   former has a root filesystem it cannot administer
+        #                   -- which is why raven-install checks for the second
+        #                   name separately and refuses --fs btrfs without it.
+        cryptsetup device-mapper btrfs-progs \
+        # Firewall and kernel tunables. Both are here for the same reason as
+        # the installer tooling above: stage2 copies the binary into the
+        # sysroot, so a container without the package ships an image that
+        # cannot run a file the image also ships.
+        #
+        #   nftables   /usr/bin/nft is the `exec` of the nftables service in
+        #              etc/raven/init.toml, which runs `nft -f
+        #              /etc/nftables.conf` at boot. The ruleset shipped
+        #              without the binary, which is a firewall that is a text
+        #              file: the service could never have started, and because
+        #              it is `critical = false` it would not have said so
+        #              loudly.
+        #   procps-ng  `sysctl`. The image had no way at all to read or set a
+        #              kernel tunable -- not to apply one, which the sysctl
+        #              stage now does, but to answer "did it take?". A policy
+        #              you cannot query is a policy you cannot debug, and
+        #              /usr/lib/sysctl.d/50-raven.conf exists to be checked.
+        #              The rest of procps-ng (ps, top, free, uptime, pgrep)
+        #              was already being copied out of this container by
+        #              stage2 and arrived only because the base image happens
+        #              to carry the package; naming it makes that deliberate.
+        nftables procps-ng \
         # Build systems
         meson ninja cmake pkgconf autoconf automake libtool m4 gettext gperf \
         # Kernel build
@@ -174,6 +224,22 @@ RUN pacman -Syu --noconfirm --needed \
         libmtp libgphoto2 \
         # Bluetooth file transfer, and lsusb with a readable id database.
         bluez-obex usbutils hwdata \
+        # The desktop portals. xdg-desktop-portal is the D-Bus service a
+        # sandboxed or portal-using client asks for a file chooser, a
+        # screenshot or a screencast, and -gtk is the backend that draws the
+        # dialog; stage-gui.sh already writes raven.portal and
+        # raven-portals.conf into /usr/share/xdg-desktop-portal for them, and
+        # configs/raven/user-services/xdg-desktop-portal.toml ships
+        # `enabled = true` with `restart = true`, so every login on a built
+        # image forks /usr/lib/xdg-desktop-portal, fails ENOENT, and restarts
+        # forever -- a crash loop in the session supervisor for a program no
+        # stage installs. This container is the first half of closing that: the
+        # second is naming both in OPTIONAL in scripts/lib/stage-desktop-runtime.py,
+        # which is what copies a package's files into the sysroot, and until
+        # that lands these two are only in the container. They are OPTIONAL
+        # there rather than REQUIRED for the same reason cups and sane are: a
+        # rename upstream should cost a file dialog, not the ISO.
+        xdg-desktop-portal xdg-desktop-portal-gtk \
         # Firmware updates. raven-firmware drives fwupdtool directly -- no
         # fwupd daemon and no polkit -- so a dock, an SSD or a hub with a
         # known-bad firmware is fixable on a stock image. fwupd-efi is the

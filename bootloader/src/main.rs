@@ -19,6 +19,7 @@ use uefi::table::boot::{OpenProtocolAttributes, OpenProtocolParams, SearchType};
 use uefi::table::runtime::{VariableAttributes, VariableVendor};
 use uefi::CString16;
 
+mod cmdline;
 mod config;
 mod font;
 mod gfx;
@@ -500,6 +501,10 @@ fn display_menu_graphical(
     // ticking underneath it would boot the entry the user is reading about.
     let mut countdown_active = nav.depth == 0 && message.is_none();
 
+    // `Some` while the argument prompt is open. See `cmdline.rs` for what it
+    // is for; here it only changes what the frame says and where keys go.
+    let mut edit: Option<cmdline::Editor> = None;
+
     loop {
         {
             let entries = nav.current_entries();
@@ -513,7 +518,30 @@ fn display_menu_graphical(
 
             // Owns the formatted countdown for as long as `view` borrows it.
             let countdown;
-            let status = if let Some(text) = message.as_deref() {
+            // And the same for the line of typed arguments.
+            let typed;
+            let status = if let Some(editor) = &edit {
+                // An empty prompt spends its line on the four arguments this
+                // exists for, because the operator most likely to need one is
+                // the one least likely to remember its spelling -- and the
+                // machine they would look it up on is the one in front of
+                // them, which is not booting.
+                //
+                // Once there is something to show, the trailing underscore is
+                // the caret. There is no blink and no cursor positioning: the
+                // prompt only ever appends, so the insertion point is always
+                // the end of the line and drawing it as a character costs
+                // nothing.
+                typed = if editor.is_empty() {
+                    format!("> _    {RECOVERY_ARGUMENTS}")
+                } else {
+                    format!("> {}_", cmdline::tail(editor.text(), EDIT_VISIBLE_CHARS))
+                };
+                Some(MenuStatus {
+                    text: &typed,
+                    tone: Tone::Caution,
+                })
+            } else if let Some(text) = message.as_deref() {
                 Some(MenuStatus {
                     text,
                     tone: Tone::Failure,
@@ -531,10 +559,33 @@ fn display_menu_graphical(
                 None
             };
 
+            // The prompt line carries the only advertisement of the `e` key.
+            // The footer would be the conventional place, but its hints are
+            // built from `View` alone and `View` cannot tell a Linux entry from
+            // a Reboot one -- offering to edit the arguments of "Shut Down"
+            // would be worse than saying nothing. An undiscoverable recovery
+            // key is very nearly as useless as no key at all, so it is said
+            // here, and only while the selection is something it applies to.
+            let prompt;
+            let prompt_text = if edit.is_some() {
+                prompt = String::from(
+                    "Arguments to add for this boot only -- [Enter] Boot  [Esc] Cancel",
+                );
+                prompt.as_str()
+            } else if nav
+                .selected_entry()
+                .is_some_and(|entry| entry_takes_cmdline(entry.entry_type))
+            {
+                prompt = format!("{}    [e] Kernel arguments", nav.menu_title());
+                prompt.as_str()
+            } else {
+                nav.menu_title()
+            };
+
             let view = View {
                 rows: &rows,
                 selected: nav.selected,
-                prompt: nav.menu_title(),
+                prompt: prompt_text,
                 status,
                 version,
                 can_go_back: nav.depth > 0,
@@ -557,6 +608,15 @@ fn display_menu_graphical(
                             }
                         }
                     }
+                    // `e` during the countdown opens the prompt rather than
+                    // merely stopping the clock. Requiring it to be pressed
+                    // twice would be a trap: the countdown is the five seconds
+                    // in which somebody watching a machine fail to boot is
+                    // most likely to reach for it.
+                    if edit_requested(key) {
+                        edit = open_editor(nav);
+                        continue;
+                    }
                     handle_nav_key(key, nav);
                 }
                 None => {
@@ -575,6 +635,45 @@ fn display_menu_graphical(
             // user just asked for, not a state they have to clear.
             *message = None;
 
+            // The prompt takes the whole keyboard while it is open, which is
+            // why this comes first and ends in `continue`: inside it Esc
+            // cancels the edit rather than leaving the submenu, Backspace
+            // deletes a character rather than going back, and the arrow keys
+            // do nothing -- the selection must not move out from under a line
+            // that was typed for the entry on screen.
+            if edit.is_some() {
+                match key {
+                    Key::Printable(c) if c == uefi::Char16::try_from('\r').unwrap() => {
+                        if let Some(entry) = nav.selected_entry() {
+                            let mut entry = entry.clone();
+                            // The clone is the whole of "for one boot only":
+                            // `boot.cfg` on the ESP is never reopened, so a
+                            // failed boot comes back to a menu that has
+                            // forgotten this.
+                            entry.cmdline = cmdline::combine(
+                                &entry.cmdline,
+                                edit.as_ref().map_or("", cmdline::Editor::text),
+                            );
+                            return MenuAction::Boot(entry);
+                        }
+                        edit = None;
+                    }
+                    Key::Special(ScanCode::ESCAPE) => edit = None,
+                    Key::Printable(c) if c == uefi::Char16::try_from('\x08').unwrap() => {
+                        if let Some(editor) = edit.as_mut() {
+                            editor.backspace();
+                        }
+                    }
+                    Key::Printable(c) => {
+                        if let Some(editor) = edit.as_mut() {
+                            editor.insert(char::from(c));
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
             match key {
                 Key::Printable(c) if c == uefi::Char16::try_from('\r').unwrap() => {
                     if let Some(entry) = nav.selected_entry() {
@@ -591,6 +690,7 @@ fn display_menu_graphical(
                         nav.go_back();
                     }
                 }
+                key if edit_requested(key) => edit = open_editor(nav),
                 _ => handle_nav_key(key, nav),
             }
         }
@@ -610,8 +710,20 @@ fn display_menu_with_nav(system_table: &mut SystemTable<Boot>, nav: &mut MenuNav
     let mut timeout = nav.config.timeout;
     let mut countdown_active = nav.depth == 0; // Only countdown on root menu
 
+    // The argument prompt, open or not. This path is the one a headless or
+    // pre-GOP machine gets, which is disproportionately the one being rescued,
+    // so it has the same key and the same rules as the graphical menu -- the
+    // two differ in how they draw and in nothing else.
+    let mut edit: Option<cmdline::Editor> = None;
+
     loop {
         let entries = nav.current_entries();
+
+        // Worked out before `stdout` is borrowed, because that borrow takes
+        // the whole system table and `nav` cannot be consulted through it.
+        let edit_takes_a_prompt = nav
+            .selected_entry()
+            .is_some_and(|entry| entry_takes_cmdline(entry.entry_type));
 
         // Clear and redraw menu (scoped borrow of stdout)
         {
@@ -654,7 +766,19 @@ fn display_menu_with_nav(system_table: &mut SystemTable<Boot>, nav: &mut MenuNav
                 "    ──────────────────────────────────────────────────────"
             );
 
-            if countdown_active && timeout > 0 {
+            if let Some(editor) = &edit {
+                let _ = stdout.set_color(Color::Yellow, Color::Black);
+                let _ = writeln!(
+                    stdout,
+                    "    Arguments to add for this boot only   [Enter] Boot   [Esc] Cancel"
+                );
+                // No elision here: the text console wraps, so a long line
+                // costs a row rather than running off the panel.
+                if editor.is_empty() {
+                    let _ = writeln!(stdout, "    try:  {RECOVERY_ARGUMENTS}");
+                }
+                let _ = writeln!(stdout, "    > {}_", editor.text());
+            } else if countdown_active && timeout > 0 {
                 let _ = stdout.set_color(Color::Yellow, Color::Black);
                 let _ = writeln!(
                     stdout,
@@ -663,13 +787,17 @@ fn display_menu_with_nav(system_table: &mut SystemTable<Boot>, nav: &mut MenuNav
                 );
             } else {
                 let _ = stdout.set_color(Color::LightGray, Color::Black);
+                let hint_edit = if edit_takes_a_prompt { "   [e] Kernel args" } else { "" };
                 if nav.depth > 0 {
                     let _ = writeln!(
                         stdout,
-                        "    [↑/↓] Select   [Enter] Select   [Esc/Backspace] Back"
+                        "    [↑/↓] Select   [Enter] Select   [Esc/Backspace] Back{hint_edit}"
                     );
                 } else {
-                    let _ = writeln!(stdout, "    [↑/↓] Select   [Enter] Boot/Enter   [Esc] Exit");
+                    let _ = writeln!(
+                        stdout,
+                        "    [↑/↓] Select   [Enter] Boot/Enter   [Esc] Exit{hint_edit}"
+                    );
                 }
             }
         }
@@ -688,6 +816,10 @@ fn display_menu_with_nav(system_table: &mut SystemTable<Boot>, nav: &mut MenuNav
                             }
                         }
                     }
+                    if edit_requested(key) {
+                        edit = open_editor(nav);
+                        continue;
+                    }
                     handle_nav_key(key, nav);
                 }
                 None => {
@@ -702,6 +834,39 @@ fn display_menu_with_nav(system_table: &mut SystemTable<Boot>, nav: &mut MenuNav
             }
         } else {
             let key = wait_for_key(system_table);
+
+            // See the graphical menu: while the prompt is open it owns every
+            // key, so that Esc and Backspace mean what they mean inside a text
+            // field rather than what they mean in the menu behind it.
+            if edit.is_some() {
+                match key {
+                    Key::Printable(c) if c == uefi::Char16::try_from('\r').unwrap() => {
+                        if let Some(entry) = nav.selected_entry() {
+                            let mut entry = entry.clone();
+                            entry.cmdline = cmdline::combine(
+                                &entry.cmdline,
+                                edit.as_ref().map_or("", cmdline::Editor::text),
+                            );
+                            return MenuAction::Boot(entry);
+                        }
+                        edit = None;
+                    }
+                    Key::Special(ScanCode::ESCAPE) => edit = None,
+                    Key::Printable(c) if c == uefi::Char16::try_from('\x08').unwrap() => {
+                        if let Some(editor) = edit.as_mut() {
+                            editor.backspace();
+                        }
+                    }
+                    Key::Printable(c) => {
+                        if let Some(editor) = edit.as_mut() {
+                            editor.insert(char::from(c));
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
             match key {
                 Key::Printable(c) if c == uefi::Char16::try_from('\r').unwrap() => {
                     if let Some(entry) = nav.selected_entry() {
@@ -718,6 +883,9 @@ fn display_menu_with_nav(system_table: &mut SystemTable<Boot>, nav: &mut MenuNav
                     if nav.depth > 0 {
                         nav.go_back();
                     }
+                }
+                key if edit_requested(key) => {
+                    edit = open_editor(nav);
                 }
                 _ => {
                     handle_nav_key(key, nav);
@@ -751,6 +919,60 @@ fn handle_nav_key(key: Key, nav: &mut MenuNav) {
         Key::Special(ScanCode::DOWN) => nav.move_down(),
         _ => {}
     }
+}
+
+/// What an empty prompt suggests.
+///
+/// These are exactly the four arguments `scripts/build-initramfs.sh` parses as
+/// recovery options, in the order somebody is likely to want them: `noresume`
+/// abandons a hibernation image that is killing the restore, `rootdelay=`
+/// gives a slow disk longer to appear, `crypttries=` changes how many
+/// passphrase attempts come before the rescue shell, and `raven.live` boots
+/// the live image from a disk that has a root= of its own. If that list
+/// changes there, it has to change here -- a prompt that suggests an argument
+/// nothing reads is worse than a prompt that suggests nothing.
+const RECOVERY_ARGUMENTS: &str = "noresume   rootdelay=30   crypttries=10   raven.live";
+
+/// How many characters of the typed line the status row shows.
+///
+/// The status is one centred, unwrapped row drawn in the small face, and the
+/// narrowest panel firmware commonly reports is 1024 logical pixels wide. At
+/// that width this many characters plus the `> ` and the caret still sit
+/// inside the margins, and the recovery arguments it exists for -- `noresume`,
+/// `rootdelay=30`, `crypttries=10`, `raven.live` -- are all far shorter than
+/// it. A longer line is not refused, only scrolled: see `cmdline::tail`.
+const EDIT_VISIBLE_CHARS: usize = 72;
+
+/// Whether this key asks for the argument prompt.
+///
+/// `e` is GRUB's key for the same thing. Somebody who has ever edited a boot
+/// entry on another distribution will try it here first, and somebody who has
+/// not is no worse off. The case is ignored because Caps Lock on a machine
+/// that will not boot is not a thing anyone should have to notice.
+fn edit_requested(key: Key) -> bool {
+    matches!(key, Key::Printable(c) if char::from(c).eq_ignore_ascii_case(&'e'))
+}
+
+/// The prompt, for the current selection, or `None` if it would do nothing.
+///
+/// Returning `None` rather than opening an empty prompt is the honest
+/// behaviour: a chainloaded Windows entry is handed to the firmware's
+/// `LoadImage` with no load options at all, and a Reboot row is not an image,
+/// so a prompt on either would take a line of typing and then discard it.
+fn open_editor(nav: &MenuNav) -> Option<cmdline::Editor> {
+    let entry = nav.selected_entry()?;
+    entry_takes_cmdline(entry.entry_type).then(|| cmdline::Editor::for_base(&entry.cmdline))
+}
+
+/// Whether an entry of this kind is booted with a command line that the kernel
+/// will read.
+///
+/// `boot_entry` is the authority: `LinuxEfi` passes `entry.cmdline` through to
+/// `boot_efi_stub`, and `LinuxLegacy` is where a command line would go if that
+/// path were implemented. Every other kind either ignores the field or is not
+/// a boot at all.
+fn entry_takes_cmdline(entry_type: EntryType) -> bool {
+    matches!(entry_type, EntryType::LinuxEfi | EntryType::LinuxLegacy)
 }
 
 fn wait_for_key(system_table: &mut SystemTable<Boot>) -> Key {
@@ -837,6 +1059,26 @@ fn load_config(boot_services: &BootServices, image_handle: Handle) -> Result<Boo
         }
     }
 
+    // Snapshots, if this machine takes any. Read while the ESP is still open,
+    // and before detect_other_os, because both want top-level slots and
+    // MAX_ENTRIES is not generous: a way back into yesterday's system belongs
+    // in the menu ahead of a Windows that the firmware's own boot menu can
+    // still reach.
+    for snapshot_path in config::SNAPSHOT_CONFIG_PATHS {
+        let Ok(snapshot_data) = read_file_from_root(&mut root, snapshot_path) else {
+            continue;
+        };
+        if let Some(menu) = config::parse_snapshot_menu(&snapshot_data) {
+            insert_snapshot_menu(&mut config, menu);
+        }
+        // The first of these paths that exists is the answer, even if it held
+        // nothing usable. Falling through to the next one after reading an
+        // empty list would let a stale `snapshots.cfg` reappear the moment
+        // `raven-snapshot` emptied `snaps.cfg`, which is exactly when the menu
+        // must stop offering snapshots that are no longer on the disk.
+        break;
+    }
+
     // Our own volume is scanned by the sweep below like any other, so the
     // handle is what is needed here, not the open filesystem.
     drop(root);
@@ -847,6 +1089,49 @@ fn load_config(boot_services: &BootServices, image_handle: Handle) -> Result<Boo
     detect_other_os(boot_services, device_handle, &mut config);
 
     Ok(config)
+}
+
+/// Put the "Snapshots >" submenu in the menu, after the last Linux entry.
+///
+/// Position is a decision and not tidiness. Appending would put it below
+/// Shutdown, at the bottom of a list whose bottom is where the machine-control
+/// entries live; a snapshot is another way to boot this machine's Linux, so it
+/// belongs with the other ways to boot this machine's Linux. `raven-install`
+/// writes those first and the firmware/reboot/shutdown entries last, so "after
+/// the last Linux entry" puts it exactly on that seam without this code having
+/// to know anything about what the entries are called.
+///
+/// THE PART THAT MUST NOT BE GOT WRONG is the two lines at the bottom.
+/// `config.default` is an *index*, chosen by `raven-install` -- 0 for a console
+/// profile and 1 for a desktop one -- and inserting an entry above it moves the
+/// entry it points at. Forgetting that would mean a desktop machine that took
+/// its first snapshot then started booting to a text console instead, five
+/// seconds later, with nothing anywhere saying why.
+fn insert_snapshot_menu(config: &mut BootConfig, menu: BootEntry) {
+    // One top-level slot is all this needs, but if there is not even one then
+    // the menu is already at the cap and something would have to be dropped to
+    // make room. Nothing here is worth dropping a boot entry for.
+    if config.entries.len() >= config::MAX_ENTRIES {
+        return;
+    }
+
+    let position = config
+        .entries
+        .iter()
+        .rposition(|entry| {
+            matches!(
+                entry.entry_type,
+                EntryType::LinuxEfi | EntryType::LinuxLegacy
+            )
+        })
+        .map(|last| last + 1)
+        .unwrap_or(config.entries.len());
+
+    config.entries.insert(position, menu);
+
+    if config.default >= position {
+        config.default += 1;
+    }
 }
 
 /// Try to read a file from the ESP root

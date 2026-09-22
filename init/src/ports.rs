@@ -294,9 +294,7 @@ fn thunderbolt() -> Vec<String> {
         let generation = read(dev.join("generation"))
             .map(|g| format!("gen {g}"))
             .unwrap_or_default();
-        let speed = read(dev.join("tx_speed"))
-            .map(|s| format!("{s}"))
-            .unwrap_or_default();
+        let speed = read(dev.join("tx_speed")).unwrap_or_default();
         out.push(
             [
                 name,
@@ -951,9 +949,11 @@ mod tests {
         };
         // SAFETY: writing plain data into a buffer large enough for it.
         unsafe { std::ptr::write_unaligned(buf.as_mut_ptr().cast(), hdr) };
-        let mut info = IfInfoMsg::default();
-        info.ifi_index = 4;
-        info.ifi_flags = (libc::IFF_UP | libc::IFF_RUNNING) as u32;
+        let info = IfInfoMsg {
+            ifi_index: 4,
+            ifi_flags: (libc::IFF_UP | libc::IFF_RUNNING) as u32,
+            ..IfInfoMsg::default()
+        };
         // SAFETY: as above, at the offset the parser reads from.
         unsafe { std::ptr::write_unaligned(buf.as_mut_ptr().add(hdr_len).cast(), info) };
         let at = hdr_len + info_len;

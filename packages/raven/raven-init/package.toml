@@ -1,0 +1,157 @@
+# PID 1, the six daemons that are the rest of init, and the firewall front end.
+#
+# ONE PACKAGE, EIGHT BINARIES -- and that is not a shortcut.
+#
+# init/Cargo.toml is a single crate with eight [[bin]] targets, so one
+# `cargo build --release` produces all eight from one dependency graph and one
+# Cargo.lock. They are not eight components that happen to live together:
+# raven-powerd asks init for the suspend over raven-rc's control socket rather
+# than writing /sys/power/state itself, raven-ports reuses the raven-dhcp
+# invocation init's `network` service uses, raven-timed is the other half of
+# init's boot-time hwclock read, and raven-mount resolves the session account
+# through the same `user` module init's overrides do. Split into eight
+# packages, every one of those pairs becomes a version skew somebody can
+# install -- a raven-powerd talking a protocol the raven-init beside it does
+# not speak. There is no version of this crate in which seven of the eight are
+# the right thing to have.
+#
+# The eight names also come from one place: RAVEN_INIT_BINARIES in
+# scripts/lib/components.sh, which is what the Raven stage builds and what
+# stage4's check_sysroot_layers looks for. raven-ports was in the build call
+# and missing from that check for exactly as long as the two lists were
+# written out separately; this manifest is a third copy of the same list, so
+# keep it in step with that constant. raven-firewall repeated the mistake at
+# full length -- declared in Cargo.toml, given a row in ARCHITECTURE.md, and
+# named by neither the constant nor this file, so `rvn build` on this manifest
+# succeeded while shipping a package with the binary missing and nothing
+# anywhere said so.
+[package]
+name = "raven-init"
+version = "0.1.0"
+description = "RavenLinux init - PID 1, its control tool, the power, port, clock, mount and fingerprint daemons, and the firewall front end"
+license = "MIT"
+homepage = "https://github.com/javanhut/RavenLinux"
+repository = "https://github.com/javanhut/RavenLinux"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "init", "base"]
+
+[source]
+# `local`, not `git`: this crate is init/ inside the RavenLinux repository, so
+# there is nothing to fetch and nothing to pin. A `commit` here would claim the
+# repository could be at a revision other than the one holding this file, which
+# is not a state that exists. `url` names the repository anyway, because
+# package metadata is read by people who have only the package.
+#
+# The practical consequence is that `rvn build --srcdir` for this manifest is
+# the RavenLinux checkout itself, not a component checkout under
+# build/sources -- which is why every `src` below is repository-relative.
+type = "local"
+url = "https://github.com/javanhut/RavenLinux.git"
+
+[build]
+system = "cargo"
+# The musl target, so PID 1 is statically linked. It matters more here than
+# anywhere else in the image: init is exec'd by the kernel before any
+# filesystem holding a shared library is guaranteed to be mounted, and a
+# dynamic PID 1 whose loader is missing is a kernel panic with no message
+# worth reading.
+target = "x86_64-unknown-linux-musl"
+# --locked because init/Cargo.lock is committed. No `-p` flags and no
+# `--bins`: this is one crate, and a plain --release build of it produces all
+# eight binaries.
+build_flags = ["--release", "--locked"]
+
+[dependencies]
+# Nothing at runtime. That is the point of the musl build, and it is also the
+# contract PID 1 has to keep -- init cannot depend on a package, because
+# nothing has installed any package yet at the moment it runs.
+runtime = []
+build = ["rust", "cargo"]
+
+[install]
+files = [
+    { src = "init/target/x86_64-unknown-linux-musl/release/raven-init",    dest = "/usr/bin/raven-init",    mode = 755 },
+    { src = "init/target/x86_64-unknown-linux-musl/release/raven-rc",      dest = "/usr/bin/raven-rc",      mode = 755 },
+    { src = "init/target/x86_64-unknown-linux-musl/release/raven-powerd",  dest = "/usr/bin/raven-powerd",  mode = 755 },
+    { src = "init/target/x86_64-unknown-linux-musl/release/raven-ports",   dest = "/usr/bin/raven-ports",   mode = 755 },
+    { src = "init/target/x86_64-unknown-linux-musl/release/raven-timed",   dest = "/usr/bin/raven-timed",   mode = 755 },
+    { src = "init/target/x86_64-unknown-linux-musl/release/raven-mount",   dest = "/usr/bin/raven-mount",   mode = 755 },
+    { src = "init/target/x86_64-unknown-linux-musl/release/raven-fprintd", dest = "/usr/bin/raven-fprintd", mode = 755 },
+    # The firewall's front end. It fronts no daemon of its own -- a loaded
+    # ruleset lives in the kernel rather than in a process -- so unlike the six
+    # above it has no service template further down. What it needs instead is
+    # /usr/bin/nft and /etc/nftables.conf, and neither belongs to this package:
+    # nft is staged out of the build container by stage2 and the ruleset is
+    # stage2's file, so both are absent from `runtime` deliberately. A
+    # raven-firewall with nothing to drive still answers `status` honestly,
+    # which is the behaviour to want on an image built without nftables.
+    { src = "init/target/x86_64-unknown-linux-musl/release/raven-firewall", dest = "/usr/bin/raven-firewall", mode = 755 },
+    # Init's own configuration. It is in this package because it is the file
+    # that decides what PID 1 does, and a machine that has raven-init and no
+    # init.toml boots to the compiled-in fallback and nothing else.
+    { src = "etc/raven/init.toml",  dest = "/etc/raven/init.toml",  mode = 644 },
+    # power.toml and time.toml are the same story one level down: every value
+    # in each is a default the daemon already has compiled in, so they are a
+    # written record of the keys that exist rather than files the machine
+    # cannot start without -- which is exactly why a settings page can edit
+    # them instead of guessing.
+    { src = "etc/raven/power.toml", dest = "/etc/raven/power.toml", mode = 644 },
+    { src = "etc/raven/time.toml",  dest = "/etc/raven/time.toml",  mode = 644 },
+    # The service drop-in templates for the three daemons here that have one.
+    # They ship inert under /usr/share/raven/services and are copied into
+    # /etc/raven/init.d by hand; an image built from this tree does not need
+    # them, because its init.toml already defines the services. They exist for
+    # an already-installed machine whose init.toml predates the daemon, where
+    # the binary arrives and nothing ever starts it. They belong to this
+    # package because each one describes a binary in it: uninstall raven-init
+    # and a template naming /usr/bin/raven-powerd should not outlive it.
+    { src = "configs/raven/services/powerd.toml",  dest = "/usr/share/raven/services/powerd.toml",  mode = 644 },
+    { src = "configs/raven/services/timed.toml",   dest = "/usr/share/raven/services/timed.toml",   mode = 644 },
+    { src = "configs/raven/services/fprintd.toml", dest = "/usr/share/raven/services/fprintd.toml", mode = 644 },
+]
+
+# Three files here are edited by administrators, so an upgrade must not write
+# over them. Declaring them means rvn compares what is on disk against what the
+# last install of this package put there, keeps the local copy when they differ
+# and leaves the package's version beside it as .pacnew.
+#
+# The cost, stated plainly because it is real: on the FIRST install onto a
+# machine whose /etc already has these files -- which is every machine built
+# from this repository today, because stage2 writes them by hand and no package
+# has ever owned them -- there is no previous install to compare against, so
+# all three arrive as .pacnew. That is the .pacnew story in REPOSFORRAVEN.md
+# and it is fixed by seeding the local database at build time, not by leaving
+# init.toml unprotected. An init.toml silently replaced on upgrade is a machine
+# that boots to somebody else's service list.
+backup = [
+    "/etc/raven/init.toml",
+    "/etc/raven/power.toml",
+    "/etc/raven/time.toml",
+]
+
+# No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS
+# /usr/bin: a link at /bin/<name> whose target is /usr/bin/<name> names the
+# same path on both sides, and creating it replaces the real binary with a
+# symlink to itself. Anything installed to /usr/bin is already reachable at
+# /bin/<name> through the merge link -- see scripts/lib/usrmerge.sh.
+#
+# This is also why /sbin/raven-init and /bin/raven-rc need no entry: init.toml,
+# stage4's PID 1 check and the installer all name the /sbin path and every one
+# of them resolves to the file above.
+symlinks = []
+
+# What this manifest does NOT describe:
+#
+#   - poweroff, reboot, halt and shutdown. raven-rc dispatches on argv[0], so
+#     those four names are the same program -- but they are not symlinks to it
+#     on this image. stage4 installs a dispatcher that calls raven-rc when
+#     raven-init is PID 1 and falls back to the reboot(2) syscall in a rescue
+#     environment where it is not, which is a file of stage4's own and not a
+#     file of this package's.
+#   - /etc/raven/init.d, the drop-in directory init reads alongside init.toml.
+#     It ships empty, created by stage2, because the base image runs nothing it
+#     does not ship.
+#   - the other fifteen templates under /usr/share/raven/services. Each belongs
+#     with the daemon it starts -- fstrim.toml with raven-fstrim, rvnd.toml
+#     with the package manager, bluetoothd.toml with bluez -- and only the
+#     three above name a binary out of this crate.

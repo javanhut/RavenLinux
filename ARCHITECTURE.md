@@ -185,6 +185,131 @@ filesystems, and hands off to `raven-rc` for service supervision.
 | `init/src/power.rs` | Suspend to RAM, and the `/run/raven-power/state` marker |
 | `init/src/powerd.rs` | `raven-powerd`: the power button, the sleep button, the lid, and the `/run/raven-power/ctl` socket |
 | `init/src/profile.rs` | `raven-powerd`'s CPU/platform power profile: governor, energy-performance preference, ACPI platform profile and PCIe ASPM, switched between the `[profile]` presets in `power.toml` as the supply changes |
+| `init/src/overrides.rs` | What the kernel command line and the installed binaries change about a loaded config: the graphical session, `ravend`, `seatd` |
+| `init/src/readiness.rs` | The inotify watches that say when a service's ready path appeared, rather than when the loop next looked |
+| `init/src/cgroup.rs` | `raven.slice`, the per-service cgroup, and the `setrlimit`/`nice`/`oom_score_adj` applied between fork and exec |
+| `init/src/logrotate.rs` | Keeping `/var/log/raven` from filling the root filesystem |
+| `init/src/demand.rs` | Services started by a device arriving rather than at boot |
+| `init/src/sysctl.rs` | The kernel parameters written to `/proc/sys` during early boot |
+| `init/src/timeline.rs` | The boot clock and the milestones `raven-rc blame` reports against |
+| `init/src/firewall.rs` | `raven-firewall`: reading, opening a port in and reloading `/etc/nftables.conf` without learning nft |
+
+#### Readiness, ordering and one-shots
+
+A service declaring `after = ["dbus"]` must not be started until dbus can
+answer, so a service definition may name a `ready_path` -- the socket, pid file
+or lock whose existence proves it is serving -- and init watches the *parent
+directory* of that path with inotify. It has to be the directory: the file does
+not exist yet, which is the whole question being asked.
+
+This replaced a timer, and the difference is not subtle. `raven-rc blame` used
+to report powerd, controlsd, timed and fprintd each taking exactly 1.120
+seconds and each becoming ready at the same microsecond -- four unrelated
+daemons with nothing to do with each other, all apparently synchronised. They
+were not. Readiness was noticed when the main loop next looked, and the loop
+stamped `Instant::now()` on each in turn inside one `for` loop, so the column
+was measuring the tick rate. With the watch, the kernel wakes the `poll(2)` the
+loop is already sleeping in, and the four report four different numbers of
+milliseconds.
+
+The other half of ordering is `type`. Three services here exist to finish --
+udev's coldplug, console-font's `setfont`, raven-dhcp's one pass over the wired
+links -- and they have no socket to wait on, so `after` had nothing to mean for
+them. `type = "oneshot"` says that finishing *is* success, which is a fact
+about the service, where `restart = false` is only an instruction to the
+supervisor. Services ordered after a one-shot are held until it exits, a
+non-zero exit is reported as a failure, and `raven-rc list` stops printing the
+same word -- `exited` -- for a coldplug that worked and a daemon that died in
+the night.
+
+A third answer sits beside `enabled` and `disabled` in that listing: `on
+demand`. The printing and bluetooth stack -- `cupsd`, `ipp-usb`,
+`avahi-daemon`, `bluetoothd`, `obexd` -- carry a `[services.demand]` block and
+are not started at boot at all. Init matches the rules in that block against
+the kernel's uevents, and against the `uevent` files in sysfs for hardware that
+was already plugged in at boot, and starts the service when a device matches.
+This is deliberately **not** socket activation: nothing binds a socket on the
+daemon's behalf, and a client that connects just before the trigger fires gets
+ECONNREFUSED exactly as it would on a machine where the daemon was simply not
+running. Those five are safe because the event that triggers them is the same
+physical event that produces the work -- somebody plugs a printer in and then
+prints.
+
+#### Resource control
+
+Every service init starts gets a cgroup of its own under
+`/sys/fs/cgroup/raven.slice/<name>/`. Before that existed they all ran in the
+root cgroup, which meant no service's memory or CPU could be accounted
+separately from any other's, and the only tool for a daemon that misbehaved was
+to stop it.
+
+A service definition may set `memory_max`, `cpu_weight` and `io_weight`, which
+are written into that cgroup, and `nice`, `oom_score_adj` and a
+`[services.limits]` table of `setrlimit(2)` values, which are applied between
+fork and exec -- before the service drops to its `user =` account, because a
+negative nice, a negative OOM score and a raised hard limit each need privilege
+the account does not have. `raven-rc status <name>` reads `memory.current`,
+`cpu.stat` and `pids.current` back out of the cgroup, so the numbers reported
+are the kernel's rather than a guess from `/proc`. Where cgroup v2 is not
+mounted or not writable the whole mechanism degrades to a no-op with one
+warning, and a definition that uses it still starts.
+
+The weights are shares and not caps: a service at `cpu_weight = 50` is not
+limited to half a core, it gets every idle cycle it asks for, and the number
+only decides who yields when two services want the same core at once.
+`io_weight` needs a weight-capable I/O policy (BFQ, or iocost with a cost
+model) and is reported once and ignored on mq-deadline.
+
+The shipped policy is small on purpose, because a limit nobody has measured is
+worse than no limit -- a ceiling guessed below a working set turns a daemon
+that works into one killed under exactly the load it was installed to handle,
+with a bare SIGKILL as the only evidence. Nothing in `/etc/raven/init.toml`
+sets a `memory_max`. What it does set: `dbus` is told not to be the OOM
+killer's choice, since everything that talks to that socket hangs rather than
+dies when it goes away, and is given 8192 file descriptors because a bus holds
+one per client; `faced` is niced and volunteered as the first to be killed,
+because two ONNX graphs make it the largest thing on the list and losing face
+unlock costs one way in where losing the compositor costs the session; and
+`cawd`, `fprintd` and `faced` are all forbidden to dump core, because each has
+a credential in memory whenever it is answering and a core file is a copy of it
+written to disk by the kernel with no say from the program.
+
+The compositor and the login daemon are the obvious candidates for a strongly
+negative `oom_score_adj` and are the two that cannot be given one in a file:
+`ravend` and `wayland-session` are synthesized by `overrides.rs` from the
+kernel command line and from which binaries are installed, and exist in no
+config. Their defaults belong beside the rest of their definition, in that
+module. `docs/service-resource-control.md` has the whole of this in
+administrator's terms.
+
+#### Logs
+
+A service's stdout and stderr go to `/var/log/raven/<name>.log` and init's own
+messages to `init.log` beside them. Until `logrotate.rs`, nothing ever
+shortened any of them: `/var/log/raven` reached 5.1MB in two days on an idle
+laptop, which is roughly 900MB a year of dbus reporting its configuration and
+cawd mentioning once a minute that there is no wireless port. The failure that
+matters is not the size, it is the day a daemon in a crash loop turns that
+trickle into a flood and the first symptom is a full root filesystem -- no new
+session, no `rvn` unpack, and no room for init to write the line naming the
+service responsible. A log that eats the disk destroys the evidence it exists
+to keep.
+
+Two limits, doing different jobs, both in `[system]` in `init.toml`:
+`log_max_size` (10M) bounds one service's history and keeps `raven-rc logs`
+readable, and `log_total_max` (200M) bounds the machine and is the one that
+holds during the flood. `log_keep` (5) is how many rotated generations survive,
+and `log_compress` gzips them, which is the difference between 50MB and 5MB per
+service.
+
+Rotation is copy-and-truncate rather than rename-and-reopen, and that is not a
+preference. `Service::open_log` dups an `O_APPEND` fd onto the child's stdout
+and stderr, so from that moment the child is writing to an *inode*: renaming
+the file does not reach it, and a daemon started at boot would spend the rest
+of the machine's uptime appending to `<name>.log.1` while `<name>.log` stayed
+empty. There is no way to hand it a fresh descriptor -- it has already execed,
+and a service adopted across `raven-rc reexec` was never held by this init at
+all, which inherited a pid and not a file.
 
 #### Sleep
 

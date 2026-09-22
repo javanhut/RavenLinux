@@ -23,10 +23,258 @@ enable_network = true
 # Log level: trace, debug, info, warn, error
 log_level = "info"
 
+# -----------------------------------------------------------------------------
+# Logs
+# -----------------------------------------------------------------------------
+#
+# Every service's stdout and stderr go to /var/log/raven/<name>.log, and init's
+# own messages to /var/log/raven/init.log beside them. Nothing else on this
+# machine shortens those files, so these four keys are the whole of what stands
+# between a daemon in a crash loop and a full root filesystem -- at which point
+# no new session can be created, rvn cannot unpack a package, and init cannot
+# write the line that would have named the service responsible. A log that eats
+# the disk destroys the evidence it exists to keep.
+#
+# Sizes are a plain byte count, or a number with a K/M/G suffix in binary
+# multiples, or the word "max" for no limit. They are strings rather than
+# integers so that an operator writes "10M" instead of working out 10485760;
+# a service's `memory_max` takes the same vocabulary for the same reason.
+#
+# A value that is not a size is a warning naming the key, and the built-in
+# default is used instead: an unreadable limit must not be the reason a machine
+# fills its disk. These are read once, at start -- `raven-rc reload` does not
+# re-apply them, the same way it does not re-apply the hostname -- so a change
+# here takes a reboot or a `raven-rc reexec`.
+
+# Rotate a log once it reaches this size. 10M keeps `raven-rc logs` a readable
+# thing rather than a 400MB slurp, and on an idle machine it is measured in
+# days of history rather than hours.
+log_max_size = "10M"
+
+# How many rotated generations of each log to keep. Five at 10M is 50MB per
+# service before compression, which is roughly a week of the chattiest daemon
+# in this file. 0 is meaningful and means "cap the file, keep no history": the
+# log is truncated in place at log_max_size and nothing is copied out first,
+# which is the setting for a machine short enough of space that the only thing
+# worth keeping is what is happening now.
+log_keep = 5
+
+# The backstop: a cap on everything in /var/log/raven together. Rotation bounds
+# one service; this bounds the machine, and it is the limit that holds when
+# twenty services are misbehaving at once or when somebody has added more
+# services than this image ships. Rotated generations are removed oldest first
+# until the directory is back under it; the file a service is currently writing
+# to is never removed, so a machine whose live logs alone exceed this gets a
+# warning rather than a silently deleted daemon's output. "max" removes the cap.
+log_total_max = "200M"
+
+# Gzip a generation once it has been rotated out. Service output compresses by
+# something like ten to one, so this is the difference between five generations
+# costing 50MB and costing 5MB. It is a knob at all because the compressor is
+# /bin/gzip run as a child of PID 1: where that binary has been removed, or
+# where the fraction of a second it takes is not wanted in init, false keeps
+# the generations as plain text, which every tool that reads them handles just
+# as well.
+log_compress = true
+
 
 # =============================================================================
 # Services
 # =============================================================================
+#
+# A [[services]] block needs a name and an exec and nothing else. What follows
+# is the rest of what one may say -- written down here because this file is
+# where an administrator goes to find out that a setting exists, and because
+# none of it is required, so a service that mentions none of these behaves
+# exactly as every service in this file did before they were added.
+#
+#   type = "simple" | "oneshot"
+#     What the service is expected to do with its life, and therefore what
+#     init should make of it exiting. "simple" is the default: a process that
+#     ought to be running for as long as the machine is. "oneshot" says that
+#     finishing is what success looks like -- which is a fact about the
+#     service, where restart = false is only a decision about the supervisor,
+#     and the difference is why a one-shot that has done its job and a daemon
+#     that died at three in the morning no longer share the word "exited" in
+#     `raven-rc list`. It is also what lets `after` mean something for a
+#     command with no socket to wait on: services ordered after a one-shot are
+#     held until it has exited, and a non-zero exit is reported as the failure
+#     it is. udev, console-font, nftables and network below are all one-shots.
+#
+#   [services.demand]
+#     Present when the service is not started at boot at all, but when
+#     something happens -- a printer is plugged in, a bluetooth adapter
+#     appears. `raven-rc list` shows it as `on demand`, which had to be a third
+#     answer beside enabled and disabled because it is neither: the operator
+#     did enable it, and it is deliberately not running. A block holds any
+#     number of [[services.demand.device]] rules matched against the kernel's
+#     uevent (subsystem, devtype, and properties such as INTERFACE, where a
+#     trailing * is the one pattern supported), plus an optional `daemon = `
+#     naming the raven daemon that will run `raven-rc start` for the cases init
+#     cannot watch for itself.
+#
+#     This is NOT socket activation, and the distinction is worth being
+#     tiresome about because the two look alike from outside. Nothing binds a
+#     socket on the service's behalf and hands it over at exec; a client that
+#     connects a microsecond before the trigger fires gets ECONNREFUSED exactly
+#     as it would on a machine where the daemon was simply not running yet. A
+#     service whose correctness depends on never losing the first connection
+#     must not be given one. The printing and bluetooth stack are safe because
+#     the thing that triggers them is the same physical event that produces the
+#     work seconds later -- somebody plugs a printer in and then prints.
+#
+#     One worked example ships, in /usr/share/raven/services/ipp-usb.toml, and
+#     it is deliberately the only one. An earlier version of this paragraph
+#     promised five -- cupsd, ipp-usb, avahi-daemon, bluetoothd and obexd --
+#     and none of them existed; all five shipped starting at every boot, which
+#     is the state the feature was built to end. ipp-usb is the one whose
+#     trigger can be written down and be certain: the IPP-over-USB interface is
+#     class 7, subclass 1, protocol 4 by specification, the daemon exists only
+#     to serve that interface, and a machine with no printer attached needs it
+#     for nothing. cupsd and avahi-daemon are the opposite case and must not be
+#     given a block on this evidence -- a network printer produces no uevent at
+#     all, so a demand-started print spooler is a machine that cannot print to
+#     the printer down the hall. bluetoothd and obexd wait on somebody being
+#     able to say what starting them late costs a paired device that is
+#     reconnecting; the rule would be `subsystem = "bluetooth"` with `devtype =
+#     "host"`, and writing it is not the hard part.
+#
+#     `raven-rc start` always works regardless, which is the escape hatch for
+#     every case the triggers get wrong.
+#
+#   ready_path / ready_timeout
+#     The filesystem object that proves the service is serving, usually its
+#     control socket, and how long a dependant waits for it. Init watches the
+#     parent directory with inotify rather than polling, so the moment recorded
+#     is the moment the file appeared and not the moment the main loop next
+#     looked -- which is what makes the READY and TOOK columns of `raven-rc
+#     blame` measurements rather than a picture of the tick rate. For a
+#     type = "oneshot" service there is no path to watch and the timeout
+#     bounds the wait for its exit instead, because from a dependant's side
+#     those are the same question.
+#
+# -----------------------------------------------------------------------------
+# Resource control
+# -----------------------------------------------------------------------------
+#
+# init puts every service it starts in a cgroup of its own, at
+# /sys/fs/cgroup/raven.slice/<name>/, and writes memory_max, cpu_weight and
+# io_weight into it. Where cgroup v2 is not mounted or not writable the whole
+# mechanism degrades to a no-op with one warning in the log, so a definition
+# using these keys is still a definition that starts. `raven-rc status <name>`
+# reads the same cgroup back and reports what the service is actually using.
+#
+# The per-process half -- nice, oom_score_adj and [services.limits] -- is
+# applied between fork and exec, before the service drops to its `user =`
+# account. That ordering is deliberate and it is what makes a negative nice, a
+# negative oom_score_adj and a raised hard limit possible at all: each needs
+# privilege that the account being dropped to does not have.
+#
+# The rule covering all of them is that a number nobody has measured is worse
+# than no number. An unset key leaves the kernel's own behaviour alone, and the
+# kernel's own behaviour is right for nearly every daemon in this file.
+#
+#   nice = -20 .. 19
+#     Scheduling priority, as nice(1) spells it. 0, the default, is what a
+#     child of init inherits and what almost every service should keep: a
+#     daemon that is idle most of the time costs nothing at any priority, and
+#     one that is busy is usually busy because somebody is waiting for it.
+#     Positive values are for the handful that are neither -- an indexer, a
+#     thumbnailer, anything that will happily eat every core it is given for
+#     work nobody is watching. Negative values are worth being frightened of: a
+#     daemon at -5 competes with the compositor, and a compositor that misses
+#     its frame deadline is more visible than whatever the negative value was
+#     meant to fix.
+#
+#   oom_score_adj = -1000 .. 1000
+#     The thumb on the scale when the kernel has to choose something to kill.
+#     Its own score is dominated by how much memory a process is using, which
+#     means the thing it picks is usually the largest innocent bystander. A
+#     positive value volunteers a service as the first to go; a negative one
+#     asks the kernel to look elsewhere. 0, the default, is right for nearly
+#     everything, and the two cases worth setting it for are the extremes:
+#     something that can be killed and restarted without anyone noticing, and
+#     something whose death takes the session with it. A service that has a
+#     memory_max is usually better served by that instead, because it is then
+#     killed for its own consumption rather than chosen when something else
+#     exhausts the machine.
+#
+#   memory_max = "512M" | "2G" | "max"
+#     A hard ceiling for the service and everything it forks. This is the
+#     cgroup's memory.max and not an rlimit, which is the entire point:
+#     RLIMIT_AS makes one mmap fail, and most daemons answer that by crashing
+#     down their least-tested error path, while memory.max makes the kernel
+#     reclaim first and OOM-kill second -- so a daemon that slowly leaks is
+#     killed and restarted by the supervisor instead of taking the machine's
+#     last free page with it. Unset, the default, means no limit, and that is
+#     the correct setting for a service whose working set nobody has measured.
+#     A ceiling guessed too low is worse than none: it turns a daemon that
+#     works into one that is killed under exactly the load it was installed to
+#     handle, and the only evidence is a SIGKILL with no message. Nothing in
+#     this file sets one, for that reason.
+#
+#   cpu_weight = 1 .. 10000        (the kernel's own value is 100)
+#   io_weight  = 1 .. 10000
+#     Relative shares, and emphatically not caps. A service at 50 is not
+#     limited to half a core: it gets every idle cycle it asks for, exactly as
+#     it would with no setting at all, and the number decides only who yields
+#     when two services want the same core at the same moment. That is almost
+#     always what is wanted from a supervisor, because capping a daemon that is
+#     competing with nothing wastes the machine. io_weight additionally needs a
+#     weight-capable I/O policy for the device -- BFQ, or iocost with a cost
+#     model; on a machine using mq-deadline the io.weight file does not exist,
+#     and the setting is reported once and ignored rather than failing a start.
+#
+#   [services.limits]
+#     setrlimit(2) values, applied between fork and exec, soft and hard set
+#     together. Four keys, because these are the four that have actually
+#     mattered on this system; the rest of the kernel's sixteen can be added
+#     the day something needs one.
+#
+#       nofile = 8192    Open file descriptors, as a count. The one worth
+#                        knowing about: the kernel's soft default is 1024,
+#                        which is fine for a daemon holding a few sockets and
+#                        completely wrong for one holding a descriptor per
+#                        client. The symptom is accept() returning EMFILE and
+#                        a daemon that stops answering without dying, which
+#                        looks like a hang rather than a limit.
+#       nproc = 512      Processes and threads FOR THIS SERVICE'S USER, which
+#                        is the trap in this limit: RLIMIT_NPROC is counted per
+#                        uid across the whole system, not per service, so on
+#                        anything running as root it counts every root process
+#                        on the machine. Useful on a service with an account of
+#                        its own and misleading anywhere else -- pids.current
+#                        in the service's cgroup is the number that actually
+#                        describes the service.
+#       memlock = "64M"  Locked, unswappable memory, for a daemon that keeps
+#                        secrets out of swap. The default is 8MB on most
+#                        kernels, and a daemon that needs more usually fails
+#                        its mlock and carries on with the secret in swappable
+#                        memory, which is the failure nobody notices.
+#       core = "0"       Core dump size. Worth setting to 0 on anything that
+#                        handles credentials, because a core dump is a copy of
+#                        everything the process had in memory, written to disk
+#                        by the kernel with no say from the program. Worth
+#                        setting high on a daemon being debugged, which is the
+#                        other half of why it is per-service.
+#
+#     TOML puts everything following a sub-table header inside that sub-table,
+#     so [services.limits] -- like [services.demand] -- must come after every
+#     plain key of the service block it belongs to. A `restart = true` written
+#     below one becomes limits.restart and is quietly ignored.
+#
+# Two services on a desktop machine want a strongly negative oom_score_adj and
+# cannot be given one in this file: `ravend`, the login daemon, and
+# `wayland-session`, which starts huginn. Neither is written down anywhere --
+# both are synthesized at boot by init/src/overrides.rs from the kernel command
+# line and from which binaries are installed -- and a block written for them
+# here would not do what it looks like it does. The merge keeps an operator's
+# resource fields, deliberately, but it keeps `after`, `pre_exec` and `user`
+# from the file too, so a hand-written ravend block would silently lose its
+# dependency on seatd and the udev settle that stops its compositor taking
+# simpledrm, and a hand-written wayland-session block cannot name the session's
+# account at all. Those two defaults belong in overrides.rs beside the rest of
+# their definition. See docs/service-resource-control.md.
 
 # Device manager, before anything that needs a device.
 #
@@ -49,17 +297,59 @@ log_level = "info"
 # display where success and permanent failure share a word is a status
 # display nobody reads. The type is what lets init tell those two apart.
 #
-# Every one-shot in this tree is marked: udev, console-font and network here,
-# postinstall in its template. The key is named `type` on the assumption that
-# the field lands in ServiceConfig with that name; init ignores keys it does
-# not know, so this is inert either way, and if the field arrives called
-# something else these four lines are the ones to change.
+# Every one-shot in this tree is marked: udev, console-font, nftables and
+# network here, postinstall in its template. The key really is spelled `type`
+# -- config.rs:345 carries `#[serde(default, rename = "type")]` over
+# `service_type`, and ServiceType is `rename_all = "lowercase"` with `oneshot`
+# and `one-shot` both accepted -- so this is not the inert documentation an
+# earlier draft of this comment supposed it might be. It changes what the boot
+# does, which is the subject of the next three paragraphs.
+#
+# WHAT THE TYPE COSTS HERE, AND WHY IT IS STILL WRITTEN.
+#
+# `type = "oneshot"` redefines every `after = ["udev"]` in this file and in
+# /etc/raven/init.d. start_services stops at the first dependant and waits for
+# raven-udev to *exit* (main.rs, the ServiceType::Oneshot arm), where before it
+# waited for nothing at all. raven-udev finishes with `udevadm settle
+# --timeout=30`, so "finished" now includes the coldplug settle -- and
+# configs/raven-udev:92-94 states the opposite contract in the script's own
+# words: "Nothing waits by default ... making dbus, cawd and powerd wait out a
+# settle would move the whole boot behind the slowest driver."
+#
+# That contradiction is real, and it is decided here in favour of the wait, on
+# a measurement rather than on either comment's say-so. From
+# /var/log/raven/init.log on the machine this file boots, over six cold boots,
+# raven-udev runs for 1.1s to 2.0s and exits 0; the 30 seconds in the script is
+# a bound on a settle that has gone wrong, not the price of a boot. The wait is
+# also paid once rather than once per dependant: by the time cawd asks,
+# `wait_until_finished` has an exit status rather than `Running` to answer
+# with, and returns immediately. And what it buys is the ordering every one of
+# those dependants was written to express and did not get -- before this,
+# `after` resolved between two spawns tens of microseconds apart, so cawd
+# opened nl80211, seatd opened DRM and controlsd opened /dev/input while the
+# modules that create those nodes were still loading. Everything that works
+# today works because those daemons retry, not because the ordering held.
+#
+# The one case the script names that has no business paying for this is dbus,
+# which binds a Unix socket and touches no device at all; its block below no
+# longer says `after = ["udev"]`, and says why. Any other service here that
+# turns out not to need hardware should leave the same way, one line at a time
+# and with the reason beside it -- not by taking the type off this service,
+# which would put the whole file back to an ordering satisfied by luck.
+#
+# `ready_timeout` is written out rather than inherited for the same reason the
+# log policy is: for a one-shot it bounds the wait for the exit, and a budget
+# an operator cannot see in the file is a budget that does not exist to them.
+# Five is the default this used to take silently. A machine that genuinely
+# settles slowly is the machine that wants a different number here, and now
+# there is a number to change.
 [[services]]
 name = "udev"
 description = "Device manager: start udevd and coldplug attached hardware"
 exec = "/usr/sbin/raven-udev"
 args = []
 type = "oneshot"
+ready_timeout = 5
 restart = false
 enabled = true
 critical = false
@@ -132,12 +422,33 @@ args = ["--system", "--nofork", "--nopidfile"]
 # /run is a fresh tmpfs each boot and dbus-daemon does not mkdir its own
 # socket directory -- without this it dies binding /run/dbus/system_bus_socket.
 runtime_dirs = ["/run/dbus"]
-after = ["udev"]
+# No `after = ["udev"]`, and its absence is the decision rather than an edit
+# somebody lost. dbus-daemon binds a Unix socket and reads a configuration
+# directory; there is no device node anywhere in its startup, so the only
+# thing ordering it behind the coldplug bought was the coldplug's duration --
+# see the note on the udev service above for what that measures at, and for
+# why the nine that remain keep theirs. The bus comes up in parallel
+# with the device probe instead, which is where every client of it wanted it.
 ready_path = "/run/dbus/system_bus_socket"
 ready_timeout = 5
 restart = true
 enabled = true
 critical = false
+# Resource policy. dbus is small -- a couple of megabytes resident -- so it is
+# never what the kernel's own arithmetic would choose to kill, and the negative
+# score is insurance against the cases where that arithmetic is not what picks
+# the victim. It is cheap insurance against a total outcome: the portals, the
+# settings app and most of what the desktop does are clients of this socket,
+# and they do not die when it goes away, they hang on it.
+oom_score_adj = -500
+# A descriptor per connected client, plus one per match rule the bus watches.
+# The kernel's soft default of 1024 is the classic way a system bus stops
+# answering on a busy desktop without dying: accept() returns EMFILE and
+# everything that connects afterwards simply waits. Raising a limit a daemon is
+# nowhere near costs nothing, and the limit that is never reached is the one
+# nobody has to diagnose.
+[services.limits]
+nofile = 8192
 
 # cawd - CAW wireless daemon
 #
@@ -185,6 +496,13 @@ critical = false
 stop_exec = "/usr/bin/caw"
 stop_args = ["shutdown"]
 stop_timeout = 5
+# cawd does WPA in-process, so every saved network's passphrase is in this
+# process's memory rather than somewhere else's problem. A core dump is a copy
+# of all of it written to disk by the kernel, with no say from the program that
+# owns it, and there is nothing to be learned from a crash here that is worth
+# leaving a file of wireless credentials in /var.
+[services.limits]
+core = "0"
 
 # Power button, sleep button and lid.
 #
@@ -388,6 +706,73 @@ ready_timeout = 5
 restart = true
 enabled = true
 critical = false
+# The same argument as cawd's, for the same kind of secret: the stored finger
+# templates are in this process's memory whenever it is answering, and a core
+# dump would put them on disk in the clear.
+[services.limits]
+core = "0"
+
+# Face unlock.
+#
+# The camera's counterpart to fprintd, and the reasoning is the same one twice:
+# the process that decides who gets in should not also be the process driving a
+# USB device, and the lock screen -- which runs as the person logged in --
+# must not be able to open the camera itself. If it could, a claim that "a face
+# matched" would carry no secret and any process in that session could make it.
+# So raven-faced owns the camera on a root-only socket and answers one
+# question, whose stored face is in front of it. It cannot unlock anything.
+#
+# It is a separate crate from init's other daemons because it links an ONNX
+# inference engine -- two small networks, one to find a face and one to say
+# whose it is -- and nothing PID 1 builds should have to compile that.
+#
+# Started on every machine, including those with no camera and those with no
+# models installed, for the reason fprintd is: those are both answers a
+# settings panel needs, and a daemon that is not running cannot give either.
+# It opens the device lazily.
+#
+# The models are not on the image. /usr/share/raven-face/fetch-models.sh
+# downloads them by hash; until then this answers "no models" and the settings
+# page says what to run. ready_timeout is longer than fprintd's because this
+# optimises both graphs before it binds.
+[[services]]
+name = "faced"
+description = "Face unlock"
+exec = "/usr/bin/raven-faced"
+args = []
+after = ["udev"]
+runtime_dirs = ["/run/raven-face"]
+ready_path = "/run/raven-face/camera.sock"
+ready_timeout = 30
+restart = true
+enabled = true
+critical = false
+# Resource policy, and this is the one service in this file with a real claim
+# on any of it.
+#
+# nice = 5 is about what it does at start rather than what it does in use: it
+# optimises both ONNX graphs before it binds its socket -- which is why
+# ready_timeout above is 30 and not 5 -- and it spends that CPU during boot,
+# while the compositor is trying to draw its first frames. A nice value is not
+# a cap, so on an idle machine faced still gets every core it asks for; the
+# number only decides who yields when the two want the same one at the same
+# moment. The inference itself is short, and nothing else is competing for the
+# CPU while somebody is standing at a lock screen waiting for it.
+#
+# oom_score_adj = 300 volunteers it. Two neural networks and their optimised
+# graphs make this the largest resident process started from this file, so the
+# kernel's memory-weighted score already puts it near the top of the list;
+# writing it down states what its death costs rather than restating its size.
+# Killing faced costs one way of unlocking the machine and the password is
+# still there, and restart = true brings it back. The alternative the kernel
+# reaches for when memory runs out is whatever else is large, which on a
+# desktop is the compositor -- and that costs the session.
+nice = 5
+oom_score_adj = 300
+# Stored face embeddings are in memory whenever it is answering, so the core
+# dump argument on fprintd and cawd above applies here word for word.
+[services.limits]
+core = "0"
 
 # Removable storage: a drive that arrives after boot.
 #

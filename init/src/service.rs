@@ -1,21 +1,20 @@
 //! Service management for RavenInit
 
 use std::ffi::CString;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::io::RawFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use nix::fcntl::{open, OFlag};
 use nix::sys::signal::{self, Signal};
-use nix::sys::stat::Mode;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::{self, dup2, execvp, fork, setsid, ForkResult, Pid};
+use nix::unistd::{self, fork, setsid, ForkResult, Pid};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::ServiceConfig;
+use crate::config::{ServiceConfig, ServiceType};
 
 // TIOCSCTTY ioctl to set controlling terminal
 nix::ioctl_write_int_bad!(tiocsctty, libc::TIOCSCTTY);
@@ -59,6 +58,30 @@ pub fn restart_delay(attempt: u32) -> Duration {
         .min(RESTART_BACKOFF_MAX)
 }
 
+/// How long a service's `pre_exec` hook may run before the start is failed.
+///
+/// A hook is setup the daemon expects somebody else to have done, and it runs
+/// on PID 1's only thread, so an unbounded wait here is a machine that stops
+/// booting mid-list with nothing said. The documented case is sshd's
+/// `ssh-keygen -A`, which blocks in `getrandom(2)` until the kernel CRNG is
+/// initialised -- on a first boot, or in a VM with no virtio-rng, that can be
+/// a very long time. Thirty seconds is long enough for the hooks people
+/// actually write and short enough that a hook which is never going to finish
+/// becomes a failed service, with the reason in its log, rather than a boot
+/// that never ends.
+pub const PRE_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long [`Service::wait_for_exit`] waits for a SIGKILLed service to be
+/// reaped before it gives up and leaves the corpse to the main loop.
+///
+/// SIGKILL is normally acted on within microseconds, so this is generous for
+/// every process that can die at all. The ones that cannot -- a task wedged in
+/// uninterruptible sleep on a yanked USB volume is the case that matters -- do
+/// not become killable by being waited on longer, and waiting on them is how
+/// PID 1 stops supervising the machine. See the giving-up branch there for
+/// what is traded away.
+const SIGKILL_REAP_GRACE: Duration = Duration::from_millis(500);
+
 /// Make `cmd` exec as `account`: supplementary groups, then gid, then uid.
 ///
 /// All three happen inside one `pre_exec` closure rather than through
@@ -100,6 +123,76 @@ fn apply_credentials(cmd: &mut Command, account: &crate::user::Account) {
             Ok(())
         });
     }
+}
+
+/// Put the signal state back the way a freshly `exec`'d program expects to
+/// find it: every disposition at its default, and nothing blocked.
+///
+/// PID 1 is a Rust program, and Rust's runtime sets SIGPIPE to SIG_IGN before
+/// `main` runs. SIG_IGN survives `execve`, `login(1)` does not reset it, and
+/// POSIX requires a shell to leave an inherited-ignored signal ignored -- so
+/// without this, every command the person at the console ever ran inherited
+/// init's ignored SIGPIPE, four processes down the line. What that looks like
+/// is `cat /dev/zero | head -c1` printing "write error: Broken pipe" instead
+/// of `cat` dying quietly, and, worse, any producer in a pipeline that does
+/// not check its write return value never noticing that the reader is gone.
+///
+/// `Command` already does this -- std's `do_exec` empties the signal mask and
+/// resets SIGPIPE before it execs -- which is why every service started the
+/// ordinary way is clean and only the hand-rolled tty path was not.
+///
+/// The loop stops at 31 deliberately: 32 and 33 are glibc's, reserved for the
+/// threading implementation, and SIGKILL and SIGSTOP cannot be reset at all.
+///
+/// # Safety
+///
+/// Must be called only in a child of `fork` that has not yet `exec`ed, where
+/// this process is the only thread and these calls are therefore safe. Every
+/// call it makes is a raw syscall over stack memory: nothing allocates, and
+/// nothing takes a lock.
+unsafe fn reset_signals_for_exec() {
+    for sig in 1..=31 {
+        if sig == libc::SIGKILL || sig == libc::SIGSTOP {
+            continue;
+        }
+        libc::signal(sig, libc::SIG_DFL);
+    }
+
+    let mut empty: libc::sigset_t = std::mem::zeroed();
+    libc::sigemptyset(&mut empty);
+    libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
+}
+
+/// Say something from a forked child, with `write(2)` and nothing else.
+///
+/// `log::error!` formats, allocates and takes the logger's mutex, none of
+/// which a child between `fork` and `exec` may do: the heap it holds is a
+/// snapshot taken mid-`fork`, so a lock some other thread held at that instant
+/// stays held here forever. The message itself is therefore formatted in the
+/// parent and this only puts the bytes on the descriptor.
+///
+/// # Safety
+///
+/// Same window as [`reset_signals_for_exec`].
+unsafe fn child_say(message: &[u8]) {
+    // Nothing to do about a short or failed write from here, and nowhere to
+    // report it to; the message is a diagnostic, not the work.
+    libc::write(2, message.as_ptr().cast(), message.len());
+}
+
+/// Say it and leave, without running any of the parent's exit machinery.
+///
+/// `_exit(2)` rather than `std::process::exit`, which runs `atexit` handlers
+/// and `std::rt`'s cleanup registered by *init* and flushes init's inherited
+/// stdio buffers -- printing whatever PID 1 had buffered a second time, out of
+/// a process that is only a copy of it.
+///
+/// # Safety
+///
+/// Same window as [`reset_signals_for_exec`].
+unsafe fn child_abort(message: &[u8]) -> ! {
+    child_say(message);
+    libc::_exit(1)
 }
 
 /// Why `exec` cannot be run, if it cannot.
@@ -159,6 +252,42 @@ pub enum ServiceState {
     /// word for it if a future start path needs one.
     #[allow(dead_code)]
     Failed,
+}
+
+/// How a `type = "oneshot"` service is getting on with the one thing it was
+/// asked to do.
+///
+/// Deliberately not a [`ServiceState`] variant. The states describe what the
+/// supervisor is holding -- a live child, a corpse with a status, a process it
+/// signalled -- and a one-shot that has finished is exactly the same object as
+/// a daemon that has exited; nothing about the bookkeeping differs. What
+/// differs is what it *means*, and meaning belongs to the definition, which is
+/// where `type` is. Threading a sixth state through `describe_state`, `list`,
+/// `status`, the snapshot and `adopt` would buy the same four words at the
+/// price of a state that `adopt` has to reconstruct across a re-exec from a
+/// pid it no longer has.
+///
+/// So this is derived, every time, from the state and the exit status that
+/// were already being kept. It costs nothing and it cannot fall out of step
+/// with them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OneshotOutcome {
+    /// Still going. The work has been started and has not finished.
+    Running,
+    /// Exited zero: the one thing it was for is done.
+    Completed,
+    /// Exited non-zero, carrying the status it exited with.
+    ///
+    /// The distinction this whole type exists for. A daemon exiting is a
+    /// daemon that stopped; a one-shot exiting is a one-shot that worked --
+    /// unless it did this, and then it is the only kind of exit on the machine
+    /// that is unambiguously a failure.
+    Failed(i32),
+    /// Killed by a signal, stopped by an operator, or never run in this boot:
+    /// it did not finish and it did not fail, and nothing more can be said
+    /// about it than the words the supervisor already has for a process in
+    /// that condition.
+    Unfinished,
 }
 
 /// What one service looks like to the raven-init that replaces this one.
@@ -303,6 +432,33 @@ pub struct Service {
     /// straight back up. Auto-restart is for services that *crash*, not for
     /// ones that were told to stop.
     manually_stopped: bool,
+    /// When a requested stop becomes a SIGKILL, once one has been requested.
+    ///
+    /// `stop_by_request` only sends SIGTERM and deliberately does not wait for
+    /// the process to go -- PID 1 has a machine to supervise and SIGTERM is
+    /// asynchronous. That left the one case nobody escalated: a daemon that
+    /// ignores or blocks SIGTERM stayed alive *and* flagged
+    /// `manually_stopped`, a state the operator could not leave, because
+    /// `stop` only sent another futile signal and `start` answered "already
+    /// running". Recording the deadline here instead of waiting for it keeps
+    /// both properties: the reply comes back at once, and
+    /// [`Service::escalate_stop_if_due`] finishes the job from the main loop.
+    kill_at: Option<Instant>,
+    /// Set when the most recent attempt to start this service failed before
+    /// there was a process, and cleared the moment one exists.
+    ///
+    /// The backoff asks [`Service::last_run_was_stable`] whether the run that
+    /// just ended lasted, and that question is answered from `started_at` and
+    /// `exited_at` -- both of which a failed `do_start` leaves describing the
+    /// *previous*, successful run, because it bails before it touches either.
+    /// Without this flag a daemon that ran happily for an hour and then could
+    /// not be started again (its binary removed, its filesystem not mounted)
+    /// had every attempt credited with that hour: `restart_count` was zeroed
+    /// on each pass, the delay was pinned at [`RESTART_BACKOFF_BASE`], and the
+    /// escalating backoff -- the whole point of the constant above -- never
+    /// happened. Two console lines a second for the life of the boot is
+    /// precisely the flood it exists to stop.
+    start_failed: bool,
 }
 
 impl Service {
@@ -324,6 +480,8 @@ impl Service {
             exited_at: None,
             retry_at: None,
             manually_stopped: false,
+            kill_at: None,
+            start_failed: false,
         };
 
         service.do_start()?;
@@ -420,7 +578,29 @@ impl Service {
                 first_ready_at,
                 exited_at: None,
                 retry_at: None,
-                manually_stopped: false,
+                // Carried, exactly as the dead branch below carries it. Alive
+                // *and* manually stopped is a real state and not a
+                // contradiction, because `stop` is asynchronous: it sends
+                // SIGTERM and returns, so a service the operator stopped is
+                // still running for as long as its stop_exec and its own
+                // shutdown take. Dropping the flag here meant that a re-exec
+                // inside that window handed the service back auto-restartable,
+                // and the SIGTERM landing a moment later had `check_services`
+                // start it straight up again -- the operator's stop reversed
+                // by the supervisor, with nothing in the log saying so.
+                manually_stopped: snapshot.manually_stopped,
+                // A pending kill deadline is not carried across a re-exec: the
+                // snapshot has no field for it, and inventing one here would
+                // mean SIGKILLing a service on the strength of a stop this
+                // supervisor never saw. A stop that was still in flight over a
+                // re-exec therefore needs to be re-issued to escalate, which
+                // is a narrow gap in a rare operation, and the honest one.
+                kill_at: None,
+                // Whatever start produced the times in this snapshot worked --
+                // there was a process, and this branch is the one where it is
+                // still there -- so the run they describe is a run the
+                // stability test is entitled to believe.
+                start_failed: false,
             },
             None => Self {
                 config,
@@ -450,6 +630,13 @@ impl Service {
                 exited_at: if snapshot.pid.is_some() { Some(now) } else { None },
                 retry_at: None,
                 manually_stopped: snapshot.manually_stopped,
+                // Nothing to escalate: this branch is the one where the
+                // process is already gone.
+                kill_at: None,
+                // As above: the snapshot describes a run that did start, and
+                // the failure this flag is about is one this supervisor has
+                // not had yet.
+                start_failed: false,
             },
         }
     }
@@ -462,6 +649,23 @@ impl Service {
     }
 
     /// Open this service's log file, creating the directory on the way.
+    ///
+    /// `append` is not a detail. The handle returned here is dup'd onto the
+    /// child's stdout and stderr and is never touched again by this process,
+    /// so from the exec onwards the service is writing to an *inode* rather
+    /// than to a path -- which is why `crate::logrotate` rotates by copying
+    /// the contents out and truncating this file in place instead of renaming
+    /// it. A rename would leave every already-running service appending to the
+    /// rotated file for the rest of the boot while `<name>.log` stayed empty.
+    /// O_APPEND is also what makes the truncation safe from the child's side:
+    /// its next write goes to offset 0 rather than to wherever its file offset
+    /// had got to, so a rotated log does not come back full of NUL bytes.
+    ///
+    /// Nothing here checks the size. Rotation is a sweep on a timer in the
+    /// main loop (`maintain_logs`, main.rs), not a check on the write path:
+    /// the writes are the children's and init does not see them, and hanging
+    /// it off a start instead would mean a service that never restarts is
+    /// never looked at.
     fn open_log(&self) -> Option<std::fs::File> {
         let dir = Self::log_dir();
         std::fs::create_dir_all(&dir).ok()?;
@@ -472,34 +676,105 @@ impl Service {
             .ok()
     }
 
+    /// How long a `pre_exec` hook may take here.
+    ///
+    /// [`PRE_EXEC_TIMEOUT`] everywhere except the tests, which cannot afford
+    /// to wait half a minute to prove that the wait ends. Overridable through
+    /// the environment for the same reason `log_dir` is, and read on every
+    /// start rather than cached so a test can set it and put it back.
+    fn pre_exec_timeout() -> Duration {
+        std::env::var("RAVEN_PRE_EXEC_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or(PRE_EXEC_TIMEOUT)
+    }
+
+    /// Run the configured `pre_exec` hook to completion, or fail the start.
+    ///
+    /// Bounded, and for the same reason [`Service::run_stop_exec`] is bounded:
+    /// this runs on PID 1's only thread, during `start_services`, before the
+    /// main loop exists. A hook that never returns used to take the boot with
+    /// it -- no further service started, no control socket accepted on,
+    /// nothing reaped, and a console showing the service list stopped halfway
+    /// with no error on it. A hook that has stopped making progress is the
+    /// service's failure, so it is reported as one: the supervisor then
+    /// applies the restart backoff to it like any other failed start, which is
+    /// a machine that keeps booting and says what is wrong.
+    ///
+    /// The kill on expiry is not waited on. A hook wedged in uninterruptible
+    /// sleep would not die for that wait either, and the main loop's
+    /// `waitpid(-1)` reaps whatever the kill does free.
+    fn run_pre_exec(&self, program: &str, args: &[String]) -> Result<()> {
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(match self.open_log() {
+                Some(f) => Stdio::from(f),
+                None => Stdio::null(),
+            })
+            .stderr(match self.open_log() {
+                Some(f) => Stdio::from(f),
+                None => Stdio::null(),
+            })
+            .spawn()
+            .with_context(|| format!("pre_exec: cannot run {}", program))?;
+
+        let timeout = Self::pre_exec_timeout();
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        bail!("pre_exec {} exited with {}", program, status);
+                    }
+                    return Ok(());
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        bail!(
+                            "pre_exec {} did not finish within {:?}; killed it",
+                            program,
+                            timeout
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => bail!("pre_exec: cannot wait on {}: {}", program, e),
+            }
+        }
+    }
+
     fn do_start(&mut self) -> Result<()> {
+        // Pessimistic from the first line and cleared only where a process
+        // exists, so that every one of the many ways out of this function --
+        // `exec_problem`, a pre_exec hook that failed or timed out, a spawn
+        // that could not fork, the tty path's own errors -- leaves the flag
+        // set without each of them having to remember to. What depends on it
+        // is the restart backoff; see the field's own comment.
+        self.start_failed = true;
+
         // Checked before anything is created or forked, so the reply names the
         // real problem instead of an errno from deep inside spawn().
         if let Some(problem) = exec_problem(&self.config.exec) {
             bail!("{problem}");
         }
 
+        // Any escalation still owed to the previous run is void from here.
+        // The pid this start is about to record is a different process, and a
+        // deadline set for the old one would have the main loop SIGKILL the
+        // new one seconds after it came up -- `stop` followed by `start`
+        // inside the stop timeout is exactly how an operator restarts a
+        // service by hand.
+        self.kill_at = None;
+
         // Setup the daemon expects someone else to have done -- generating
         // host keys, say. Run to completion first, and a failure is the
         // service's failure: starting sshd with no keys just moves the error
         // into a crash loop.
         if let Some((program, args)) = self.config.pre_exec.split_first() {
-            let status = Command::new(program)
-                .args(args)
-                .stdin(Stdio::null())
-                .stdout(match self.open_log() {
-                    Some(f) => Stdio::from(f),
-                    None => Stdio::null(),
-                })
-                .stderr(match self.open_log() {
-                    Some(f) => Stdio::from(f),
-                    None => Stdio::null(),
-                })
-                .status()
-                .with_context(|| format!("pre_exec: cannot run {}", program))?;
-            if !status.success() {
-                bail!("pre_exec {} exited with {}", program, status);
-            }
+            self.run_pre_exec(program, args)?;
         }
 
         // A daemon that binds a socket under /run cannot mkdir its own parent
@@ -637,6 +912,9 @@ impl Service {
         self.exited_at = None;
         self.exit_status = None;
         self.exit_signal = None;
+        // There is a process, so `started_at` above now describes this run and
+        // the stability test may believe it again.
+        self.start_failed = false;
 
         log::debug!("Service {} started with PID {}", self.config.name, pid);
 
@@ -682,10 +960,79 @@ impl Service {
             );
         }
 
-        // Prepare environment
-        let env_vars: Vec<(String, String)> = self.config.environment.clone().into_iter().collect();
+        // The environment block the child will exec with, assembled here in
+        // the parent. The child used to call `std::env::set_var`, which is
+        // glibc's `setenv`: it allocates and takes an internal lock, and
+        // between `fork` and `exec` neither is allowed -- a lock another
+        // thread held at the instant of the fork is held forever in the copy.
+        // `execvpe` takes the block whole rather than adding to what is
+        // inherited, so init's own variables are copied in alongside the
+        // service's; where a definition names a variable init also has, the
+        // definition's value wins, which is what `setenv` did.
+        let mut env_cstr: Vec<CString> = Vec::new();
+        for (key, value) in std::env::vars_os() {
+            if key
+                .to_str()
+                .is_some_and(|k| self.config.environment.contains_key(k))
+            {
+                continue;
+            }
+            let mut pair = key.into_vec();
+            pair.push(b'=');
+            pair.extend_from_slice(value.as_bytes());
+            // An interior NUL cannot come out of `environ`, and this is PID 1
+            // with a release profile that aborts on unwind, so an impossible
+            // entry is dropped rather than panicked over.
+            if let Ok(entry) = CString::new(pair) {
+                env_cstr.push(entry);
+            }
+        }
+        for (key, value) in &self.config.environment {
+            env_cstr.push(
+                CString::new(format!("{key}={value}"))
+                    .with_context(|| format!("Invalid environment entry: {key}"))?,
+            );
+        }
+
+        // The two NULL-terminated pointer arrays `execvpe` wants, built here
+        // for the same reason: `nix::unistd::execvp` builds this vector itself,
+        // in the child, which is an allocation in the window where allocating
+        // can deadlock.
+        let argv: Vec<*const libc::c_char> = args_cstr
+            .iter()
+            .map(|a| a.as_ptr())
+            .chain(std::iter::once(std::ptr::null()))
+            .collect();
+        let envp: Vec<*const libc::c_char> = env_cstr
+            .iter()
+            .map(|e| e.as_ptr())
+            .chain(std::iter::once(std::ptr::null()))
+            .collect();
 
         let tty_path_owned = tty_path.to_string();
+
+        // The device as a CString, so that the child's `open` is a raw syscall
+        // over a buffer this parent allocated.
+        let tty_cstr =
+            CString::new(tty_path).with_context(|| format!("Invalid tty path: {tty_path}"))?;
+
+        // Everything the child might have to say, formatted here because it
+        // may not format anything itself; see `child_say`. Each is a complete
+        // line, so it reaches the console in one `write` and cannot be
+        // interleaved with a line PID 1 is logging at the same moment.
+        let say = |what: &str| {
+            format!(
+                "raven-init: {}: {} ({})\n",
+                self.config.name, what, tty_path
+            )
+            .into_bytes()
+        };
+        let msg_setsid = say("setsid failed");
+        let msg_open = say("cannot open tty");
+        let msg_ctty = say("TIOCSCTTY failed, continuing");
+        let msg_dup2 = say("cannot put the tty on stdin/stdout/stderr");
+        let msg_fgpgrp = say("tcsetpgrp failed, continuing");
+        let msg_exec = say(&format!("cannot exec {}", self.config.exec));
 
         // Resource control, prepared before the fork for the same reason the
         // argument vector is: after `fork` this child may not allocate, and
@@ -720,6 +1067,9 @@ impl Service {
                 self.state = ServiceState::Running;
                 self.exit_status = None;
                 self.exit_signal = None;
+                // As in `do_start`: the fork returned a child, so this run is
+                // real and the times just recorded describe it.
+                self.start_failed = false;
 
                 log::info!(
                     "Service {} started with PID {} on TTY {}",
@@ -731,12 +1081,28 @@ impl Service {
                 Ok(())
             }
             Ok(ForkResult::Child) => {
-                // Child process - set up TTY and exec
+                // Child process - set up TTY and exec.
+                //
+                // Everything from here to the `execvpe` at the bottom runs
+                // between `fork` and `exec` in a copy of PID 1, and keeps the
+                // discipline `ChildResources::apply_in_child` documents:
+                // no allocation, no lock, no logging, no `exit(3)`. Every
+                // string it needs was built in the parent above.
+
+                // 0. Start from a standard signal state, the way `Command`
+                // does. Without this the console session inherits PID 1's
+                // ignored SIGPIPE; see `reset_signals_for_exec` for what that
+                // does to a pipeline.
+                //
+                // SAFETY: this is the child of a `fork` and has not yet
+                // exec'd, which is the window that function requires.
+                unsafe {
+                    reset_signals_for_exec();
+                }
 
                 // 1. Create a new session (become session leader)
-                if let Err(e) = setsid() {
-                    log::error!("setsid() failed: {}", e);
-                    std::process::exit(1);
+                if setsid().is_err() {
+                    unsafe { child_abort(&msg_setsid) };
                 }
 
                 // 1b. Join the cgroup and take the configured limits.
@@ -754,60 +1120,47 @@ impl Service {
                 }
 
                 // 2. Open the TTY device
-                let tty_fd: RawFd = match open(
-                    tty_path_owned.as_str(),
-                    OFlag::O_RDWR | OFlag::O_NOCTTY,
-                    Mode::empty(),
-                ) {
-                    Ok(fd) => fd,
-                    Err(e) => {
-                        log::error!("Failed to open TTY {}: {}", tty_path_owned, e);
-                        std::process::exit(1);
-                    }
-                };
+                let tty_fd: RawFd =
+                    unsafe { libc::open(tty_cstr.as_ptr(), libc::O_RDWR | libc::O_NOCTTY) };
+                if tty_fd < 0 {
+                    unsafe { child_abort(&msg_open) };
+                }
 
                 // 3. Set this TTY as the controlling terminal
                 // TIOCSCTTY with arg 0 means "don't steal if already controlled"
-                if let Err(e) = unsafe { tiocsctty(tty_fd, 0) } {
-                    log::error!("TIOCSCTTY failed: {}", e);
+                if unsafe { tiocsctty(tty_fd, 0) }.is_err() {
                     // Continue anyway - some systems may not require this
+                    unsafe { child_say(&msg_ctty) };
                 }
 
                 // 4. Duplicate TTY fd to stdin/stdout/stderr
-                if let Err(e) = dup2(tty_fd, 0) {
-                    log::error!("dup2 stdin failed: {}", e);
-                }
-                if let Err(e) = dup2(tty_fd, 1) {
-                    log::error!("dup2 stdout failed: {}", e);
-                }
-                if let Err(e) = dup2(tty_fd, 2) {
-                    log::error!("dup2 stderr failed: {}", e);
+                for target in 0..=2 {
+                    if unsafe { libc::dup2(tty_fd, target) } < 0 {
+                        unsafe { child_say(&msg_dup2) };
+                    }
                 }
 
                 // Close the original fd if it's not 0, 1, or 2
                 if tty_fd > 2 {
-                    let _ = unistd::close(tty_fd);
+                    unsafe { libc::close(tty_fd) };
                 }
 
                 // 5. Set the foreground process group to our process group
                 let our_pid = unistd::getpid();
-                let ret = unsafe { libc::tcsetpgrp(0, our_pid.as_raw()) };
-                if ret < 0 {
-                    log::error!("tcsetpgrp failed: {}", std::io::Error::last_os_error());
+                if unsafe { libc::tcsetpgrp(0, our_pid.as_raw()) } < 0 {
                     // Continue anyway
+                    unsafe { child_say(&msg_fgpgrp) };
                 }
 
-                // 6. Set environment variables
-                for (key, value) in env_vars {
-                    std::env::set_var(&key, &value);
-                }
-
-                // 7. Exec the service
-                let _ = execvp(&exec_cstr, &args_cstr);
+                // 6. Exec the service, with the environment built above.
+                //
+                // `execvpe` rather than `execvp`: the variables the definition
+                // asks for are in `envp`, because setting them here would mean
+                // calling `setenv` after a fork.
+                unsafe { libc::execvpe(exec_cstr.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
 
                 // If we get here, exec failed
-                log::error!("execvp failed for {}", self.config.exec);
-                std::process::exit(1);
+                unsafe { child_abort(&msg_exec) };
             }
             Err(e) => {
                 anyhow::bail!("fork() failed: {}", e);
@@ -885,6 +1238,16 @@ impl Service {
 
     /// Whether the run that just ended lasted [`RESTART_STABLE_AFTER`].
     fn last_run_was_stable(&self) -> bool {
+        // A start that failed produced no run at all, so there is nothing here
+        // to call stable. The times below still hold the last run that really
+        // happened -- `do_start` bails before it touches them -- and believing
+        // them would credit an hour of uptime to an attempt that never got as
+        // far as a process, resetting the backoff on every pass. See
+        // `start_failed`.
+        if self.start_failed {
+            return false;
+        }
+
         match (self.started_at, self.exited_at) {
             (Some(started), Some(exited)) => {
                 exited.saturating_duration_since(started) >= RESTART_STABLE_AFTER
@@ -907,7 +1270,39 @@ impl Service {
         self.child = None;
         self.release_cgroup();
 
-        log::info!("Service {} exited with status {}", self.config.name, status);
+        if self.is_oneshot() {
+            if status == 0 {
+                // A one-shot's finish is its readiness. It is recorded through
+                // `mark_ready` rather than written here so that `ready_at`
+                // keeps its two writers and its first-wins rule, and because
+                // everything already built on top of that field then works for
+                // one-shots without knowing they exist: `blame` gets a READY
+                // column and a TOOK that measure the run, the boot summary's
+                // "last ready" counts a coldplug that finished at 3.2s, and
+                // the hand-off carries the time across a re-exec in
+                // `first_ready_mono` -- which `exited_at` is not and cannot
+                // easily become, since the snapshot has no field for it.
+                //
+                // The moment recorded is a hair later than `exited_at`: both
+                // are `Instant::now()`, taken a few instructions apart, and
+                // `blame` prints milliseconds.
+                self.mark_ready();
+                log::info!("One-shot {} completed", self.config.name);
+            } else {
+                // The one exit on this machine that is unambiguously a
+                // failure, and therefore the one worth the console. Every
+                // other exit here is logged at info, because a daemon that
+                // exits is usually about to be restarted and the restart
+                // already says so at warn.
+                log::error!(
+                    "One-shot {} failed with status {}",
+                    self.config.name,
+                    status
+                );
+            }
+        } else {
+            log::info!("Service {} exited with status {}", self.config.name, status);
+        }
     }
 
     /// Mark service as killed by signal
@@ -927,6 +1322,12 @@ impl Service {
         self.manually_stopped = false;
         self.restart_count = self.restart_count.saturating_add(1);
         self.last_restart = Some(Instant::now());
+        // Cleared so that the next death decides a fresh delay rather than
+        // comparing against a deadline that has already fired. When the start
+        // below *fails* this leaves no pending retry, which is deliberate: the
+        // next tick recomputes one from the now-incremented `restart_count`,
+        // and `do_start` has set `start_failed`, so the schedule escalates
+        // 1s, 2s, 4s ... instead of restarting from the base delay forever.
         self.retry_at = None;
 
         log::info!(
@@ -1072,6 +1473,11 @@ impl Service {
     /// Runs the configured `stop_exec` first so a daemon can leave cleanly --
     /// the same courtesy shutdown extends, and the reason cawd can deauthenticate
     /// from its AP instead of vanishing mid-association.
+    ///
+    /// Escalation is deferred rather than waited out: the deadline is recorded
+    /// and [`Service::escalate_stop_if_due`] acts on it from the main loop, so
+    /// the `raven-rc` client gets its reply now and PID 1 is not held for
+    /// `stop_timeout` inside a control request.
     pub fn stop_by_request(&mut self) {
         self.manually_stopped = true;
 
@@ -1080,6 +1486,58 @@ impl Service {
         }
 
         self.stop();
+
+        // Only where there is something to escalate against. `stop()` is a
+        // no-op without a pid, and a deadline recorded for a service that was
+        // already gone would be a SIGKILL aimed at nothing -- or, worse, at
+        // whatever `pid` came to mean later.
+        if self.pid.is_some() {
+            self.kill_at =
+                Some(Instant::now() + Duration::from_secs(self.config.stop_timeout as u64));
+        }
+    }
+
+    /// Turn a requested stop that SIGTERM did not achieve into a SIGKILL.
+    ///
+    /// Called once per main-loop pass for every service. Does nothing until
+    /// the deadline `stop_by_request` recorded has passed, and nothing at all
+    /// for a service that stopped when it was asked to, which is all of them
+    /// on a normal machine.
+    ///
+    /// It signals and returns: the corpse is collected by the main loop's
+    /// `waitpid(-1)` on one of the next passes, exactly as for a service that
+    /// died on its own. Waiting here would put the hang this exists to avoid
+    /// straight back into PID 1's thread -- see [`Service::reap_after_kill`]
+    /// for why no wait on a killed process can be trusted to end.
+    ///
+    /// Returns whether it sent the signal, for the caller's log line.
+    pub fn escalate_stop_if_due(&mut self) -> bool {
+        let Some(deadline) = self.kill_at else {
+            return false;
+        };
+        if Instant::now() < deadline {
+            return false;
+        }
+
+        // Spent either way: if the service is still there after a SIGKILL,
+        // sending it another one every pass forever would say nothing new.
+        self.kill_at = None;
+
+        // The reaper runs at the top of the same pass, but a service that died
+        // between then and now is still recorded as running, and a SIGKILL
+        // sent on that record goes to a pid this supervisor no longer owns.
+        self.poll_exit();
+        let Some(pid) = self.pid.filter(|_| self.is_running()) else {
+            return false;
+        };
+
+        log::warn!(
+            "{} did not exit within {}s of being stopped; sending SIGKILL",
+            self.config.name,
+            self.config.stop_timeout
+        );
+        self.signal_everything(pid, Signal::SIGKILL);
+        true
     }
 
     /// Bring `state` up to date with the child process, without blocking.
@@ -1141,10 +1599,7 @@ impl Service {
                             timeout
                         );
                         self.signal_everything(pid, Signal::SIGKILL);
-                        let _ = waitpid(pid, None);
-                        self.state = ServiceState::Stopped;
-                        self.pid = None;
-                        self.child = None;
+                        self.reap_after_kill(pid);
                         return;
                     }
                     std::thread::sleep(Duration::from_millis(20));
@@ -1159,6 +1614,71 @@ impl Service {
                 _ => {}
             }
         }
+    }
+
+    /// Collect a service that has just been SIGKILLed, and give up if it does
+    /// not come.
+    ///
+    /// This used to be `waitpid(pid, None)` -- no WNOHANG, no deadline -- in a
+    /// function whose own documentation says it is bounded because it runs on
+    /// PID 1's thread. SIGKILL is not the guarantee that made that look safe:
+    /// a task in uninterruptible sleep (the wedged USB volume that
+    /// `raven-mount` was writing to when it was pulled out) does not act on
+    /// any signal until its I/O errors out, which for a confused bridge chip
+    /// may be never. PID 1 blocked there is a machine that reaps nothing,
+    /// answers no further `raven-rc` request -- including the one that issued
+    /// this restart -- notices no ready path and does not honour poweroff,
+    /// until something unrelated happens to die and breaks the call with
+    /// EINTR. Recovery was the reset button.
+    ///
+    /// So the wait has a deadline of its own, and past it the process is left
+    /// where it is. What that costs is a pid the supervisor no longer tracks:
+    /// if the process does eventually die, the main loop's `waitpid(-1)` reaps
+    /// it and finds no service to attribute it to, and if it never dies it
+    /// stays in `ps` as the D-state task it already was. A leaked corpse is
+    /// survivable; a supervisor that has stopped supervising is not.
+    ///
+    /// The bookkeeping below is what the blocking version did on return, and
+    /// deliberately not `mark_exited`/`mark_signaled`: the caller's contract
+    /// is that the service is gone as far as this supervisor is concerned, and
+    /// a killed service must not come back through the restart path.
+    fn reap_after_kill(&mut self, pid: Pid) {
+        let deadline = Instant::now() + SIGKILL_REAP_GRACE;
+        loop {
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                // Gone, and reaped here: nothing is left for the main loop.
+                Ok(WaitStatus::Exited(..)) | Ok(WaitStatus::Signaled(..)) => break,
+                Ok(WaitStatus::StillAlive) => {
+                    if Instant::now() >= deadline {
+                        log::error!(
+                            "{} (leader {}) has not died {:?} after SIGKILL -- \
+                             giving up the wait rather than blocking the supervisor; \
+                             it is probably stuck in uninterruptible I/O",
+                            self.config.name,
+                            pid,
+                            SIGKILL_REAP_GRACE
+                        );
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                // ECHILD: the main loop's reaper got there first. Anything
+                // else (EINTR from a SIGCHLD for an unrelated child, since the
+                // handler is installed without SA_RESTART) is worth another
+                // pass, and the deadline above ends it either way.
+                Err(nix::errno::Errno::ECHILD) => break,
+                Err(_) | Ok(_) => {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+
+        self.state = ServiceState::Stopped;
+        self.pid = None;
+        self.child = None;
     }
 
     /// Start a service that is not currently running.
@@ -1281,6 +1801,92 @@ impl Service {
         self.config.restart
     }
 
+    /// Whether this service's definition says its job is to finish.
+    pub fn is_oneshot(&self) -> bool {
+        self.config.service_type == ServiceType::Oneshot
+    }
+
+    /// What this one-shot has to say for itself, or `None` for a service that
+    /// is not one.
+    ///
+    /// `None` rather than a fifth variant meaning "not applicable", so that
+    /// every caller has to say out loud which kind of service it is talking
+    /// about before it can use any of the one-shot words. The display sites
+    /// all read the same way because of it: ask, and if there is an answer,
+    /// use it instead of the ordinary description.
+    pub fn oneshot_outcome(&self) -> Option<OneshotOutcome> {
+        if !self.is_oneshot() {
+            return None;
+        }
+
+        if self.is_running() {
+            return Some(OneshotOutcome::Running);
+        }
+
+        Some(match (self.state, self.exit_status) {
+            (ServiceState::Exited, Some(0)) => OneshotOutcome::Completed,
+            (ServiceState::Exited, Some(code)) => OneshotOutcome::Failed(code),
+            // A signal is never a finish, whatever else is recorded.
+            (ServiceState::Signaled, _) => OneshotOutcome::Unfinished,
+            // Gone with no status recorded. Two ways to arrive here, and the
+            // ready time answers both: `poll_exit`'s ECHILD branch, where the
+            // main loop's reaper got the status first and this service only
+            // knows the process is gone; and a service adopted across a
+            // re-exec, where the hand-off carries the times and not the
+            // status. `mark_exited` records a one-shot's readiness only on a
+            // clean exit and `do_start` clears it on every start, so a ready
+            // time on a finished one-shot means precisely "this run finished,
+            // and it finished well".
+            _ if self.ready_at.is_some() => OneshotOutcome::Completed,
+            // Killed, stopped, or never run. Claiming a failure on no
+            // evidence is worse than admitting the evidence is missing.
+            _ => OneshotOutcome::Unfinished,
+        })
+    }
+
+    /// Wait for a one-shot to finish, for up to `timeout`, and report how it
+    /// went. `None` for a service that is not a one-shot, which has no
+    /// finishing to wait for.
+    ///
+    /// This is what `after = ["<a one-shot>"]` is worth. A long-running
+    /// service announces itself by creating a file and a dependant waits on an
+    /// inotify watch for it; a one-shot announces itself by leaving, and the
+    /// only way to hear that is `waitpid`. The loop is the same shape as
+    /// [`Service::wait_for_exit`] -- WNOHANG on a 20ms timer -- for the same
+    /// reason: this is called from the boot path and from a control request,
+    /// and in both it is PID 1's only thread that is waiting, so it must be
+    /// bounded and it must not block in the kernel with a signal pending.
+    ///
+    /// Returning [`OneshotOutcome::Running`] means the timeout ran out with
+    /// the one-shot still working. That is not a failure and it is reported as
+    /// itself: the caller decides what to do about a one-shot that is taking
+    /// longer than its `ready_timeout`, and on this machine what it does is
+    /// carry on and say so.
+    pub fn wait_until_finished(&mut self, timeout: Duration) -> Option<OneshotOutcome> {
+        if !self.is_oneshot() {
+            return None;
+        }
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            // Reaps the child itself. Nothing else can: during boot the main
+            // loop does not exist yet, and after it does, a `raven-rc start`
+            // is being served from inside that loop rather than beside it.
+            self.poll_exit();
+
+            let outcome = self.oneshot_outcome();
+            if outcome != Some(OneshotOutcome::Running) {
+                return outcome;
+            }
+
+            if Instant::now() >= deadline {
+                return outcome;
+            }
+
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Kill the service (SIGKILL)
     pub fn kill(&mut self) {
         if let Some(pid) = self.pid {
@@ -1313,4 +1919,125 @@ fn signal_service_group(pid: Pid, signal_to_send: Signal) {
         _ => pid,
     };
     let _ = signal::kill(target, signal_to_send);
+}
+
+#[cfg(test)]
+mod restart_backoff_tests {
+    use super::*;
+
+    /// A service that has never run, built by hand rather than started, so the
+    /// times the backoff reads can be set to the ones the case is about
+    /// without waiting a minute of real time for them.
+    fn idle_service(exec: &str) -> Service {
+        Service {
+            config: ServiceConfig {
+                name: "backoff-probe".to_string(),
+                exec: exec.to_string(),
+                restart: true,
+                ..ServiceConfig::default()
+            },
+            state: ServiceState::Exited,
+            child: None,
+            pid: None,
+            exit_status: Some(1),
+            exit_signal: None,
+            restart_count: 0,
+            last_restart: None,
+            started_at: None,
+            ready_at: None,
+            first_started_at: None,
+            first_ready_at: None,
+            exited_at: None,
+            retry_at: None,
+            manually_stopped: false,
+            kill_at: None,
+            start_failed: false,
+        }
+    }
+
+    /// The backoff must escalate when a service that ran happily for an hour
+    /// can no longer be started at all.
+    ///
+    /// `restart()` clears `retry_at` before calling `do_start`, and `do_start`
+    /// fails -- the binary was removed, or its filesystem is not mounted --
+    /// before it touches `state`, `started_at` or `exited_at`. So the next
+    /// tick found no pending retry and recomputed the whole decision from
+    /// fields that still described the *previous*, hour-long run:
+    /// `last_run_was_stable` said yes, `restart_count` was zeroed, the delay
+    /// came out at RESTART_BACKOFF_BASE, and it came out at
+    /// RESTART_BACKOFF_BASE again one second later, forever. Two log lines a
+    /// second to the console and to /var/log/raven/init.log for the life of
+    /// the boot is precisely the flood RESTART_BACKOFF_BASE's own doc comment
+    /// says the backoff exists to stop, and `raven-rc status` reported
+    /// "restart count 1" through all of it.
+    #[test]
+    fn a_failing_start_after_a_stable_run_still_backs_off() {
+        // Times are built forwards from now rather than backwards, because an
+        // `Instant` an hour before this machine booted does not exist.
+        let started = Instant::now();
+        let died = started + RESTART_STABLE_AFTER + Duration::from_secs(1);
+
+        let mut svc = idle_service("/nonexistent/raven-backoff-probe");
+        svc.started_at = Some(started);
+        svc.exited_at = Some(died);
+
+        // The first tick after the death: the run was long, so the schedule
+        // starts over at the base delay. This much was always right.
+        let mut now = died;
+        assert!(!svc.should_restart_at(now));
+        assert_eq!(svc.retry_at(), Some(now + RESTART_BACKOFF_BASE));
+
+        // Every attempt from here fails before there is a process. The delays
+        // must double rather than stand still.
+        let expected = [
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+            Duration::from_secs(8),
+            Duration::from_secs(16),
+            Duration::from_secs(32),
+            RESTART_BACKOFF_MAX,
+            RESTART_BACKOFF_MAX,
+        ];
+        for (attempt, want) in expected.iter().enumerate() {
+            now = svc.retry_at().expect("a restart is pending");
+            assert!(svc.should_restart_at(now), "the retry is due");
+            assert!(
+                svc.restart().is_err(),
+                "the whole case is a start that cannot succeed"
+            );
+            assert!(
+                !svc.should_restart_at(now),
+                "the failed start leaves the next retry to be decided"
+            );
+            assert_eq!(
+                svc.retry_at(),
+                Some(now + *want),
+                "attempt {} must wait {:?}",
+                attempt + 2,
+                want
+            );
+        }
+
+        // And the count an operator reads has to be the number of attempts
+        // that really happened, not one forever.
+        assert_eq!(svc.restart_count(), expected.len() as u32);
+    }
+
+    /// The flag exists to describe the *last start*, so a start that works
+    /// must clear it -- otherwise the first fix of a broken service would
+    /// leave it permanently ineligible for the stable-run reset.
+    #[test]
+    fn a_successful_start_clears_the_failure_flag() {
+        let mut svc = idle_service("/nonexistent/raven-backoff-probe");
+        assert!(svc.restart().is_err());
+        assert!(svc.start_failed, "a start that never reached a process");
+
+        svc.config.exec = "/bin/sleep".to_string();
+        svc.config.args = vec!["300".to_string()];
+        svc.restart().expect("this one has a binary");
+        assert!(!svc.start_failed, "there is a process now");
+        assert!(svc.is_running());
+
+        svc.kill();
+    }
 }

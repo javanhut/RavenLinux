@@ -1,0 +1,54 @@
+# The console font loader.
+#
+# The kernel's built-in font is 8x16, which on a laptop panel at 2560x1600 is
+# about two millimetres tall. This picks a cell size from the framebuffer
+# resolution and hands the matching PSF to setfont, which is the difference
+# between a usable console and a magnifying glass.
+[package]
+name = "raven-console-font"
+version = "2026.08"
+description = "RavenLinux console font loader - picks a readable cell size for the panel it finds"
+license = "MIT"
+homepage = "https://github.com/javanhut/RavenLinux"
+repository = "https://github.com/javanhut/RavenLinux"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "console", "base"]
+arch = "any"
+
+[source]
+type = "local"
+url = "https://github.com/javanhut/RavenLinux.git"
+
+[build]
+system = "none"
+
+[dependencies]
+# setfont, from kbd. Without it this is a no-op that exits 0, which is the
+# right behaviour on a build that could not supply one and still a reason to
+# say what is missing.
+runtime = ["kbd"]
+build = []
+
+[install]
+files = [
+    { src = "configs/raven-console-font", dest = "/usr/bin/raven-console-font", mode = 755 },
+]
+
+# No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS
+# /usr/bin: a link at /bin/<name> whose target is /usr/bin/<name> names the
+# same path on both sides, and creating it replaces the real binary with a
+# symlink to itself. Anything installed to /usr/bin is already reachable at
+# /bin/<name> through the merge link -- see scripts/lib/usrmerge.sh.
+#
+# init.toml names "/usr/sbin/raven-console-font"; same merge, same file.
+symlinks = []
+
+# What this manifest does NOT describe:
+#
+#   - the fonts themselves, /usr/share/kbd/consolefonts/raven-*.psfu. They are
+#     rasterised at build time by stage4 from a Nerd Font, so they are output
+#     of the image build rather than a file in this repository and there is no
+#     `src` that could name them. The loader falls back to the kernel font when
+#     they are absent, and says so.
+#   - /etc/raven/console-font.conf, which is an override an administrator
+#     writes. Nothing ships one; FONT= in it beats the automatic choice.

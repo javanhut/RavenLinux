@@ -45,10 +45,33 @@ pub struct Answers {
     pub shrink_part: String,
     /// How much space to take, as a size the installer parses ("120G").
     pub alongside_size: String,
+    /// The root filesystem: "ext4", "xfs" or "btrfs", and only ever one the
+    /// probe listed -- raven-install refuses anything else, and refuses btrfs
+    /// on an image that cannot create its subvolumes.
+    ///
+    /// "btrfs" carries more than its name. There is no separate answer for the
+    /// subvolume layout, because there is no sensible btrfs install here
+    /// without one: the reason to choose it is snapshots, snapshots need a
+    /// subvolume to be taken of, and the root has to be mounted from @ for a
+    /// rollback to be able to swap it out. So choosing btrfs chooses @, @home,
+    /// @snapshots, @log and @cache, and the last two are deliberately outside
+    /// the snapshots -- see BTRFS_SUBVOLS in raven-install, which is the one
+    /// place that layout is written down.
     pub fs: String,
     pub esp_size: String,
     /// "" means "let the installer pick", "none" means no swap partition.
     pub swap: String,
+    /// Full-disk encryption: LUKS2 with argon2id over the root partition, and
+    /// over the swap partition as well so a hibernation image is not a
+    /// plaintext copy of memory. Off by default, and deliberately so: it is
+    /// the only answer on any of these pages that cannot be corrected from a
+    /// running system afterwards, because a passphrase that was mistyped is a
+    /// disk that never opens again.
+    pub encrypt: bool,
+    /// The passphrase for `encrypt`. Required when it is on -- raven-install
+    /// refuses an empty one rather than installing a container nobody can
+    /// open -- and meaningless when it is off.
+    pub encrypt_password: String,
     pub hostname: String,
     pub username: String,
     pub fullname: String,
@@ -75,6 +98,21 @@ pub struct Answers {
     /// The hardware clock: "local" (as Windows keeps it) or "utc". Empty lets
     /// the installer decide, which it does by looking for Windows.
     pub rtc: String,
+    /// What to do about Secure Boot: "skip", "sign" or "enroll".
+    ///
+    /// Three values rather than a switch, because the middle one is the whole
+    /// safety argument. "sign" puts a signature on RavenBoot, the fallback
+    /// loader and the kernel; firmware that is not checking ignores it, so it
+    /// changes nothing about the next boot and can be undone by deleting a
+    /// directory. "enroll" does that and then hands the firmware a new
+    /// Platform Key, which is the only step here that changes anything outside
+    /// the disk being installed to -- and the only one that can leave a
+    /// machine unable to boot, if it is done and the signing is not.
+    ///
+    /// "enroll" is refused outright by raven-install unless the firmware is in
+    /// setup mode, because that is the only state in which the firmware will
+    /// accept a new Platform Key at all. "skip" is the default everywhere.
+    pub secureboot: String,
 }
 
 impl Default for Answers {
@@ -88,6 +126,8 @@ impl Default for Answers {
             fs: "ext4".into(),
             esp_size: "512M".into(),
             swap: String::new(),
+            encrypt: false,
+            encrypt_password: String::new(),
             hostname: "raven".into(),
             username: "raven".into(),
             fullname: String::new(),
@@ -105,6 +145,7 @@ impl Default for Answers {
             manual_new: Vec::new(),
             manual_use: Vec::new(),
             rtc: String::new(),
+            secureboot: "skip".into(),
         }
     }
 }
@@ -164,11 +205,18 @@ impl Answers {
             // It becomes a colon-separated field of /etc/passwd.
             v.push("The full name cannot contain a colon.".into());
         }
+        if self.encrypt && self.encrypt_password.is_empty() {
+            // apply_answers refuses this too. Caught here so it is said on the
+            // page with the box on it, rather than by an installer that quit
+            // after the summary had been confirmed.
+            v.push("An encrypted disk needs a passphrase; there is no empty one.".into());
+        }
         // A newline would end the record and turn the rest of the password into
         // a key=value line of its own. Nothing else is off limits.
         for (what, s) in [
             ("password", &self.user_password),
             ("root password", &self.root_password),
+            ("encryption passphrase", &self.encrypt_password),
             ("full name", &self.fullname),
             ("hostname", &self.hostname),
         ] {
@@ -242,6 +290,13 @@ impl Answers {
         put("fs", &self.fs);
         put("esp_size", &self.esp_size);
         put("swap", &self.swap);
+        put("encrypt", if self.encrypt { "1" } else { "0" });
+        // Written even when it is empty, and unconditionally rather than only
+        // when `encrypt` is on. The parity test wants every key present, and
+        // an installer reading encrypt=0 ignores this one -- it warns if it is
+        // non-empty, which is the right noise to make about a passphrase that
+        // was typed and then not used.
+        put("encrypt_password", &self.encrypt_password);
         put("hostname", &self.hostname);
         put("username", &self.username);
         put("fullname", &self.fullname);
@@ -258,6 +313,11 @@ impl Answers {
         // is what the switches default to.
         put("optional", &self.optional.join(","));
         put("rtc", &self.rtc);
+        // Always written, and "skip" is a real answer rather than an absence:
+        // an installer told nothing about Secure Boot does nothing about it,
+        // which is the same outcome, but a person reading this file afterwards
+        // should be able to see that the question was asked and answered.
+        put("secureboot", &self.secureboot);
         s
     }
 }
@@ -375,13 +435,51 @@ mod tests {
     fn every_key_is_written_exactly_once() {
         let f = good().to_file();
         for k in [
-            "disk", "mode", "fs", "esp_size", "swap", "hostname", "username", "fullname",
+            "disk", "mode", "fs", "esp_size", "swap", "encrypt", "encrypt_password",
+            "hostname", "username", "fullname",
             "user_password", "user_sudo", "root_password", "timezone", "locale",
             "keymap", "profile", "postinstall", "efi_nvram",
         ] {
             let n = f.lines().filter(|l| l.starts_with(&format!("{k}="))).count();
             assert_eq!(n, 1, "{k} written {n} times");
         }
+    }
+
+    #[test]
+    fn encryption_needs_a_passphrase() {
+        let mut a = good();
+        a.encrypt = true;
+        assert!(
+            a.problems().iter().any(|p| p.contains("passphrase")),
+            "{:?}",
+            a.problems()
+        );
+        a.encrypt_password = "correct horse".into();
+        assert!(a.problems().is_empty(), "{:?}", a.problems());
+    }
+
+    #[test]
+    fn an_unencrypted_install_needs_no_passphrase() {
+        // The switch is off by default, and leaving the box empty must not be
+        // a reason the Install button stays greyed out.
+        let a = good();
+        assert!(!a.encrypt);
+        assert!(a.problems().is_empty(), "{:?}", a.problems());
+        assert!(a.to_file().lines().any(|l| l == "encrypt=0"));
+    }
+
+    #[test]
+    fn a_newline_in_the_passphrase_is_refused() {
+        // Same reason as the account passwords: it would end the record and
+        // make the rest of the passphrase a key of its own. Here it would
+        // also produce a container whose passphrase is the first line and a
+        // person who believes it is the whole thing.
+        let a = Answers {
+            encrypt: true,
+            encrypt_password: "abc\nswap=none".into(),
+            ..good()
+        };
+        assert!(a.problems().iter().any(|p| p.contains("line break")));
     }
 
     #[test]

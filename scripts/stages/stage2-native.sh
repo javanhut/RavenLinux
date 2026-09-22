@@ -141,8 +141,38 @@ copy_system_utils() {
         mkswap swapon swapoff
         # Filesystem creation beyond the ext4/vfat pair above, when the host has
         # them. raven-install offers whichever ones are present.
-        mkfs.xfs mkfs.btrfs mkfs.ext2 mkfs.ext3 mkfs.fat fatlabel e2label tune2fs
+        #
+        # `btrfs` is here beside mkfs.btrfs and not instead of it, because the
+        # two are different halves of the same feature and this list carried
+        # only the first. mkfs.btrfs makes the filesystem; every single thing
+        # done to it afterwards is a subcommand of the multicall binary --
+        # `btrfs subvolume create` for the @/@home/@snapshots layout
+        # raven-install writes, `btrfs subvolume snapshot` for raven-snapshot
+        # and for rvn's pre-transaction hook, `btrfs filesystem` for anything
+        # that reports free space honestly on a COW filesystem. raven-install
+        # probes for both names separately for exactly this reason, and
+        # soft_dies with "btrfs-progs is not on this image, so the subvolume
+        # layout cannot be created" when only the mkfs is present -- so every
+        # image built from this list refused --fs btrfs, and with it the whole
+        # snapshot and rollback chain built on top.
+        mkfs.xfs mkfs.btrfs btrfs mkfs.ext2 mkfs.ext3 mkfs.fat fatlabel e2label tune2fs
         resize2fs dumpe2fs
+        # Full-disk encryption. raven-install --encrypt creates the LUKS2
+        # container with cryptsetup and opens it to install into, so without
+        # this binary the installer's preflight reports cryptsetup 0 and the
+        # encryption switch is refused on every image -- and because the
+        # refusal is a soft_die at install time rather than a build failure,
+        # nothing said so until somebody tried it. dmsetup comes with it: a
+        # LUKS mapping is a device-mapper target, and dmsetup is what answers
+        # "is it open, and under what name?" when an unlock goes wrong.
+        #
+        # The initramfs gets its own copy of both from the build host (see
+        # scripts/build-initramfs.sh host_bins), because an encrypted root has
+        # to be opened before this filesystem exists to be opened from. These
+        # two copies are staged from the same container and are the same build,
+        # which is what keeps the installer and the initramfs agreeing about
+        # what a LUKS header means.
+        cryptsetup dmsetup
         # NTFS. ntfsresize is what raven-install --alongside uses to make room
         # on a disk that already has Windows on it -- without it that install
         # mode can offer the user nothing, because the partition it would need
@@ -164,6 +194,16 @@ copy_system_utils() {
         dmesg lspci lsusb free uptime uname hostname
         dmidecode lscpu
         sensors smartctl nvme hdparm
+        # Kernel tunables. From procps-ng, like ps/top/free/uptime above, but
+        # it was the one name in that package nobody had listed -- so the
+        # image shipped no way to read /proc/sys through anything but cat.
+        # That matters now that /usr/lib/sysctl.d/50-raven.conf exists and
+        # init's sysctl stage applies it at boot: `sysctl <key>` is how anyone
+        # confirms a key actually took, `sysctl -a` is how they find the ones
+        # that did not, and `sysctl -w` is how a value gets tried before it is
+        # written into a fragment. Applying policy to a machine that cannot
+        # then be asked about it is how a setting silently stops working.
+        sysctl
         # User management
         passwd login chpasswd useradd usermod groupadd getent chsh
         runuser setpriv newgrp sg
@@ -468,6 +508,16 @@ copy_networking() {
         nc ncat
         host dig nslookup
         traceroute tracepath mtr tcpdump
+        # The firewall. etc/raven/init.toml's nftables service runs
+        # `nft -f /etc/nftables.conf`, and the ruleset was shipped without
+        # anything that could read it -- a config file is not a firewall. The
+        # service is `enabled = false`, so this binary changes nothing on a
+        # stock boot; it is what makes `raven-rc enable nftables` a step that
+        # can succeed, and what makes `nft list ruleset` able to answer
+        # whether it did. Only nft: iptables and its nft-backed wrappers are
+        # deliberately absent, because two front ends to one netfilter table
+        # is how a machine ends up with a ruleset nobody can account for.
+        nft
     )
 
     for tool in "${net_tools[@]}"; do
@@ -1043,6 +1093,73 @@ install_raven_fstrim() {
 
     if [[ ! -x "${SYSROOT_DIR}/usr/bin/fstrim" ]]; then
         log_warn "  fstrim is not in the sysroot; raven-fstrim will find nothing to run"
+    fi
+}
+
+# =============================================================================
+# raven-snapshot, and the rvn hook that calls it
+# =============================================================================
+# rvn cannot undo an install -- a file the payload overwrites is gone the
+# moment it is written -- so the only honest answer to "that upgrade broke my
+# machine" is a copy of the system taken before the upgrade started. On btrfs
+# that copy is nearly free. configs/raven-snapshot is what takes it, and
+# configs/rvn/hooks.d/50-snapshot.toml is what makes rvn take one on its own
+# before every transaction.
+#
+# BOTH OR NEITHER, which is why they are installed by one function. The hook's
+# `exec = "/usr/bin/raven-snapshot"` is an absolute path: a hook without the
+# tool fails on every transaction (quietly -- it ships abort_on_fail = false,
+# so the upgrade proceeds), and the tool without the hook is a command nobody
+# ever runs automatically, which is the case that matters because the person
+# who needed a snapshot is by definition not thinking about snapshots.
+#
+# WHERE THE HOOK GOES, read out of the package manager rather than assumed:
+# RavenPackageManager/src/txhooks.rs declares
+#   pub const DIRS: &[&str] = &["usr/share/rvn/hooks.d", "etc/rvn/hooks.d"];
+# relative to the install root, read in that order, with a file in the second
+# replacing one of the same name in the first. /usr/share is the vendor half,
+# so a hook this repository ships belongs there and an administrator who wants
+# it changed drops a file of the same name into /etc/rvn/hooks.d rather than
+# editing ours. Installing it into /etc instead would have made every upgrade
+# of rvn's own packaging fight the admin for the file.
+#
+# This is stage2's and not the Raven layer's despite being rvn's file, because
+# both of these are plain data -- a POSIX shell script and a TOML file -- with
+# no build step and no dependency on rvn existing yet. They need /usr/bin/btrfs,
+# which is staged by copy_system_utils just above, and that is the only ordering
+# this has.
+install_raven_snapshot() {
+    local src="${PROJECT_ROOT}/configs/raven-snapshot"
+
+    if [[ ! -f "${src}" ]]; then
+        log_warn "  configs/raven-snapshot is missing; rvn will install with no way back"
+        return 0
+    fi
+
+    install -D -m 0755 "${src}" "${SYSROOT_DIR}/usr/bin/raven-snapshot"
+    log_info "  Installed raven-snapshot"
+
+    local hooks="${PROJECT_ROOT}/configs/rvn/hooks.d"
+    if [[ -d "${hooks}" ]]; then
+        local hook
+        for hook in "${hooks}"/*.toml; do
+            [[ -e "${hook}" ]] || continue
+            install -D -m 0644 "${hook}" \
+                "${SYSROOT_DIR}/usr/share/rvn/hooks.d/$(basename "${hook}")"
+            log_info "  Installed rvn hook $(basename "${hook}")"
+        done
+    else
+        log_warn "  configs/rvn/hooks.d is missing; rvn will not snapshot before a transaction"
+    fi
+
+    # Not fatal, and deliberately not a reason to skip the install above. An
+    # image with no btrfs binary can still be *installed onto* btrfs later by a
+    # newer installer, and raven-snapshot answers `status` honestly on a root
+    # it cannot snapshot -- which is a far better thing for the hook to hit
+    # than a missing file.
+    if [[ ! -x "${SYSROOT_DIR}/usr/bin/btrfs" ]]; then
+        log_warn "  btrfs is not in the sysroot; raven-snapshot will report that this"
+        log_warn "  machine cannot snapshot, and rvn's pre-transaction hook will no-op"
     fi
 }
 
@@ -2746,6 +2863,29 @@ EOF
 	        cp "${PROJECT_ROOT}/configs/raven/user-services/"*.toml \
 	            "${SYSROOT_DIR}/usr/share/raven/user-services/" 2>/dev/null || true
 	    fi
+	    # The kernel parameter policy. raven-init's sysctl stage reads
+	    # /usr/lib/sysctl.d, then /run/sysctl.d, then /etc/sysctl.d once at
+	    # boot and applies every *.conf in them in name order -- and this
+	    # file, the only fragment Raven ships, was in none of those
+	    # directories on any image ever built. Every key in it was inert:
+	    # kptr_restrict and dmesg_restrict at 0, protected_fifos and
+	    # protected_regular at 0, rp_filter at the kernel default, while the
+	    # file's own header told whoever read it that it was in force and
+	    # /etc/nftables.conf cited its rp_filter as the reason a rule could be
+	    # left out.
+	    #
+	    # /usr/lib and not /etc: that is the vendor directory, it is read
+	    # first, and /etc/sysctl.d is read last so an administrator's fragment
+	    # of the same name replaces ours entirely. Putting the vendor policy
+	    # in /etc would have made every update of it a conflict with whoever
+	    # had edited it.
+	    if compgen -G "${PROJECT_ROOT}/configs/sysctl.d/*.conf" >/dev/null 2>&1; then
+	        mkdir -p "${SYSROOT_DIR}/usr/lib/sysctl.d"
+	        install -m 0644 "${PROJECT_ROOT}/configs/sysctl.d/"*.conf \
+	            "${SYSROOT_DIR}/usr/lib/sysctl.d/"
+	    else
+	        log_warn "  configs/sysctl.d has no fragment; the image ships no kernel parameter policy"
+	    fi
 	    # WirePlumber's Raven defaults, beside the package's own config in
 	    # /usr/share: /etc/wireplumber is the drop-in directory it reads, and
 	    # a file no package owns there survives every wireplumber update.
@@ -3790,6 +3930,7 @@ main() {
     install_raven_console_font
     install_raven_firmware
     install_raven_fstrim
+    install_raven_snapshot
     install_raven_os_release_guard
     copy_networking
     setup_pam_and_nss

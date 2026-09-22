@@ -198,6 +198,14 @@ create_directory_structure() {
     mkdir -p "${INITRAMFS_DIR}"/mnt/{cdrom,squashfs,root,overlay,work}
     mkdir -p "${INITRAMFS_DIR}"/etc/{raven,rvn}
     mkdir -p "${INITRAMFS_DIR}"/var/{log,tmp}
+    # cryptsetup takes a lock per device under /run/cryptsetup so two of them
+    # cannot work on one header at once. When the directory is missing it
+    # prints "WARNING: Locking directory /run/cryptsetup is missing!" on every
+    # invocation and carries on unlocked -- harmless here, where nothing runs
+    # concurrently, but it is a warning in the middle of a passphrase prompt
+    # and it teaches people to ignore what cryptsetup says at exactly the
+    # prompt where they should be reading it.
+    mkdir -p -m 0700 "${INITRAMFS_DIR}"/run/cryptsetup
 
     log_success "Directory structure created"
 }
@@ -301,13 +309,40 @@ EOF
     chmod 755 "${INITRAMFS_DIR}/bin/whoami" 2>/dev/null || true
 
     # These need to come from host (not in uutils or need special handling)
-    # Include switch_root for live boot, udevadm for device enumeration
-    local host_bins=(mount umount dmesg clear reset ps kill free grep sed awk find xargs switch_root losetup blkid udevadm setsid stty)
+    # Include switch_root for live boot, udevadm for device enumeration,
+    # cryptsetup to open a LUKS root before there is anything to mount.
+    local host_bins=(mount umount dmesg clear reset ps kill free grep sed awk find xargs switch_root losetup blkid udevadm setsid stty cryptsetup dmsetup)
     for bin in "${host_bins[@]}"; do
         if command -v "$bin" &>/dev/null; then
             cp "$(which "$bin")" "${INITRAMFS_DIR}/bin/" 2>/dev/null || true
         fi
     done
+
+    # cryptsetup gets a check of its own, because its absence is the one that
+    # is invisible until a machine will not boot.
+    #
+    # Everything else in that list has a fallback or a symptom you can see: no
+    # blkid and the root hunt says so on the console, no stty and the prompt
+    # is ugly. An image built without cryptsetup looks perfectly normal, boots
+    # every unencrypted machine perfectly normally, and then drops an
+    # encrypted one into a rescue shell -- on a disk whose contents are
+    # unreadable without exactly the binary that is missing. The installer
+    # refuses to encrypt a disk when cryptsetup is missing on *its* side, but
+    # it cannot see inside the image it is copying, so this is the only place
+    # the two halves can be kept honest.
+    #
+    # A warning rather than a fatal error: an unencrypted RavenLinux is a
+    # complete and supported system, and refusing to build an image for it
+    # because a package is missing from the build host would be the wrong
+    # trade. The build still says so loudly, and names the package.
+    if [[ -x "${INITRAMFS_DIR}/bin/cryptsetup" ]]; then
+        log_info "  Added cryptsetup (LUKS unlock at boot)"
+    else
+        log_warn "cryptsetup is not on the build host; this image CANNOT boot an"
+        log_warn "  encrypted disk. Machines installed with encryption will stop at"
+        log_warn "  the initramfs rescue shell. Install the cryptsetup package on the"
+        log_warn "  build host and rebuild, or do not offer encryption in the installer."
+    fi
 
     # reboot/poweroff are deliberately NOT copied from the host. On a systemd
     # distro those binaries are systemd's, and in an initramfs they fail with
@@ -990,6 +1025,26 @@ RAVEN_ROOT_FLAGS=""
 RAVEN_ROOT_RW="rw"
 RAVEN_ROOT_WAIT=30
 RAVEN_INIT_OVERRIDE=""
+
+# Full-disk encryption, and the hibernation image.
+#
+# RAVEN_CRYPT_SPEC/NAME is the container holding the root filesystem;
+# RAVEN_SWAP_CRYPT_SPEC/NAME is the one holding swap. Both come from the
+# kernel command line as `cryptdevice=<spec>:<name>` and `cryptswap=<spec>:<name>`,
+# written by raven-install, and both are opened by the one passphrase typed at
+# the prompt below -- see raven_luks_open() for why there are two of them.
+#
+# RAVEN_RESUME_SPEC is the swap device a hibernation image would be in. On an
+# encrypted machine that spec resolves to /dev/mapper/ravenswap and not to the
+# partition, because it is the UUID of the swap signature *inside* the
+# container; that is the whole reason raven_try_resume runs after
+# raven_luks_open rather than before it.
+RAVEN_CRYPT_SPEC=""
+RAVEN_CRYPT_NAME=""
+RAVEN_SWAP_CRYPT_SPEC=""
+RAVEN_SWAP_CRYPT_NAME=""
+RAVEN_CRYPT_TRIES=3
+RAVEN_RESUME_SPEC=""
 # The live image's volume label. Declared up here rather than beside the
 # squashfs hunt that matches on it, because raven_wait_for_devices() waits for
 # a device carrying exactly this label and runs first.
@@ -1082,7 +1137,7 @@ RAVEN_MEDIA_WAIT=3
 # paths need completely different things:
 #
 #   * With root= on the command line, the wait belongs in
-#     raven_mount_disk_root(), which already polls for that exact device for up
+#     raven_find_root_device(), which already polls for that exact device for up
 #     to RAVEN_ROOT_WAIT seconds and gives up the instant it appears. Sleeping
 #     here first meant every machine paid three seconds for a disk the kernel
 #     had usually registered before /init even started -- nvme0n1p3 was there
@@ -1167,7 +1222,7 @@ raven_root_from_cmdline() {
             rootfstype=*) RAVEN_ROOT_FSTYPE="${arg#rootfstype=}" ;;
             rootflags=*)  RAVEN_ROOT_FLAGS="${arg#rootflags=}" ;;
             rootwait)     RAVEN_ROOT_WAIT=60 ;;
-            # Digits or nothing. The poll in raven_mount_disk_root turns this
+            # Digits or nothing. The poll in raven_find_root_device turns this
             # into a deadline with arithmetic, and a rootdelay= somebody
             # fat-fingered at the boot prompt would otherwise produce a shell
             # arithmetic error on every pass of the loop and no waiting at all
@@ -1182,6 +1237,66 @@ raven_root_from_cmdline() {
             init=*)       RAVEN_INIT_OVERRIDE="${arg#init=}" ;;
             ro)           RAVEN_ROOT_RW="ro" ;;
             rw)           RAVEN_ROOT_RW="rw" ;;
+            # cryptdevice=<spec>:<name>, mkinitcpio's spelling. The value is
+            # split on the FIRST colon and the name on the next, so a third
+            # field -- mkinitcpio allows one for options -- is dropped rather
+            # than becoming part of the mapper name. Nothing here implements
+            # those options, and silently accepting one would be worse than
+            # ignoring it.
+            #
+            # A value with no colon in it is taken as the device alone and
+            # given the name raven-install would have used. Without that,
+            # `${v#*:}` on a colonless string returns the string itself, so
+            # `cryptdevice=UUID=abc` typed by hand at the boot prompt would
+            # open the container under the mapper name "UUID=abc" -- which
+            # succeeds, and then leaves root=UUID= pointing at a device that
+            # is not where the filesystem ended up.
+            cryptdevice=*)
+                raven_cd="${arg#cryptdevice=}"
+                case "$raven_cd" in
+                    *:*)
+                        RAVEN_CRYPT_SPEC="${raven_cd%%:*}"
+                        RAVEN_CRYPT_NAME="${raven_cd#*:}"
+                        RAVEN_CRYPT_NAME="${RAVEN_CRYPT_NAME%%:*}"
+                        ;;
+                    *)
+                        RAVEN_CRYPT_SPEC="$raven_cd"
+                        RAVEN_CRYPT_NAME="ravenroot"
+                        ;;
+                esac
+                ;;
+            cryptswap=*)
+                raven_cs="${arg#cryptswap=}"
+                case "$raven_cs" in
+                    *:*)
+                        RAVEN_SWAP_CRYPT_SPEC="${raven_cs%%:*}"
+                        RAVEN_SWAP_CRYPT_NAME="${raven_cs#*:}"
+                        RAVEN_SWAP_CRYPT_NAME="${RAVEN_SWAP_CRYPT_NAME%%:*}"
+                        ;;
+                    *)
+                        RAVEN_SWAP_CRYPT_SPEC="$raven_cs"
+                        RAVEN_SWAP_CRYPT_NAME="ravenswap"
+                        ;;
+                esac
+                ;;
+            # How many passphrase attempts before the rescue shell. Validated
+            # the way rootdelay= is, and for the same reason: a fat-fingered
+            # value would otherwise make the retry loop's arithmetic fail on
+            # every pass, which here means zero attempts at a prompt somebody
+            # is standing in front of.
+            crypttries=*)
+                case "${arg#crypttries=}" in
+                    ''|*[!0-9]*|0) warn "Ignoring malformed $arg; keeping ${RAVEN_CRYPT_TRIES} tries" ;;
+                    *)             RAVEN_CRYPT_TRIES="${arg#crypttries=}" ;;
+                esac
+                ;;
+            resume=*)     RAVEN_RESUME_SPEC="${arg#resume=}" ;;
+            # The documented way out of a resume that is killing the boot. A
+            # hibernation image that crashes the machine as it is restored
+            # leaves no other escape: every subsequent boot finds the same
+            # image and tries again. Typed at the RavenBoot prompt, this
+            # abandons it, and the next boot is a normal cold one.
+            noresume)     RAVEN_RESUME_SPEC="" ;;
             # Escape hatch: boot the live image even from a disk that has a
             # root= on its command line.
             raven.live)   RAVEN_ROOT_SPEC="" ; return 0 ;;
@@ -1224,7 +1339,293 @@ raven_resolve_root() {
     return 0
 }
 
-raven_mount_disk_root() {
+# Resolve a spec to a block device, waiting up to $2 seconds for it to appear.
+#
+# The same shape as the poll inside raven_find_root_device, deliberately not
+# factored out of it: that loop also announces itself, settles udev and prints
+# a diagnostic list of every block device on failure, and pulling the common
+# three lines out of it would leave the thing every boot depends on harder to
+# read in order to save nine lines here. The budget is wall clock off
+# /proc/uptime for the same reason it is there -- each pass runs blkid, which
+# is not free, so counting iterations makes a timeout mean something different
+# on every machine.
+raven_wait_for_spec() {
+    raven_spec="$1"
+    raven_budget="$2"
+    raven_found=""
+
+    raven_uptime_cs || RAVEN_UPTIME_CS=0
+    raven_spec_start="$RAVEN_UPTIME_CS"
+    while :; do
+        raven_found=$(raven_resolve_root "$raven_spec") && break
+        raven_found=""
+        raven_uptime_cs || break
+        [ $(( RAVEN_UPTIME_CS - raven_spec_start )) -lt $(( raven_budget * 100 )) ] || break
+        raven_poll_sleep
+    done
+
+    [ -n "$raven_found" ] || return 1
+    echo "$raven_found"
+    return 0
+}
+
+# Open the LUKS containers named on the kernel command line, from one
+# passphrase typed once.
+#
+# WHY THE PASSPHRASE IS READ HERE AND NOT BY CRYPTSETUP. cryptsetup has a
+# perfectly good prompt of its own, with a --tries count, and using it would
+# be less code. It cannot be used because there are two containers: the root
+# and the swap that a hibernation image goes into, each with its own header
+# and its own keyslot. Letting cryptsetup ask would ask twice, at every boot,
+# for the same passphrase -- and a boot that asks twice is a boot people
+# shorten their passphrase to survive. So the passphrase is read once and
+# offered to both.
+#
+# It is fed in on stdin rather than named on a command line, where it would be
+# in /proc/<pid>/cmdline while cryptsetup ran, and with `printf '%s'` rather
+# than `echo`, because cryptsetup reading a key file from a pipe takes the
+# bytes it is given: a trailing newline becomes part of the passphrase and
+# nothing will ever open the container again. raven-install writes the header
+# the same way, with the same printf, for the same reason.
+#
+# Every failure here ends in rescue_shell rather than a bare exit. A machine
+# whose root is encrypted and unopened has nothing else to offer -- there is
+# no second root to try and no partial boot to fall back to -- and a shell at
+# least lets somebody run `cryptsetup open` by hand and look at blkid.
+raven_luks_open() {
+    [ -n "$RAVEN_CRYPT_SPEC" ] || return 0
+
+    step "Unlocking the encrypted disk"
+
+    if ! command -v cryptsetup >/dev/null 2>&1; then
+        fail "This initramfs has no cryptsetup, and $RAVEN_CRYPT_SPEC is encrypted."
+        info "The image was built on a host without the cryptsetup package;"
+        info "rebuild it there and copy the new initramfs onto the EFI partition."
+        rescue_shell "No cryptsetup to open $RAVEN_CRYPT_SPEC"
+    fi
+
+    # libdevmapper waits for udev to confirm that it has created the device
+    # nodes for anything dm-crypt sets up. Nothing in this initramfs starts a
+    # udevd -- see raven_udev_active() above -- so that confirmation never
+    # arrives and the wait runs to its full timeout before libdevmapper gives
+    # up and carries on. That is a silent minute added to the boot of every
+    # encrypted machine. Turning the synchronisation off tells libdevmapper to
+    # create /dev/mapper/<name> itself, with mknod, which is how it worked
+    # before udev existed and is exactly right in a devtmpfs with no daemon.
+    DM_DISABLE_UDEV=1
+    export DM_DISABLE_UDEV
+
+    # cryptsetup takes a per-device lock in here; without the directory it
+    # prints a warning at every invocation, in the middle of the passphrase
+    # prompt. create_directory_structure() makes it, and this covers an image
+    # built before it did.
+    [ -d /run/cryptsetup ] || mkdir -p /run/cryptsetup 2>/dev/null || true
+
+    if [ ! -c /dev/console ]; then
+        fail "No console to ask for the passphrase on."
+        rescue_shell "Cannot prompt for the passphrase"
+    fi
+
+    crypt_dev=$(raven_wait_for_spec "$RAVEN_CRYPT_SPEC" "$RAVEN_ROOT_WAIT")
+    if [ -z "$crypt_dev" ]; then
+        fail "Encrypted device not found: $RAVEN_CRYPT_SPEC"
+        info "Block devices the kernel can see:"
+        blkid 2>/dev/null || true
+        rescue_shell "Cannot find $RAVEN_CRYPT_SPEC"
+    fi
+    ok "Encrypted device: $crypt_dev ($RAVEN_CRYPT_SPEC)"
+
+    # The swap container is looked for now, before the prompt, so that the one
+    # passphrase can be tried against both while it is still in hand. A short
+    # budget on purpose: it is on the same disk as the root, which has just
+    # been found, so if it is not there in five seconds it is not there at
+    # all -- and its absence costs a hibernation image, not a boot.
+    swap_crypt_dev=""
+    if [ -n "$RAVEN_SWAP_CRYPT_SPEC" ]; then
+        swap_crypt_dev=$(raven_wait_for_spec "$RAVEN_SWAP_CRYPT_SPEC" 5)
+        if [ -z "$swap_crypt_dev" ]; then
+            warn "Encrypted swap $RAVEN_SWAP_CRYPT_SPEC not found; no swap and no resume"
+        fi
+    fi
+
+    crypt_tries_left="$RAVEN_CRYPT_TRIES"
+    while [ "$crypt_tries_left" -gt 0 ]; do
+        raven_pass=""
+        printf '\n  Unlock %s: ' "$crypt_dev" > /dev/console
+        # IFS= so a passphrase that begins or ends with a space keeps it --
+        # read's default word splitting would strip both, and the container
+        # was formatted with what the person actually typed. -r so a backslash
+        # is a character rather than an escape. -s so it is not echoed.
+        IFS= read -rs raven_pass < /dev/console
+        printf '\n' > /dev/console
+
+        # The already-open test comes first so that a second pass through this
+        # loop -- reached only when the root opened and something else did
+        # not -- does not try to open a container that is already there and
+        # fail with "device already exists", which would burn a retry and read
+        # to the person standing here as a rejected passphrase.
+        if [ -b "/dev/mapper/${RAVEN_CRYPT_NAME}" ] \
+           || printf '%s' "$raven_pass" | cryptsetup open --type luks \
+                --key-file - "$crypt_dev" "$RAVEN_CRYPT_NAME" > /dev/console 2>&1; then
+            ok "Opened $crypt_dev as /dev/mapper/${RAVEN_CRYPT_NAME}"
+
+            if [ -n "$swap_crypt_dev" ] && [ ! -b "/dev/mapper/${RAVEN_SWAP_CRYPT_NAME}" ]; then
+                # The same passphrase, because raven-install put it in both
+                # headers. A failure here is not fatal: the machine boots
+                # without swap, which is a working machine, and saying so is
+                # better than refusing to start.
+                if printf '%s' "$raven_pass" | cryptsetup open --type luks \
+                        --key-file - "$swap_crypt_dev" "$RAVEN_SWAP_CRYPT_NAME" > /dev/console 2>&1; then
+                    ok "Opened $swap_crypt_dev as /dev/mapper/${RAVEN_SWAP_CRYPT_NAME}"
+                else
+                    warn "Could not open the encrypted swap; no swap and no resume this boot"
+                fi
+            fi
+
+            # Not a security guarantee -- this whole filesystem is RAM that is
+            # handed back at switch_root, and the key is in the kernel either
+            # way -- but there is no reason for the passphrase to stay in a
+            # shell variable that a rescue shell later in this boot could
+            # print with `set`.
+            raven_pass=""
+            unset raven_pass
+            raven_mark crypt_opened
+            return 0
+        fi
+
+        raven_pass=""
+        crypt_tries_left=$(( crypt_tries_left - 1 ))
+        if [ "$crypt_tries_left" -gt 0 ]; then
+            warn "Wrong passphrase. ${crypt_tries_left} attempt(s) left."
+        fi
+    done
+
+    unset raven_pass
+    fail "Could not unlock $crypt_dev after ${RAVEN_CRYPT_TRIES} attempts."
+    info "The passphrase is typed on a US keyboard layout: this initramfs"
+    info "loads no keymap, so a passphrase entered on another layout at install"
+    info "time may need different keys here."
+    info "To try again by hand: cryptsetup open $crypt_dev ${RAVEN_CRYPT_NAME}"
+    rescue_shell "Cannot unlock $crypt_dev"
+}
+
+# Hand a hibernation image back to the kernel, if there is one.
+#
+# This MUST run before the root is mounted, after raven_find_root_device, and
+# on an encrypted machine after raven_luks_open. All three are load-bearing:
+#
+#   * before the mount, because resuming replaces the whole of memory with the
+#     image's, including its idea of what is on the disk. Anything written to
+#     the root between the snapshot and the resume is invisible to the
+#     restored kernel and gets overwritten by it -- which is filesystem
+#     corruption rather than a stale file. Mounting read-only is not a way
+#     round it either: ext4 replays the journal on a read-only mount, and that
+#     is a write.
+#
+#   * after the unlock, because resume=UUID= names the swap signature that
+#     mkswap wrote *inside* the container. Before the container is open that
+#     UUID exists on no device the kernel can see, blkid finds nothing, and
+#     the resume is skipped with no image ever being read back. That failure
+#     is completely silent -- the machine simply boots fresh, every time --
+#     which is why it is worth this much comment.
+#
+#   * after the root device has been found, because that is the only thing in
+#     this initramfs that waits for the disk at all. See the budget below.
+#
+# Every failure warns and returns 0. Having no image to resume is what happens
+# on every ordinary boot, so it cannot be treated as an error, and a machine
+# that will not boot because its hibernation image is unreadable is a much
+# worse outcome than one that boots without it. `noresume` on the command line
+# is the escape hatch when the image itself is what is breaking the boot.
+raven_try_resume() {
+    [ -n "$RAVEN_RESUME_SPEC" ] || return 0
+
+    if [ ! -w /sys/power/resume ]; then
+        warn "resume=$RAVEN_RESUME_SPEC given but this kernel has no hibernation support"
+        return 0
+    fi
+
+    step "Checking for a hibernation image"
+
+    # The same budget the root device gets, RAVEN_ROOT_WAIT.
+    #
+    # This was five seconds, justified by "this runs after the root device has
+    # already been found, on the same disk, so the hardware is present". That
+    # was not true: this ran *before* raven_mount_disk_root, which is where the
+    # root was found, so on an unencrypted machine -- where raven_luks_open
+    # returns at once and raven_wait_for_devices no longer sleeps in disk mode
+    # -- this poll was the first thing in the whole boot to wait for any disk,
+    # and it waited five seconds where the root gets thirty. The machine whose
+    # controller needs longer than that is exactly the machine the thirty
+    # seconds exists for, and on it the resume gave up, the root then resolved
+    # fine a moment later, and the hibernation image -- somebody's open work --
+    # was silently overwritten by a fresh boot.
+    #
+    # raven_find_root_device() now runs first, so the premise is finally true.
+    # The budget is still the root's rather than a short one, because the two
+    # ways of being wrong are not the same size: waiting too long costs seconds
+    # on a machine whose resume= names a device that no longer exists, and not
+    # waiting long enough destroys data. On a healthy machine it costs nothing
+    # measurable -- the disk has already been found, so the first blkid call
+    # resolves the swap and the poll returns without ever sleeping.
+    resume_dev=$(raven_wait_for_spec "$RAVEN_RESUME_SPEC" "$RAVEN_ROOT_WAIT")
+    if [ -z "$resume_dev" ]; then
+        warn "No device for resume=$RAVEN_RESUME_SPEC after ${RAVEN_ROOT_WAIT}s; booting fresh"
+        info "Any hibernation image on that device is being left behind."
+        info "If the swap is gone for good, add noresume to the kernel command"
+        info "line so this wait does not happen on every boot."
+        return 0
+    fi
+
+    # A device path first, because the kernel's own parser resolves one with
+    # lookup_bdev and this initramfs's /dev is still the one it will use. If
+    # the resume succeeds, this write never returns: the kernel restores the
+    # image over the top of us and the machine carries on from where it
+    # hibernated.
+    if echo "$resume_dev" > /sys/power/resume 2>/dev/null; then
+        ok "No hibernation image on $resume_dev; booting fresh"
+        return 0
+    fi
+
+    # Fallback: major:minor, in DECIMAL. stat prints both in hex with %t/%T
+    # and the kernel's parser reads this field as decimal, so handing it the
+    # hex straight through resumes from whatever device happens to have those
+    # numbers -- or, far more often, from nothing at all, silently. 10# is not
+    # needed on the way in (16# says what base the input is) but the output of
+    # $(( )) is decimal, which is what is wanted.
+    resume_node=$(readlink -f "$resume_dev" 2>/dev/null)
+    [ -n "$resume_node" ] || resume_node="$resume_dev"
+    resume_maj=$(stat -c '%t' "$resume_node" 2>/dev/null)
+    resume_min=$(stat -c '%T' "$resume_node" 2>/dev/null)
+    case "${resume_maj}:${resume_min}" in
+        ''|*[!0-9a-fA-F:]*|:*|*:)
+            warn "Could not read the device number of $resume_node; booting fresh"
+            return 0
+            ;;
+    esac
+    if echo "$(( 16#$resume_maj )):$(( 16#$resume_min ))" > /sys/power/resume 2>/dev/null; then
+        ok "No hibernation image on $resume_dev; booting fresh"
+    else
+        warn "The kernel would not accept $resume_dev as a resume device; booting fresh"
+    fi
+    return 0
+}
+
+# Find the block device root= names, and nothing else.
+#
+# This is split out of raven_mount_disk_root() so that it can run before
+# raven_try_resume() rather than after it. The order matters and the reason is
+# in raven_try_resume(): a hibernation image lives on a swap device that is
+# almost always a partition of the same disk as the root, and until something
+# has actually waited for that disk, a short poll for the swap is a coin toss
+# whose losing side silently discards the image. Waiting for the root first
+# means the storage controller has enumerated by the time the resume is
+# considered, which is what the resume path always claimed and never had.
+#
+# It leaves the device in $root_dev, which raven_mount_disk_root() then mounts.
+# Everything in this initramfs shares one global scope, so there is nothing to
+# pass; the split is about when the waiting happens, not about the value.
+raven_find_root_device() {
     info "Root requested on the command line: $RAVEN_ROOT_SPEC"
 
     # NVMe in particular regularly needs longer than the kernel's own probe,
@@ -1271,6 +1672,16 @@ raven_mount_disk_root() {
 
     ok "Root device: $root_dev ($RAVEN_ROOT_SPEC)"
     raven_mark root_found
+    return 0
+}
+
+raven_mount_disk_root() {
+    # raven_find_root_device() is called before raven_try_resume() and has
+    # normally already filled this in. The call here is a guard rather than the
+    # usual path: if some future edit reorders the three calls below, this
+    # mounts the right device instead of mounting "" and failing in a way that
+    # takes an afternoon to read.
+    [ -n "$root_dev" ] || raven_find_root_device
 
     mount_opts="$RAVEN_ROOT_RW"
     [ -n "$RAVEN_ROOT_FLAGS" ] && mount_opts="${mount_opts},${RAVEN_ROOT_FLAGS}"
@@ -1285,12 +1696,45 @@ raven_mount_disk_root() {
         # Second chance read-only: a filesystem with a dirty journal the kernel
         # will not replay still mounts ro, and a rescue shell on the real root
         # beats one on an empty initramfs.
-        warn "Mounting $root_dev ${RAVEN_ROOT_RW} failed; retrying read-only"
-        if ! mount -o ro "$root_dev" /mnt/root 2>/dev/null; then
+        #
+        # RAVEN_ROOT_FLAGS is carried over, and that is the whole point of this
+        # line. On btrfs those flags hold subvol=@ and they are the only thing
+        # that names the subvolume: a bare `mount -o ro` gets subvolid=5, the
+        # top level, which holds @, @home, @log and @cache and no /sbin/init at
+        # all. The retry would then "succeed", the init check below would fail,
+        # and the boot would end in a rescue shell telling the user their root
+        # filesystem is not a RavenLinux root -- on a machine whose root is
+        # perfectly fine and one mount option away.
+        warn "Mounting $root_dev ${mount_opts} failed; retrying read-only"
+        mount_opts="ro"
+        [ -n "$RAVEN_ROOT_FLAGS" ] && mount_opts="${mount_opts},${RAVEN_ROOT_FLAGS}"
+        if [ -n "$RAVEN_ROOT_FSTYPE" ]; then
+            mount -t "$RAVEN_ROOT_FSTYPE" -o "$mount_opts" "$root_dev" /mnt/root 2>/dev/null
+        else
+            mount -o "$mount_opts" "$root_dev" /mnt/root 2>/dev/null
+        fi
+        if [ $? -ne 0 ]; then
             fail "Cannot mount $root_dev"
+            # Two failures hide behind that one line and they want different
+            # things from whoever is reading it. A filesystem that will not
+            # mount at all is a repair job. A filesystem that mounts only once
+            # rootflags= is dropped is a boot entry naming a subvolume that is
+            # not there -- a snapshot removed with `btrfs subvolume delete`
+            # instead of `raven-snapshot delete` is the usual way in -- and the
+            # fix for that is one line of editing at the boot menu. So probe,
+            # say which one it is, and unmount again: this is diagnosis, not a
+            # third chance. Booting the btrfs top level is not a boot.
+            if [ -n "$RAVEN_ROOT_FLAGS" ] && mount -o ro "$root_dev" /mnt/root 2>/dev/null; then
+                info "The filesystem itself mounts. It is rootflags=${RAVEN_ROOT_FLAGS}"
+                info "that $root_dev will not take -- what it names is not there."
+                info "What is there:"
+                ls /mnt/root 2>/dev/null | head -20
+                info "Edit rootflags= at the boot menu, or choose another entry."
+                umount /mnt/root 2>/dev/null || true
+            fi
             rescue_shell "Root filesystem would not mount"
         fi
-        warn "Root mounted READ-ONLY. Repair it, then remount rw."
+        warn "Root mounted READ-ONLY (${mount_opts}). Repair it, then remount rw."
     fi
 
     ok "Mounted root filesystem (${mount_opts})"
@@ -1316,6 +1760,19 @@ raven_wait_for_devices
 raven_mark devices_ready
 
 if [ "$RAVEN_ROOT_MODE" = "disk" ]; then
+    # Order is the whole of the correctness here, and getting it wrong fails
+    # quietly rather than loudly. Unlock first, because on an encrypted
+    # machine neither the root nor the swap exists as a device until the
+    # containers are open. Then find the root device -- which is the only poll
+    # in this initramfs that waits for storage to enumerate, so everything that
+    # needs a disk to exist has to come after it. Then resume, because
+    # restoring a hibernation image on top of a root that has already been
+    # mounted read-write corrupts it. Then mount. The unlock and the resume are
+    # each a no-op when the command line does not ask for them, which is every
+    # unencrypted, never-hibernated boot.
+    raven_luks_open
+    raven_find_root_device
+    raven_try_resume
     raven_mount_disk_root
 else
     ok "No root= on the command line; booting the live image"

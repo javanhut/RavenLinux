@@ -1,0 +1,85 @@
+# /etc/raven/face.toml -- raven-faced, the face unlock daemon.
+#
+# Every value here is a default. The whole file is optional and so is every
+# field, so a machine needs none of this -- it is shipped as a reference for
+# the values that exist, not as a file you must maintain.
+#
+# A file that is present but does not parse is a hard error, and so is one that
+# would make face unlock a formality: raven-faced refuses to start rather than
+# running with numbers nobody chose. One of these decides how easily somebody
+# gets into this machine.
+
+# The camera to use, instead of the one raven-faced would find.
+#
+# It looks at every /dev/video* in order, keeps the ones that answer as capture
+# devices, and prefers an infrared one -- an infrared sensor sees a warm face
+# and does not see a photograph of one, which is a better check than anything
+# a screen can do. Set this when the wrong one wins: an external webcam
+# pointing at a wall, or an infrared node it did not recognise as one.
+#
+# device = "/dev/video2"
+
+# Where the models are. Both are fetched by fetch-models.sh.
+#
+# models = "/usr/share/raven-face/models"
+
+# How alike two faces have to be, as a cosine similarity between what the
+# recogniser makes of them. 1.0 is identical.
+#
+# OpenCV recommends 0.363 for SFace, which is where the model does best at
+# answering "are these two photographs of the same person". That is not this
+# question. This one is "should this open somebody's machine", where a wrong
+# yes is much worse than a wrong no and there is a password sitting underneath
+# either way -- so the default is well above theirs.
+#
+# Raise it if somebody who looks like you can get in. Lower it, a little, if
+# your own face keeps being refused in a room where it used to work -- but
+# enrol another look first, which is the better fix.
+#
+# threshold = 0.45
+
+# How confident the detector has to be that something is a face at all.
+# detect_threshold = 0.8
+
+# How much of the frame's short side your face has to fill. Under the first you
+# are too far away for the screen's light to reach you; over the second the
+# camera is looking at a nose.
+# min_fill = 0.22
+# max_fill = 0.95
+
+# --- the liveness check ------------------------------------------------------
+#
+# A camera that sees visible light cannot tell a face from a photograph of one.
+# So the screen throws a short random sequence of colours and raven-faced checks
+# what comes back: that the face responds at all, that it responds to *this*
+# sequence rather than some remembered one, that the light lands unevenly the
+# way it does on something with a nose, and that it is not being mirrored
+# straight back the way glossy paper and phone glass do.
+#
+# Every number below is a judgement rather than a measurement. They are set
+# where a live face in ordinary indoor light passes comfortably and a printed
+# photograph does not, and they all err towards refusing a real face -- the
+# password is right there underneath, and a refusal costs two seconds.
+#
+# None of this runs on an infrared camera, which does not need it.
+
+# How much your face's brightness has to change across the sequence, as a
+# fraction of full scale, for anything to be measurable at all. Below it the
+# screen is not reaching you -- too far away, or a room brighter than the
+# panel -- which is reported as "the light behind you is too strong" and is
+# never treated as an attack.
+# min_response = 0.015
+
+# How closely your face has to follow the sequence, per colour channel.
+# min_correlation = 0.55
+
+# How unevenly the light has to land across your face. This is the one that
+# catches a printed photograph, which reflects the sequence perfectly and
+# reflects it flat. Raise it if a photo gets in; lower it only if real faces
+# are being refused and you have checked everything else.
+# min_relief = 0.10
+
+# How much brighter than the rest one part of your face may get before what is
+# in front of the camera is a mirror rather than a face. Glasses can trip this;
+# enrol a look with them on and one without.
+# max_glare = 4.0

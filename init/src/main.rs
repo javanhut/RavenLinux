@@ -25,18 +25,21 @@ use std::os::fd::AsFd;
 mod cgroup;
 mod config;
 mod control;
+mod demand;
+mod logrotate;
 mod overrides;
 mod power;
 mod readiness;
 mod reexec;
 mod rtc;
 mod service;
+mod sysctl;
 mod timeline;
 mod user;
 mod usermode;
 
-use config::{InitConfig, ServiceConfig};
-use service::{Service, ServiceState};
+use config::{InitConfig, ServiceConfig, ServiceType};
+use service::{OneshotOutcome, Service, ServiceState};
 
 /// Global flag for shutdown request
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -206,6 +209,184 @@ fn close_log_file() {
     LOG_FILE_CLOSED.store(true, Ordering::SeqCst);
     if let Ok(mut guard) = LOG_FILE.lock() {
         guard.take();
+    }
+}
+
+/// Rotate and prune the log directory, if the sweep is due.
+///
+/// Called once per pass of the main loop and does nothing on almost all of
+/// them: `Schedule` lets one pass a minute through, and the loop already wakes
+/// at least every two seconds, so this adds no wakeup to an idle machine. The
+/// whole cost on a pass that is not due is one comparison of two `Instant`s.
+///
+/// # Why init.log is handled separately
+///
+/// Every other file in the directory is being written by a child process
+/// through an fd this supervisor handed over and cannot reach, so its rotation
+/// has the copy-and-truncate window that `logrotate`'s header describes -- a
+/// line written between the copy and the truncation is lost, and there is no
+/// lock that would prevent it because the writer is another process.
+///
+/// init.log has no such problem and it would be a shame to waste that. Init is
+/// the only writer of its own log and it writes through [`LOG_FILE`], so
+/// holding that mutex across the rotation makes the window disappear: no line
+/// can be written while the copy and the truncation happen, and the `File`
+/// inside the mutex stays valid throughout because the inode never changes.
+///
+/// That is also why nothing inside `logrotate` logs, and why the reports are
+/// collected and printed after the guard is dropped. `log::warn!` reached from
+/// inside that block would try to lock the same non-reentrant mutex on the
+/// same thread, and PID 1 blocked forever in its own logger does not come
+/// back. Read the two `drop(guard)` points below as load-bearing, not tidy.
+fn maintain_logs(
+    schedule: &mut logrotate::Schedule,
+    policy: &logrotate::Policy,
+    dir: &Path,
+    init_log: &Path,
+) {
+    if !schedule.due(Instant::now()) {
+        return;
+    }
+
+    let mut report = logrotate::Report::default();
+    for (path, _size) in logrotate::oversized(dir, policy) {
+        if path == init_log {
+            // The lock is taken for the rotation and released before anything
+            // is said about it; see this function's doc comment.
+            let Ok(guard) = LOG_FILE.lock() else { continue };
+            // Shutdown has let go of init.log so the root can be remounted
+            // read-only. Rotating it now would reopen a file on a filesystem
+            // that is on its way to read-only, for a supervisor that is about
+            // to exec /sbin/reboot.
+            if LOG_FILE_CLOSED.load(Ordering::SeqCst) {
+                continue;
+            }
+            let one = logrotate::rotate(&path, policy);
+            drop(guard);
+            report.done.extend(one.done);
+            report.trouble.extend(one.trouble);
+        } else {
+            let one = logrotate::rotate(&path, policy);
+            report.done.extend(one.done);
+            report.trouble.extend(one.trouble);
+        }
+    }
+
+    let pruned = logrotate::prune(dir, policy);
+    report.done.extend(pruned.done);
+    report.trouble.extend(pruned.trouble);
+
+    for line in report.done {
+        log::info!("{}", line);
+    }
+    for line in report.trouble {
+        complain_about_logs(&line);
+    }
+}
+
+/// Say something is wrong with the log directory, but only when it is not the
+/// same thing we said last time.
+///
+/// This is on a path that runs once a minute for as long as the machine is up,
+/// and WARN reaches the console -- where, after the gettys are up, it is
+/// printed over whoever is logging in. A read-only /var/log or a log directory
+/// on a full disk is a permanent condition, so without a latch it would be a
+/// line on the console every minute until the machine was rebooted, which is
+/// the same flood `Service::should_restart`'s `retry_at` latch exists to
+/// prevent.
+///
+/// Remembering a set of recent complaints rather than one keeps it bounded
+/// without making it deaf: a fault that persists is said once, and a
+/// *different* fault appearing later is still said.
+///
+/// The repeat is emitted at debug, which as things stand means it is emitted
+/// nowhere -- `DualLogger::enabled` admits Info and above and nothing reads
+/// `[system] log_level`. That is the wanted behaviour today and the line is
+/// written this way rather than dropped so that it reappears, in the file
+/// alone and never on the console, on the day somebody wires that knob up.
+fn complain_about_logs(line: &str) {
+    static SAID: std::sync::Mutex<ComplaintLatch> = std::sync::Mutex::new(ComplaintLatch::new());
+    let Ok(mut said) = SAID.lock() else {
+        log::warn!("Log rotation: {}", line);
+        return;
+    };
+    if said.admit(line) {
+        log::warn!("Log rotation: {}", line);
+    } else {
+        log::debug!("Log rotation (unchanged): {}", line);
+    }
+}
+
+/// How many distinct complaints the latch remembers.
+///
+/// The number only has to cover one sweep's worth of trouble: the flood being
+/// prevented is the same handful of lines returning every minute, and a
+/// machine with more than this many *different* faults at once has a
+/// /var/log worth the console. Bounded because this is PID 1 and the input is
+/// filenames, which a machine can invent without limit.
+const COMPLAINTS_REMEMBERED: usize = 32;
+
+/// The "have we already said this" half of [`complain_about_logs`], separated
+/// so it can be tested without a global.
+struct ComplaintLatch {
+    /// Canonical forms of the complaints already said, oldest first.
+    said: Vec<String>,
+}
+
+impl ComplaintLatch {
+    const fn new() -> Self {
+        Self {
+            said: Vec::new(),
+        }
+    }
+
+    /// Whether `line` is worth the console, recording it if so.
+    fn admit(&mut self, line: &str) -> bool {
+        let key = Self::key(line);
+        if self.said.contains(&key) {
+            return false;
+        }
+        // Oldest out first, so the lines still arriving are the ones
+        // remembered. Dropping the newest instead would make a machine with
+        // more faults than this holds re-warn about every one of them, every
+        // sweep, which is the flood this exists to stop.
+        if self.said.len() >= COMPLAINTS_REMEMBERED {
+            self.said.remove(0);
+        }
+        self.said.push(key);
+        true
+    }
+
+    /// What two complaints have to share to count as the same one.
+    ///
+    /// Every run of digits collapses to a `#`, and that is the whole point.
+    /// The complaints these lines are made of carry live measurements -- the
+    /// prune warning interpolates the directory's current byte total, which
+    /// moves every time a service writes a line -- so comparing the text
+    /// verbatim made "over the cap (201.4M)" and "over the cap (201.5M)" two
+    /// different faults, and the latch never latched once. A cap overshoot
+    /// that grew by a hundred kilobytes is the same permanent condition
+    /// reported again, and saying it once is the contract.
+    ///
+    /// Collapsing numbers also folds together the generations of one file
+    /// (`init.log.1`, `init.log.2`), which is right for the same reason: a
+    /// rotation failing on a read-only filesystem fails on all of them, and
+    /// it is one fault.
+    fn key(line: &str) -> String {
+        let mut key = String::with_capacity(line.len());
+        let mut in_number = false;
+        for ch in line.chars() {
+            if ch.is_ascii_digit() {
+                if !in_number {
+                    key.push('#');
+                    in_number = true;
+                }
+            } else {
+                in_number = false;
+                key.push(ch);
+            }
+        }
+        key
     }
 }
 
@@ -561,6 +742,50 @@ fn kill_remaining_processes() {
     log::warn!("Some processes survived SIGKILL; continuing shutdown");
 }
 
+/// Whether a re-exec should start this service, given what the hand-off left
+/// of it.
+///
+/// `adopted` is `None` for a definition the previous image did not have -- one
+/// added to init.toml or dropped into init.d since boot -- and starting those
+/// is the whole point of the pass this answers for.
+///
+/// The rest is about not redoing the boot. A re-exec swaps the supervisor and
+/// leaves every service process exactly where it is, so a service that already
+/// had its turn this boot must not be given another one. Two kinds cannot tell
+/// the supervisor that by state alone:
+///
+///   * A one-shot that finished. `snapshot` writes no pid for anything that is
+///     not running, so `adopt` sees no pid and records `Stopped` -- the same
+///     state as a service that never started. Every `raven-rc reexec` was
+///     therefore re-running udev's coldplug, the console font and
+///     `raven-dhcp --all -q`, which leaves a second dhcpcd on every wired
+///     link; scripts/dev-install.sh runs a reexec after replacing the binary,
+///     so this happened on every development install.
+///   * A `restart = false` service that had already exited. It said in its
+///     definition that it should not be started again after it stops, and a
+///     re-exec is not a reason to disregard that.
+///
+/// The question is asked of `first_started_at`, which the hand-off carries, so
+/// it survives the re-exec that is the whole problem. A service that is merely
+/// between restarts -- `restart = true`, died, waiting out its backoff -- is
+/// still started here, which is what brings it back after a re-exec that
+/// landed inside that window.
+fn wants_start_after_reexec(config: &ServiceConfig, adopted: Option<&Service>) -> bool {
+    let Some(svc) = adopted else {
+        return true;
+    };
+
+    if svc.is_running() || svc.is_manually_stopped() || svc.state() != ServiceState::Stopped {
+        return false;
+    }
+
+    if svc.first_started_at().is_some() && (svc.is_oneshot() || !config.restart) {
+        return false;
+    }
+
+    true
+}
+
 /// Take over the services a previous raven-init handed us, then start
 /// whatever the configuration wants that is not already running.
 ///
@@ -602,18 +827,26 @@ fn adopt_services(config: &InitConfig, handoff: reexec::Handoff) -> HashMap<Stri
         .services
         .iter()
         .filter(|c| c.enabled)
-        .filter(|c| {
-            services
-                .get(&c.name)
-                .map(|svc| !svc.is_running() && !svc.is_manually_stopped() && svc.state() == ServiceState::Stopped)
-                .unwrap_or(true)
-        })
+        // Except the demand-started ones, which "enabled and not running" is
+        // the ordinary and correct state for. Without this, `raven-rc reexec`
+        // would start every one of them -- the whole printing and bluetooth
+        // stack on a machine with no printer -- which is the same mistake as
+        // starting them at boot, arriving by a door nobody would think to
+        // look at. They are reached instead by the walk through sysfs at the
+        // top of `main_loop_at`, which starts exactly the ones whose device
+        // is actually plugged in, whether this is a boot or a re-exec.
+        .filter(|c| !c.is_demand_started())
+        .filter(|c| wants_start_after_reexec(c, services.get(&c.name)))
         .map(|c| c.name.clone())
         .collect();
     for name in wanted {
         log::info!("Starting {} (not running before the re-exec)", name);
         let reply = control::start_service(&name, &mut services, config);
-        if reply.starts_with("error:") {
+        // Line by line rather than on the whole reply: a start whose one-shot
+        // dependency went wrong answers with a warning line before the result,
+        // and reading only the first line would take a failed start for a
+        // successful one. rc.rs:352 tests the same reply the same way.
+        if reply.lines().any(|l| l.starts_with("error:")) {
             log::error!("  {}", reply.trim_end());
         }
     }
@@ -661,8 +894,28 @@ fn early_boot() -> Result<()> {
     // `lo` quietly breaks everything that talks to 127.0.0.1.
     bring_loopback_up();
 
-    // Let unprivileged ping work. The image's /sbin/ping has neither setuid
-    // nor file capabilities (squashfs is not built with xattrs), so its raw
+    // Let unprivileged ping work. This one write stays here, in the code,
+    // rather than moving into a /usr/lib/sysctl.d fragment with the rest of
+    // the kernel parameters below -- and it stays *above* the stage that
+    // reads them, which is the part worth explaining.
+    //
+    // It is not policy. Every line in sysctl.d is somebody's opinion about how
+    // this machine should behave and is meant to be argued with; this is a
+    // repair for a property of the image itself, which ships a /sbin/ping with
+    // no file capabilities because squashfs is built without xattrs. A machine
+    // whose sysctl.d somebody emptied, or whose /usr is a different image's,
+    // must still be able to ping, because "ping something" is the first thing
+    // anybody types when the network looks wrong -- and a boot-time repair
+    // that lives in a file that can be deleted is not a repair.
+    //
+    // Being above the stage is what makes it a default rather than a decree:
+    // the fragments are applied afterwards, so /etc/sysctl.d/90-local.conf
+    // saying `net.ipv4.ping_group_range = 0 0` closes the range again and
+    // means it. Written the other way round, init would clobber the operator's
+    // setting on every boot and nothing would say why.
+    //
+    // The mechanism, for completeness: the image's /sbin/ping has neither
+    // setuid nor file capabilities (squashfs is not built with xattrs), so its raw
     // ICMP socket fails -- and the kernel's unprivileged ICMP datagram
     // fallback is disabled by default (ping_group_range is "1 0", an empty
     // range). Opening the range to every group is what systemd-based distros
@@ -672,8 +925,72 @@ fn early_boot() -> Result<()> {
         log::warn!("Could not enable unprivileged ping: {}", e);
     }
 
+    // Phase 2c: the kernel parameters the machine's policy asks for
+    //
+    // /usr/lib/sysctl.d and /etc/sysctl.d have existed on this image since the
+    // skeleton first created them, and until now nothing read a line of
+    // either. The result was a machine running with kernel.kptr_restrict = 0
+    // and kernel.dmesg_restrict = 0 while a file in /usr/lib/sysctl.d sat
+    // there asking for better, and no way to express a kernel policy short of
+    // editing PID 1. See src/sysctl.rs for the format and for what is and is
+    // not honoured of it.
+    //
+    // Here, rather than in a service, for two reasons. It needs /proc, which
+    // Phase 1 mounted; and everything started after this point is entitled to
+    // assume the kernel it is running on is the one the policy describes --
+    // raven-udev coldplugs devices whose drivers read module parameters, the
+    // network comes up with whatever rp_filter says, and a service that had
+    // to wonder whether the sysctls had landed yet would be a service with a
+    // race in it.
+    //
+    // It is not re-run when init re-executes itself: early_boot as a whole is
+    // skipped there, and that is right rather than merely convenient. A sysctl
+    // is state of the kernel, not of this process, so every value written here
+    // is still in place after the exec -- while re-applying them would undo
+    // whatever somebody had since changed by hand while chasing a problem.
+    // The long version of that argument is on `sysctl::apply_boot_sysctls`.
+    log::info!("Phase 2c: Applying kernel parameters from sysctl.d");
+    sysctl::apply_boot_sysctls();
+    timeline::mark("sysctl applied");
+
     Ok(())
 }
+
+/// The kernel filesystems that exist so the kernel can be asked what it is
+/// doing: `(fstype, mount point, mount options)`.
+///
+/// A table rather than two more calls in the function below, because the mode
+/// on debugfs is a security decision and a table is a thing a test can assert
+/// about. See `the_introspection_filesystems_are_root_only_and_never_unmounted`.
+///
+/// securityfs carries no options because it needs none. It is a small
+/// root-owned tree with nothing writable in it by default, and it is the only
+/// way to find out at runtime which LSMs this kernel actually has: reading
+/// /sys/kernel/security/lsm is the one check that confirms the CONFIG_LSM line
+/// the kernel is built with took effect. Landlock's ABI version lives there
+/// too, which is what a sandboxing helper has to read before it can know which
+/// of its rules the running kernel will accept. Unmounted, that directory is
+/// empty and the question simply cannot be asked.
+///
+/// debugfs is mounted `mode=0700`, and the judgement there is deliberate. It
+/// is not that debugfs is harmless -- it is the largest unaudited surface the
+/// kernel exposes, whole subsystems publish writable knobs into it with no
+/// stability contract and in places no validation, which is why several
+/// distributions leave it unmounted entirely. It is mounted because Raven's
+/// own tuning needs it and has nowhere else to go:
+/// /sys/kernel/debug/sched/sched_itmt_enabled is where the ITMT switch has
+/// lived since 6.16, and the scheduler domain flags that say whether
+/// asymmetric packing is actually on for a hybrid CPU are readable nowhere
+/// else. 0700 on the mount's root directory is what keeps that surface to
+/// root: a process that is already root can load a module, so debugfs hands it
+/// nothing it did not have, while a process that is not root cannot even
+/// traverse the mount point. If a kernel ever rejects the option the mount
+/// fails and debugfs stays unmounted, which is the correct way round -- there
+/// is no retry without the mode.
+const INTROSPECTION_FILESYSTEMS: &[(&str, &str, &str)] = &[
+    ("securityfs", "/sys/kernel/security", ""),
+    ("debugfs", "/sys/kernel/debug", "mode=0700"),
+];
 
 fn mount_essential_filesystems() -> Result<()> {
     // Mount /proc
@@ -743,6 +1060,20 @@ fn mount_essential_filesystems() -> Result<()> {
     // re-executed init that assumed the slice existed would put every service
     // started from then on into no cgroup at all, silently.
     cgroup::ensure_slice();
+
+    // The two filesystems through which the kernel describes itself. Neither
+    // is needed to reach the root or start a service, which is why they are
+    // last, and neither was mounted at all until it was noticed that the
+    // things they expose had become unreachable on a booted Raven machine.
+    for (fstype, target, data) in INTROSPECTION_FILESYSTEMS {
+        if let Err(e) = mount_fs(fstype, target, fstype, MsFlags::empty(), data) {
+            // A kernel built without CONFIG_SECURITYFS or CONFIG_DEBUG_FS
+            // answers ENODEV here. That is a fact about the kernel rather than
+            // a fault of this machine's, so it is a debug line and not a
+            // warning printed over somebody's console at every boot.
+            log::debug!("Not mounting {} on {}: {:#}", fstype, target, e);
+        }
+    }
 
     log::info!("Essential filesystems mounted");
     timeline::mark("filesystems mounted");
@@ -924,10 +1255,8 @@ fn resolve_fstab_spec(spec: &str) -> Option<String> {
         ("/dev/disk/by-partuuid", v)
     } else if let Some(v) = spec.strip_prefix("LABEL=") {
         ("/dev/disk/by-label", v)
-    } else if let Some(v) = spec.strip_prefix("PARTLABEL=") {
-        ("/dev/disk/by-partlabel", v)
     } else {
-        return None;
+        ("/dev/disk/by-partlabel", spec.strip_prefix("PARTLABEL=")?)
     };
 
     let link = format!("{}/{}", dir, value);
@@ -1068,6 +1397,35 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
     let mut pending: Vec<&ServiceConfig> = config.services.iter().filter(|s| s.enabled).collect();
     let mut unavailable: Vec<String> = Vec::new();
 
+    // Services that are enabled, installed and perfectly startable, and that
+    // this boot is deliberately not starting: the demand-triggered ones. Kept
+    // apart from `unavailable` only so that a service ordered after one of
+    // them gets an accurate reason -- "the thing you are ordered after is
+    // started on demand" is a definition to go and fix, where "dependency
+    // unavailable" sends somebody looking for a daemon that is not broken.
+    //
+    // The consequence itself is the same either way and is not a subtlety
+    // worth hiding: a service ordered after a demand-started one does not
+    // start at boot, and nothing starts it when the trigger fires, because a
+    // trigger starts the service it names and that service's dependencies --
+    // never its dependants. Ordering something after a service that may not
+    // exist yet is a thing to think twice about, and the log line is where
+    // that thinking gets prompted.
+    let mut deferred: Vec<String> = Vec::new();
+
+    // The one-shots whose `ready_timeout` has already been spent waiting in
+    // this function, so that it is spent once per boot rather than once per
+    // dependant. The wait below sits inside the loop over one service's
+    // `after` list, and that loop is re-entered for every service ordered
+    // after the same one-shot: init.toml has nine enabled services with
+    // `after = ["udev"]`, so a coldplug wedged on a device probe charged the
+    // boot udev's five seconds nine times over, in PID 1's only thread, and
+    // printed nine identical warnings about it. Waiting again also cannot
+    // learn anything the first wait did not: the one-shot is still running,
+    // and what the dependants do about that -- start anyway -- does not
+    // change.
+    let mut oneshots_waited: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     // Resolve the small dependency graph as services are started. Configuration
     // order remains the tie-breaker, but `after` is authoritative.
     while !pending.is_empty() {
@@ -1091,6 +1449,44 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
             control::observe_readiness(&mut services);
 
             let svc_config = pending[index];
+
+            // Not started at boot, and that is the whole point of it. Checked
+            // before the dependency resolution below rather than after,
+            // because a demand-started service must not spend the boot
+            // waiting for a dependency's ready path: it is not starting, so
+            // nothing it is ordered after needs to have happened yet, and the
+            // wait would charge every boot several seconds for a daemon that
+            // is not going to run. Its `after` is honoured in full when the
+            // trigger does fire, by `control::start_service`, which is the
+            // same code `raven-rc start` goes through.
+            if svc_config.is_demand_started() {
+                log::info!(
+                    "Service {} not started at boot: it starts on demand",
+                    svc_config.name
+                );
+                deferred.push(svc_config.name.clone());
+                pending.remove(index);
+                progressed = true;
+                continue;
+            }
+            if svc_config.after.iter().any(|d| deferred.contains(d)) {
+                log::warn!(
+                    "Service {} not started: it is ordered after {:?}, which starts on demand",
+                    svc_config.name,
+                    svc_config
+                        .after
+                        .iter()
+                        .filter(|d| deferred.contains(d))
+                        .collect::<Vec<_>>()
+                );
+                // Into `unavailable` rather than `deferred`: this service is
+                // not demand-started, it is merely not started, and anything
+                // ordered after *it* should be told the ordinary thing.
+                unavailable.push(svc_config.name.clone());
+                pending.remove(index);
+                progressed = true;
+                continue;
+            }
             if svc_config.after.iter().any(|d| unavailable.contains(d)) {
                 log::error!(
                     "Service {} skipped: dependency unavailable ({:?})",
@@ -1110,6 +1506,103 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
             let mut dependencies_ready = true;
             for dependency in &svc_config.after {
                 if let Some(dep_cfg) = config.services.iter().find(|s| &s.name == dependency) {
+                    if dep_cfg.service_type == ServiceType::Oneshot {
+                        // What `after = ["udev"]` was always meant to say, and
+                        // could not. A one-shot has no ready path -- the thing
+                        // it produces is a machine in a different state, not a
+                        // socket -- so the loop below had nothing to wait on
+                        // and every service ordered after the coldplug started
+                        // the instant the coldplug had been *forked*. Which is
+                        // to say the ordering was between two spawns, tens of
+                        // microseconds apart, and the dependency it was
+                        // written to express was satisfied by luck.
+                        //
+                        // Nothing here stops the dependant starting, whatever
+                        // the answer is, and that is deliberate on all three
+                        // counts:
+                        //
+                        //   * `after` is an ordering, the way systemd's
+                        //     `After=` is. "Do not start me unless that
+                        //     succeeded" is `Requires=`, which this supervisor
+                        //     does not have and which nothing in init.toml has
+                        //     ever asked for.
+                        //   * a one-shot that failed has usually still done
+                        //     most of its work -- a coldplug that could not
+                        //     probe one device is not a machine with no
+                        //     devices -- so the dependants would nearly always
+                        //     have been fine, and skipping them would take out
+                        //     dbus, cawd, powerd, controlsd, the network and
+                        //     every one of their dependants over one non-zero
+                        //     status from raven-udev.
+                        //   * running out of `ready_timeout` is not a verdict
+                        //     at all. The one-shot is still working; the
+                        //     supervisor has merely stopped waiting, because
+                        //     the alternative is a boot that a slow coldplug
+                        //     can hang forever.
+                        //
+                        // A ready path that never appears is skipped below,
+                        // and that is a different case: the socket the
+                        // dependant is about to connect to does not exist, so
+                        // starting it is starting it into a restart loop.
+                        //
+                        // The failure is not lost by carrying on. It is an
+                        // ERROR in the log from `mark_exited`, "failed (status
+                        // N)" in `raven-rc list`, and the NOTE on the service's
+                        // own row in `raven-rc blame`.
+                        // Zero once the deadline has been spent on this
+                        // one-shot: `wait_until_finished` still reaps it and
+                        // still reports where it got to, it simply does not
+                        // sleep on it a second time.
+                        let already_waited = !oneshots_waited.insert(dependency.clone());
+                        let timeout = if already_waited {
+                            Duration::ZERO
+                        } else {
+                            Duration::from_secs(dep_cfg.ready_timeout as u64)
+                        };
+                        match services
+                            .get_mut(dependency)
+                            .and_then(|dep| dep.wait_until_finished(timeout))
+                        {
+                            Some(OneshotOutcome::Completed) | None => {}
+                            Some(OneshotOutcome::Failed(code)) => {
+                                log::error!(
+                                    "Service {} starting anyway: one-shot {} failed with status {}",
+                                    svc_config.name,
+                                    dependency,
+                                    code
+                                );
+                            }
+                            Some(OneshotOutcome::Running) if already_waited => {
+                                // Said differently from the line below on
+                                // purpose: nothing waited this time, so
+                                // repeating "after 5s" would be a boot
+                                // reporting forty-five seconds it did not
+                                // spend.
+                                log::warn!(
+                                    "Service {} starting anyway: one-shot {} is still running",
+                                    svc_config.name,
+                                    dependency
+                                );
+                            }
+                            Some(OneshotOutcome::Running) => {
+                                log::warn!(
+                                    "Service {} starting anyway: one-shot {} has not finished after {}s",
+                                    svc_config.name,
+                                    dependency,
+                                    dep_cfg.ready_timeout
+                                );
+                            }
+                            Some(OneshotOutcome::Unfinished) => {
+                                log::warn!(
+                                    "Service {} starting anyway: one-shot {} did not finish",
+                                    svc_config.name,
+                                    dependency
+                                );
+                            }
+                        }
+                        continue;
+                    }
+
                     if let Some(path) = dep_cfg.ready_path.as_deref() {
                         // Blocks on an inotify watch rather than on a 50ms
                         // timer. The dependency chain on this machine is four
@@ -1386,6 +1879,75 @@ fn main_loop_at(
     // watch goes on the parent directory and why an event is only ever a
     // wakeup. `None` means no inotify, and the loop keeps the timer it had.
     let mut ready_watch = readiness::Watcher::new();
+
+    // The fourth: the kernel's uevent broadcast, for services that are not
+    // started at boot and wait for a device instead. See demand.rs, and in
+    // particular the section of its module comment explaining that this is
+    // demand-triggered start and NOT socket activation -- no descriptor is
+    // passed to anything and no connection is ever held open.
+    //
+    // Not opened in user mode: the socket needs CAP_NET_ADMIN, a session
+    // supervisor has none, and trying would print a warning about a
+    // capability nobody expected it to have.
+    let mut demand_watch = if paths.machine {
+        demand::Monitor::open()
+    } else {
+        None
+    };
+
+    // What is demand-started and what will start it, said once, at the one
+    // moment somebody reading a boot log is looking for a service that is not
+    // there. Before the walk below, so the explanation precedes the actions.
+    //
+    // Said in user mode too, and deliberately: a session service kept out of
+    // the boot by a `[services.demand]` block is kept out of it whether or not
+    // anything is watching, so the one place that says what will bring it back
+    // has to speak in both modes. What differs is the answer, which is what
+    // `Watching` carries.
+    demand::report_configuration(
+        config,
+        match (paths.machine, demand_watch.is_some()) {
+            (true, true) => demand::Watching::Devices,
+            (true, false) => demand::Watching::Nothing,
+            (false, _) => demand::Watching::NotInThisMode,
+        },
+    );
+
+    // The devices that were already plugged in when nobody was listening.
+    //
+    // This runs after the socket above is open, never before, and the
+    // ordering is the same one readiness.rs argues at length for its watches:
+    // a device that appears between a look and the arming of the thing that
+    // would have noticed it is a device nothing ever notices. Opening first
+    // and looking second means the worst case is seeing a device twice, which
+    // costs one "is already running" and nothing else.
+    if paths.machine {
+        let wanted = demand::already_present(config);
+        start_on_demand(&wanted, services, config);
+    }
+
+    // Log rotation, read once here rather than per sweep.
+    //
+    // `[system]` is read where it is needed and not re-applied on a `raven-rc
+    // reload` -- reload reloads service definitions, which is the property
+    // that makes it safe to run on a live machine -- so a changed log knob
+    // takes effect at the next boot or `raven-rc reexec`, exactly like a
+    // changed hostname. Reading it once also means an unreadable value is
+    // complained about once, here, instead of once a minute forever.
+    let (log_policy, log_policy_report) = logrotate::Policy::from_system(&config.system);
+    for line in &log_policy_report.trouble {
+        log::warn!("{}", line);
+    }
+    let mut log_sweep = logrotate::Schedule::due_now();
+    // Both live in the same directory in both modes: /var/log/raven for the
+    // machine, and $XDG_STATE_HOME/raven/log for a session, where `run_user`
+    // sets $RAVEN_SERVICE_LOG_DIR before opening init.log beside the services'
+    // logs. Asking `Service::log_dir` is therefore the one question that
+    // answers both, and a session supervisor's logs are rotated by the same
+    // sweep under the same policy.
+    let log_dir = Service::log_dir();
+    let init_log = log_dir.join("init.log");
+
     // How long to sleep with nothing pending. Bounded so a wake that was
     // missed (a signal before the handler was installed, a client that raced
     // the poll) costs at most this, and so the command-file fallback and the
@@ -1411,6 +1973,15 @@ fn main_loop_at(
 
         // Check service status and restart if needed
         check_services(services, config);
+
+        // Keep /var/log/raven from growing without bound. On the timer rather
+        // than on every write: a size check per line written would be a stat
+        // per line, and the supervisor does not see the writes in any case --
+        // the services write to fds it handed over and has not looked at
+        // since. Placed after `reap_zombies` so that a service which has just
+        // died has already been reaped, and its log is a file with no writer
+        // by the time the sweep reaches it.
+        maintain_logs(&mut log_sweep, &log_policy, &log_dir, &init_log);
 
         // Arm a watch on the parent directory of every ready path still being
         // waited for, and drop the ones nothing waits on any more. This runs
@@ -1441,15 +2012,28 @@ fn main_loop_at(
         // SIGCHLD pipe is what makes IDLE safe: without it nothing wakes this
         // loop when a child dies, so a machine that could not set it up keeps
         // the short timer it had before there was anything to poll at all.
-        let wait = if child_wake.is_none() || control::wants_quick_tick(services, readiness_watched)
+        let mut wait = if child_wake.is_none()
+            || control::wants_quick_tick(services, readiness_watched)
         {
             BUSY
         } else {
             IDLE
         };
+        // A pending restart is a deadline, not a reason to look often. Waking
+        // on the deadline keeps the restart as punctual as the old 100ms tick
+        // made it while a service waiting out the sixty-second backoff sleeps
+        // through its own wait instead of holding the loop at ten wakes a
+        // second for the whole of it. Floored at BUSY so that a deadline
+        // already in the past -- between falling due and `check_services`
+        // acting on it, or one left behind by a `stop` issued while a restart
+        // was pending -- asks for the tick it always had rather than a
+        // zero-length poll.
+        if let Some(until) = control::next_retry_in(services, Instant::now()) {
+            wait = wait.min(until.max(BUSY));
+        }
         {
             use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-            let mut fds = Vec::with_capacity(3);
+            let mut fds = Vec::with_capacity(4);
             if let Some(pipe) = &child_wake {
                 fds.push(PollFd::new(pipe.as_fd(), PollFlags::POLLIN));
             }
@@ -1459,14 +2043,26 @@ fn main_loop_at(
             if let Some(watcher) = &ready_watch {
                 fds.push(PollFd::new(watcher.as_fd(), PollFlags::POLLIN));
             }
+            // A printer being plugged in wakes the loop here rather than
+            // being found by a sweep, which is what makes a demand-started
+            // service start within a few milliseconds of its trigger instead
+            // of within the loop's two-second idle sleep.
+            if let Some(monitor) = &demand_watch {
+                fds.push(PollFd::new(monitor.as_fd(), PollFlags::POLLIN));
+            }
             if fds.is_empty() {
                 // No pipe, no socket, no inotify: nothing to wait on but the
                 // clock. This is the degraded path the SIGCHLD warning above
                 // describes, and it is why BUSY still exists.
                 std::thread::sleep(BUSY);
             } else {
-                let timeout =
-                    PollTimeout::try_from(wait.as_millis() as u16).unwrap_or(PollTimeout::MAX);
+                // Clamped in milliseconds before the cast, not after. `as
+                // u16` on its own wraps, so a wait longer than 65.5 seconds
+                // would come out as a short one and the loop would spin at
+                // whatever the remainder happened to be.
+                let timeout = PollTimeout::from(
+                    u16::try_from(wait.as_millis()).unwrap_or(u16::MAX),
+                );
                 match poll(&mut fds, timeout) {
                     Ok(_) | Err(nix::errno::Errno::EINTR) => {}
                     Err(e) => log::warn!("poll: {e}"),
@@ -1508,12 +2104,43 @@ fn main_loop_at(
                         log::error!("Suspend failed: {:#}", e);
                     }
                 }
+                // Inline for the same reason, and the error path matters more
+                // here than it does above: `power::hibernate` refuses a
+                // machine with no resume device rather than writing an image
+                // nothing will read, and this is where that refusal has to be
+                // said out loud. The reply has already gone out, so the log is
+                // the only place left to say it.
+                control::Action::Hibernate => {
+                    if let Err(e) = power::hibernate() {
+                        log::error!("Hibernate failed: {:#}", e);
+                    }
+                }
                 // Not inline: the listener has to be gone before the exec so
                 // the new image can bind the socket, and it is this
                 // function's local. Returning drops it.
                 control::Action::Reexec => {
                     REEXEC_REQUESTED.store(true, Ordering::SeqCst);
                 }
+            }
+        }
+
+        // Demand-triggered start. Read unconditionally rather than only when
+        // the poll named this fd, for the same reason the readiness watch is
+        // drained unconditionally: a netlink socket with an unread message
+        // stays readable, so a pass that skipped the read would make every
+        // subsequent poll return at once, forever.
+        //
+        // After `control::poll` on purpose. Starting a service can hold this
+        // thread for as long as its dependencies take to become ready --
+        // `ready_timeout`, five seconds by default, per dependency -- and a
+        // raven-rc client that is already waiting on the socket should not be
+        // behind a printer. It is the same bound `raven-rc start` has always
+        // had on this thread; it is new only in that a device can now reach
+        // it without anybody typing anything.
+        if let Some(monitor) = demand_watch.as_mut() {
+            let wanted = monitor.drain(config);
+            if !wanted.is_empty() {
+                start_on_demand(&wanted, services, config);
             }
         }
 
@@ -1536,6 +2163,41 @@ fn main_loop_at(
         // which is worth having when the socket is what is broken.
         if paths.machine {
             check_command_file()?;
+        }
+    }
+}
+
+/// Start the services a trigger has asked for, and say so.
+///
+/// The starting goes through `control::start_service` -- the same function
+/// `raven-rc start` reaches -- and that is the entire reason this is three
+/// lines rather than a fork and an exec. `after` ordering, the wait on a
+/// dependency's ready path, the wait for a one-shot dependency to finish, the
+/// fallback that reads a definition for a service that is not in the running
+/// set, and the diagnostics that name /etc/raven/init.d and tell an operator
+/// to run `raven-rc reload`: all of it already exists, and a second start path
+/// written for hotplug would be a second answer to "what does starting a
+/// service mean", differing from the first in ways nobody would find until a
+/// printer was plugged into a machine whose dbus had not come up.
+///
+/// The reply is a string meant for a person at a terminal, so it is logged a
+/// line at a time. An `error:` line is a warning, because it means a device
+/// was plugged in and the daemon for it did not start -- somebody is standing
+/// at the machine wondering why nothing happened, and the console is where
+/// they will look.
+fn start_on_demand(
+    wanted: &[String],
+    services: &mut HashMap<String, Service>,
+    config: &InitConfig,
+) {
+    for name in demand::filter_startable(wanted, services, config) {
+        let reply = control::start_service(&name, services, config);
+        for line in reply.lines().filter(|l| !l.trim().is_empty()) {
+            if line.starts_with("error:") || line.starts_with("warning:") {
+                log::warn!("On-demand start of {}: {}", name, line);
+            } else {
+                log::info!("On-demand start of {}: {}", name, line);
+            }
         }
     }
 }
@@ -1639,6 +2301,17 @@ fn check_command_file() -> Result<()> {
                     fs::remove_file(cmd_path).ok();
                     if let Err(e) = power::suspend() {
                         log::error!("Suspend failed: {:#}", e);
+                    }
+                    return Ok(());
+                }
+                "hibernate" => {
+                    // Removed first for the same reason, and it matters more:
+                    // a hibernation that came back would otherwise find the
+                    // word still there and hibernate again, which on a machine
+                    // whose resume works is an unbreakable loop.
+                    fs::remove_file(cmd_path).ok();
+                    if let Err(e) = power::hibernate() {
+                        log::error!("Hibernate failed: {:#}", e);
                     }
                     return Ok(());
                 }
@@ -1989,6 +2662,49 @@ mod tests {
         );
     }
 
+    /// The two filesystems mounted so the kernel can be interrogated have to
+    /// stay root-only and have to survive shutdown's unmount sweep.
+    ///
+    /// There is no way to test the mount itself: securityfs and debugfs are
+    /// not FS_USERNS_MOUNT, so not even a user namespace lets this suite mount
+    /// one, and PID 1's own mount namespace is the machine's. What can be
+    /// pinned down is the part that is a decision rather than a syscall --
+    /// that debugfs is never handed out world-readable, and that neither entry
+    /// is missing from the do-not-unmount list, which would have shutdown
+    /// trying to remount a kernel filesystem read-only.
+    #[test]
+    fn the_introspection_filesystems_are_root_only_and_never_unmounted() {
+        let types: Vec<&str> = INTROSPECTION_FILESYSTEMS
+            .iter()
+            .map(|(fstype, _, _)| *fstype)
+            .collect();
+        assert!(
+            types.contains(&"securityfs"),
+            "without securityfs there is no way to read which LSMs are active"
+        );
+        assert!(
+            types.contains(&"debugfs"),
+            "without debugfs the scheduler's runtime switches are unreachable"
+        );
+
+        for (fstype, target, data) in INTROSPECTION_FILESYSTEMS {
+            assert!(
+                VIRTUAL_FSTYPES.contains(fstype),
+                "{fstype} is not in VIRTUAL_FSTYPES, so shutdown would try to remount it"
+            );
+            assert!(
+                target.starts_with("/sys/kernel/"),
+                "{target} is not where the kernel's own trees live"
+            );
+            if *fstype == "debugfs" {
+                assert_eq!(
+                    *data, "mode=0700",
+                    "debugfs must not be reachable by anyone but root"
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_root_is_remounted_last() {
         // `/` must come last. Remounting it read-only while a real filesystem
@@ -2106,5 +2822,262 @@ mod builtin_module_options_tests {
         let value =
             fs::read_to_string(sys_module.join("rtw88_pci/parameters/disable_aspm")).expect("read");
         assert_eq!(value, "1");
+    }
+}
+
+#[cfg(test)]
+mod complaint_latch_tests {
+    use super::*;
+
+    /// The flood the latch exists to stop, in the form it actually arrives in.
+    ///
+    /// Comparing each complaint against the single previous one suppressed
+    /// nothing in practice, for two independent reasons that are both
+    /// permanent states rather than transients. A directory over its total cap
+    /// reports the live byte count, which moves every time a service writes a
+    /// line, so no two sweeps ever produced the same string; and a sweep that
+    /// finds two faults leaves the *second* one remembered, so on the next
+    /// sweep the first differs from it and both warn again. Either way a WARN
+    /// reached the console every sixty seconds for the life of the machine --
+    /// printed over whoever was logging in on tty1, which is the thing the
+    /// doc comment above says must not happen.
+    #[test]
+    fn a_complaint_whose_numbers_move_is_still_the_same_complaint() {
+        let mut latch = ComplaintLatch::new();
+
+        assert!(latch.admit("/var/log/raven is 201.4M, over the 200M cap"));
+        assert!(
+            !latch.admit("/var/log/raven is 201.5M, over the 200M cap"),
+            "a cap overshoot that grew by a hundred kilobytes is the same \
+             permanent condition, said once"
+        );
+        assert!(!latch.admit("/var/log/raven is 214.0M, over the 200M cap"));
+    }
+
+    #[test]
+    fn two_faults_in_one_sweep_are_each_said_once() {
+        let mut latch = ComplaintLatch::new();
+        let sweep = [
+            "cannot rotate dbus.log: Read-only file system",
+            "cannot rotate cawd.log: Read-only file system",
+        ];
+
+        for line in sweep {
+            assert!(latch.admit(line), "the first sweep says both");
+        }
+        for line in sweep {
+            assert!(
+                !latch.admit(line),
+                "and no later sweep says either of them again"
+            );
+        }
+
+        // A genuinely new fault still reaches the console.
+        assert!(latch.admit("cannot prune dbus.log.3: Read-only file system"));
+    }
+
+    /// The memory is bounded, because the input is filenames and this is PID 1.
+    #[test]
+    fn the_latch_remembers_a_bounded_number_of_complaints() {
+        let mut latch = ComplaintLatch::new();
+        for n in 0..COMPLAINTS_REMEMBERED {
+            // Distinct in letters, not in digits, since digits are what the
+            // key collapses.
+            assert!(latch.admit(&format!("cannot rotate {}.log", "x".repeat(n + 1))));
+        }
+        assert_eq!(latch.said.len(), COMPLAINTS_REMEMBERED);
+
+        assert!(latch.admit("cannot rotate newcomer.log"));
+        assert_eq!(
+            latch.said.len(),
+            COMPLAINTS_REMEMBERED,
+            "the oldest is dropped rather than the set growing"
+        );
+        assert!(
+            !latch.admit("cannot rotate newcomer.log"),
+            "and what is still remembered is what is still arriving"
+        );
+    }
+}
+
+#[cfg(test)]
+mod reexec_start_filter_tests {
+    use super::*;
+    use crate::service::ServiceSnapshot;
+
+    /// What a hand-off says about a service that is not running: a definition,
+    /// no pid, and the times of the run it did have.
+    fn snapshot_of(config: &ServiceConfig, ran: bool) -> ServiceSnapshot {
+        let mono = timeline::instant_secs(Instant::now());
+        ServiceSnapshot {
+            config: config.clone(),
+            pid: None,
+            started_mono: ran.then_some(mono),
+            ready_mono: ran.then_some(mono),
+            first_started_mono: ran.then_some(mono),
+            first_ready_mono: ran.then_some(mono),
+            ..ServiceSnapshot::default()
+        }
+    }
+
+    fn oneshot(name: &str) -> ServiceConfig {
+        ServiceConfig {
+            name: name.to_string(),
+            exec: "/bin/true".to_string(),
+            service_type: ServiceType::Oneshot,
+            ..ServiceConfig::default()
+        }
+    }
+
+    /// The defect: `raven-rc reexec` re-ran every one-shot that had already
+    /// completed, because a finished one-shot and one that never started are
+    /// both `Stopped` after `adopt`.
+    #[test]
+    fn a_completed_one_shot_is_not_re_run_by_a_re_exec() {
+        let cfg = oneshot("udev");
+        let svc = Service::adopt(snapshot_of(&cfg, true), cfg.clone());
+
+        // The state the filter used to look at, and why it was not enough.
+        assert_eq!(svc.state(), ServiceState::Stopped);
+        assert_eq!(svc.oneshot_outcome(), Some(OneshotOutcome::Completed));
+
+        assert!(
+            !wants_start_after_reexec(&cfg, Some(&svc)),
+            "a coldplug that already ran this boot must not run again"
+        );
+    }
+
+    /// And the three things the same filter must keep doing.
+    #[test]
+    fn a_re_exec_still_starts_what_never_had_its_turn() {
+        // A definition the previous supervisor did not have at all.
+        let added = oneshot("console-font");
+        assert!(wants_start_after_reexec(&added, None));
+
+        // A one-shot the previous supervisor knew and never started -- it was
+        // added by a reload, or its dependency was unavailable.
+        let never = Service::adopt(snapshot_of(&added, false), added.clone());
+        assert!(
+            wants_start_after_reexec(&added, Some(&never)),
+            "a one-shot with no run behind it still has one coming"
+        );
+
+        // A daemon waiting out its restart backoff when the re-exec landed.
+        let daemon = ServiceConfig {
+            name: "cawd".to_string(),
+            exec: "/bin/true".to_string(),
+            restart: true,
+            ..ServiceConfig::default()
+        };
+        let waiting = Service::adopt(snapshot_of(&daemon, true), daemon.clone());
+        assert!(
+            wants_start_after_reexec(&daemon, Some(&waiting)),
+            "a restartable daemon that is down is still brought back"
+        );
+
+        // The same service with `restart = false`, which asked not to be.
+        let once = ServiceConfig {
+            restart: false,
+            ..daemon.clone()
+        };
+        let stopped = Service::adopt(snapshot_of(&once, true), once.clone());
+        assert!(!wants_start_after_reexec(&once, Some(&stopped)));
+    }
+}
+
+#[cfg(test)]
+mod oneshot_wait_tests {
+    use super::*;
+
+    /// A one-shot that never finishes costs its `ready_timeout` once, not once
+    /// per service ordered after it.
+    ///
+    /// The wait lives inside the loop over one service's `after` list, so it
+    /// was re-entered with a fresh deadline for every dependant. init.toml has
+    /// nine enabled services with `after = ["udev"]` and udev takes the
+    /// default five-second timeout, so a coldplug wedged on a device probe
+    /// spent forty-five seconds asleep in PID 1's only thread and printed nine
+    /// warnings that all said "after 5s" -- a boot that reads as hung, for a
+    /// dependency the supervisor had already decided to stop waiting for.
+    ///
+    /// Real processes rather than a mock, because what is being measured is
+    /// wall-clock time spent inside `start_services` itself.
+    #[test]
+    fn a_hung_one_shot_is_waited_for_once_not_once_per_dependant() {
+        let root = std::env::temp_dir().join(format!("raven-oneshot-wait-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp root");
+        // A directory that is not a cgroup2 tree, and a log directory of this
+        // test's own: nothing here may reach the machine's /sys or /var.
+        std::env::set_var("RAVEN_CGROUP_ROOT", root.join("not-a-cgroup2-tree"));
+        std::env::set_var("RAVEN_SERVICE_LOG_DIR", &root);
+
+        let hang = ServiceConfig {
+            name: "coldplug".to_string(),
+            exec: "/bin/sleep".to_string(),
+            args: vec!["30".to_string()],
+            service_type: ServiceType::Oneshot,
+            // The smallest the field can express, so the test costs one second
+            // rather than five.
+            ready_timeout: 1,
+            ..ServiceConfig::default()
+        };
+        let dependants: Vec<ServiceConfig> = ["dbus", "powerd", "network"]
+            .iter()
+            .map(|name| ServiceConfig {
+                name: name.to_string(),
+                exec: "/bin/sleep".to_string(),
+                args: vec!["30".to_string()],
+                after: vec!["coldplug".to_string()],
+                ..ServiceConfig::default()
+            })
+            .collect();
+
+        let mut services = vec![hang];
+        services.extend(dependants);
+        let config = InitConfig {
+            services,
+            ..InitConfig::default()
+        };
+
+        let started_at = Instant::now();
+        let started = start_services(&config).expect("nothing here is critical");
+        let spent = started_at.elapsed();
+
+        // Kill and reap before asserting. A test that fails with four sleeps
+        // still holding cargo's stdout pipe open hangs the harness instead of
+        // reporting the failure.
+        let mut names: Vec<&String> = started.keys().collect();
+        names.sort();
+        let names: Vec<String> = names.into_iter().cloned().collect();
+        for name in &names {
+            if let Some(pid) = started[name].pid() {
+                unsafe {
+                    libc::kill(pid.as_raw(), libc::SIGKILL);
+                    let mut status = 0;
+                    libc::waitpid(pid.as_raw(), &mut status, 0);
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(
+            names,
+            vec![
+                "coldplug".to_string(),
+                "dbus".to_string(),
+                "network".to_string(),
+                "powerd".to_string()
+            ],
+            "every service still starts; the wait is an ordering, not a gate"
+        );
+        assert!(
+            spent >= Duration::from_millis(900),
+            "the first dependant must still wait the one-shot out: {spent:?}"
+        );
+        assert!(
+            spent < Duration::from_millis(2500),
+            "the other two must not each pay for it again: {spent:?}"
+        );
     }
 }

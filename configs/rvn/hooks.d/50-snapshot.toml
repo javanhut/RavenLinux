@@ -1,0 +1,79 @@
+# Take a snapshot of the root subvolume before rvn changes anything.
+#
+# Installed at /usr/share/rvn/hooks.d/50-snapshot.toml.
+#
+# WHY /usr/share AND NOT /etc, since /etc/rvn/hooks.d is the path most of the
+# discussion of this feature names. rvn reads both -- usr/share first, then
+# etc, and a file in etc replaces a shipped file of the same name. The two
+# directories mean different things: usr/share is what a component of the
+# system ships, etc is what this machine's administrator decided. This hook is
+# Raven shipping a default, so it belongs in the first, and putting it in the
+# second would cost the two things that split exists to buy:
+#
+#   - Switching it off. An empty /etc/rvn/hooks.d/50-snapshot.toml replaces
+#     this file with nothing, which is rvn's documented way to turn a shipped
+#     hook off. That only works if the shipped one is somewhere else.
+#   - Changing it. Copy this file to /etc/rvn/hooks.d/50-snapshot.toml, edit
+#     the copy, and upgrades stop arguing with you about it -- the shipped
+#     file is replaced on upgrade, your copy is not, and rvn's .pacnew
+#     machinery never has to get involved at all.
+#
+# WHAT THIS IS FOR. rvn cannot undo an install: a file the payload overwrites
+# is gone the moment it is written and nothing keeps a copy. So the moment
+# before the first byte is written is the only moment at which an upgrade can
+# still be taken back, and a pre-transaction hook is that moment -- it runs
+# after the plan has been approved and before anything is even fetched.
+#
+# On a machine with no btrfs -- which is most of them, because RavenLinux
+# installs ext4 unless asked otherwise -- raven-snapshot says "no snapshots
+# available" and exits 0. See abort_on_fail below.
+
+[trigger]
+when = "pre-transaction"
+
+# `operations` is deliberately absent, which means install, remove and update.
+# A snapshot hook wants all three: an upgrade that breaks the machine is the
+# obvious case, but `rvn remove` taking a library something else needed is the
+# same accident with a different verb.
+#
+# `packages` and `paths` are absent for a sharper reason than tidiness. A
+# pre-transaction hook's `paths` are matched against what the transaction's
+# packages own *now*, so a package being installed for the first time has an
+# empty file list and matches nothing -- a `paths = ["usr/**"]` here would
+# silently skip exactly the transactions that add new software to the system.
+# There is no filter that is right for a snapshot anyway: the transaction that
+# breaks a machine is never the one anybody expected to.
+
+[run]
+description = "snapshotting the root subvolume"
+exec = "/usr/bin/raven-snapshot"
+
+# --tag rvn is what ends up in the snapshot's name and in the boot menu, so
+# that a snapshot rvn took before an upgrade is distinguishable at a glance
+# from one somebody took by hand. raven-snapshot reads RVN_HOOK_ROOT and
+# RVN_HOOK_OPERATIONS out of the environment rvn provides: the first so that
+# `rvn --root /mnt install` snapshots the system being installed into rather
+# than the one doing the installing, the second so the snapshot records what
+# the transaction was about to do.
+#
+# It prunes by itself after a successful snapshot -- keeping five plus
+# anything pinned -- so there is nothing else to schedule and no second hook.
+args = ["create", "--tag", "rvn"]
+
+# FALSE, AND THIS IS THE MOST IMPORTANT LINE IN THE FILE.
+#
+# `true` is the tempting answer and it is the wrong one here. It would mean
+# "no snapshot, no upgrade", which reads as admirably strict until you notice
+# what it does to the machines that cannot snapshot at all: every ext4
+# install, every machine without btrfs-progs, every live image. On those, a
+# hook that aborts is a package manager that has stopped working, and the
+# error explaining why is about a filesystem feature the person never asked
+# for. A package manager must keep installing packages.
+#
+# raven-snapshot is built so that this is belt and braces rather than the only
+# guard -- it exits 0 on a machine that cannot snapshot, so the hook does not
+# fail there in the first place, and it fails only when this machine really
+# can snapshot and really did not. Even then a warning is the right answer: it
+# names the file, it is visible, and the person can decide. What it must not
+# do is stand between somebody and a security update.
+abort_on_fail = false

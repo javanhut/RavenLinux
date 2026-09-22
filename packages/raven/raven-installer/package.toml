@@ -1,0 +1,102 @@
+# The installer: the program that puts RavenLinux on a disk, and the two that
+# finish the job afterwards.
+#
+# One package for the three, unlike the shell tools in configs/, and for the
+# opposite reason. These are not three tools that happen to sit together --
+# raven-install writes /etc/raven/install-profile and promises that "the
+# installed system runs raven-postinstall once it has networking", and
+# raven-desktopinstall rebuilds the caches raven-postinstall's package set
+# needs. The promise is the coupling: an installed system carrying a profile
+# name and no program that reads it is a system waiting for something that will
+# never happen.
+#
+# They go into the squashfs rather than onto the ISO beside it, so the same
+# copy is on the live image and on every system installed from it. Installing
+# from an already-installed machine onto a second disk is then the same code
+# path and not a second one.
+[package]
+name = "raven-installer"
+version = "2026.08"
+description = "RavenLinux installer - the disk installer, its post-install package run, and the desktop cache rebuild"
+license = "MIT"
+homepage = "https://github.com/javanhut/RavenLinux"
+repository = "https://github.com/javanhut/RavenLinux"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "installer", "base"]
+# Shell throughout, so nothing here is architecture-specific. What it installs
+# is; this is the program that does the installing.
+arch = "any"
+
+[source]
+type = "local"
+url = "https://github.com/javanhut/RavenLinux.git"
+
+[build]
+system = "none"
+
+[dependencies]
+# bash, because raven-install is `#!/bin/bash` and uses arrays throughout; the
+# other two are `#!/bin/sh` and would run under anything. rvn, because the
+# whole of raven-postinstall is "wait for a default route, then install the
+# profile with rvn".
+#
+# The disk tools -- sfdisk, mkfs.ext4, mkfs.fat -- are deliberately not listed.
+# They come from util-linux, e2fsprogs and dosfstools, and on the live image
+# every one of them is a file stage2 copied off the build container rather than
+# a package, so declaring them would make the installer uninstallable on the
+# only medium it runs from. That is the same gap raven-dhcp's manifest names,
+# and it closes the same way: by packaging the base layer.
+runtime = ["bash", "rvn"]
+build = []
+
+[install]
+files = [
+    { src = "scripts/installer/raven-install",        dest = "/usr/bin/raven-install",        mode = 755 },
+    { src = "scripts/installer/raven-postinstall",    dest = "/usr/bin/raven-postinstall",    mode = 755 },
+    # The one of the three worth running on a machine that has been up for
+    # months: the toolkit caches it rebuilds are derived state, nothing on this
+    # image rebuilds them on a package upgrade, and "the GTK application
+    # suddenly aborts on startup" is a thing that happens to working systems.
+    { src = "scripts/installer/raven-desktopinstall", dest = "/usr/bin/raven-desktopinstall", mode = 755 },
+    # What raven-install offers and raven-postinstall later installs. They are
+    # in this package because the profile names in raven-install and the file
+    # names here are the same three strings, and a profile the installer offers
+    # with no file behind it is an install that stops at the package step.
+    { src = "configs/installer/profiles/minimal.packages",   dest = "/etc/raven/install-profiles/minimal.packages",   mode = 644 },
+    { src = "configs/installer/profiles/desktop.packages",   dest = "/etc/raven/install-profiles/desktop.packages",   mode = 644 },
+    { src = "configs/installer/profiles/developer.packages", dest = "/etc/raven/install-profiles/developer.packages", mode = 644 },
+    # The drop-in that runs raven-postinstall once the installed system has a
+    # route. It ships disabled -- raven-install enables it in the system it
+    # installs, and nothing else should -- and it names /usr/bin/raven-
+    # postinstall, which is why it belongs to this package.
+    { src = "configs/raven/services/postinstall.toml", dest = "/usr/share/raven/services/postinstall.toml", mode = 644 },
+]
+
+# No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS
+# /usr/bin: a link at /bin/<name> whose target is /usr/bin/<name> names the
+# same path on both sides, and creating it replaces the real binary with a
+# symlink to itself. Anything installed to /usr/bin is already reachable at
+# /bin/<name> through the merge link -- see scripts/lib/usrmerge.sh.
+#
+# The old /sbin/raven-install link is exactly the failure that rule describes.
+# It existed because /sbin was on root's PATH and /usr/sbin was not always;
+# after the merge it unlinked the installer and left a dangler, and the ISO
+# shipped with no way to install itself.
+symlinks = []
+
+# What this manifest does NOT describe:
+#
+#   - /etc/sudoers.d/, the drop-in that lets the live session's placeholder
+#     account run the installer without a password. It is written by stage4's
+#     install_live_installer_sudoers and removed at install time, so it belongs
+#     to the live medium rather than to any package -- a rule of that shape
+#     surviving onto an installed disk is exactly what nobody wants.
+#   - /etc/raven/install-profile, the single line raven-install writes to
+#     record which profile was chosen. It is state the installer produces, not
+#     a file it ships.
+#   - raven-installer-ui, the graphical front-end. It is a crate rather than a
+#     script and it has its own manifest at packages/gui/raven-installer-ui.
+#     The two do ship as one version -- see the header of installer-ui/
+#     Cargo.toml -- but one of them needs GTK4 on the build host and the other
+#     needs nothing, and an image that could not build the toolkit still has to
+#     be able to install itself.

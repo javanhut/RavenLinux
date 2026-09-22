@@ -1,5 +1,10 @@
 [package]
 name = "poxy"
+# The upstream version only, and the base a build appends a revision to. This
+# component is cloned from its own repository and tracks that repository's
+# default branch unless RAVEN_USE_MANIFEST_PINS=1, so the package carries
+# +r<committer date>.g<commit> for the checkout that was actually compiled --
+# raven_component_version in scripts/lib/components.sh composes it.
 version = "0.1.0"
 description = "Poxy - universal package manager"
 license = "MIT"
@@ -7,6 +12,11 @@ homepage = "https://github.com/javanhut/Poxy"
 repository = "https://github.com/javanhut/Poxy"
 maintainers = ["RavenLinux Team"]
 categories = ["raven", "package-management"]
+# Stated rather than derived. rvn takes the architecture from [build]
+# target when [package] does not say, which is right for a Rust triple
+# and wrong for a Go package path -- `./cmd` would become the
+# architecture and land in the package filename.
+arch = "x86_64"
 
 [source]
 type = "git"

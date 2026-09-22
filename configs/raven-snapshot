@@ -1,0 +1,796 @@
+#!/bin/sh
+# =============================================================================
+# raven-snapshot -- take, keep and boot into snapshots of the root subvolume
+# =============================================================================
+#
+# Ships at /usr/bin/raven-snapshot. Called by hand, and called by rvn before
+# every system transaction through /usr/share/rvn/hooks.d/50-snapshot.toml.
+#
+# WHAT THIS IS FOR. rvn cannot undo an install. A file the payload overwrites
+# is gone the moment it is written and nothing keeps a copy -- the package
+# manager's own extract module says so in as many words -- so the only honest
+# answer to "that upgrade broke my machine" is a copy of the system taken
+# before the upgrade started. On btrfs that copy is nearly free: a snapshot
+# shares every block with the original and costs only what diverges
+# afterwards. This takes one, keeps a handful, throws the rest away, and puts
+# the ones it kept in the boot menu so that a machine which no longer starts
+# can be started anyway.
+#
+# WHAT IT IS NOT. It is not a backup. Every snapshot is on the same
+# filesystem, on the same disk, inside the same LUKS container as the thing it
+# is a copy of. A failing disk takes all of them with it. It is also not a
+# rollback tool: it can boot you into yesterday's system, which is enough to
+# get a shell and fix the thing that broke, but making yesterday's system the
+# permanent one is a separate job (see FUTURE at the bottom).
+#
+#   raven-snapshot create [--tag TAG] [--reason TEXT] [--no-prune]
+#   raven-snapshot list [--json]
+#   raven-snapshot delete NAME...
+#   raven-snapshot prune [--keep N]
+#   raven-snapshot pin NAME / unpin NAME
+#   raven-snapshot boot-entries        rewrite the boot menu's snapshot list
+#   raven-snapshot status              can this machine snapshot at all?
+#
+# Global options, before or after the command:
+#   --root DIR   operate on the system installed at DIR rather than on /.
+#                Defaults to $RVN_HOOK_ROOT, which rvn sets for every hook, so
+#                that `rvn --root /mnt install` snapshots the system being
+#                installed into and not the one doing the installing. Getting
+#                that backwards would mean a chroot upgrade silently taking
+#                snapshots of the host on every transaction.
+#   --keep N     how many unpinned snapshots to keep (default 5)
+#   --quiet      only complain
+#
+# THE MACHINE THIS RUNS ON MAY NOT BE ABLE TO SNAPSHOT AT ALL, and that is the
+# ordinary case rather than the exception. RavenLinux installs ext4 by default
+# and btrfs only if it was asked for, so most machines have no subvolumes, no
+# /.snapshots and very possibly no btrfs binary. Every command here answers
+# that situation with "no snapshots available" and exit status 0. Nothing
+# about it is an error, and in particular it must never be reported as one to
+# rvn: a pre-transaction hook that failed is a thing the administrator is
+# meant to look at, and "this machine is ext4" is not.
+#
+# Configuration, all optional, in /etc/raven/snapshot.conf (shell syntax, the
+# same shape as /etc/raven/fstrim.conf):
+#   ENABLED=yes           "no" stops snapshots being taken without unwiring
+#                         the rvn hook -- the hook still runs and still
+#                         succeeds, it just has nothing to do
+#   KEEP=5                unpinned snapshots kept by a prune; pinned ones are
+#                         kept on top of this and do not count towards it
+#   ESP=/boot/efi         where the EFI System Partition is mounted
+#   BOOT_ENTRIES=yes      "no" stops the boot menu being regenerated
+#   SNAPDIR=/.snapshots   where @snapshots is mounted
+#
+# =============================================================================
+
+set -u
+
+# Sorting, globbing and date formatting all have to be stable no matter who
+# started this: the names below are sorted as bytes and parsed as bytes, and a
+# locale that collates differently would quietly reorder which snapshot counts
+# as the newest. rvn's hook environment already sets LANG=C.UTF-8; a person
+# running this from a terminal has whatever they have.
+LC_ALL=C
+export LC_ALL
+
+PROG=raven-snapshot
+
+# --------------------------------------------------------------------------
+# Defaults, then the configuration file, then the command line. In that order
+# on purpose: a --keep typed at a terminal beats the conf, and the conf beats
+# what is written here.
+# --------------------------------------------------------------------------
+ENABLED=yes
+KEEP=5
+ESP=/boot/efi
+BOOT_ENTRIES=yes
+SNAPDIR=/.snapshots
+
+# The install root. rvn hands every hook RVN_HOOK_ROOT; see --root above.
+ROOT="${RVN_HOOK_ROOT:-/}"
+QUIET=0
+
+# How many entries the boot menu will show. This is RavenBoot's number, not
+# ours: bootloader/src/config.rs MAX_SNAPSHOT_ENTRIES. Writing more than it
+# will read would put entries in the file that nobody can select, and the ones
+# it drops are the oldest -- which are the ones at the bottom of a list
+# written newest first, so the loss would at least be the harmless end. Keep
+# the two in step anyway.
+MAX_BOOT_ENTRIES=12
+
+CONF="${RAVEN_SNAPSHOT_CONF:-/etc/raven/snapshot.conf}"
+# shellcheck disable=SC1090 -- the conf is the administrator's, in shell syntax
+[ -r "$CONF" ] && . "$CONF"
+
+say() { [ "$QUIET" -eq 1 ] || printf '%s: %s\n' "$PROG" "$*"; }
+warn() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+
+usage() {
+    sed -n '/^#   raven-snapshot create/,/^# ===/p' "$0" | sed 's/^# \{0,1\}//;/^===/d'
+}
+
+# --------------------------------------------------------------------------
+# Argument parsing
+#
+# Global options are accepted on either side of the command because this is
+# called both by a person (who will type them last) and by a hook file (whose
+# args are fixed in TOML and read best with the command first).
+# --------------------------------------------------------------------------
+COMMAND=""
+TAG=""
+REASON=""
+NO_PRUNE=0
+JSON=0
+TARGETS=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root)     ROOT="${2:-}"; shift 2 || exit 2 ;;
+        --keep)     KEEP="${2:-}"; shift 2 || exit 2 ;;
+        --tag)      TAG="${2:-}"; shift 2 || exit 2 ;;
+        --reason)   REASON="${2:-}"; shift 2 || exit 2 ;;
+        --no-prune) NO_PRUNE=1; shift ;;
+        --json)     JSON=1; shift ;;
+        --quiet|-q) QUIET=1; shift ;;
+        -h|--help)  usage; exit 0 ;;
+        -*)         warn "unknown option $1"; exit 2 ;;
+        *)
+            if [ -z "$COMMAND" ]; then
+                COMMAND="$1"
+            else
+                TARGETS="${TARGETS}${TARGETS:+ }$1"
+            fi
+            shift
+            ;;
+    esac
+done
+
+[ -n "$COMMAND" ] || { usage; exit 2; }
+
+case "$KEEP" in
+    ''|*[!0-9]*) warn "--keep wants a number, not '${KEEP}'"; exit 2 ;;
+esac
+
+# Normalise the root to a path with no trailing slash, so that "$ROOT$SNAPDIR"
+# is "/.snapshots" and not "//.snapshots". Both work, but one of them shows up
+# in the boot menu.
+ROOT="${ROOT%/}"
+
+SNAP_PATH="${ROOT}${SNAPDIR}"
+META_PATH="${SNAP_PATH}/.meta"
+ESP_PATH="${ROOT}${ESP}"
+
+# --------------------------------------------------------------------------
+# Can this machine snapshot?
+#
+# Four things have to be true, and the answer to any of them being false is
+# the same: say so once and stop, successfully. `unsupported` carries the
+# reason so that `status` can print something a person can act on rather than
+# a bare no.
+# --------------------------------------------------------------------------
+unsupported=""
+
+supported() {
+    [ -z "$unsupported" ]
+}
+
+check_support() {
+    unsupported=""
+
+    case "$ENABLED" in
+        [Nn]*|0|false|off)
+            unsupported="disabled by ${CONF}"
+            return 1
+            ;;
+    esac
+
+    command -v btrfs >/dev/null 2>&1 || {
+        unsupported="btrfs-progs is not installed"
+        return 1
+    }
+
+    # The root has to be btrfs. On the live image it is squashfs under an
+    # overlay, on an ordinary install it is usually ext4, and neither can be
+    # snapshotted by anything here.
+    root_fs="$(findmnt -no FSTYPE "${ROOT:-/}" 2>/dev/null || true)"
+    if [ "$root_fs" != "btrfs" ]; then
+        unsupported="${ROOT:-/} is ${root_fs:-not a mount point}, not btrfs"
+        return 1
+    fi
+
+    # And there has to be somewhere to put them. @snapshots is a subvolume of
+    # its own, mounted at /.snapshots, precisely so that a snapshot does not
+    # end up inside the thing being snapshotted -- every snapshot would then
+    # contain all the earlier ones. If it is not mounted, the layout is not
+    # the one raven-install creates and guessing at it would be worse than
+    # declining.
+    if ! findmnt -no TARGET "$SNAP_PATH" >/dev/null 2>&1; then
+        unsupported="${SNAP_PATH} is not a mount point (no @snapshots subvolume)"
+        return 1
+    fi
+
+    # Same filesystem as the root, or a snapshot of the root cannot be written
+    # into it: btrfs snapshots do not cross filesystems.
+    root_src="$(findmnt -no SOURCE "${ROOT:-/}" 2>/dev/null || true)"
+    snap_src="$(findmnt -no SOURCE "$SNAP_PATH" 2>/dev/null || true)"
+    # SOURCE reads as "/dev/sda2[/@]" -- the device plus the subvolume in
+    # brackets. The device is the part before the bracket and is what has to
+    # match; the subvolumes are different by design.
+    if [ "${root_src%%[*}" != "${snap_src%%[*}" ]; then
+        unsupported="${SNAP_PATH} is on a different filesystem from ${ROOT:-/}"
+        return 1
+    fi
+
+    return 0
+}
+
+# The path of a subvolume relative to the top of the filesystem -- "@" for the
+# root, "@snapshots" for the store. `btrfs subvolume show` prints it on its
+# first line, with no leading slash on some versions and one on others.
+#
+# This is read rather than assumed because it is what goes on the kernel
+# command line: rootflags=subvol=<this>/<name>. raven-install always names
+# them @ and @snapshots, but a filesystem that came from somewhere else may
+# not, and a boot entry built on a guess would mount the wrong subvolume --
+# which on btrfs is not an error, it is a successful mount of a directory with
+# no /sbin/init in it, and an initramfs rescue shell.
+subvol_path() {
+    btrfs subvolume show "$1" 2>/dev/null | sed -n '1{s#^[[:space:]]*##;s#^/##;p;q;}'
+}
+
+# Is this path the root of a btrfs subvolume? Every subvolume root has inode
+# 256; nothing else on a btrfs filesystem does. Cheaper than asking btrfs, and
+# it is what keeps `.meta` -- an ordinary directory living beside the
+# snapshots -- out of every listing below.
+is_subvolume() {
+    [ -d "$1" ] && [ "$(stat -c %i "$1" 2>/dev/null || echo 0)" = "256" ]
+}
+
+# Every snapshot, oldest first.
+#
+# No sort: the names start with a fixed-width UTC timestamp, so byte order is
+# chronological, which is the reason they are named that way. Note that this
+# means the ordering survives a machine whose clock jumped, in the sense that
+# it stays consistent with the names -- it is the names that would be wrong.
+snapshots() {
+    for path in "$SNAP_PATH"/*; do
+        [ -e "$path" ] || continue
+        name="${path##*/}"
+        case "$name" in .*) continue ;; esac
+        is_subvolume "$path" || continue
+        printf '%s\n' "$name"
+    done
+}
+
+meta_file() { printf '%s/%s' "$META_PATH" "$1"; }
+
+meta_get() {
+    # meta_get NAME KEY -- prints the value, or nothing.
+    f="$(meta_file "$1")"
+    [ -r "$f" ] || return 0
+    sed -n "s/^$2=//p" "$f" | head -1
+}
+
+is_pinned() {
+    [ "$(meta_get "$1" pinned)" = "1" ]
+}
+
+# --------------------------------------------------------------------------
+# create
+# --------------------------------------------------------------------------
+do_create() {
+    if ! supported; then
+        say "no snapshots available (${unsupported})"
+        return 0
+    fi
+
+    # The tag is what this snapshot is for, and it goes in the name so that a
+    # person reading the boot menu at three in the morning can tell the
+    # snapshot rvn took before an upgrade from the one they took by hand
+    # before editing something. rvn's hook passes --tag rvn.
+    tag="${TAG:-manual}"
+    # Anything that is not a plain word would end up in a subvolume name, in a
+    # boot menu label and on a kernel command line. One character class, one
+    # place, rather than three different escapes later.
+    tag="$(printf '%s' "$tag" | tr -c 'A-Za-z0-9._-' '-')"
+
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    name="${stamp}-${tag}"
+    # Two transactions in the same second is not hypothetical: `rvn install a`
+    # and `rvn install b` from a script do it every time.
+    n=2
+    while [ -e "${SNAP_PATH}/${name}" ]; do
+        name="${stamp}-${tag}-${n}"
+        n=$((n + 1))
+        [ "$n" -gt 99 ] && { warn "cannot find an unused name for a snapshot"; return 1; }
+    done
+
+    # READ-WRITE, and this is the decision in this file most worth arguing
+    # with. A read-only snapshot is the better archive: nothing can change it,
+    # so what it holds is exactly what the system was. But the entry in the
+    # boot menu exists so that a machine which no longer boots can be booted,
+    # and a root filesystem mounted read-only is not a system you can log into
+    # and fix -- raven-init writes to /run, /var and /etc on its way up, and
+    # the initramfs would have to make a writable clone first, which it cannot
+    # do because it has no btrfs binary in it and does not need one for an
+    # ordinary subvolume mount.
+    #
+    # The cost, stated plainly: booting a snapshot modifies it. It stops being
+    # a faithful copy of what the system was the moment you use it. Treat one
+    # you have booted as somewhere to work, not as the archive it was before.
+    if ! btrfs subvolume snapshot "${ROOT:-/}" "${SNAP_PATH}/${name}" >/dev/null 2>&1; then
+        warn "could not snapshot ${ROOT:-/} into ${SNAP_PATH}/${name}"
+        return 1
+    fi
+
+    mkdir -p "$META_PATH" 2>/dev/null || true
+    # The metadata lives beside the snapshot rather than inside it, because
+    # anything written inside is a change to the copy -- and because @snapshots
+    # is outside @, which means this index survives a rollback of the system
+    # while an index kept in /var would be rewound with it.
+    {
+        printf 'created=%s\n' "$stamp"
+        printf 'tag=%s\n' "$tag"
+        printf 'kernel=%s\n' "$(uname -r 2>/dev/null || echo unknown)"
+        printf 'pinned=0\n'
+        [ -n "$REASON" ] && printf 'reason=%s\n' "$REASON"
+        [ -n "${RVN_HOOK_OPERATIONS:-}" ] && printf 'operations=%s\n' "$RVN_HOOK_OPERATIONS"
+        # The two lines above are conditionals, and a false one is the last
+        # thing this group runs on an ordinary hand-taken snapshot. Without
+        # this the group exits non-zero, and the warning below fires on a
+        # metadata file that was written perfectly.
+        :
+    } > "$(meta_file "$name")" 2>/dev/null || warn "snapshot ${name} has no metadata file"
+
+    say "snapshot ${name}"
+
+    # PRUNE HERE, not on a timer, and the reason is worth writing down because
+    # the obvious alternative is to hang this off the same weekly schedule
+    # raven-fstrim uses.
+    #
+    # A timer is the right shape for fstrim: blocks become free continuously,
+    # nothing tells anybody when, and the work is worth doing on a machine
+    # nobody has touched for a week. Snapshots are the opposite. Exactly one
+    # thing creates them -- this function -- so the count can only ever exceed
+    # the limit at the instant a new one is taken, and pruning at that instant
+    # is both exact and free of a schedule to configure, a service to wire up
+    # and a daemon to leave running.
+    #
+    # A weekly prune would also be wrong in both directions: a machine doing
+    # twenty upgrades in an afternoon would hold twenty snapshots for six days
+    # (the disk filling silently is the failure this is meant to prevent), and
+    # a machine that upgrades nothing would wake up weekly to do nothing at
+    # all.
+    #
+    # --no-prune exists for the one case that reasoning does not cover: taking
+    # several snapshots deliberately, by hand, and not wanting the older ones
+    # to fall off the end while you do it.
+    if [ "$NO_PRUNE" -eq 0 ]; then
+        do_prune
+    else
+        update_boot_entries
+    fi
+}
+
+# --------------------------------------------------------------------------
+# prune
+# --------------------------------------------------------------------------
+do_prune() {
+    if ! supported; then
+        say "no snapshots available (${unsupported})"
+        return 0
+    fi
+
+    # Pinned snapshots are exempt AND do not count towards the limit. A pin is
+    # somebody saying "this is the one that works"; making it occupy one of
+    # the five slots would mean the act of protecting a known-good system
+    # quietly reduced how far back the automatic ones reach.
+    unpinned=""
+    count=0
+    for name in $(snapshots); do
+        is_pinned "$name" && continue
+        unpinned="${unpinned}${unpinned:+ }${name}"
+        count=$((count + 1))
+    done
+
+    removed=0
+    excess=$((count - KEEP))
+    if [ "$excess" -gt 0 ]; then
+        # snapshots() is oldest first, so the excess is at the front.
+        i=0
+        for name in $unpinned; do
+            i=$((i + 1))
+            [ "$i" -gt "$excess" ] && break
+            if delete_one "$name"; then
+                removed=$((removed + 1))
+            fi
+        done
+    fi
+
+    if [ "$removed" -gt 0 ]; then
+        say "pruned ${removed} (keeping ${KEEP} plus pinned)"
+    fi
+    update_boot_entries
+}
+
+delete_one() {
+    name="$1"
+    path="${SNAP_PATH}/${name}"
+    if ! is_subvolume "$path"; then
+        warn "${name}: not a snapshot"
+        return 1
+    fi
+    if ! btrfs subvolume delete "$path" >/dev/null 2>&1; then
+        warn "${name}: could not delete"
+        return 1
+    fi
+    rm -f "$(meta_file "$name")" 2>/dev/null || true
+    return 0
+}
+
+do_delete() {
+    if ! supported; then
+        say "no snapshots available (${unsupported})"
+        return 0
+    fi
+    [ -n "$TARGETS" ] || { warn "delete needs at least one snapshot name"; return 2; }
+
+    status=0
+    for name in $TARGETS; do
+        if delete_one "$name"; then
+            say "deleted ${name}"
+        else
+            status=1
+        fi
+    done
+    update_boot_entries
+    return "$status"
+}
+
+# --------------------------------------------------------------------------
+# pin / unpin
+# --------------------------------------------------------------------------
+do_pin() {
+    want="$1"
+    if ! supported; then
+        say "no snapshots available (${unsupported})"
+        return 0
+    fi
+    [ -n "$TARGETS" ] || { warn "pin needs at least one snapshot name"; return 2; }
+
+    status=0
+    for name in $TARGETS; do
+        if ! is_subvolume "${SNAP_PATH}/${name}"; then
+            warn "${name}: not a snapshot"
+            status=1
+            continue
+        fi
+        mkdir -p "$META_PATH" 2>/dev/null || true
+        f="$(meta_file "$name")"
+        [ -e "$f" ] || : > "$f"
+        # Rewrite rather than append: a file with two pinned= lines would be
+        # read by meta_get as whichever came first, which is the old one.
+        tmp="${f}.tmp"
+        { grep -v '^pinned=' "$f" 2>/dev/null; printf 'pinned=%s\n' "$want"; } > "$tmp" \
+            && mv -f "$tmp" "$f" \
+            || { warn "${name}: could not write metadata"; status=1; continue; }
+        if [ "$want" = "1" ]; then
+            say "pinned ${name}"
+        else
+            say "unpinned ${name}"
+        fi
+    done
+    return "$status"
+}
+
+# --------------------------------------------------------------------------
+# list / status
+# --------------------------------------------------------------------------
+do_list() {
+    if ! supported; then
+        if [ "$JSON" -eq 1 ]; then
+            printf '{"available":false,"reason":"%s","snapshots":[]}\n' "$unsupported"
+        else
+            say "no snapshots available (${unsupported})"
+        fi
+        return 0
+    fi
+
+    if [ "$JSON" -eq 1 ]; then
+        printf '{"available":true,"keep":%s,"snapshots":[' "$KEEP"
+        first=1
+        for name in $(snapshots); do
+            [ "$first" -eq 1 ] || printf ','
+            first=0
+            printf '{"name":"%s","tag":"%s","created":"%s","pinned":%s,"reason":"%s"}' \
+                "$name" \
+                "$(meta_get "$name" tag)" \
+                "$(meta_get "$name" created)" \
+                "$(is_pinned "$name" && echo true || echo false)" \
+                "$(meta_get "$name" reason)"
+        done
+        printf ']}\n'
+        return 0
+    fi
+
+    any=0
+    for name in $(snapshots); do
+        any=1
+        pin=' '
+        is_pinned "$name" && pin='*'
+        printf '%s %-34s %-10s %s\n' \
+            "$pin" "$name" "$(meta_get "$name" tag)" "$(meta_get "$name" reason)"
+    done
+    if [ "$any" -eq 0 ]; then
+        say "no snapshots yet"
+    else
+        printf '\n%s: * = pinned (kept regardless of --keep %s)\n' "$PROG" "$KEEP"
+    fi
+}
+
+do_status() {
+    if supported; then
+        n=0
+        for _ in $(snapshots); do n=$((n + 1)); done
+        say "ready: ${n} snapshot(s) in ${SNAP_PATH}, keeping ${KEEP} plus pinned"
+    else
+        say "no snapshots available (${unsupported})"
+    fi
+    return 0
+}
+
+# --------------------------------------------------------------------------
+# The boot menu
+#
+# RavenBoot reads the EFI System Partition and nothing else. It has no btrfs
+# driver and could not have one that mattered -- the ESP is FAT by
+# specification and the root filesystem may be inside a LUKS container that
+# nothing has unlocked yet at that point in the boot. So the list of snapshots
+# cannot be discovered at boot; it has to be written onto the ESP by something
+# running on the system, which is this.
+#
+# It goes in its own file, \EFI\raven\snaps.cfg, and never into boot.cfg.
+# boot.cfg is raven-install's: it carries the root UUID, the LUKS container,
+# the resume device and the console arguments, and it is the file the machine
+# cannot boot without. This one is regenerated every time a snapshot is taken
+# or pruned, which on a machine that updates weekly is weekly. A tool that
+# rewrites the volatile list has no business also rewriting the file that
+# everything depends on, and keeping them apart means a truncated write or a
+# full ESP costs the snapshot menu and nothing else.
+# --------------------------------------------------------------------------
+update_boot_entries() {
+    case "$BOOT_ENTRIES" in
+        [Nn]*|0|false|off) return 0 ;;
+    esac
+    supported || return 0
+
+    esp_dir="${ESP_PATH}/EFI/raven"
+    if [ ! -d "$esp_dir" ]; then
+        # Not an error. The ESP is in the fstab and mounted at /boot/efi on a
+        # running system, but a transaction inside a chroot may not have
+        # mounted it, and a machine booted from the live image to repair
+        # something certainly has not. The snapshot still exists; only the
+        # menu entry is missing, and the next create or prune writes it.
+        say "no ESP at ${ESP_PATH}; boot menu not updated"
+        return 0
+    fi
+
+    base_cmdline=""
+    base_kernel=""
+    base_initrd=""
+    read_base_entry "${esp_dir}/boot.cfg"
+
+    if [ -z "$base_kernel" ]; then
+        say "cannot read a boot entry from ${esp_dir}/boot.cfg; boot menu not updated"
+        return 0
+    fi
+
+    snap_subvol="$(subvol_path "$SNAP_PATH")"
+    if [ -z "$snap_subvol" ]; then
+        say "cannot resolve the subvolume path of ${SNAP_PATH}; boot menu not updated"
+        return 0
+    fi
+
+    out="${esp_dir}/snaps.cfg"
+    tmp="${esp_dir}/snaps.tmp"
+
+    # Newest first: the snapshot somebody wants is nearly always the last one
+    # taken before the thing that broke, and a menu is read from the top.
+    # Capped at what RavenBoot will show (config.rs MAX_SNAPSHOT_ENTRIES);
+    # writing more would be writing entries nobody can select.
+    names=""
+    for name in $(snapshots); do
+        names="${name}${names:+ }${names}"
+    done
+
+    {
+        printf '# RavenBoot snapshot entries -- generated by %s\n' "$PROG"
+        printf '# Rewritten on every snapshot and every prune. Do not edit:\n'
+        printf '# boot.cfg is the file to edit, this one is derived from it.\n'
+        printf '#\n'
+        printf '# Generated %s from %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${esp_dir}/boot.cfg"
+        n=0
+        for name in $names; do
+            n=$((n + 1))
+            [ "$n" -gt "$MAX_BOOT_ENTRIES" ] && break
+            label="$(entry_label "$name")"
+            printf '[entry]\n'
+            printf 'name = "%s"\n' "$label"
+            printf 'kernel = "%s"\n' "$base_kernel"
+            [ -n "$base_initrd" ] && printf 'initrd = "%s"\n' "$base_initrd"
+            printf 'cmdline = "%s"\n' "$(snapshot_cmdline "${snap_subvol}/${name}")"
+            printf 'type = linux-efi\n\n'
+        done
+    } > "$tmp" 2>/dev/null || {
+        warn "could not write ${tmp}"
+        rm -f "$tmp" 2>/dev/null
+        return 0
+    }
+
+    # Replace in one step. A half-written snaps.cfg is a menu full of
+    # truncated entries, and RavenBoot parses what it finds rather than
+    # refusing: the rename means it sees either the old list or the new one.
+    if ! mv -f "$tmp" "$out" 2>/dev/null; then
+        warn "could not replace ${out}"
+        rm -f "$tmp" 2>/dev/null
+        return 0
+    fi
+
+    # FAT has no journal and firmware reads the ESP without asking this kernel
+    # anything, so what matters is that the bytes are on the disk before the
+    # reboot -- which may be the next thing that happens after an upgrade.
+    sync -f "$out" 2>/dev/null || sync 2>/dev/null || true
+    return 0
+}
+
+# The first bootable Linux entry in boot.cfg, which is what every snapshot
+# entry is a variant of.
+#
+# Copying it rather than composing a command line from scratch is the whole
+# trick. That line already carries root=UUID=, cryptdevice=, the console
+# arguments, and the reboot=pci that some Dell firmware needs -- things this
+# script has no way to work out and no business guessing at. Change one of
+# them in boot.cfg and the snapshot entries follow on the next snapshot.
+#
+# The fixed entries raven-install writes for the firmware setup, reboot and
+# shutdown carry a placeholder in `kernel` and a `type` of their own; the type
+# check below is what skips them. An entry with no `type` is a Linux entry, as
+# in RavenBoot's own parser.
+read_base_entry() {
+    cfg="$1"
+    [ -r "$cfg" ] || return 0
+
+    found="$(awk '
+        function emit() {
+            if (kernel != "" && (type == "" || type == "linux-efi" || type == "linux") \
+                && cmdline ~ /root=/) {
+                printf "%s\n%s\n%s\n", kernel, initrd, cmdline
+                exit
+            }
+        }
+        function value(line) {
+            sub(/^[^=]*=[ \t]*/, "", line)
+            gsub(/^"|"$/, "", line)
+            gsub(/^'"'"'|'"'"'$/, "", line)
+            return line
+        }
+        /^[ \t]*[#;]/ { next }
+        /^[ \t]*\[entry\][ \t]*$/ { emit(); kernel=""; initrd=""; cmdline=""; type=""; next }
+        /^[ \t]*(kernel|path)[ \t]*=/   { kernel = value($0); next }
+        /^[ \t]*initrd[ \t]*=/          { initrd = value($0); next }
+        /^[ \t]*(cmdline|options)[ \t]*=/ { cmdline = value($0); next }
+        /^[ \t]*type[ \t]*=/            { type = value($0); next }
+        END { emit() }
+    ' "$cfg" 2>/dev/null)"
+    [ -n "$found" ] || return 0
+
+    base_kernel="$(printf '%s\n' "$found" | sed -n 1p)"
+    base_initrd="$(printf '%s\n' "$found" | sed -n 2p)"
+    base_cmdline="$(printf '%s\n' "$found" | sed -n 3p)"
+}
+
+# What the menu shows. "2026-09-21 14:30  rvn" reads as a date to a person in
+# a hurry; the subvolume name it came from does not.
+entry_label() {
+    name="$1"
+    tag="$(meta_get "$name" tag)"
+    [ -n "$tag" ] || tag="${name##*-}"
+    # 20260921T143005Z-rvn -> 2026-09-21 14:30
+    d="${name%%T*}"
+    t="${name#*T}"
+    t="${t%%Z*}"
+    case "$d" in
+        ????????)
+            printf 'Snapshot %s-%s-%s %s:%s (%s)' \
+                "$(printf '%s' "$d" | cut -c1-4)" \
+                "$(printf '%s' "$d" | cut -c5-6)" \
+                "$(printf '%s' "$d" | cut -c7-8)" \
+                "$(printf '%s' "$t" | cut -c1-2)" \
+                "$(printf '%s' "$t" | cut -c3-4)" "$tag"
+            ;;
+        *)  printf 'Snapshot %s' "$name" ;;
+    esac
+}
+
+# The base command line, pointed at a snapshot instead of at the system.
+#
+# Three edits, and the second one is not optional.
+#
+# 1. rootflags=subvol=<X> becomes rootflags=subvol=<the snapshot>. This is the
+#    only channel that can say which subvolume to mount: the root's options
+#    cannot come from /etc/fstab, because raven-init skips the root -- the
+#    initramfs mounted it already. Everything else in rootflags (noatime,
+#    compress=zstd:1, ssd) is carried over untouched, so a snapshot is mounted
+#    exactly the way the system it came from is.
+#
+# 2. resume= is REMOVED and noresume added. A hibernation image is only valid
+#    against the filesystem exactly as it stood when the image was written,
+#    and the image on this machine's swap was written against the live system,
+#    not against a snapshot of it. Resuming it onto a root mounted from
+#    @snapshots/<something> would hand the resumed kernel a page cache
+#    describing a filesystem it is no longer looking at. That is corruption,
+#    not staleness, and it would happen on the one boot somebody attempts when
+#    their machine is already broken. noresume is the initramfs's own spelling
+#    for "do not", parsed in raven_try_resume.
+#
+# 3. Nothing is done about `rw`, which the base line already carries, and that
+#    is deliberate: see the read-write argument in do_create.
+snapshot_cmdline() {
+    subvol="$1"
+    printf '%s' "$base_cmdline" | sed \
+        -e "s#subvol=[^, ]*#subvol=${subvol}#" \
+        -e 's#[[:space:]]\{1,\}resume=[^[:space:]]*##g' \
+        -e 's#^resume=[^[:space:]]*[[:space:]]*##' \
+        | {
+            IFS= read -r line
+            case "$line" in
+                *subvol=*) ;;
+                # No subvol= to replace. On a btrfs root raven-install always
+                # writes one, so this is a hand-edited boot.cfg or a layout
+                # this script did not create -- add it rather than produce an
+                # entry that silently boots the running system again under a
+                # snapshot's name, which is the one outcome nobody could
+                # debug.
+                *rootflags=*) line="$(printf '%s' "$line" | sed "s#rootflags=#rootflags=subvol=${subvol},#")" ;;
+                *) line="${line} rootflags=subvol=${subvol}" ;;
+            esac
+            printf '%s noresume' "$line"
+        }
+}
+
+do_boot_entries() {
+    if ! supported; then
+        say "no snapshots available (${unsupported})"
+        return 0
+    fi
+    update_boot_entries
+}
+
+# --------------------------------------------------------------------------
+# Dispatch
+# --------------------------------------------------------------------------
+check_support || true
+
+case "$COMMAND" in
+    create)       do_create ;;
+    list|ls)      do_list ;;
+    delete|rm)    do_delete ;;
+    prune)        do_prune ;;
+    pin)          do_pin 1 ;;
+    unpin)        do_pin 0 ;;
+    boot-entries) do_boot_entries ;;
+    status)       do_status ;;
+    *)            warn "unknown command '${COMMAND}'"; usage; exit 2 ;;
+esac
+exit $?
+
+# FUTURE: rolling one of these back permanently.
+#
+# Booting a snapshot gets a working shell on a broken machine, which is what
+# this is for. Making the snapshot the system is a different operation and it
+# is NOT `btrfs subvolume set-default`: set-default only decides what gets
+# mounted when no subvol= is given, and every boot entry raven-install writes
+# gives one. The version that composes with what is here is to rewrite the
+# rootflags=subvol= in \EFI\raven\boot.cfg on the ESP, which means the rollback
+# tool needs the ESP mounted and writable -- the same thing this needs, for the
+# same reason.

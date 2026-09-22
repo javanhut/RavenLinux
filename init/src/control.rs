@@ -47,8 +47,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::config::InitConfig;
-use crate::service::{Service, ServiceState};
+use crate::config::{InitConfig, ServiceType};
+use crate::service::{OneshotOutcome, Service, ServiceState};
 
 /// Where raven-rc looks for us.
 pub const SOCKET_PATH: &str = "/run/raven-init.sock";
@@ -97,6 +97,16 @@ pub enum Action {
     /// like a hang and, worse, would still be waiting on a machine that may
     /// never come back.
     Suspend,
+    /// Hibernate to disk: write the image, power off, and come back on the
+    /// next boot with every service where it was.
+    ///
+    /// Performed inline exactly as `Suspend` is, and for the same reason --
+    /// there is nothing to supervise while the machine is not running. The
+    /// difference is only in what init checks before it writes, which is
+    /// `crate::power::hibernate`'s business and not this module's: a
+    /// hibernation refused for want of a resume device is a log line and a
+    /// machine that is still running, not a shutdown that half happened.
+    Hibernate,
     /// Replace PID 1 with the raven-init binary on disk, keeping every
     /// service running. See `crate::reexec`.
     ///
@@ -156,6 +166,11 @@ pub fn poll(
 ) -> Action {
     let mut action = Action::None;
 
+    // Before the accept loop, and on every pass rather than only when a client
+    // is waiting: this is where a stop that SIGTERM did not achieve becomes a
+    // SIGKILL. See `escalate_pending_stops`.
+    escalate_pending_stops(services);
+
     loop {
         match listener.accept() {
             Ok((stream, _)) => match serve_one(stream, services, &mut *config) {
@@ -173,6 +188,37 @@ pub fn poll(
     }
 
     action
+}
+
+/// Finish the stops that SIGTERM did not.
+///
+/// `stop_by_request` sends SIGTERM and records a deadline; this is what acts
+/// on the deadline. A daemon that ignores or blocks SIGTERM was otherwise left
+/// running and flagged `manually_stopped` at the same time -- `stop` answered
+/// "Stopping" and sent another futile signal, `start` answered "already
+/// running", and the only way out was `restart`, which escalates only because
+/// it waits. Now the second signal arrives by itself, within one main-loop
+/// pass of the service's `stop_timeout`.
+///
+/// It lives here, on the control path, because this is the function the main
+/// loop calls once per pass with a mutable view of every service, and because
+/// an operator stop is the only thing that records a deadline in the first
+/// place: shutdown has its own escalation in `shutdown_services`, and the
+/// restart backoff has nothing to escalate. Nothing here blocks -- the signal
+/// is sent and the corpse is left to the reaper at the top of the next pass,
+/// which is the whole point of deferring the escalation instead of waiting for
+/// it inside the request that asked for the stop.
+///
+/// A machine whose control socket could not be bound never reaches this,
+/// because the main loop only calls `poll` when it has a listener -- and on
+/// such a machine nothing can request a stop in the first place, since the
+/// socket is the only way to ask for one.
+pub fn escalate_pending_stops(services: &mut HashMap<String, Service>) {
+    for (name, svc) in services.iter_mut() {
+        if svc.escalate_stop_if_due() {
+            log::info!("Escalated stop of {} to SIGKILL", name);
+        }
+    }
 }
 
 fn serve_one(
@@ -220,7 +266,7 @@ pub fn dispatch(
     if user_mode()
         && matches!(
             verb,
-            "poweroff" | "halt" | "reboot" | "suspend" | "sleep" | "reexec"
+            "poweroff" | "halt" | "reboot" | "suspend" | "sleep" | "hibernate" | "reexec"
         )
     {
         return (
@@ -269,6 +315,10 @@ pub fn dispatch(
         // an operator guessing wrong at three in the morning should still get
         // the machine to sleep.
         "suspend" | "sleep" => ("Suspending\n".to_string(), Action::Suspend),
+        // No alias. `hibernate` is the only spelling because it is the one
+        // verb here that can lose work when it is asked for by mistake, and
+        // every extra spelling is one more way to arrive at it by accident.
+        "hibernate" => ("Hibernating\n".to_string(), Action::Hibernate),
 
         // Checked here, while there is still a client to tell. Once the main
         // loop acts on it the only place a failure can be reported is the
@@ -287,7 +337,8 @@ pub fn dispatch(
             format!(
                 "error: unknown command '{}'\n\
                  commands: list, status [NAME], blame, start NAME, stop NAME, restart NAME, \
-                 enable NAME, disable NAME, reload, reexec, suspend, poweroff, reboot, halt\n",
+                 enable NAME, disable NAME, reload, reexec, suspend, hibernate, poweroff, \
+                 reboot, halt\n",
                 other
             ),
             Action::None,
@@ -313,21 +364,113 @@ where
 ///
 /// `ServiceState` alone is not enough: a service an operator stopped and one
 /// that exited on its own are both `Exited`, and calling the first "exited"
-/// invites the question of why it has not come back.
-fn describe_state(svc: &Service) -> &'static str {
+/// invites the question of why it has not come back. A one-shot that has done
+/// its job is the same case again and was the worse half of it -- udev's
+/// coldplug, console-font and the DHCP pass sat in every `raven-rc list` under
+/// the word "exited", which is the word this supervisor uses for a daemon that
+/// died, so the healthiest possible reading of that machine had three services
+/// on it that looked wrong.
+///
+/// Returns an owned `String` rather than the `&'static str` it used to,
+/// because a failed one-shot's status is part of the description and there is
+/// nowhere to borrow "failed (status 127)" from. The two callers both push it
+/// into a format string immediately.
+fn describe_state(svc: &Service) -> String {
     if svc.is_running() {
-        "running"
-    } else if svc.is_manually_stopped() {
-        "stopped (by request)"
-    } else {
-        match svc.state() {
-            ServiceState::Running => "running",
-            ServiceState::Exited => "exited",
-            ServiceState::Signaled => "killed",
-            ServiceState::Stopped => "stopped",
-            ServiceState::Failed => "failed",
+        return "running".to_string();
+    }
+    if svc.is_manually_stopped() {
+        return "stopped (by request)".to_string();
+    }
+
+    if let Some(outcome) = svc.oneshot_outcome() {
+        match outcome {
+            OneshotOutcome::Completed => return "completed".to_string(),
+            OneshotOutcome::Failed(code) => return format!("failed (status {code})"),
+            // `Running` cannot be reached -- `is_running` answered it above --
+            // and `Unfinished` means a one-shot that was killed, stopped or
+            // never run, for which the supervisor's ordinary words are already
+            // the right ones.
+            OneshotOutcome::Running | OneshotOutcome::Unfinished => {}
         }
     }
+
+    match svc.state() {
+        ServiceState::Running => "running",
+        ServiceState::Exited => "exited",
+        ServiceState::Signaled => "killed",
+        ServiceState::Stopped => "stopped",
+        ServiceState::Failed => "failed",
+    }
+    .to_string()
+}
+
+/// What the BOOT column says about a service, and what `status` repeats.
+///
+/// There are three answers rather than two, and the third had to be added
+/// because it is genuinely neither of the others. A demand-started service is
+/// enabled -- the operator wants it, `raven-rc enable` has nothing to change
+/// about it, and it will run the moment its trigger fires -- and it is also
+/// deliberately not running at boot, which is what somebody reading this
+/// column for a stopped service is trying to find out. Calling it `enabled`
+/// made the pair "enabled / stopped" look like a service that had failed;
+/// calling it `disabled` was a lie that `raven-rc enable` would then appear
+/// not to fix.
+///
+/// Nine characters wide at most, which is what `format_row`'s column allows
+/// and why the words are `on demand` rather than `demand-started`.
+fn boot_word(cfg: &crate::config::ServiceConfig) -> &'static str {
+    if !cfg.enabled {
+        "disabled"
+    } else if cfg.is_demand_started() {
+        "on demand"
+    } else {
+        "enabled"
+    }
+}
+
+/// The `trigger` line `raven-rc status` prints for a demand-started service,
+/// or nothing at all for every other service.
+///
+/// "Not running" is only half an answer for one of these, and the useful half
+/// is the other one: what has to happen for it to run. Without this line the
+/// operator's next step is to open the service's definition and read a
+/// `[services.demand]` block, which is exactly the lookup `status` exists to
+/// save.
+///
+/// It is derived from the configuration and never from the machine's state,
+/// so it is the same text on every tick -- which matters, because the status
+/// publisher rewrites its file whenever this text changes. See `Counters`.
+fn demand_line(cfg: &crate::config::ServiceConfig) -> String {
+    let Some(demand) = cfg.demand.as_ref() else {
+        return String::new();
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    // Subsystems rather than whole rules: "a usb device appearing" is the
+    // sentence somebody needs, and the class/subclass/protocol matching that
+    // decides *which* usb device belongs in the definition, not in a status
+    // readout that is also written to a file every tick.
+    let mut subsystems: Vec<&str> = Vec::new();
+    for rule in &demand.device {
+        if !rule.subsystem.is_empty() && !subsystems.contains(&rule.subsystem.as_str()) {
+            subsystems.push(rule.subsystem.as_str());
+        }
+    }
+    if !subsystems.is_empty() {
+        parts.push(format!("a {} device appearing", subsystems.join(" or ")));
+    }
+    if let Some(who) = demand.daemon.as_deref() {
+        parts.push(format!("{who} asking for it"));
+    }
+    if parts.is_empty() {
+        // The case worth being blunt about: a demand block with no trigger in
+        // it. The service is out of the boot and nothing will ever bring it
+        // in, which is a definition to fix rather than a state to wait out.
+        parts.push("nothing -- it has no trigger; start it by hand".to_string());
+    }
+
+    format!("  trigger      {}\n", parts.join(", or "))
 }
 
 fn list_services(services: &HashMap<String, Service>, config: &InitConfig) -> String {
@@ -343,11 +486,11 @@ fn list_services(services: &HashMap<String, Service>, config: &InitConfig) -> St
     let mut seen = Vec::new();
     for cfg in &config.services {
         seen.push(cfg.name.as_str());
-        let boot = if cfg.enabled { "enabled" } else { "disabled" };
+        let boot = boot_word(cfg);
         match services.get(&cfg.name) {
             Some(svc) => out.push_str(&format_row(
                 &cfg.name,
-                describe_state(svc),
+                &describe_state(svc),
                 svc.pid().map(|p| p.as_raw()),
                 boot,
                 svc.description(),
@@ -372,7 +515,7 @@ fn list_services(services: &HashMap<String, Service>, config: &InitConfig) -> St
     for (name, svc) in extras {
         out.push_str(&format_row(
             name,
-            describe_state(svc),
+            &describe_state(svc),
             svc.pid().map(|p| p.as_raw()),
             "-",
             svc.description(),
@@ -383,10 +526,17 @@ fn list_services(services: &HashMap<String, Service>, config: &InitConfig) -> St
 }
 
 /// Whether the main loop has time-driven work pending: a running service
-/// whose ready path has not appeared yet and cannot be watched for, or a dead
-/// one with a restart due. When neither, the loop can sleep until a child
-/// exits, a client connects or a ready path appears, instead of waking ten
-/// times a second to look.
+/// whose ready path has not appeared yet and cannot be watched for. When there
+/// is none, the loop can sleep until a child exits, a client connects or a
+/// ready path appears, instead of waking ten times a second to look.
+///
+/// A pending restart used to be counted here too, and it does not belong: the
+/// answer is a yes or a no, so a retry sixty seconds out asked for the same
+/// hundred-millisecond tick as one due in a moment, and a single
+/// crash-looping service held PID 1 at six hundred pointless wakes per
+/// backoff interval, forever -- the opposite of what the idle sleep was
+/// built for. A restart is not "look often", it is "wake at this time", which
+/// is what [`next_retry_in`] gives the loop instead.
 ///
 /// `readiness_watched` is the main loop's answer to "is every ready path I am
 /// still waiting on covered by an inotify watch" (see readiness.rs). When it
@@ -399,12 +549,36 @@ fn list_services(services: &HashMap<String, Service>, config: &InitConfig) -> St
 /// looked at on a timer.
 pub fn wants_quick_tick(services: &HashMap<String, Service>, readiness_watched: bool) -> bool {
     services.values().any(|svc| {
-        (!readiness_watched
+        !readiness_watched
             && svc.is_running()
             && svc.ready_path().is_some()
-            && svc.ready_at().is_none())
-            || (!svc.is_running() && svc.retry_at().is_some())
+            && svc.ready_at().is_none()
     })
+}
+
+/// How long until the soonest pending restart, if any service has one.
+///
+/// The main loop caps its sleep with this, so a service waiting out a
+/// minute-long backoff costs the wakes its own schedule asks for and no
+/// others: the loop sleeps its full idle interval while the retry is far off
+/// and wakes on the deadline itself when it is near.
+///
+/// Zero for a retry that is already due, which the caller is expected to floor
+/// at its busy tick rather than poll on. A deadline in the past is the state
+/// between the retry falling due and `check_services` acting on it, and it
+/// also outlives an operator `stop` issued while a restart was pending --
+/// `should_restart` refuses a manually stopped service without clearing the
+/// deadline it will now never use. Neither is a reason to spin.
+pub fn next_retry_in(
+    services: &HashMap<String, Service>,
+    now: std::time::Instant,
+) -> Option<Duration> {
+    services
+        .values()
+        .filter(|svc| !svc.is_running() && !svc.is_manually_stopped())
+        .filter_map(|svc| svc.retry_at())
+        .map(|at| at.saturating_duration_since(now))
+        .min()
 }
 
 /// Look at every running service's ready path once and record the ones that
@@ -454,6 +628,7 @@ pub(crate) fn blame_services(
     let mut out = String::new();
     out.push_str("Seconds since the kernel started. Each service is timed from its first\n");
     out.push_str("start in this boot; restarts since are in `raven-rc status NAME`.\n");
+    out.push_str("A one-shot is READY when it finished, so its TOOK is how long it ran.\n");
     out.push_str("Milestones cross a re-exec: a name that appears twice marks one, and\n");
     out.push_str("the rows above the second `init started` are the original boot's.\n\n");
 
@@ -502,19 +677,52 @@ pub(crate) fn blame_services(
         // names nothing to wait for; `waiting` means it does and the file has
         // not appeared yet; `never` means it does, the file never appeared,
         // and the service is not running any more to make it.
+        //
+        // A one-shot reaches this column too, and it has an answer for it: it
+        // is "ready" when it has finished, which `Service::mark_exited`
+        // records on a clean exit for exactly this reason. So a coldplug that
+        // took 310ms prints its finish time here and 0.310 under TOOK, in the
+        // same shape as a daemon that took 310ms to bind its socket, and the
+        // NOTE below says which of the two happened.
         let ready_text = match (svc.ready_path(), ready) {
             (_, Some(at)) => format!("{at:.3}"),
             (Some(_), None) if svc.is_running() => "waiting".to_string(),
             (Some(_), None) => "never".to_string(),
+            (None, None) if svc.is_oneshot() => match svc.oneshot_outcome() {
+                Some(OneshotOutcome::Running) => "running".to_string(),
+                // Failed or was killed: it has no finish time because it never
+                // finished, and a dash would say the same thing about it as
+                // about a daemon that simply has no ready path.
+                _ => "never".to_string(),
+            },
             (None, None) => "-".to_string(),
         };
-        let mut note = match (svc.ready_path(), ready, svc.is_running()) {
-            (None, _, _) => "no ready path",
-            (Some(_), Some(_), _) => "",
-            (Some(_), None, true) => "not ready yet",
-            (Some(_), None, false) => "exited before ready",
-        }
-        .to_string();
+        // One-shots first, because the arm below them is where they used to
+        // land: `(None, _, _) => "no ready path"`, which is true of every
+        // one-shot on the machine, explains nothing about any of them, and put
+        // the same four words beside udev's coldplug, console-font and the
+        // DHCP pass on every boot. A one-shot has no ready path because it is
+        // not the kind of thing that has one.
+        let mut note = match svc.oneshot_outcome() {
+            Some(OneshotOutcome::Completed) => match took {
+                Some(t) => format!("completed in {t:.3}s"),
+                // Completed, but this supervisor did not see it start -- an
+                // adopted service from a hand-off written before the times
+                // were carried. The fact is still worth having; the duration
+                // would be invented.
+                None => "completed".to_string(),
+            },
+            Some(OneshotOutcome::Failed(code)) => format!("failed (status {code})"),
+            Some(OneshotOutcome::Running) => "one-shot, still running".to_string(),
+            Some(OneshotOutcome::Unfinished) => "one-shot, did not finish".to_string(),
+            None => match (svc.ready_path(), ready, svc.is_running()) {
+                (None, _, _) => "no ready path",
+                (Some(_), Some(_), _) => "",
+                (Some(_), None, true) => "not ready yet",
+                (Some(_), None, false) => "exited before ready",
+            }
+            .to_string(),
+        };
         let after_boot = matches!((started, boot_done), (Some(s), Some(done)) if s > done);
         if after_boot {
             // Without this the row is simply baffling: one line reading 2751
@@ -649,9 +857,10 @@ fn status_one(
     let Some(svc) = services.get(name) else {
         return match cfg {
             Some(cfg) => format!(
-                "{}\n  state        stopped\n  boot         {}\n  description  {}\n  exec         {}\n",
+                "{}\n  state        stopped\n  boot         {}\n{}  description  {}\n  exec         {}\n",
                 name,
-                if cfg.enabled { "enabled" } else { "disabled" },
+                boot_word(cfg),
+                demand_line(cfg),
                 cfg.description,
                 cfg.exec
             ),
@@ -664,12 +873,14 @@ fn status_one(
     out.push_str(&format!(
         "  boot         {}\n",
         match cfg {
-            Some(c) if c.enabled => "enabled",
-            Some(_) => "disabled",
+            Some(c) => boot_word(c),
             // Running but absent from the config: the synthesised fallback getty.
             None => "not in config",
         }
     ));
+    if let Some(cfg) = cfg {
+        out.push_str(&demand_line(cfg));
+    }
     out.push_str(&format!("  description  {}\n", svc.description()));
 
     match svc.pid() {
@@ -692,6 +903,19 @@ fn status_one(
 
     if counters == Counters::Read {
         out.push_str(&resource_usage(name));
+    }
+
+    // How long the one thing this one-shot was for took, on the run being
+    // described. `blame` reports the same span for the *first* run in the
+    // boot; this one moves if the one-shot is run again, which is the whole
+    // difference between the two commands.
+    if svc.oneshot_outcome() == Some(OneshotOutcome::Completed) {
+        if let (Some(started), Some(finished)) = (svc.started_at(), svc.ready_at()) {
+            out.push_str(&format!(
+                "  completed in {:.3}s\n",
+                finished.saturating_duration_since(started).as_secs_f64()
+            ));
+        }
     }
 
     if let Some(code) = svc.exit_status() {
@@ -860,28 +1084,111 @@ pub(crate) fn start_service(
         return format!("error: no such service '{}'\n", name);
     };
 
+    // Anything worth telling the operator about a dependency, said before the
+    // reply about the service they actually asked for. A dependency that went
+    // wrong without stopping the start is exactly the kind of thing that is
+    // otherwise only in a log nobody is reading yet.
+    let mut notes = String::new();
+
     // Starting a unit manually must honor the same direct dependencies as
     // boot. Previously `raven-rc start polkitd` could report success while
     // D-Bus was stopped, leaving the new process to fail immediately.
+
     for dependency in &service_config.after {
-        let running = services
+        let dep_cfg = config
+            .services
+            .iter()
+            .find(|c| &c.name == dependency)
+            .cloned();
+        let dep_is_oneshot = dep_cfg
+            .as_ref()
+            .is_some_and(|c| c.service_type == ServiceType::Oneshot);
+
+        // "Satisfied" rather than "running", because for a one-shot those are
+        // opposites: a coldplug that has finished is the state everything
+        // ordered after it was waiting for, and starting it again because it
+        // is not running would re-run the work on every `raven-rc start` of
+        // every service that names it. A one-shot that is *still* running is
+        // also left alone -- the wait below is what deals with it.
+        let satisfied = services
             .get_mut(dependency)
             .map(|svc| {
                 svc.poll_exit();
-                svc.is_running()
+                if svc.is_oneshot() {
+                    svc.is_running() || svc.oneshot_outcome() == Some(OneshotOutcome::Completed)
+                } else {
+                    svc.is_running()
+                }
             })
             .unwrap_or(false);
-        if !running {
+        if !satisfied {
             let reply = start_service_raw(dependency, services, config);
             if reply.starts_with("error:") {
-                return format!(
-                    "error: cannot start {}: dependency {}: {}",
-                    name, dependency, reply
-                );
+                // A one-shot that ran and exited non-zero comes back from
+                // `confirm_started` as an error, and for the dependant it is
+                // not one: the dependency did run, and whether that is enough
+                // is decided by the wait below, on the same terms boot uses.
+                // Anything else -- a binary that is not installed, a name
+                // nothing defines, a service that would not spawn -- is a
+                // dependency that could not be started at all, and that still
+                // stops the start here.
+                let ran = services.get(dependency).is_some_and(|dep| {
+                    matches!(
+                        dep.oneshot_outcome(),
+                        Some(
+                            OneshotOutcome::Completed
+                                | OneshotOutcome::Failed(_)
+                                | OneshotOutcome::Running
+                        )
+                    )
+                });
+                if !ran {
+                    return format!(
+                        "error: cannot start {}: dependency {}: {}",
+                        name, dependency, reply
+                    );
+                }
             }
         }
 
-        if let Some(dep_cfg) = config.services.iter().find(|c| &c.name == dependency) {
+        if dep_is_oneshot {
+            // The same wait boot does, on the same bound, reaching the same
+            // conclusions -- see `start_services` in main.rs, which carries
+            // the argument for why none of these outcomes stops the start.
+            let timeout =
+                Duration::from_secs(dep_cfg.as_ref().map(|c| c.ready_timeout).unwrap_or(0) as u64);
+            match services
+                .get_mut(dependency)
+                .and_then(|dep| dep.wait_until_finished(timeout))
+            {
+                Some(OneshotOutcome::Completed) | None => {}
+                Some(OneshotOutcome::Failed(code)) => {
+                    log::error!(
+                        "Starting {}: one-shot dependency {} failed with status {}",
+                        name,
+                        dependency,
+                        code
+                    );
+                    notes.push_str(&format!(
+                        "warning: {dependency} failed with status {code}; starting {name} anyway\n"
+                    ));
+                }
+                Some(OneshotOutcome::Running) => {
+                    notes.push_str(&format!(
+                        "warning: {dependency} has not finished after {}s; starting {name} anyway\n",
+                        timeout.as_secs()
+                    ));
+                }
+                Some(OneshotOutcome::Unfinished) => {
+                    notes.push_str(&format!(
+                        "warning: {dependency} did not finish; starting {name} anyway\n"
+                    ));
+                }
+            }
+            continue;
+        }
+
+        if let Some(dep_cfg) = dep_cfg.as_ref() {
             if let Some(path) = dep_cfg.ready_path.as_deref() {
                 // The third of the three readiness waits this codebase had,
                 // and the last one still spending a timer on it. It was a 20ms
@@ -906,7 +1213,7 @@ pub(crate) fn start_service(
         }
     }
 
-    start_service_raw(name, services, config)
+    format!("{}{}", notes, start_service_raw(name, services, config))
 }
 
 fn start_service_raw(
@@ -991,6 +1298,43 @@ fn confirm_started(name: &str, svc: &mut Service) -> String {
     while std::time::Instant::now() < deadline {
         svc.poll_exit();
         if !svc.is_running() {
+            // A one-shot that exited inside the grace period did not die
+            // young -- it finished. Before `type` existed there was no way to
+            // tell those apart here, so `raven-rc start udev` reported
+            // "error: udev started but exited with status 0 immediately" and
+            // pointed at a log containing a successful coldplug. Worse, the
+            // dependency loop in `start_service` reads this reply and gives up
+            // on any reply beginning "error:", so a one-shot that worked
+            // stopped everything ordered after it from starting at all.
+            if let Some(outcome) = svc.oneshot_outcome() {
+                match outcome {
+                    OneshotOutcome::Completed => {
+                        let took = match (svc.started_at(), svc.ready_at()) {
+                            (Some(started), Some(finished)) => format!(
+                                " in {:.3}s",
+                                finished.saturating_duration_since(started).as_secs_f64()
+                            ),
+                            _ => String::new(),
+                        };
+                        return format!("Completed {name}{took}\n");
+                    }
+                    OneshotOutcome::Failed(code) => {
+                        return format!(
+                            "error: {} failed with status {}.\n\
+                             Its output is in {}; `raven-rc status {}` has the rest.\n",
+                            name,
+                            code,
+                            Service::log_dir().join(format!("{}.log", name)).display(),
+                            name
+                        );
+                    }
+                    // Killed inside the grace period, or gone with no status
+                    // recorded: the ordinary report below is as much as is
+                    // known, and it is the right report.
+                    OneshotOutcome::Running | OneshotOutcome::Unfinished => {}
+                }
+            }
+
             let how = match svc.exit_status() {
                 Some(code) => format!("exited with status {}", code),
                 None => "was killed".to_string(),

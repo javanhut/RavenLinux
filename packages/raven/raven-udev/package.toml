@@ -1,0 +1,52 @@
+# Start the device manager and coldplug what is already attached.
+#
+# A package of its own for the reason raven-dhcp's manifest sets out: the tools
+# in configs/ share a directory and nothing else, and each needs a different
+# program to do its work.
+[package]
+name = "raven-udev"
+version = "2026.08"
+description = "RavenLinux device manager bring-up - starts udevd and coldplugs attached hardware"
+license = "MIT"
+homepage = "https://github.com/javanhut/RavenLinux"
+repository = "https://github.com/javanhut/RavenLinux"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "hardware", "base"]
+arch = "any"
+
+[source]
+type = "local"
+url = "https://github.com/javanhut/RavenLinux.git"
+
+[build]
+system = "none"
+
+[dependencies]
+# udevd itself, which on Arch comes out of systemd and is what `udev` resolves
+# to. Without it the graphics and wireless modules never load: they are modules
+# rather than built in, so they probe from the mounted root, and nothing else
+# on the image loads them.
+#
+# Unowned on an image built from this repository, like dhcpcd -- stage2 copies
+# udevd off the build container. Stated anyway; see raven-dhcp's manifest.
+runtime = ["udev"]
+build = []
+
+[install]
+files = [
+    { src = "configs/raven-udev", dest = "/usr/bin/raven-udev", mode = 755 },
+]
+
+# No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS
+# /usr/bin: a link at /bin/<name> whose target is /usr/bin/<name> names the
+# same path on both sides, and creating it replaces the real binary with a
+# symlink to itself. Anything installed to /usr/bin is already reachable at
+# /bin/<name> through the merge link -- see scripts/lib/usrmerge.sh.
+#
+# init.toml spells this one "/usr/sbin/raven-udev". /usr/sbin is a symlink onto
+# bin under the merge, so that is the same file and needs no entry here.
+symlinks = []
+
+# The udev rules in configs/udev are not this package's: stage2 installs them
+# beside the rules it copies off the build host, and they describe devices
+# rather than this script.

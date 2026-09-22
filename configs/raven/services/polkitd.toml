@@ -1,0 +1,68 @@
+# polkitd -- the authorization manager. SHIPPED DISABLED, and not shipped in
+# the base image at all: this file is a template that only becomes a drop-in
+# once `rvn install polkit` has put the binary on the machine.
+#
+# Raven does not run polkitd, and that is a decision rather than an omission.
+# Every privileged thing Raven ships answers the question "may this caller do
+# this?" itself and more cheaply: raven-rc, raven-powerd, raven-timed and
+# cawd each check the peer's credentials on their own unix socket against a
+# group, rvn and raven-firmware check for uid 0, and an authorization
+# framework in the middle of any of those would add a D-Bus round trip, a
+# JavaScript rules engine and a second daemon to a check that is already one
+# getsockopt call. Nothing in the first-party system is improved by this
+# process existing.
+#
+# What is not improved but is outright blocked is everybody else's software.
+# virt-manager, GNOME Disks, GParted's graphical front end, the graphical
+# updaters, and `fwupdmgr` all call org.freedesktop.PolicyKit1's
+# CheckAuthorization before they touch anything, and with no process owning
+# that name the call does not return "denied" -- it fails with a D-Bus error
+# about the name not being activatable, which the application reports as some
+# variant of "could not connect". That is the dead end
+# /etc/raven/init.d/fwupd.toml describes and the reason this file exists: a
+# machine that wants one of those tools should be able to make a decision
+# about polkit, not reconstruct a service definition for it from upstream's
+# systemd unit.
+#
+# The cost, stated plainly rather than left for someone to discover:
+# installing polkit also installs /usr/bin/pkexec setuid root. pkexec has had
+# local root holes before -- CVE-2021-4034 was a decade-old argv handling bug
+# reachable by any unprivileged user -- and it is setuid whether or not this
+# service ever starts, because that is how the package ships it. The base
+# image therefore carries neither, and the profiles that do carry polkit
+# (configs/installer/profiles/{desktop,developer}.packages) get it as a
+# package under `rvn update` rather than as a copied file nothing can patch.
+#
+# Two things must be true before `raven-rc enable polkitd` does anything
+# useful, and both are handled by the install rather than by this file:
+#
+#   the polkitd account   `user` below names it. The package declares it in
+#                         usr/lib/sysusers.d/polkit.conf and rvn applies
+#                         sysusers.d fragments itself (src/hooks.rs) because
+#                         nothing else on Raven would. A name that cannot be
+#                         resolved fails the start rather than silently
+#                         running as root, which is the right way round.
+#   the system bus        polkitd claims a name on it, so `after = ["dbus"]`.
+#                         Upstream's unit is Type=dbus and relies on bus
+#                         activation; raven-init supervises it directly
+#                         instead, which is also what stops it being
+#                         restarted by the bus with nothing recording why.
+#
+# What this still does not give you is a way to authenticate. polkitd asks an
+# authentication agent to prompt the user, and Raven ships none -- there is no
+# polkit-gnome or polkit-kde-agent in the image and huginn implements no agent
+# of its own. In practice that means rules which resolve to `yes` or `no`
+# without a prompt work, and anything that would raise a password dialog fails
+# with "no authentication agent found". For the wheel-user case that covers
+# most of what the tools above want; for the rest, installing an agent is a
+# further `rvn install` and a further user-service drop-in.
+[[services]]
+name = "polkitd"
+description = "Authorization manager for third-party GUI admin tools"
+exec = "/usr/lib/polkit-1/polkitd"
+args = ["--no-debug"]
+after = ["dbus"]
+user = "polkitd"
+restart = true
+enabled = false
+critical = false

@@ -141,9 +141,13 @@ fn welcome(app: &Rc<App>) {
         &adw::ActionRow::builder()
             .title("Firmware")
             .subtitle(format!(
-                "{}, Secure Boot {}",
+                "{}, Secure Boot {}{}",
                 p.firmware.to_uppercase(),
-                p.secureboot
+                p.secureboot,
+                // Only when it is on, because that is the state somebody has
+                // deliberately put the machine into and the one this installer
+                // can act on. "setup mode off" on every other machine is noise.
+                if p.setupmode == "on" { " (firmware in setup mode)" } else { "" }
             ))
             .build(),
     );
@@ -906,6 +910,50 @@ fn manual_editor(app: &Rc<App>, d: &Disk) -> (adw::PreferencesGroup, Rc<dyn Fn()
 // Disk
 // =============================================================================
 
+/// What the root-filesystem row says underneath itself for a given choice.
+///
+/// Three sentences of trade-off rather than a list of features, because the
+/// decision this row is really asking about is snapshots: ext4 cannot do them
+/// and btrfs can, and everything else on the page is downstream of that. The
+/// btrfs text names the two subvolumes that are kept *out* of the snapshots,
+/// since a person who expects a rollback to restore their logs and finds that
+/// it deliberately did not would otherwise have no way of knowing it was on
+/// purpose.
+fn filesystem_subtitle(fs: &str, p: &Probe) -> String {
+    match fs {
+        "btrfs" => "Snapshots, and so rollbacks. Laid out as subvolumes: @ is the root, \
+                    with @home and @snapshots beside it, and /var/log and /var/cache as \
+                    subvolumes of their own -- kept outside the snapshots on purpose, so \
+                    rolling the system back does not rewind the logs that say why it was \
+                    needed or throw away the package cache. Mounted noatime, with zstd \
+                    compression."
+            .to_string(),
+        "xfs" => "No snapshots, and it cannot be shrunk afterwards, but it is the quickest \
+                  of the three under metadata-heavy work."
+            .to_string(),
+        _ => {
+            let mut s = "The default. No snapshots, and so no rollbacks -- but no \
+                         copy-on-write fragmentation to think about either, and the \
+                         longest-standing set of repair tools of the three."
+                .to_string();
+            // Said here rather than nowhere. btrfs missing from the list has
+            // two possible causes and only one of them is obvious; if the
+            // image has mkfs.btrfs but not the btrfs binary, the choice
+            // silently is not offered and nothing says why.
+            if !p.filesystems.iter().any(|f| f == "btrfs") {
+                s.push_str(if p.btrfs_progs {
+                    " btrfs is not offered: this image has no mkfs.btrfs."
+                } else {
+                    " btrfs is not offered: it needs both mkfs.btrfs and the btrfs binary \
+                     -- the second is what creates the @ subvolume the root is mounted \
+                     from -- and this image is missing at least one of them."
+                });
+            }
+            s
+        }
+    }
+}
+
 fn disk(app: &Rc<App>) {
     let page = adw::PreferencesPage::new();
     let installable: Vec<Disk> = app.probe.installable_disks().into_iter().cloned().collect();
@@ -1049,9 +1097,16 @@ fn disk(app: &Rc<App>) {
         // Only the ones whose mkfs is on this image: offering btrfs where there
         // is no mkfs.btrfs offers an install that dies three steps after the
         // disk was erased.
-        .subtitle("Only filesystems this image can create are listed")
         .model(&fs_model)
         .build();
+    // The subtitle is the choice's consequences rather than a fixed sentence
+    // about the list, because on this row the name is not the whole answer:
+    // picking btrfs also picks a subvolume layout, and that layout is what
+    // decides what a later rollback rewinds and what it leaves alone. Somebody
+    // choosing between two words in a combo box should be told that here, not
+    // find it afterwards in a comment inside raven-install.
+    fs_row.set_subtitle_lines(0);
+    fs_row.set_subtitle(&filesystem_subtitle(&app.answers.borrow().fs, &app.probe));
     if let Some(i) = app.probe.filesystems.iter().position(|f| *f == app.answers.borrow().fs) {
         fs_row.set_selected(i as u32);
     }
@@ -1059,7 +1114,11 @@ fn disk(app: &Rc<App>) {
         let app = app.clone();
         move |r| {
             if let Some(f) = app.probe.filesystems.get(r.selected() as usize) {
-                app.answers.borrow_mut().fs = f.clone();
+                // Cloned out before the subtitle is set: set_subtitle can run
+                // handlers, and the answers are still borrowed here.
+                let chosen = f.clone();
+                app.answers.borrow_mut().fs = chosen.clone();
+                r.set_subtitle(&filesystem_subtitle(&chosen, &app.probe));
             }
         }
     });
@@ -1113,6 +1172,102 @@ fn disk(app: &Rc<App>) {
     }
     page.add(&layout);
 
+    // ---- encryption ---------------------------------------------------------
+    // Its own group rather than another row under Layout, because it is the
+    // one thing on this page that cannot be undone later: every other choice
+    // here is a partition table a person can redo, and this one is a disk
+    // that stops opening if the passphrase is lost. A group with a
+    // description is the room to say so before the switch is touched.
+    let crypto = adw::PreferencesGroup::builder()
+        .title("Encryption")
+        .description(
+            "There is no recovery key and no way back in without the passphrase. \
+             It is typed at every boot, on a US keyboard layout -- the initramfs \
+             loads no keymap -- so choose characters that are in the same place \
+             on the layout you are installing.",
+        )
+        .build();
+
+    let enc_row = adw::SwitchRow::builder()
+        .title("Encrypt this disk")
+        .subtitle(
+            "LUKS2 with argon2id over the root partition, and over the swap \
+             partition as well so a hibernation image is not a plaintext copy \
+             of memory.",
+        )
+        .active(false)
+        .build();
+    enc_row.set_subtitle_lines(0);
+
+    let enc_pw = adw::PasswordEntryRow::builder().title("Encryption passphrase").build();
+    let enc_pw2 = adw::PasswordEntryRow::builder().title("Confirm passphrase").build();
+    // Shown only once the switch is on. Two empty password boxes under a
+    // switch that is off read as something that has been forgotten.
+    enc_pw.set_visible(false);
+    enc_pw2.set_visible(false);
+
+    if !app.probe.cryptsetup {
+        // preflight would refuse this install. Say so where the switch is,
+        // the same way the swap row does for a missing mkswap.
+        enc_row.set_active(false);
+        enc_row.set_sensitive(false);
+        enc_row.set_subtitle("cryptsetup is not on this image, so this disk cannot be encrypted");
+        app.answers.borrow_mut().encrypt = false;
+    } else if !app.probe.aes_ni {
+        // Not a reason to refuse -- the disk is encrypted and correct either
+        // way -- but the cost is large and invisible, and "the machine got
+        // slow after I reinstalled" points nowhere near a kernel option.
+        enc_row.set_subtitle(
+            "LUKS2 with argon2id over the root partition, and over the swap \
+             partition as well. This kernel has no AES-NI driver, so the \
+             encrypted disk will run generic AES and be much slower than the \
+             hardware allows.",
+        );
+    }
+
+    enc_row.connect_active_notify({
+        let app = app.clone();
+        let enc_pw = enc_pw.clone();
+        let enc_pw2 = enc_pw2.clone();
+        move |r| {
+            let on = r.is_active();
+            enc_pw.set_visible(on);
+            enc_pw2.set_visible(on);
+            if !on {
+                // Cleared rather than kept for later. The answers file is
+                // written straight from this struct, and a passphrase left
+                // behind in it would be a password in a file on disk for an
+                // install that is not encrypted at all. The connect_changed
+                // handlers below put the empty string into the answers, so
+                // this has to happen outside any borrow of them.
+                enc_pw.set_text("");
+                enc_pw2.set_text("");
+            }
+            app.answers.borrow_mut().encrypt = on;
+            app.revalidate();
+        }
+    });
+    enc_pw.connect_changed({
+        let app = app.clone();
+        move |e| {
+            app.answers.borrow_mut().encrypt_password = e.text().to_string();
+            app.revalidate();
+        }
+    });
+    enc_pw2.connect_changed({
+        let app = app.clone();
+        move |_| app.revalidate()
+    });
+
+    crypto.add(&enc_row);
+    crypto.add(&enc_pw);
+    crypto.add(&enc_pw2);
+    page.add(&crypto);
+    // Hidden in manual mode, where the installer refuses encryption outright:
+    // manual mode exists to reuse partitions that are already on the disk, and
+    // those stay unencrypted, so the result would not be an encrypted machine.
+    app.auto_only.borrow_mut().push(crypto.clone().upcast());
+
     // ---- advanced -----------------------------------------------------------
     let advanced = adw::PreferencesGroup::builder()
         .title("Advanced")
@@ -1153,20 +1308,147 @@ fn disk(app: &Rc<App>) {
     }
     page.add(&advanced);
 
+    // ---- Secure Boot ---------------------------------------------------------
+    // Its own group, under Advanced rather than in it, for the same reason
+    // Encryption has one: it is the only choice on this page that reaches
+    // outside the disk. Everything else here is a partition table; "enrol
+    // keys" writes a Platform Key into the machine's firmware, which survives
+    // reinstalling, reformatting and replacing the drive.
+    //
+    // What is offered depends on the firmware and is decided once, here,
+    // rather than by a switch that is enabled and then refused: enrolment
+    // needs setup mode, and setup mode is a fact about this machine that the
+    // probe has already read and that nothing the installer does can change.
+    let secure = adw::PreferencesGroup::builder().title("Secure Boot").build();
+
+    let sb_choices: Vec<(&str, &str)> = if app.probe.can_enroll_keys() {
+        vec![
+            ("Leave the firmware alone", "skip"),
+            ("Sign the bootloader and kernel", "sign"),
+            ("Enrol this machine's keys, and sign", "enroll"),
+        ]
+    } else {
+        vec![
+            ("Leave the firmware alone", "skip"),
+            ("Sign the bootloader and kernel", "sign"),
+        ]
+    };
+
+    // The state of the machine, said plainly, because the difference between
+    // the three is invisible from inside Linux and decides everything on this
+    // page. "Secure Boot is off" is two different machines: one that will take
+    // a new key without being asked, and one that will refuse.
+    secure.set_description(Some(if app.probe.secureboot == "on" {
+        "Secure Boot is ON in this firmware, and RavenBoot is not signed by anyone \
+         it trusts, so the installed system will not start. Turn Secure Boot off in \
+         the firmware setup -- or, to keep it on, use the firmware's \"Clear Secure \
+         Boot Keys\" to put it in setup mode, leave Secure Boot off, and run this \
+         installer again: it will then offer to enrol this machine's own keys. \
+         Signing here is harmless but on its own will not make this machine boot."
+    } else if app.probe.can_enroll_keys() {
+        "This firmware is in setup mode: it holds no Platform Key, so the installer \
+         can give it one of this machine's own and sign RavenBoot and the kernel \
+         with it. Microsoft's certificates are enrolled alongside, so Windows and \
+         the option ROMs on your cards keep working. Turn Secure Boot on in the \
+         firmware afterwards, and only after the machine has booted once without \
+         it. Undone with \"sbctl reset\" or the firmware's \"restore factory keys\". \
+         Kernel modules are not signed and do not need to be."
+    } else if app.probe.setupmode == "off" {
+        "Secure Boot is off, and the firmware still holds its vendor's Platform Key \
+         -- so nothing here can enrol another one. Signing now is reversible, \
+         changes nothing about how the machine boots, and means that enrolling \
+         later is one command. To enrol: clear the Secure Boot keys in the firmware \
+         setup, which puts it in setup mode, then run \"sbctl enroll-keys \
+         --microsoft\" on the installed system."
+    } else {
+        "This firmware does not report a Secure Boot state, so there is nothing \
+         reliable to act on. Signing is harmless either way."
+    }));
+
+    let sb_row = adw::ComboRow::builder()
+        .title("What to do about Secure Boot")
+        .model(&gtk::StringList::new(
+            &sb_choices.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+        ))
+        .selected(0)
+        .build();
+    sb_row.set_subtitle_lines(0);
+
+    // sbctl does the work, and it does it inside the new system so that the
+    // keys live where the next kernel update will need them. If it is not
+    // going to be there, the choice is not offered -- the installer would
+    // accept it, warn, and sign nothing, and a switch that is quietly ignored
+    // is worse than one that is greyed out with a reason.
+    //
+    // Whether it will be there depends on the package profile, which is
+    // chosen two pages further on. So the subtitle here states the rule and
+    // the summary page, which is rebuilt from the answers every time it is
+    // opened, says what it actually means for the profile that was picked.
+    if app.probe.sbctl {
+        sb_row.set_subtitle("sbctl is on the install media and will be on the new system");
+    } else if app.probe.sbctl_profiles.is_empty() {
+        sb_row.set_sensitive(false);
+        sb_row.set_subtitle(
+            "sbctl is not on this image and no package profile installs it, so \
+             nothing here can sign anything",
+        );
+        app.answers.borrow_mut().secureboot = "skip".into();
+    } else {
+        sb_row.set_subtitle(&format!(
+            "Needs sbctl, which comes with the {} profile{} -- pick one of those on \
+             the Software page, and have the packages installed during the install \
+             rather than at first boot",
+            app.probe.sbctl_profiles.join(" or "),
+            if app.probe.sbctl_profiles.len() > 1 { "s" } else { "" },
+        ));
+    }
+
+    {
+        let app = app.clone();
+        let sb_choices: Vec<String> =
+            sb_choices.iter().map(|(_, value)| (*value).to_string()).collect();
+        sb_row.connect_selected_notify(move |r| {
+            if let Some(v) = sb_choices.get(r.selected() as usize) {
+                app.answers.borrow_mut().secureboot = v.clone();
+            }
+            app.revalidate();
+        });
+    }
+    secure.add(&sb_row);
+    page.add(&secure);
+
     push(
         app,
         "disk",
         "Disk",
         &scrolled(&page),
-        Box::new(|a, p| {
+        Box::new(move |a, p| {
             let mut v = Vec::new();
             if a.disk.is_empty() {
                 v.push("Choose the disk to install onto.".to_string());
                 return v;
             }
+            // Checked before the manual branch below, because it is the one
+            // encryption problem that manual mode has and it would otherwise
+            // be reported by an installer that quit after the summary.
+            if a.encrypt && a.mode == "manual" {
+                v.push(
+                    "Encryption is not available with manual partitioning: that mode \
+                     exists to reuse partitions that are already on the disk, and \
+                     those stay unencrypted. Erase the disk or install alongside, \
+                     or turn encryption off."
+                        .to_string(),
+                );
+            }
+            // Not an answer, so it is checked against the widgets: the
+            // confirmation box is never written to the answers file and
+            // therefore cannot be forgotten there.
+            if a.encrypt && enc_pw.text() != enc_pw2.text() {
+                v.push("The encryption passphrases do not match.".to_string());
+            }
             if a.mode == "manual" {
                 if let Some(d) = p.disks.iter().find(|d| d.dev == a.disk) {
-                    return manual::problems(d, a, p);
+                    v.append(&mut manual::problems(d, a, p));
                 }
                 return v;
             }
@@ -1815,9 +2097,100 @@ fn plan_rows(a: &Answers, p: &Probe) -> Vec<(String, String)> {
         ("GPT, erasing everything on the disk".to_string(), l)
     };
 
+    // Said on the summary as well as on the disk page, because this is the
+    // page a person reads before typing YES and it is the last chance to
+    // notice that the disk is -- or is not -- going to be encrypted.
+    let encryption = if a.encrypt {
+        let mut s = "LUKS2 (argon2id) on the root partition".to_string();
+        if a.swap != "none" {
+            s.push_str(", and on the swap partition so the hibernation image is encrypted too");
+        }
+        s.push_str("\nOne passphrase, asked for at every boot. There is no recovery key.");
+        s
+    } else {
+        "None. The disk is readable by anyone who has it.".to_string()
+    };
+
+    // Said on the summary as well as on the disk page, for the same reason
+    // encryption is: this is the page read before YES is typed, and the
+    // subvolume layout is the half of a btrfs install that is invisible
+    // afterwards until the day somebody rolls back and wants to know why
+    // /var/log did not come back with the rest of it.
+    let filesystem = if a.fs == "btrfs" {
+        // @home is not created when /home is a partition of its own, which
+        // only manual mode can arrange. raven-install decides this from
+        // HOME_DEV; the manual plan is where a front-end can see the same
+        // thing, and a summary claiming an @home the installer will not make
+        // is worse than one that says nothing.
+        let separate_home = a.mode == "manual"
+            && (a.manual_use.iter().any(|u| u.role == "home")
+                || a.manual_new.iter().any(|n| n.role == "home"));
+        format!(
+            "btrfs, laid out as subvolumes:\n{}\n\
+             @log → /var/log and @cache → /var/cache are subvolumes too, kept \
+             outside the snapshots on purpose, so a rollback does not rewind the \
+             logs that say why it was needed or throw away the package cache.\n\
+             Mounted noatime, with zstd compression.",
+            if separate_home {
+                "@ → /,  @snapshots → /.snapshots   (/home is a partition of its own)"
+            } else {
+                "@ → /,  @home → /home,  @snapshots → /.snapshots"
+            }
+        )
+    } else if a.fs == "xfs" {
+        "xfs. No snapshots, and it cannot be shrunk afterwards.".to_string()
+    } else {
+        format!("{}. No snapshots, and so no rollbacks.", a.fs)
+    };
+
+    // Said here as well as on the disk page, and said differently: this is the
+    // only place that knows the package profile, and so the only place that
+    // can tell somebody their Secure Boot answer is not going to happen.
+    // Finding that out from a warning at the end of the install, on a machine
+    // whose firmware is in setup mode and now needs a second visit, is the
+    // outcome this row exists to prevent.
+    let secureboot = {
+        let state = if p.secureboot == "on" {
+            "Secure Boot is ON in this firmware"
+        } else if p.can_enroll_keys() {
+            "the firmware is in setup mode"
+        } else if p.setupmode == "off" {
+            "Secure Boot is off, vendor keys still enrolled"
+        } else {
+            "this firmware reports no Secure Boot state"
+        };
+        let have_tool = p.sbctl_with_profile(&a.profile, &a.postinstall);
+        match a.secureboot.as_str() {
+            "enroll" if have_tool => format!(
+                "Enrol this machine's own keys ({state}), and sign RavenBoot, the \
+                 fallback loader and the kernel with them.\nMicrosoft's certificates \
+                 go in alongside, so Windows and option ROMs keep working. Kernel \
+                 modules are not signed. Undone with \"sbctl reset\".\nBoot once with \
+                 Secure Boot still off before turning it on."
+            ),
+            "sign" if have_tool => format!(
+                "Sign RavenBoot, the fallback loader and the kernel ({state}).\nNo key \
+                 is enrolled, so Secure Boot must stay off until you enrol one. \
+                 Nothing about the next boot changes."
+            ),
+            "skip" => format!("Not touched ({state})."),
+            // The answer was sign or enroll and sbctl will not be there.
+            other => format!(
+                "Asked for \"{other}\", but sbctl will not be on the installed system, \
+                 so nothing will be signed and no key will be enrolled ({state}).\n\
+                 The install goes ahead unchanged. Pick a package profile that \
+                 includes sbctl, and install its packages during the install rather \
+                 than at first boot."
+            ),
+        }
+    };
+
     vec![
         ("Disk".into(), disk_info),
         ("Partitioning".into(), format!("{partitioning}\n{layout}")),
+        ("Filesystem".into(), filesystem),
+        ("Encryption".into(), encryption),
+        ("Secure Boot".into(), secureboot),
         ("Hostname".into(), a.hostname.clone()),
         (
             "User".into(),
@@ -2008,6 +2381,157 @@ mod tests {
         assert!(!text.contains("swap"));
         // Root moves up to 2 when there is no swap partition before it.
         assert!(text.contains("/dev/sda2   rest"), "root: {text}");
+    }
+
+    /// The summary is the only page that knows both the Secure Boot answer and
+    /// the package profile, so it is the only place that can say "you asked
+    /// for this and it is not going to happen". A person who finds that out
+    /// from a warning after the install has a firmware in setup mode and a
+    /// second trip into it ahead of them.
+    #[test]
+    fn the_summary_says_when_secure_boot_was_asked_for_and_cannot_happen() {
+        let setup_mode = Probe {
+            secureboot: "off".into(),
+            setupmode: "on".into(),
+            sbctl: false,
+            sbctl_profiles: vec!["desktop".into(), "developer".into()],
+            ..Default::default()
+        };
+        let row = |a: &Answers, p: &Probe| -> String {
+            plan_rows(a, p)
+                .into_iter()
+                .find(|(k, _)| k == "Secure Boot")
+                .expect("a Secure Boot row")
+                .1
+        };
+
+        // minimal does not carry sbctl, so nothing can be signed.
+        let minimal = Answers {
+            disk: "/dev/sda".into(),
+            profile: "minimal".into(),
+            secureboot: "enroll".into(),
+            ..Default::default()
+        };
+        let t = row(&minimal, &setup_mode);
+        assert!(t.contains("will not be on the installed system"), "{t}");
+        assert!(t.contains("goes ahead unchanged"), "{t}");
+
+        // desktop does, as long as the packages go in during the install.
+        let desktop = Answers { profile: "desktop".into(), ..minimal.clone() };
+        let t = row(&desktop, &setup_mode);
+        assert!(t.contains("Enrol this machine's own keys"), "{t}");
+        assert!(t.contains("setup mode"), "{t}");
+        assert!(t.contains("Microsoft"), "{t}");
+        assert!(t.contains("modules are not signed"), "{t}");
+
+        // ...and not when they are deferred to first boot, which is an hour
+        // after the installer could have signed anything.
+        let later = Answers { postinstall: "later".into(), ..desktop.clone() };
+        let t = row(&later, &setup_mode);
+        assert!(t.contains("will not be on the installed system"), "{t}");
+
+        // The default answer never claims anything happened.
+        let skip = Answers { secureboot: "skip".into(), ..desktop.clone() };
+        let t = row(&skip, &setup_mode);
+        assert!(t.starts_with("Not touched"), "{t}");
+    }
+
+    /// Signing without enrolling is the safe half, and the summary has to say
+    /// so out loud: a machine whose bootloader is signed by a key the firmware
+    /// has never heard of is exactly as unbootable under Secure Boot as an
+    /// unsigned one, and the signature makes it look done.
+    #[test]
+    fn signing_alone_says_secure_boot_must_stay_off() {
+        let p = Probe {
+            secureboot: "off".into(),
+            setupmode: "off".into(),
+            sbctl: true,
+            ..Default::default()
+        };
+        let a = Answers {
+            disk: "/dev/sda".into(),
+            secureboot: "sign".into(),
+            ..Default::default()
+        };
+        let t = plan_rows(&a, &p)
+            .into_iter()
+            .find(|(k, _)| k == "Secure Boot")
+            .expect("a Secure Boot row")
+            .1;
+        assert!(t.contains("No key is enrolled"), "{t}");
+        assert!(t.contains("must stay off"), "{t}");
+        assert!(t.contains("vendor keys still enrolled"), "{t}");
+    }
+
+    #[test]
+    fn the_filesystem_row_names_what_a_rollback_will_not_rewind() {
+        // The two subvolumes kept out of the snapshots are the part of this
+        // layout that surprises people, and the only place the front-end can
+        // say so is here and on the summary. If this string ever stops
+        // naming them, somebody's first rollback teaches them instead.
+        let p = Probe { filesystems: vec!["ext4".into(), "btrfs".into()], btrfs_progs: true, ..Default::default() };
+        let t = filesystem_subtitle("btrfs", &p);
+        assert!(t.contains("@ is the root"), "{t}");
+        assert!(t.contains("/var/log") && t.contains("/var/cache"), "{t}");
+        assert!(t.contains("outside the snapshots"), "{t}");
+
+        // ext4 is the default and must not be described as something it is
+        // not. It has no snapshots, and the row should say so rather than
+        // leave it to be discovered.
+        let t = filesystem_subtitle("ext4", &p);
+        assert!(t.contains("No snapshots"), "{t}");
+        assert!(!t.contains("btrfs is not offered"), "{t}");
+    }
+
+    #[test]
+    fn a_page_that_cannot_offer_btrfs_says_which_half_is_missing() {
+        let no_progs = Probe { filesystems: vec!["ext4".into()], btrfs_progs: false, ..Default::default() };
+        let t = filesystem_subtitle("ext4", &no_progs);
+        assert!(t.contains("btrfs is not offered"), "{t}");
+        assert!(t.contains("@ subvolume"), "{t}");
+
+        let no_mkfs = Probe { filesystems: vec!["ext4".into()], btrfs_progs: true, ..Default::default() };
+        let t = filesystem_subtitle("ext4", &no_mkfs);
+        assert!(t.contains("no mkfs.btrfs"), "{t}");
+    }
+
+    #[test]
+    fn the_summary_describes_the_subvolume_layout() {
+        let a = Answers { disk: "/dev/sda".into(), fs: "btrfs".into(), ..Default::default() };
+        let rows = plan_rows(&a, &Probe::default());
+        let fs = &rows.iter().find(|(k, _)| k == "Filesystem").unwrap().1;
+        assert!(fs.contains("@ → /"), "{fs}");
+        assert!(fs.contains("@home → /home"), "{fs}");
+        assert!(fs.contains("@snapshots → /.snapshots"), "{fs}");
+        assert!(fs.contains("@log → /var/log"), "{fs}");
+        assert!(fs.contains("@cache → /var/cache"), "{fs}");
+
+        // A /home of its own means raven-install creates no @home, so the
+        // summary must not promise one -- it would be the only line on this
+        // page that describes something that is not going to exist.
+        let manual = Answers {
+            disk: "/dev/sda".into(),
+            fs: "btrfs".into(),
+            mode: "manual".into(),
+            manual_use: vec![crate::answers::UsePart {
+                dev: "/dev/sda5".into(),
+                role: "home".into(),
+                action: "keep".into(),
+            }],
+            ..Default::default()
+        };
+        let rows = plan_rows(&manual, &Probe::default());
+        let fs = &rows.iter().find(|(k, _)| k == "Filesystem").unwrap().1;
+        assert!(!fs.contains("@home"), "{fs}");
+        assert!(fs.contains("partition of its own"), "{fs}");
+
+        // ext4 is still the default, and the row for it says the thing that
+        // makes this whole change worth having.
+        let ext4 = Answers { disk: "/dev/sda".into(), ..Default::default() };
+        let rows = plan_rows(&ext4, &Probe::default());
+        let fs = &rows.iter().find(|(k, _)| k == "Filesystem").unwrap().1;
+        assert!(fs.starts_with("ext4."), "{fs}");
+        assert!(fs.contains("no rollbacks"), "{fs}");
     }
 
     #[test]

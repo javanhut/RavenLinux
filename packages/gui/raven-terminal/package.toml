@@ -1,0 +1,101 @@
+# The terminal, and the reason the desktop can launch anything at all.
+#
+# huginn names `raven-terminal` in two compiled-in places -- theme::TERMINAL,
+# which is what the Super+Shift+T binding spawns, and the launcher's fallback
+# for a .desktop entry with Terminal=true -- so a desktop without it is a
+# desktop with no way to start a program that is not already pinned.
+#
+# This manifest is the file components.sh has been missing. GUI_APPS' TERMINAL
+# row carries an empty manifest field and the comment below it says so: "the
+# one GUI repository that cannot be pinned until one is written", and fetch
+# reports it as unpinned rather than pretending otherwise. Writing
+# `gui/raven-terminal` into that row is the change that makes a `commit` line
+# here the commit the image builds -- fetch_repo resolves its ref through
+# raven_resolve_ref, which reads [source] below. That row is in
+# scripts/lib/components.sh and is not this file's to edit.
+[package]
+name = "raven-terminal"
+# The upstream version only, and the base a build appends a revision to. This
+# component is cloned from its own repository and tracks that repository's
+# default branch unless RAVEN_USE_MANIFEST_PINS=1, so the package carries
+# +r<committer date>.g<commit> for the checkout that was actually compiled --
+# raven_component_version in scripts/lib/components.sh composes it.
+version = "0.1.0"
+description = "Raven Terminal - the Wayland terminal emulator, and what huginn launches everything else from"
+license = "MIT"
+homepage = "https://github.com/javanhut/RavenTerminal"
+repository = "https://github.com/javanhut/RavenTerminal"
+maintainers = ["RavenLinux Team"]
+categories = ["gui", "wayland", "terminal"]
+# Stated rather than derived. Everywhere else in packages/ the architecture
+# falls out of [build] target, which is a Rust triple; this is a Go build whose
+# target is a package path, and a bare `./src` would be read as the
+# architecture and end up in the package's filename.
+arch = "x86_64"
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/RavenTerminal.git"
+# Deliberately unpinned, as ravengui and ravenlogin are: nothing has been
+# tagged in that repository yet. Add a `commit = "..."` line at the first
+# release and -- once the GUI_APPS row above names this manifest -- the GUI
+# stage will build it, with no change to any script.
+
+[build]
+system = "go"
+# CGO_ENABLED=1 is set rather than inherited, and that is not belt and braces.
+# The Raven stage exports CGO_ENABLED=0 for its static musl builds, and a
+# leaked 0 turns this into a link failure against -lwayland-client that names
+# nothing to do with cgo -- which is a bad hour for whoever reads it. cgo is
+# the whole point here: the Wayland backend is vendored GLFW and go-gl.
+env = { CGO_ENABLED = "1" }
+build_flags = ["-tags", "wayland"]
+# The package path, not an architecture triple. rvn builds this as
+# `go build -tags wayland -o raven-terminal ./src`, which is what stage_terminal
+# runs -- go names a binary after its directory, so the -o is what stops this
+# producing something called `src`.
+target = "./src"
+
+[dependencies]
+# The Wayland client stack and libGL, and all of it is needed at build time as
+# well as at run time: go-gl's generated bindings shell out to
+# `pkg-config --cflags -- gl`, so libGL's .pc file is a build requirement and
+# not only a link-time one. On Arch that arrives with mesa, through libglvnd.
+#
+# The fonts are NOT here, unusually for a terminal: JetBrains Mono, FiraCode,
+# Hack and Ubuntu Mono Nerd Fonts are compiled into the binary. Neither is
+# terminfo -- it advertises TERM=xterm-256color, which stage2's copy_terminfo
+# already stages.
+runtime = ["wayland", "libxkbcommon", "mesa", "ravengui"]
+build = ["go", "pkg-config", "wayland", "libxkbcommon", "mesa"]
+
+[install]
+files = [
+    { src = "raven-terminal", dest = "/usr/bin/raven-terminal", mode = 755 },
+    # The icon the dock and launcher draw. The binary embeds this same SVG for
+    # its own window icon; the desktop needs it on disk under the name the
+    # .desktop file's Icon= key asks for. hicolor rather than breeze-dark
+    # because this is an application shipping its own icon, which is exactly
+    # what hicolor is the theme for.
+    { src = "src/assets/raven_terminal_icon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/raven-terminal.svg", mode = 644 },
+]
+
+# No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS
+# /usr/bin: a link at /bin/<name> whose target is /usr/bin/<name> names the
+# same path on both sides, and creating it replaces the real binary with a
+# symlink to itself. Anything installed to /usr/bin is already reachable at
+# /bin/<name> through the merge link -- see scripts/lib/usrmerge.sh.
+symlinks = []
+
+# What this manifest does NOT describe:
+#
+#   - /usr/share/applications/raven-terminal.desktop. The GUI stage's
+#     install_desktop_entries writes it as a heredoc rather than copying one
+#     out of the checkout, because that function owns the launcher's contents
+#     in one place for every application on the image. There is no file in this
+#     repository to name as a `src`. Its StartupWMClass has to stay
+#     `raven-terminal`, which is the app_id the vendored GLFW patch feeds to
+#     xdg_toplevel_set_app_id -- that is how the dock knows a running window
+#     belongs to the entry.
+#   - ~/.config/raven-terminal. It is created at run time when absent, which is
+#     the right owner for a per-user file no package can have an opinion about.

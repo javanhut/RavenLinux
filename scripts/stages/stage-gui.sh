@@ -3573,6 +3573,26 @@ ENTRY
 # `ln -sf ../usr/bin/${binary} ${SYSROOT}/bin/${binary}` unlinked the binary it
 # had just installed and left a dangling link in its place, which for this
 # stage meant huginn silently missing from the ISO.
+#
+# THIS IS STILL A LOOSE FILE, and the Raven layer's are not any more. The
+# Packaging section of scripts/stages/stage-raven.sh now builds each of its
+# components into a real package with `rvn build` and installs that, so
+# `rvn owns /usr/bin/crow` answers and `rvn owns /usr/bin/huginn` does not.
+# The same pass would work here -- the packages/gui manifests already name the
+# same x86_64-unknown-linux-gnu paths this stage builds into, and most of them
+# already claim their icons, metainfo and udev rules as well as their binary.
+#
+# What stops it is not the manifests, it is where the code lives. Both stages
+# are `source`d by scripts/build.sh through run_logged, which pipes them into
+# tee -- so each runs in a subshell of its own and nothing stage-raven.sh
+# defines is in scope here. Packaging this layer means lifting those functions
+# into a scripts/lib/packaging.sh both stages source; copying two hundred
+# lines of them into this file would be the other option and it is the wrong
+# one. Two manifest-side items are waiting for the same work:
+# packages/gui/ravengui is refused by `rvn build` over the symlink spelling
+# (`link` where rvn wants `dest`), and install_desktop_entries() writes the
+# .desktop files no manifest claims, so a package built today would not own
+# the launcher entry for its own application.
 install_gui_binary() {
     local binary="$1" src="$2"
 

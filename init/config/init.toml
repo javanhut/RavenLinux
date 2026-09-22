@@ -23,10 +23,81 @@ enable_network = true
 # Log level: trace, debug, info, warn, error
 log_level = "info"
 
+# -----------------------------------------------------------------------------
+# Logs
+# -----------------------------------------------------------------------------
+#
+# Every service's stdout and stderr go to /var/log/raven/<name>.log, and init's
+# own messages to /var/log/raven/init.log beside them. Nothing else on this
+# machine shortens those files, so these four keys are the whole of what stands
+# between a daemon in a crash loop and a full root filesystem -- at which point
+# no new session can be created, rvn cannot unpack a package, and init cannot
+# write the line that would have named the service responsible. A log that eats
+# the disk destroys the evidence it exists to keep.
+#
+# Sizes are a plain byte count, or a number with a K/M/G suffix in binary
+# multiples, or the word "max" for no limit. They are strings rather than
+# integers so that an operator writes "10M" instead of working out 10485760;
+# a service's `memory_max` takes the same vocabulary for the same reason.
+#
+# A value that is not a size is a warning naming the key, and the built-in
+# default is used instead: an unreadable limit must not be the reason a machine
+# fills its disk. These are read once, at start -- `raven-rc reload` does not
+# re-apply them, the same way it does not re-apply the hostname -- so a change
+# here takes a reboot or a `raven-rc reexec`.
+
+# Rotate a log once it reaches this size. 10M keeps `raven-rc logs` a readable
+# thing rather than a 400MB slurp, and on an idle machine it is measured in
+# days of history rather than hours.
+log_max_size = "10M"
+
+# How many rotated generations of each log to keep. Five at 10M is 50MB per
+# service before compression, which is roughly a week of the chattiest daemon
+# in this file. 0 is meaningful and means "cap the file, keep no history": the
+# log is truncated in place at log_max_size and nothing is copied out first,
+# which is the setting for a machine short enough of space that the only thing
+# worth keeping is what is happening now.
+log_keep = 5
+
+# The backstop: a cap on everything in /var/log/raven together. Rotation bounds
+# one service; this bounds the machine, and it is the limit that holds when
+# twenty services are misbehaving at once or when somebody has added more
+# services than this image ships. Rotated generations are removed oldest first
+# until the directory is back under it; the file a service is currently writing
+# to is never removed, so a machine whose live logs alone exceed this gets a
+# warning rather than a silently deleted daemon's output. "max" removes the cap.
+log_total_max = "200M"
+
+# Gzip a generation once it has been rotated out. Service output compresses by
+# something like ten to one, so this is the difference between five generations
+# costing 50MB and costing 5MB. It is a knob at all because the compressor is
+# /bin/gzip run as a child of PID 1: where that binary has been removed, or
+# where the fraction of a second it takes is not wanted in init, false keeps
+# the generations as plain text, which every tool that reads them handles just
+# as well.
+log_compress = true
+
 
 # =============================================================================
 # Services
 # =============================================================================
+#
+# This is the fallback copy of the boot configuration, used by
+# scripts/stages/stage2-native.sh only when etc/raven/init.toml is missing and
+# by scripts/test-desktop-build.py as its fixture. etc/raven/init.toml is the
+# one that ships, and it carries the full reference for everything a
+# [[services]] block may say -- type = "oneshot", [services.demand],
+# ready_path, and the resource keys nice / oom_score_adj / memory_max /
+# cpu_weight / io_weight / [services.limits]. That reference is deliberately
+# not repeated here: two copies of a hundred lines of prose is two copies that
+# drift, and the one nobody boots is the one that would rot. docs/service-
+# resource-control.md is the same material outside the TOML.
+#
+# What IS kept in step between the two files is the [system] block above and
+# the resource policy on the services both of them define, because those are
+# behaviour rather than prose, and a fallback config that boots a machine to a
+# different policy than the shipped one is a bug that only appears on the day
+# something has already gone wrong.
 
 # tty1: PAM-free rescue shell (avoids /bin/login issues during bring-up)
 # Device manager, before anything that needs a device.
@@ -105,6 +176,14 @@ ready_timeout = 5
 restart = true
 enabled = true
 critical = false
+# Kept in step with etc/raven/init.toml, where the argument for both numbers is
+# written out: dbus is too small for the kernel's memory-weighted score to pick
+# it, and everything that talks to this socket hangs rather than dies when it
+# goes away; and a bus holding a descriptor per client and per match rule is
+# the classic way to meet the kernel's soft default of 1024 file descriptors.
+oom_score_adj = -500
+[services.limits]
+nofile = 8192
 
 # cawd - CAW wireless daemon
 #
@@ -146,6 +225,11 @@ critical = false
 stop_exec = "/usr/bin/caw"
 stop_args = ["shutdown"]
 stop_timeout = 5
+# Kept in step with etc/raven/init.toml: cawd does WPA in-process, so a core
+# dump of it is a file of saved wireless passphrases written to /var by the
+# kernel, with no say from the program that owns them.
+[services.limits]
+core = "0"
 
 # Power button, sleep button and lid.
 #

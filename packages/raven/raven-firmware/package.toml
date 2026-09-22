@@ -1,0 +1,54 @@
+# Firmware updates for the machine and what is plugged into it.
+#
+# A Thunderbolt dock whose firmware is two years old drops its displays; an
+# NVMe drive ships from the factory with a known data-loss bug; a USB-C hub
+# renegotiates power wrongly until it is updated. None of these look like a
+# firmware problem from the desktop -- they look like Raven is broken. This is
+# the way to reach fwupd on a system shaped like this one, which is to say
+# fwupdtool directly: fwupdmgr authorises through polkit, and this system does
+# not run polkit.
+[package]
+name = "raven-firmware"
+version = "2026.08"
+description = "RavenLinux firmware updates - a polkit-free entry point to fwupd for the machine and its peripherals"
+license = "MIT"
+homepage = "https://github.com/javanhut/RavenLinux"
+repository = "https://github.com/javanhut/RavenLinux"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "hardware", "base"]
+arch = "any"
+
+[source]
+type = "local"
+url = "https://github.com/javanhut/RavenLinux.git"
+
+[build]
+system = "none"
+
+[dependencies]
+# Optional rather than required, which is the same judgement stage2 makes when
+# it installs this onto an image with no fwupd: the script looks for fwupdtool
+# at run time and names the package when it is absent, so it is a command that
+# explains itself rather than one that fails with "not found". Making fwupd a
+# hard dependency would pull a large daemon stack onto console images that will
+# never update a dock.
+runtime = []
+optional = ["fwupd: the updater itself; without it raven-firmware can only say which package to install"]
+build = []
+
+[install]
+files = [
+    { src = "configs/raven-firmware", dest = "/usr/bin/raven-firmware", mode = 755 },
+]
+
+# No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS
+# /usr/bin: a link at /bin/<name> whose target is /usr/bin/<name> names the
+# same path on both sides, and creating it replaces the real binary with a
+# symlink to itself. Anything installed to /usr/bin is already reachable at
+# /bin/<name> through the merge link -- see scripts/lib/usrmerge.sh.
+symlinks = []
+
+# There is no service and no timer here, and that is deliberate rather than
+# unfinished: a firmware write is not something to do to somebody's dock while
+# they are using it. /usr/share/raven/services/fwupd.toml exists, but it starts
+# the fwupd daemon and belongs with fwupd, not with this.

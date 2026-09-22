@@ -41,13 +41,15 @@ pub const PIX_GREY: u32 = fourcc(b"GREY");
 
 /// The controls this daemon touches, and no others.
 ///
-/// All three are pinned for the duration of a liveness challenge. See
+/// Both are pinned for the duration of a liveness challenge, and the exposure
+/// *time* is deliberately left alone -- switching to manual freezes it at
+/// whatever the camera had settled on for this room, which is the right value
+/// and one this daemon has no way to compute. See
 /// [`crate::camera::Camera::pin_exposure`] for why: a camera left on automatic
 /// corrects for the light this machine is deliberately throwing at somebody's
 /// face, which erases the one signal the challenge is measuring.
 pub const CID_AUTO_WHITE_BALANCE: u32 = 0x0098_090c;
 pub const CID_EXPOSURE_AUTO: u32 = 0x009a_0901;
-pub const CID_EXPOSURE_ABSOLUTE: u32 = 0x009a_0902;
 /// `V4L2_EXPOSURE_MANUAL`.
 pub const EXPOSURE_MANUAL: i32 = 1;
 

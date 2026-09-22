@@ -1164,6 +1164,10 @@ CONFIG_NET_EGRESS=y
 CONFIG_NET_XGRESS=y
 CONFIG_SKB_EXTENSIONS=y
 CONFIG_NET_DEVMEM=y
+# nf_tables hashes set elements with CRC32c, so enabling it below pulls this
+# promptless symbol on. It is written out rather than left for olddefconfig to
+# add so that this file is what the build produces.
+CONFIG_NET_CRC32C=y
 
 #
 # Networking options
@@ -1292,7 +1296,82 @@ CONFIG_NF_NAT_FTP=y
 CONFIG_NF_NAT_IRC=y
 CONFIG_NF_NAT_SIP=y
 CONFIG_NF_NAT_MASQUERADE=y
-# CONFIG_NF_TABLES is not set
+# nftables: the kernel half of /etc/nftables.conf.
+#
+# NF_TABLES was off here until this change, which meant the whole firewall
+# layer -- the nft binary, /etc/nftables.conf, the `nftables` one-shot
+# in etc/raven/init.toml and the raven-firewall CLI -- addressed a subsystem
+# the shipped kernel did not contain. `nft -f /etc/nftables.conf` would have
+# been answered EOPNOTSUPP on its first netlink message at every boot, the
+# service would have failed, and the machine would have run with no packet
+# filter at all: the exact state a default-deny ruleset was written to end.
+#
+# What is on here is what etc/nftables.conf needs in order to load, and not
+# the rest of netfilter. Most of what that ruleset does needs no symbol of its
+# own, because in 6.17 the expressions it uses are compiled into nf_tables
+# itself: payload matching (`ip daddr`, `udp dport`, `icmp type`, `ip ttl`,
+# `ip6 hoplimit`), meta matching (`iif`, `meta l4proto`), the anonymous sets in
+# the two ICMP rules, and the filter chain type that every chain in the file
+# declares. The set backends were separate modules once and are not any more,
+# which is why there is no NF_TABLES_SET line below to look for.
+#
+# NF_TABLES_INET is `table inet filter` on the ruleset's first line: one table
+# whose chains see both families, which is the decision that stops the IPv6
+# half from being the half that gets forgotten. It is a bool that selects
+# NF_TABLES_IPV4 and NF_TABLES_IPV6, and those two appear in their own
+# netfilter sections further down.
+#
+# NFT_CT is `ct state established,related accept` and `ct state invalid drop`.
+# It fails differently from a missing match: nft will not load a ruleset it
+# cannot fully express, so without NFT_CT the file does not lose two rules, it
+# does not load at all -- and the two rules in question are the ones that make
+# a default-deny input chain survivable.
+#
+# Those three are =y rather than =m deliberately. The nftables service runs
+# before the network comes up, and built-in means one fewer thing that has to
+# be working that early: no request_module round trip out to /sbin/modprobe,
+# no /lib/modules lookup, no dependency on depmod having been run against this
+# kernel. The window between "an interface has an address" and "the module
+# finished loading" is a window with no policy in it, and it is not a window
+# worth trading for text that is resident on every boot of a machine whose
+# firewall is always enabled anyway.
+#
+# NFT_LOG and NFT_LIMIT are =m, which is the other half of the same decision
+# rather than an inconsistency. Nothing in the shipped ruleset uses them; they
+# are wanted only by the two commented-out lines at the end of
+# /etc/nftables.conf that log and rate-limit what the policy drops. nf_tables
+# asks modprobe for an expression module by name the first time a rule needs
+# one, so uncommenting those two lines works on a running machine without a
+# kernel rebuild, and until somebody does, a module nothing loads costs disk
+# and nothing else. Building them in would be paying kernel text for a rule
+# that ships off.
+#
+# NFT_REJECT and its inet companion are not a Raven decision. NFT_REJECT is
+# `default m if NETFILTER_ADVANCED=n` upstream and NETFILTER_ADVANCED is off a
+# few lines above, so olddefconfig turns them on by itself the moment NF_TABLES
+# goes on. They are written out rather than left to appear on their own so that
+# the checked-in file is what the build produces. The shipped policy drops
+# rather than rejects, so nothing loads them; an edited ruleset that would
+# rather reject is a likely enough change that overriding the default here
+# would be churn for no saving.
+#
+# NF_TABLES_NETDEV stays off: it exists for ingress hooks bound to a named
+# interface, and this ruleset names no interface but lo -- deliberately, per
+# the comment at the `iif "lo"` rule about interface names being resolved at
+# load time on a machine whose network is not up yet.
+#
+# scripts/check-kernel-hardening.sh has NF_TABLES, NF_TABLES_INET and NFT_CT in
+# its required list, so a regenerated config that answers them with their
+# defaults fails the check instead of quietly shipping a machine with no
+# firewall. See docs/kernel-hardening.md.
+CONFIG_NF_TABLES=y
+CONFIG_NF_TABLES_INET=y
+# CONFIG_NF_TABLES_NETDEV is not set
+CONFIG_NFT_CT=y
+CONFIG_NFT_LOG=m
+CONFIG_NFT_LIMIT=m
+CONFIG_NFT_REJECT=m
+CONFIG_NFT_REJECT_INET=m
 CONFIG_NETFILTER_XTABLES=y
 # CONFIG_NETFILTER_XTABLES_COMPAT is not set
 # CONFIG_NETFILTER_XTABLES_LEGACY is not set
@@ -1333,6 +1412,10 @@ CONFIG_NETFILTER_XT_MATCH_STATE=y
 CONFIG_NF_DEFRAG_IPV4=y
 # CONFIG_NF_SOCKET_IPV4 is not set
 # CONFIG_NF_TPROXY_IPV4 is not set
+# Selected by NF_TABLES_INET above; the inet table has no IPv4 half without it.
+CONFIG_NF_TABLES_IPV4=y
+CONFIG_NFT_REJECT_IPV4=m
+# CONFIG_NF_TABLES_ARP is not set
 # CONFIG_NF_DUP_IPV4 is not set
 CONFIG_NF_LOG_ARP=m
 CONFIG_NF_LOG_IPV4=m
@@ -1345,6 +1428,10 @@ CONFIG_IP_NF_IPTABLES=y
 #
 # CONFIG_NF_SOCKET_IPV6 is not set
 # CONFIG_NF_TPROXY_IPV6 is not set
+# Selected by NF_TABLES_INET above; the inet table has no IPv6 half without it,
+# and the ICMPv6 rules that keep IPv6 from half-working live in that half.
+CONFIG_NF_TABLES_IPV6=y
+CONFIG_NFT_REJECT_IPV6=m
 # CONFIG_NF_DUP_IPV6 is not set
 CONFIG_NF_REJECT_IPV6=m
 CONFIG_NF_LOG_IPV6=m

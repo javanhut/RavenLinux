@@ -1,0 +1,70 @@
+# A DHCP lease for every wired link.
+#
+# ONE PACKAGE PER SHELL TOOL, and not one package for the six in configs/.
+#
+# They share a directory and a stage function apiece and nothing else: there is
+# no common build, each can be absent without the others noticing, and -- the
+# part that decides it -- each needs a different program to do its work. This
+# one is useless without dhcpcd, raven-console-font without setfont,
+# raven-fstrim without fstrim, raven-firmware without fwupd. Rolled into one
+# package those become a single dependency list that no image can satisfy in
+# full, so every one of them would look broken because one of them was.
+[package]
+name = "raven-dhcp"
+version = "2026.08"
+# These have no release cadence of their own -- they are files in the
+# RavenLinux repository that ship with the image, so the image's version is
+# the only honest thing to write here. RAVEN_VERSION in scripts/build.sh.
+description = "RavenLinux wired DHCP - a lease for every cabled interface, and none for a wireless one"
+license = "MIT"
+homepage = "https://github.com/javanhut/RavenLinux"
+repository = "https://github.com/javanhut/RavenLinux"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "network", "base"]
+# A /bin/sh script runs on any architecture, and saying so keeps one build of
+# the image from producing a package the next architecture has to rebuild.
+arch = "any"
+
+[source]
+type = "local"
+url = "https://github.com/javanhut/RavenLinux.git"
+
+[build]
+# Nothing to build: the payload is the script in the tree. `none` is the
+# honest answer and it is a value rvn understands, so `rvn build --no-build`
+# and a plain `rvn build` do the same thing for this manifest.
+system = "none"
+
+[dependencies]
+# dhcpcd does the protocol. This script is the two decisions above it -- which
+# interfaces to run on, and how not to run twice on the same one -- and it is
+# a wrapper precisely because the image already has an audited client.
+#
+# On an image built from this repository dhcpcd is a file stage2 copied off the
+# build container rather than a package, so `rvn owns /usr/bin/dhcpcd` answers
+# nothing and this dependency looks unmet on a machine where it is plainly
+# satisfied. It is declared anyway: the requirement is real, and the answer is
+# to package the base layer, not to stop stating it.
+runtime = ["dhcpcd"]
+build = []
+
+[install]
+files = [
+    { src = "configs/raven-dhcp", dest = "/usr/bin/raven-dhcp", mode = 755 },
+]
+
+# No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS
+# /usr/bin: a link at /bin/<name> whose target is /usr/bin/<name> names the
+# same path on both sides, and creating it replaces the real binary with a
+# symlink to itself. Anything installed to /usr/bin is already reachable at
+# /bin/<name> through the merge link -- see scripts/lib/usrmerge.sh.
+#
+# That merge is the whole reason there is no entry here. /etc/raven/init.toml's
+# `network` service runs "/bin/raven-dhcp" and init/src/ports.rs compiles in
+# the same spelling; both resolve to the file above with no link of ours.
+symlinks = []
+
+# No service template under /usr/share/raven/services, and that is not an
+# omission: the `network` service is defined in init.toml itself, so every
+# image built from this tree already starts it. A drop-in would be a second
+# definition of a service that is never missing.

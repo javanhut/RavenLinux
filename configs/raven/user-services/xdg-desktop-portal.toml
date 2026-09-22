@@ -59,6 +59,28 @@
 # opinion of it. The portals are different because they are long-lived by
 # design and because something being wrong with them is invisible until
 # somebody tries to save a file.
+#
+# ---------------------------------------------------------------------------
+#
+# `enabled = true` with `restart = true` next to an exec that no stage installs
+# yet is safe, and the reason is one line in a different file, so it is written
+# down here: usermode.rs's `load_config` drops a shipped template whose `exec`
+# does not exist before the supervisor ever sees it -- "template
+# xdg-desktop-portal skipped: /usr/lib/xdg-desktop-portal is not installed" in
+# the session log, and that is the whole of it. There is no fork, no ENOENT and
+# no restart loop; the contract is stated in the README beside this file and
+# proved by `templates_need_their_program_and_user_files_win_by_name` in
+# usermode.rs. That guard is what makes it correct to ship a session template
+# ahead of its package, which is what this file does.
+#
+# So this is not the -gtk sibling's situation and must not be "fixed" by
+# copying its `enabled = false`. That one is disabled for a reason the guard
+# cannot reach: it is a program the supervisor would successfully start and
+# could not keep alive, because the session's environment has no
+# WAYLAND_DISPLAY in it to give a GTK3 process -- see its own file. A missing
+# binary is the case the loader already answers; a present binary that cannot
+# work is the case `enabled = false` is for. This one either runs or is never
+# mentioned again.
 [[services]]
 name = "xdg-desktop-portal"
 description = "Desktop portal frontend: file dialogs, screenshots, permissions"

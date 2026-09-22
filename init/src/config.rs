@@ -115,6 +115,66 @@ pub struct SystemConfig {
     /// Log level
     #[serde(default = "default_log_level")]
     pub log_level: String,
+
+    /// The size at which a service's log -- or init's own -- is rotated.
+    ///
+    /// A size in the same vocabulary as a service's `memory_max`: a plain
+    /// number of bytes, or a number with a `K`/`M`/`G` suffix in binary
+    /// multiples, or the word `max` to switch rotation off and leave
+    /// [`SystemConfig::log_total_max`] as the only limit. It is a string
+    /// rather than an integer for exactly that reason -- `"10M"` is what an
+    /// operator writes, `10485760` is what they have to work out.
+    ///
+    /// The default is 10M. The argument for that number, and for the four
+    /// knobs below it, is in `logrotate::DEFAULT_MAX_SIZE` and its neighbours,
+    /// where the code that acts on it can be read at the same time.
+    ///
+    /// A value that is not a size is a warning naming the key, and the
+    /// built-in default is used. An unreadable limit must not be the reason a
+    /// machine fills its disk.
+    #[serde(default = "default_log_max_size")]
+    pub log_max_size: String,
+
+    /// How many rotated generations of each log to keep. Default 5.
+    ///
+    /// `0` is meaningful and means "cap the file, keep no history": the log is
+    /// truncated in place at `log_max_size` and nothing is copied out first.
+    /// That is the setting for a machine short enough of space that the only
+    /// thing worth keeping is what is happening now.
+    ///
+    /// Clamped to `logrotate::MAX_KEEP` with a warning naming the key. This is
+    /// the one log knob that is a bare number rather than a size, so it is the
+    /// one where `log_keep = 10485760` is a plausible slip -- and unclamped
+    /// that is ten million filesystem calls inside PID 1 before any service is
+    /// looked at again.
+    #[serde(default = "default_log_keep")]
+    pub log_keep: u32,
+
+    /// A cap on everything in the log directory together. Default 200M.
+    ///
+    /// Rotation bounds one service; this bounds the machine, which is the
+    /// limit that matters when twenty services are all misbehaving at once or
+    /// when somebody has added more services than this image ships. Rotated
+    /// generations are removed oldest-first until the directory is back under
+    /// it; a log a service is currently writing to is never removed, so a
+    /// machine whose *current* logs alone exceed the cap gets a warning rather
+    /// than a silently deleted daemon's output.
+    ///
+    /// `max` removes the cap. Same spelling rules as `log_max_size`.
+    #[serde(default = "default_log_total_max")]
+    pub log_total_max: String,
+
+    /// Whether to gzip a log once it has been rotated out. Default true.
+    ///
+    /// Service output compresses by something like ten to one, so this is the
+    /// difference between five generations costing 50MB and costing 5MB. It is
+    /// a knob at all because the compressor is `/bin/gzip` run as a child
+    /// process: on a machine where that binary has been removed, or where the
+    /// fraction of a second it takes is not wanted in PID 1, `false` turns it
+    /// off and the generations are kept as plain text, which every tool that
+    /// reads them handles just as well.
+    #[serde(default = "default_true")]
+    pub log_compress: bool,
 }
 
 impl Default for SystemConfig {
@@ -127,6 +187,10 @@ impl Default for SystemConfig {
             enable_udev: true,
             enable_network: true,
             log_level: default_log_level(),
+            log_max_size: default_log_max_size(),
+            log_keep: default_log_keep(),
+            log_total_max: default_log_total_max(),
+            log_compress: true,
         }
     }
 }
@@ -149,6 +213,93 @@ fn default_true() -> bool {
 
 fn default_log_level() -> String {
     "info".to_string()
+}
+
+/// 10M. The reasoning is on `logrotate::DEFAULT_MAX_SIZE`, and the constant
+/// itself is spelled out here rather than referenced so that the file format's
+/// default is legible in the file format's own vocabulary: an operator reading
+/// this to find out what to write in init.toml sees a string they could paste.
+fn default_log_max_size() -> String {
+    "10M".to_string()
+}
+
+/// Five generations. Must match `logrotate::DEFAULT_KEEP`, which carries the
+/// argument for the number; the value is repeated here rather than referenced
+/// because config.rs is compiled into the test binaries and into `raven-rc`,
+/// neither of which has a `logrotate` module -- the same reason `SOCKET_PATH`
+/// exists twice.
+fn default_log_keep() -> u32 {
+    5
+}
+
+/// 200M across the whole log directory. See `logrotate::DEFAULT_TOTAL_MAX`.
+fn default_log_total_max() -> String {
+    "200M".to_string()
+}
+
+/// What a service is expected to do with its life.
+///
+/// The supervisor has always had exactly one idea of a service -- a process
+/// that ought to be running -- and every word it says about one is built on
+/// that assumption. So the three services on this machine whose entire job is
+/// to finish (udev's coldplug, console-font's `setfont`, raven-dhcp's one
+/// pass) spent every boot being described as if something had gone wrong with
+/// them: `raven-rc list` called them "exited", which is the same word it uses
+/// for a daemon that died, and `raven-rc blame` put "no ready path" beside
+/// them, which is true and says nothing. A person reading either one had to
+/// already know which services were supposed to be gone.
+///
+/// `restart = false` was the closest thing to a way of saying it, and it is
+/// not the same statement. It says "do not bring this back", which is a
+/// decision about what the supervisor should do; this says "finishing is what
+/// success looks like", which is a fact about the service. A daemon with
+/// `restart = false` is one nobody wants restarted, and if it dies at three in
+/// the morning that is still a daemon that died. A one-shot that exits is a
+/// one-shot that worked.
+///
+/// Knowing the difference is also what lets `after` mean something for these
+/// services. A long-running service is "up" when its ready path appears, and
+/// a service ordered after it waits for that; a one-shot has no ready path to
+/// appear, it has an exit, and until this existed there was no way to write
+/// "start this only once that has finished" -- the thing everything after
+/// udev's coldplug actually wants.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceType {
+    /// A process that should be running for as long as the machine is:
+    /// `simple` because that is what systemd calls the same thing, and the
+    /// default because it is what nearly every service is.
+    ///
+    /// Its exit is an event worth a line in the log whatever `restart` says
+    /// about it.
+    ///
+    /// The alias is not decoration. A value this enum does not recognise
+    /// fails the whole of init.toml to parse, and `config::load` answers a
+    /// file it cannot parse by falling through to the built-in default --
+    /// which is one getty and nothing else. A machine that boots to a bare
+    /// login prompt because somebody wrote the word the other supervisor they
+    /// know uses is too much to charge for a spelling.
+    #[default]
+    #[serde(alias = "longrun", alias = "daemon")]
+    Simple,
+
+    /// A command whose job is to run once and finish, successfully.
+    ///
+    /// The supervisor waits for it rather than watching it: services ordered
+    /// `after` a one-shot are held until it has exited, an exit of zero is
+    /// what "worked" means for it, and a non-zero exit is reported as the
+    /// failure it is rather than as an ordinary end of life.
+    ///
+    /// A one-shot is expected to be idempotent, because nothing stops an
+    /// operator running `raven-rc start` on one a second time, and because a
+    /// one-shot with `restart = true` -- which is a strange thing to write but
+    /// a legal one -- is a loop.
+    ///
+    /// Spelled with a hyphen in the prose everywhere in this tree, so that
+    /// spelling is accepted in a file too; see `Simple` for what a value this
+    /// enum does not recognise costs.
+    #[serde(alias = "one-shot")]
+    Oneshot,
 }
 
 /// Service configuration
@@ -183,6 +334,16 @@ pub struct ServiceConfig {
     /// Whether service is critical (failure = boot failure)
     #[serde(default)]
     pub critical: bool,
+
+    /// What kind of thing this service is, and therefore what the supervisor
+    /// should make of it exiting. See [`ServiceType`].
+    ///
+    /// Spelled `type` in a file, because that is the word every other
+    /// supervisor uses for it and a service definition is read far more often
+    /// than it is written. It is `service_type` in the code only because
+    /// `type` is a Rust keyword.
+    #[serde(default, rename = "type")]
+    pub service_type: ServiceType,
 
     /// Environment variables
     #[serde(default)]
@@ -242,7 +403,21 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub ready_path: Option<String>,
 
-    /// Maximum time to wait for `ready_path`, in seconds.
+    /// Maximum time to wait for this service to be up before giving up on
+    /// waiting, in seconds.
+    ///
+    /// "Up" is `ready_path` appearing for an ordinary service, and the process
+    /// exiting for a `type = "oneshot"` -- the two things a dependant can wait
+    /// on, bounded by the same number because from the dependant's side they
+    /// are the same question. The default of five seconds is sized for a
+    /// daemon binding a socket; a one-shot that walks every device on the
+    /// machine will want its own, larger value, and saying so in its own
+    /// definition is better than making every service on the machine wait
+    /// longer for nothing.
+    ///
+    /// Running out of it is not the same as failing. See
+    /// `ServiceType::Oneshot` and the dependency wait in `start_services` for
+    /// what each kind of service does with the answer.
     #[serde(default = "default_ready_timeout")]
     pub ready_timeout: u32,
 
@@ -359,6 +534,139 @@ pub struct ServiceConfig {
     /// and exec. See [`ResourceLimits`].
     #[serde(default)]
     pub limits: ResourceLimits,
+
+    /// Present when this service is not started at boot at all, but when
+    /// something happens. See [`DemandStart`], and read its doc comment before
+    /// writing one -- in particular the part about what this is not.
+    ///
+    /// Written as `[services.demand]`, which like `[services.limits]` must
+    /// come after every plain key of the service block: TOML puts everything
+    /// following a sub-table header inside that sub-table.
+    #[serde(default)]
+    pub demand: Option<DemandStart>,
+}
+
+/// Why a service is absent from the boot and what will bring it back.
+///
+/// The five daemons this exists for are the printing and bluetooth stack --
+/// `cupsd`, `ipp-usb`, `avahi-daemon`, `bluetoothd` and `obexd`. On a laptop
+/// that prints something once a fortnight and has never been near an OBEX
+/// file transfer, all five started on every boot, held their memory for the
+/// whole of the machine's life, and spent the first second of every boot
+/// doing setup work for hardware that was not plugged in. Nothing was broken;
+/// it was simply five daemons' worth of a machine that was not printing.
+///
+/// A service with this set is skipped by `start_services` at boot exactly as
+/// though its binary were not installed, and started later by whichever
+/// trigger named here fires. `raven-rc list` shows it as `on demand` in the
+/// BOOT column, which is a third answer beside `enabled` and `disabled` and
+/// had to be, because it is neither: the operator did enable it, and it is
+/// deliberately not running.
+///
+/// # What this is not
+///
+/// **This is not socket activation.** Nothing here binds a socket on a
+/// service's behalf and hands the listening descriptor over at exec. There is
+/// no `LISTEN_FDS`, no `LISTEN_PID`, no `sd_listen_fds`, and no connection
+/// held open while the daemon starts. A daemon started this way binds its own
+/// socket, the same way it does when it is started at boot or by hand, and a
+/// client that connected a microsecond before the trigger fired gets ECONNREFUSED
+/// exactly as it would have on a machine where the daemon was simply not
+/// running yet.
+///
+/// That distinction is worth being tiresome about, because the two look alike
+/// from the outside and behave differently in the one case that matters. Real
+/// socket activation can promise that the first connection is never lost;
+/// demand-triggered start cannot promise anything of the sort, and a service
+/// whose correctness depends on that promise must not be given a `[demand]`
+/// block. `ipp-usb` and `obexd` are safe because the thing that triggers them
+/// is the same physical event that will, seconds later, produce the work --
+/// somebody plugs a printer in and then prints.
+///
+/// # The triggers
+///
+/// A service may declare any number of device rules; any one of them matching
+/// starts it. `daemon` declares the other case: that the trigger is not
+/// something init watches for at all, but something another raven daemon
+/// notices and acts on by running `raven-rc start`. That is a real mechanism
+/// and not a placeholder -- `raven-ports watch --react` already runs a command
+/// when a wired link comes up -- but init cannot verify it, so the field is
+/// prose naming who is responsible, and its presence is what stops init
+/// warning that a demand-started service has no way of ever starting.
+///
+/// An explicit `raven-rc start` always works and is never affected by any of
+/// this, which is the escape hatch for every case the triggers get wrong.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DemandStart {
+    /// Devices whose appearance starts this service. Any one rule matching is
+    /// enough; an empty list means no device will ever start it.
+    #[serde(default)]
+    pub device: Vec<DeviceTrigger>,
+
+    /// The name of the raven daemon that starts this service, for the case
+    /// where the trigger is something init has no way to see.
+    ///
+    /// Free text, and only ever printed: init does not call the daemon, look
+    /// for it, or check that it is running. Writing it is a statement by the
+    /// person who wrote the service definition that somebody else is going to
+    /// run `raven-rc start`, and it exists so that a demand-started service
+    /// with no device rules is distinguishable from one whose rules were lost
+    /// in an edit. Init warns about the second and says nothing about the
+    /// first.
+    #[serde(default)]
+    pub daemon: Option<String>,
+}
+
+/// One device whose arrival starts a service.
+///
+/// The fields are matched against the kernel's uevent for the device: the one
+/// broadcast on the netlink socket when it is plugged in, and the identical
+/// set of properties the kernel keeps in that device's `uevent` file in sysfs
+/// for one that was already there at boot. Both are matched by the same code
+/// against the same rule, which is the only way the two answers can be relied
+/// on to agree.
+///
+/// A rule is deliberately a small number of exact comparisons rather than
+/// anything resembling a udev rule. udev rules can walk up the device tree,
+/// read arbitrary sysfs attributes and run programs; this matches properties
+/// of one device, and the day a service needs more than that is the day it
+/// should be started by a udev rule calling `raven-rc start` instead --
+/// which is what the `daemon` field in [`DemandStart`] is for.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DeviceTrigger {
+    /// The kernel subsystem the device belongs to: `usb`, `bluetooth`,
+    /// `net`, `sound`. Required, and matched exactly.
+    ///
+    /// It is required because it is also how the already-plugged-in case is
+    /// answered: a rule with no subsystem would mean walking every device on
+    /// the machine at every boot to find out whether a service should start,
+    /// and a rule that names one costs reading a handful of files under
+    /// /sys/class/<subsystem> and /sys/bus/<subsystem>/devices.
+    pub subsystem: String,
+
+    /// The device's `DEVTYPE`, when the subsystem has more than one kind of
+    /// thing in it. `usb_interface` distinguishes the printer's interface
+    /// from the printer; `host` distinguishes a bluetooth adapter from a
+    /// paired remote device. `None` matches any.
+    #[serde(default)]
+    pub devtype: Option<String>,
+
+    /// Further uevent properties that must all match, by their kernel names:
+    /// `INTERFACE`, `PRODUCT`, `MODALIAS`, `DRIVER`.
+    ///
+    /// A value ending in `*` matches by prefix and is the only pattern
+    /// supported. That is not an oversight: the one property anybody needs to
+    /// match loosely is a USB interface's `class/subclass/protocol` triple,
+    /// where `INTERFACE = "7/*"` means "any printer" and `INTERFACE =
+    /// "7/1/4"` means "a printer that speaks IPP over USB", and a full glob
+    /// implementation would buy nothing else while giving a rule a way to be
+    /// subtly wrong. Everything else is compared exactly.
+    ///
+    /// A property the device does not have never matches, so a rule naming
+    /// one is a rule that will not fire -- which is easier to see in a
+    /// definition than in a log.
+    #[serde(default)]
+    pub properties: HashMap<String, String>,
 }
 
 /// The `setrlimit(2)` limits a service definition can ask for.
@@ -448,6 +756,7 @@ impl Default for ServiceConfig {
             restart: false,
             enabled: true,
             critical: false,
+            service_type: ServiceType::Simple,
             environment: HashMap::new(),
             pre_exec: Vec::new(),
             tty: None,
@@ -465,7 +774,24 @@ impl Default for ServiceConfig {
             cpu_weight: None,
             io_weight: None,
             limits: ResourceLimits::default(),
+            demand: None,
         }
+    }
+}
+
+impl ServiceConfig {
+    /// Whether this service is deliberately absent from the boot, waiting for
+    /// a trigger. See [`DemandStart`].
+    ///
+    /// A method rather than a field test at every call site because three
+    /// unrelated places ask -- the boot resolver in `start_services`, the BOOT
+    /// column of `raven-rc list`, and `raven-rc status` -- and because
+    /// `demand.is_some()` reads as a question about a struct rather than about
+    /// a service. It also keeps `control.rs` from having to name the `demand`
+    /// module: that module opens a netlink socket, which is not a thing the
+    /// test binary that re-includes `control.rs` should be dragging in.
+    pub fn is_demand_started(&self) -> bool {
+        self.demand.is_some()
     }
 }
 
@@ -583,5 +909,62 @@ fn load_dropins(config: &mut InitConfig) {
             );
             config.services.push(svc);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A service definition that says nothing about `type` is a daemon, which
+    /// is what every definition in this tree said before the key existed.
+    #[test]
+    fn a_service_that_names_no_type_is_a_daemon() {
+        let parsed: InitConfig = toml::from_str(
+            r#"
+            [[services]]
+            name = "dbus"
+            exec = "/usr/bin/dbus-daemon"
+            "#,
+        )
+        .expect("parses");
+        assert_eq!(parsed.services[0].service_type, ServiceType::Simple);
+    }
+
+    /// The key is `type` in a file and `service_type` only in the code, and
+    /// the value is the word the rest of the tree uses in prose. The
+    /// hyphenated spelling is accepted because the cost of refusing it is the
+    /// whole file, and the whole file is the machine's services.
+    #[test]
+    fn the_type_key_is_spelled_type_and_accepts_the_hyphen() {
+        for written in ["oneshot", "one-shot"] {
+            let parsed: InitConfig = toml::from_str(&format!(
+                r#"
+                [[services]]
+                name = "udev"
+                exec = "/usr/sbin/raven-udev"
+                type = "{written}"
+                "#
+            ))
+            .unwrap_or_else(|e| panic!("`type = \"{written}\"` must parse: {e}"));
+            assert_eq!(parsed.services[0].service_type, ServiceType::Oneshot);
+        }
+    }
+
+    /// `type` is a fact about the service and `restart` is an instruction to
+    /// the supervisor; a definition may carry either without the other, and a
+    /// reload must be able to see one of them change.
+    #[test]
+    fn type_is_not_restart_and_a_reload_can_tell_it_changed() {
+        let before = ServiceConfig {
+            name: "coldplug".to_string(),
+            ..ServiceConfig::default()
+        };
+        let after = ServiceConfig {
+            service_type: ServiceType::Oneshot,
+            ..before.clone()
+        };
+        assert_eq!(before.restart, after.restart);
+        assert_ne!(before, after, "reload would report no change");
     }
 }

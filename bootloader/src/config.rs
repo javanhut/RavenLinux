@@ -13,6 +13,46 @@ pub const MAX_ENTRIES: usize = 16;
 /// Maximum submenu depth
 pub const MAX_SUBMENU_DEPTH: usize = 3;
 
+/// Most snapshot entries the "Snapshots >" submenu will show.
+///
+/// This is a separate budget from [`MAX_ENTRIES`] and that is the whole point
+/// of putting snapshots behind a submenu rather than in the top-level list.
+/// The top level is nearly full before a single snapshot exists --
+/// `raven-install` writes seven fixed entries plus a Desktop one, and
+/// `detect_other_os` appends whatever else it finds on the machine's disks --
+/// and the parser here does not complain when it runs out of room, it just
+/// stops pushing. A flat snapshot list would therefore quietly shorten the
+/// fixed part of the menu from the bottom, and the entry at the bottom is the
+/// rescue shell: the one thing `raven-install`'s own closing text tells people
+/// to fall back to when a machine will not start. A submenu costs exactly one
+/// top-level slot no matter how many snapshots are in it.
+///
+/// Twelve is roughly twice the default retention (`raven-snapshot` keeps five)
+/// so that pinned snapshots have somewhere to accumulate, and still short
+/// enough to fit on one screen of the menu.
+pub const MAX_SNAPSHOT_ENTRIES: usize = 12;
+
+/// Where the snapshot entries are read from, most 8.3-safe name first.
+///
+/// This is a second file and not more `[entry]` blocks in `boot.cfg` because
+/// the two have different authors. `boot.cfg` is written once by
+/// `raven-install` and describes the machine: which UUID the root is, which
+/// container holds it, where to resume from. The snapshot list is rewritten by
+/// `raven-snapshot` every time a snapshot is taken or pruned, which on a
+/// machine that updates weekly is often. Keeping them apart means the tool
+/// that regenerates the volatile half never has to read, edit and write back
+/// the file that a machine's ability to boot at all depends on -- and that a
+/// truncated write, a full ESP or a power cut in the middle of `rvn update`
+/// costs the snapshot menu and nothing else.
+///
+/// A missing file is the normal case, not an error: an ext4 machine has no
+/// snapshots and never will, and no part of this may treat that as a fault.
+pub const SNAPSHOT_CONFIG_PATHS: &[&str] =
+    &["\\EFI\\raven\\snaps.cfg", "\\EFI\\raven\\snapshots.cfg"];
+
+/// The label of the generated submenu.
+pub const SNAPSHOT_MENU_NAME: &str = "Snapshots >";
+
 /// A single boot entry
 #[derive(Clone)]
 pub struct BootEntry {
@@ -365,36 +405,7 @@ impl BootConfig {
             if let Some((key, value)) = parse_key_value(line) {
                 if let Some(ref mut entry) = current_entry {
                     // Entry-level settings
-                    match key {
-                        "name" => entry.name = value,
-                        "kernel" | "path" => entry.kernel = value,
-                        "initrd" => entry.initrd = Some(value),
-                        "cmdline" | "options" => entry.cmdline = value,
-                        "type" => {
-                            entry.entry_type = match value.as_str() {
-                                "linux-efi" | "linux" => EntryType::LinuxEfi,
-                                "linux-legacy" => EntryType::LinuxLegacy,
-                                "chainload" | "efi" => EntryType::Chainload,
-                                "windows" => EntryType::Windows,
-                                "submenu" => EntryType::Submenu,
-                                "uefi-shell" | "shell" => EntryType::UefiShell,
-                                "back" => EntryType::Back,
-                                "reboot" => EntryType::Reboot,
-                                "shutdown" | "poweroff" => EntryType::Shutdown,
-                                // The enum and the dispatch in main.rs have
-                                // always had this; the parser had no spelling
-                                // for it, so `type = firmware-setup` fell
-                                // through the catch-all below and became a
-                                // Linux entry that tried to boot the literal
-                                // string in `kernel`.
-                                "firmware-setup" | "uefi-setup" | "firmware" => {
-                                    EntryType::FirmwareSetup
-                                }
-                                _ => EntryType::LinuxEfi,
-                            };
-                        }
-                        _ => {}
-                    }
+                    apply_entry_key(entry, key, value);
                 } else {
                     // Global settings
                     match key {
@@ -437,6 +448,117 @@ impl BootConfig {
             timeout,
         })
     }
+}
+
+/// Apply one `key = value` line to the entry being built.
+///
+/// Lifted out of [`BootConfig::parse`] unchanged so that the snapshot list
+/// below reads entries with exactly the same rules -- one spelling of `type`,
+/// one set of aliases, one catch-all. A second copy of this match would be a
+/// second dialect of boot.cfg, and the day they drifted apart would be the day
+/// an entry booted differently depending on which file it was written in.
+fn apply_entry_key(entry: &mut BootEntry, key: &str, value: String) {
+    match key {
+        "name" => entry.name = value,
+        "kernel" | "path" => entry.kernel = value,
+        "initrd" => entry.initrd = Some(value),
+        "cmdline" | "options" => entry.cmdline = value,
+        "type" => {
+            entry.entry_type = match value.as_str() {
+                "linux-efi" | "linux" => EntryType::LinuxEfi,
+                "linux-legacy" => EntryType::LinuxLegacy,
+                "chainload" | "efi" => EntryType::Chainload,
+                "windows" => EntryType::Windows,
+                "submenu" => EntryType::Submenu,
+                "uefi-shell" | "shell" => EntryType::UefiShell,
+                "back" => EntryType::Back,
+                "reboot" => EntryType::Reboot,
+                "shutdown" | "poweroff" => EntryType::Shutdown,
+                // The enum and the dispatch in main.rs have
+                // always had this; the parser had no spelling
+                // for it, so `type = firmware-setup` fell
+                // through the catch-all below and became a
+                // Linux entry that tried to boot the literal
+                // string in `kernel`.
+                "firmware-setup" | "uefi-setup" | "firmware" => EntryType::FirmwareSetup,
+                _ => EntryType::LinuxEfi,
+            };
+        }
+        _ => {}
+    }
+}
+
+/// Parse the generated snapshot list into a single submenu entry.
+///
+/// The file is the same flat `[entry]` dialect `boot.cfg` uses, and
+/// deliberately so: `raven-snapshot` builds each entry by copying the machine's
+/// own boot entry and changing `rootflags=subvol=` to name a snapshot, so what
+/// it writes is a boot.cfg entry in every respect but which subvolume it
+/// mounts. Nothing new had to be invented here, and nothing new can go wrong
+/// here that could not already go wrong in boot.cfg.
+///
+/// What this adds is the wrapper. The file has no syntax for a submenu -- the
+/// parser above has none either, and giving it one would mean nesting, an end
+/// marker and a depth check in the one piece of code whose failure mode is a
+/// machine that does not start. Instead the *meaning* of this particular file
+/// is the submenu: everything in it is a snapshot, so everything in it goes one
+/// level down, under [`SNAPSHOT_MENU_NAME`], with a `< Back` at the bottom like
+/// every other submenu in the menu.
+///
+/// Returns `None` when there is nothing to show -- no file, an unreadable one,
+/// no usable entries. Every one of those is the ordinary state of an ext4
+/// machine, a machine whose ESP was never mounted when the snapshot was taken,
+/// or a machine that has simply never taken one, and none of them is worth a
+/// warning on a screen somebody is waiting five seconds to get past.
+pub fn parse_snapshot_menu(data: &[u8]) -> Option<BootEntry> {
+    let text = str::from_utf8(data).ok()?;
+
+    let mut children: Vec<BootEntry> = Vec::new();
+    let mut current_entry: Option<BootEntry> = None;
+
+    // Pushes the finished entry if it is complete and there is still room.
+    // A snapshot entry with no name or no kernel is dropped for the same
+    // reason boot.cfg drops one: there is nothing to draw and nothing to boot.
+    fn flush(current: &mut Option<BootEntry>, children: &mut Vec<BootEntry>) {
+        if let Some(entry) = current.take() {
+            if !entry.name.is_empty()
+                && !entry.kernel.is_empty()
+                && children.len() < MAX_SNAPSHOT_ENTRIES
+            {
+                children.push(entry);
+            }
+        }
+    }
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+
+        if line == "[entry]" {
+            flush(&mut current_entry, &mut children);
+            current_entry = Some(BootEntry::default());
+            continue;
+        }
+
+        // There are no global settings in this file. `timeout` and `default`
+        // belong to the menu as a whole, which this is not part of: a snapshot
+        // is never the default and a submenu never counts down.
+        if let Some((key, value)) = parse_key_value(line) {
+            if let Some(ref mut entry) = current_entry {
+                apply_entry_key(entry, key, value);
+            }
+        }
+    }
+    flush(&mut current_entry, &mut children);
+
+    if children.is_empty() {
+        return None;
+    }
+
+    children.push(BootEntry::back());
+    Some(BootEntry::submenu(SNAPSHOT_MENU_NAME, children))
 }
 
 /// Parse a key = value line, handling quoted values

@@ -1,0 +1,72 @@
+# Face unlock: the one process on the machine that opens the camera.
+#
+# A package of its own rather than another binary out of init/, for the reason
+# faced/Cargo.toml gives: it links an ONNX inference engine, and nothing that
+# PID 1 builds should have to compile that. It is also deliberately not part of
+# ravend -- the process holding /etc/shadow does not also drive a USB device.
+[package]
+name = "raven-faced"
+version = "0.1.0"
+description = "RavenLinux face unlock - the camera daemon behind the login and lock screens"
+license = "MIT"
+homepage = "https://github.com/javanhut/RavenLinux"
+repository = "https://github.com/javanhut/RavenLinux"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "login", "hardware"]
+
+[source]
+# In-tree, like raven-init: this is faced/ in the RavenLinux repository, so
+# `rvn build --srcdir` is the RavenLinux checkout and every `src` below is
+# repository-relative. Nothing is fetched, so there is nothing to pin.
+type = "local"
+url = "https://github.com/javanhut/RavenLinux.git"
+
+[build]
+system = "cargo"
+target = "x86_64-unknown-linux-musl"
+# --locked because faced/Cargo.lock is committed. Note that faced's release
+# profile is opt-level = 3 rather than init's size-optimised one, on purpose:
+# the whole cost of a face unlock is two forward passes, and a slow build of
+# them is felt by somebody standing at the screen.
+build_flags = ["--release", "--locked"]
+
+[dependencies]
+# Nothing at runtime, and no libfprint-shaped library either: the V4L2 ioctls,
+# the MJPEG decode and the inference are all in the binary. What it does need
+# is a model, and a model is not a package -- see the note at the end.
+runtime = []
+build = ["rust", "cargo"]
+
+[install]
+files = [
+    { src = "faced/target/x86_64-unknown-linux-musl/release/raven-faced", dest = "/usr/bin/raven-faced", mode = 755 },
+    # How the models get onto a machine. It is a shipped program rather than a
+    # build step because the models are 37 MB and fetched by hash: an image
+    # that silently downloaded something it then trusted with logins would be
+    # an image nobody can reproduce.
+    { src = "faced/fetch-models.sh", dest = "/usr/share/raven-face/fetch-models.sh", mode = 755 },
+    # The drop-in template, for an already-installed machine whose init.toml
+    # predates this daemon: the binary arrives and nothing starts it. Inert
+    # where it ships; copied into /etc/raven/init.d by hand.
+    { src = "configs/raven/services/faced.toml", dest = "/usr/share/raven/services/faced.toml", mode = 644 },
+]
+
+# No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS
+# /usr/bin: a link at /bin/<name> whose target is /usr/bin/<name> names the
+# same path on both sides, and creating it replaces the real binary with a
+# symlink to itself. Anything installed to /usr/bin is already reachable at
+# /bin/<name> through the merge link -- see scripts/lib/usrmerge.sh.
+symlinks = []
+
+# What this manifest does NOT describe, and why:
+#
+#   - the models under /usr/share/raven-face. They are not in this repository
+#     and they are not in the image. Until somebody runs fetch-models.sh the
+#     daemon answers "no models" and the settings page says so, which is a
+#     better answer than a login screen that cannot explain itself.
+#   - /etc/raven/face.toml. configs/raven/face.toml exists in this tree and no
+#     stage installs it, so it is not claimed here: a manifest that shipped a
+#     file the image build does not would make `rvn build` and stage-raven.sh
+#     disagree about the contents of /etc. Every value in it is a default the
+#     daemon already carries, so its absence costs nothing; add it to the
+#     [install] files above at the same time as the stage that installs it.

@@ -4,12 +4,23 @@
 # What the power button, the sleep button and the lid do. Read by raven-powerd
 # at start; edit and `raven-rc restart powerd` to apply.
 #
-# Every setting takes one of four values:
+# Every setting takes one of five values:
 #
 #   suspend    sleep to RAM. The machine wakes on the power button or the lid.
+#   hibernate  write the session to swap and power off, resuming at next boot.
 #   poweroff   orderly shutdown, then power off.
 #   reboot     orderly shutdown, then reboot.
 #   ignore     do nothing at all.
+#
+# `hibernate` needs somewhere to write the image and something to read it back:
+# a swap device at least as large as the memory in use, and a `resume=` on the
+# kernel command line naming it. raven-install writes that line for any machine
+# it gives swap to. raven-init checks before it writes, so a machine that
+# cannot resume refuses to hibernate and says so in the log rather than powering
+# off and losing the session -- which means a lid set to "hibernate" on a
+# machine with no swap does nothing at all, quietly. A machine booted with
+# `noresume`, which is every snapshot entry raven-snapshot writes, refuses for
+# the same reason.
 #
 # The [profile] section is different: it is not about buttons but about how
 # hard the CPU runs, on mains and on battery. See below.
@@ -32,7 +43,9 @@ sleep = "suspend"
 
 [lid]
 # Closing the lid. Set this to "ignore" for a machine that lives shut on a
-# desk with an external monitor.
+# desk with an external monitor, or to "hibernate" for one that spends the day
+# in a bag -- a suspended laptop drains over several hours, a hibernated one
+# does not.
 close = "suspend"
 
 # Arm the buttons and the lid as ACPI wakeup sources at start.

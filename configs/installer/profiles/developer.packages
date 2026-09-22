@@ -1,8 +1,34 @@
 # Desktop profile plus a hosted build environment.
 #
 # raven-postinstall reads exactly one .packages file, so this is a standalone
-# list rather than an include of desktop.packages. Everything above the build
-# section must stay in step with desktop.packages by hand.
+# list rather than an include of desktop.packages. Every name in
+# desktop.packages must therefore also appear here, by hand. The build section
+# in the middle is the only part that is this file's alone -- the shared
+# content is no longer all of it above that point, so "everything above the
+# build section" is not the rule to check against.
+#
+# This is the check, and it cares about neither ordering nor where a section
+# sits, so it survives either file being reorganised:
+#
+#   cd configs/installer/profiles
+#   comm -23 <(grep -v '^#\|^$' desktop.packages | sort) \
+#            <(grep -v '^#\|^$' developer.packages | sort)
+#
+# Anything it prints is a package a desktop install gets and a developer
+# install silently does not.
+#
+# Generating this file from a shared fragment was considered and deliberately
+# not done. The only places a generator could run are stage4-iso.sh's
+# install_installer -- the function that copies these files into
+# /etc/raven/install-profiles -- or a new lazy.toml target, and either way the
+# file in the tree stops being the file that ships: reading it would no longer
+# tell you what the profile installs, which is the whole reason these are
+# plain lists. That is a poor trade for forty duplicated lines that change a
+# few times a year, and it would cost the per-profile comments too, since a
+# generated file cannot carry a note that is true for one profile and not the
+# other. The comm check above is the cheap half of the same guarantee;
+# wiring it into `imlazy test` beside check-manifests.sh is the obvious next
+# step and is a change to that script rather than to this file.
 linux-firmware
 sof-firmware
 alsa-ucm-conf
@@ -69,3 +95,75 @@ librsvg
 glycin
 bubblewrap
 dconf
+
+# Two names the ISO already carries as unowned copied files.
+#
+# Same argument as the graphics stack above, applied to two things that have
+# nothing to do with the desktop. stage2 copies /usr/bin/nft and
+# /usr/bin/sysctl out of the build container, so the image has both binaries
+# and `rvn owns` can account for neither: never updated, never repaired.
+# Declaring them here puts them under package management on an installed
+# machine, which for a firewall in particular is the difference between a
+# security fix arriving with the next `rvn update` and not arriving.
+#
+#   nftables   what the nftables service in /etc/raven/init.toml runs against
+#              /etc/nftables.conf. The service ships disabled, so this is the
+#              package you want present before you decide to turn the
+#              firewall on rather than while you are trying to. Installing it
+#              will leave an /etc/nftables.conf.pacnew beside Raven's
+#              ruleset: Arch's nftables owns that path too and rvn spares a
+#              backup file it did not write, which is the correct outcome
+#              here -- the shipped ruleset survives, and the upstream example
+#              is there to diff against.
+#   procps-ng  `sysctl`, and with it any way to ask whether
+#              /usr/lib/sysctl.d/50-raven.conf actually took. ps, top, free
+#              and uptime are from the same package and were already on the
+#              image by accident of the build container carrying it.
+nftables
+procps-ng
+
+# Optional in the sense that matters: nothing Raven ships needs any of these,
+# and each one is here because software that is not Raven's does.
+#
+#   polkit   Raven has no polkitd. raven-rc, rvn, raven-powerd and
+#            raven-firmware authorise by unix group on their own socket or by
+#            already being root, and gain exactly nothing from an
+#            authorization framework. What needs one is other people's
+#            software: virt-manager, GNOME Disks, graphical updaters and
+#            `fwupdmgr` all call CheckAuthorization before they will do
+#            anything, and with nobody owning org.freedesktop.PolicyKit1 that
+#            call fails rather than prompts. It is not a dialog you can
+#            dismiss -- it is the tool not working, with an error that blames
+#            D-Bus.
+#
+#            Installing this creates the polkitd account from the package's
+#            own sysusers.d fragment (rvn applies those; systemd is not
+#            involved) and activates the polkitd service template, which
+#            ships DISABLED. `raven-rc enable polkitd` is the deliberate
+#            second step, and /usr/share/raven/services/polkitd.toml is where
+#            the whole tradeoff is written down -- including the setuid-root
+#            /usr/bin/pkexec this package also brings, which is the honest
+#            cost and the reason polkit is not in the base image.
+#   flatpak  The answer to application availability. Raven's own repository
+#            is small and the AUR path builds from source, unsigned, on the
+#            machine you are sitting at -- neither is a way to get a current
+#            browser, an IDE or a chat client this afternoon. Flatpak is, and
+#            it does it without asking the base system to carry any of those
+#            runtimes or their dependency graphs. The portal frontend the
+#            sandboxed applications talk to is already shipped, as a user
+#            service in configs/raven/user-services/xdg-desktop-portal.toml,
+#            so the desktop side of this is in place. Adding a remote is not
+#            done here: `flatpak remote-add --if-not-exists flathub ...` is a
+#            decision about who may ship software to this machine, and that
+#            belongs to the person who owns it.
+#   sbctl    Secure Boot key management. RavenBoot is Raven's own EFI binary
+#            and is signed by nobody Microsoft has heard of, so a machine
+#            with Secure Boot enabled either boots Raven with the vendor keys
+#            cleared or does not boot it at all. sbctl is what creates a key
+#            set, enrols it while the firmware is in setup mode, and signs
+#            \EFI\BOOT\BOOTX64.EFI and \EFI\raven\raven-boot.efi on the ESP.
+#            Far easier to have installed before Secure Boot is turned on
+#            than to obtain from a machine that will not boot.
+polkit
+flatpak
+sbctl

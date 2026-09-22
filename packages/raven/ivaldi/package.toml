@@ -2,6 +2,11 @@
 # this cross-compiles cleanly to a static musl binary.
 [package]
 name = "ivaldi"
+# The upstream version only, and the base a build appends a revision to. This
+# component is cloned from its own repository and tracks that repository's
+# default branch unless RAVEN_USE_MANIFEST_PINS=1, so the package carries
+# +r<committer date>.g<commit> for the checkout that was actually compiled --
+# raven_component_version in scripts/lib/components.sh composes it.
 version = "0.1.2"
 description = "Ivaldi - standalone modern version control system"
 license = "AGPL-3.0"

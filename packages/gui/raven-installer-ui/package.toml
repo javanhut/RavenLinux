@@ -1,0 +1,87 @@
+# The graphical front-end for raven-install.
+#
+# It partitions nothing. Every disk-destroying operation in a RavenLinux
+# install lives in scripts/installer/raven-install and only there; this asks
+# the questions that script's wizard asks, writes the answers to a file, and
+# runs the script. That is the whole design, and it is why a change to the way
+# Raven installs needs no change here -- `raven-install --probe` says what to
+# ask about and the answers file is how it is answered.
+#
+# In-tree rather than a repository of its own, unlike every other GUI package,
+# for the reason installer-ui/Cargo.toml gives: it is not an application, it is
+# the other half of a file in scripts/installer, and the two have to ship as
+# one version. That is also why it is not a GUI_APPS row in
+# scripts/lib/components.sh -- there is nothing to clone -- and why it is in
+# GUI_INSTALLER_BINARIES instead.
+[package]
+name = "raven-installer-ui"
+version = "0.1.0"
+description = "RavenLinux graphical installer - the GTK4 front-end that raven-install does the work for"
+license = "MIT"
+homepage = "https://github.com/javanhut/RavenLinux"
+repository = "https://github.com/javanhut/RavenLinux"
+maintainers = ["RavenLinux Team"]
+categories = ["gui", "installer"]
+
+[source]
+# In-tree, like packages/raven/raven-init: this is installer-ui/ in the
+# RavenLinux repository, so `rvn build --srcdir` is the RavenLinux checkout
+# and every `src` below is repository-relative. Nothing is fetched and there is
+# nothing to pin.
+type = "local"
+url = "https://github.com/javanhut/RavenLinux.git"
+
+[build]
+system = "cargo"
+# NOT the musl target, for the reason ravengui's manifest gives at length: this
+# is a GTK4 and libadwaita client and it links the same glibc graphics stack
+# the rest of the desktop does. stage-gui.sh builds it for GUI_TARGET, which is
+# the build host's own triple and on this image is this one.
+target = "x86_64-unknown-linux-gnu"
+# No --locked: installer-ui ships no Cargo.lock, so there is nothing to lock
+# against and cargo would refuse the build outright. The GUI stage makes the
+# same allowance conditionally; committing a lock file is what would let both
+# sides drop it.
+build_flags = ["--release"]
+
+[dependencies]
+# GTK4 and libadwaita, the same toolkit ravenfilemanager, raven-settings and
+# raven-controls are built with, for the same reason: it is the one graphical
+# stack the image already carries and stage-gui.sh already stages its runtime.
+# The bindings ask for v4_12 features and the image carries GTK 4.22.
+#
+# raven-installer is a hard runtime dependency and the strongest one in this
+# file: without /usr/bin/raven-install this program has nothing to run and no
+# way to install anything. huginn because there is no other compositor here to
+# host a Wayland client on the live image.
+runtime = ["gtk4", "libadwaita", "raven-installer", "ravengui"]
+build = ["rust", "cargo", "pkg-config", "gtk4", "libadwaita"]
+
+[install]
+files = [
+    { src = "installer-ui/target/x86_64-unknown-linux-gnu/release/raven-installer-ui", dest = "/usr/bin/raven-installer-ui", mode = 755 },
+    # The one launcher entry on this image that is copied rather than written
+    # by install_desktop_entries. Every other application is an upstream
+    # checkout, so that function owns their entries; this one's source is in
+    # this tree, which makes "one place" and "next to the application" the same
+    # place -- and a heredoc there would be a second copy of a file already in
+    # the repository, free to disagree with it.
+    { src = "installer-ui/data/com.raveninstaller.Raven.desktop", dest = "/usr/share/applications/com.raveninstaller.Raven.desktop", mode = 644 },
+    { src = "installer-ui/data/icons/hicolor/scalable/apps/com.raveninstaller.Raven.svg", dest = "/usr/share/icons/hicolor/scalable/apps/com.raveninstaller.Raven.svg", mode = 644 },
+    # Read by software centres rather than by anything on this image, and
+    # shipped for the same reason the .desktop is: raven-install checks for all
+    # three by name when it copies the desktop onto the installed disk.
+    { src = "installer-ui/data/com.raveninstaller.Raven.metainfo.xml", dest = "/usr/share/metainfo/com.raveninstaller.Raven.metainfo.xml", mode = 644 },
+]
+
+# No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS
+# /usr/bin: a link at /bin/<name> whose target is /usr/bin/<name> names the
+# same path on both sides, and creating it replaces the real binary with a
+# symlink to itself. Anything installed to /usr/bin is already reachable at
+# /bin/<name> through the merge link -- see scripts/lib/usrmerge.sh.
+symlinks = []
+
+# The GTK runtime this needs -- the icon cache, the schemas, the loaders cache
+# -- is not in this package and cannot be: stage_gtk_runtime and
+# stage_gui_libraries resolve it with ldd at build time, which is the only way
+# to know it. See the same note in packages/gui/ravengui/package.toml.

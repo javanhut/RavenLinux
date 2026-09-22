@@ -10,6 +10,45 @@
 # `standalone` rather than the udev-activated mode: there is no systemd here to
 # do the activating, and the daemon idles at nothing when no printer is
 # attached.
+#
+# DEMAND-STARTED, and this is the worked example /etc/raven/init.toml points
+# at for `[services.demand]`. It is the one daemon in the printing stack where
+# the trigger is not a guess. An IPP-over-USB interface is class 7 (printer),
+# subclass 1, protocol 4 by specification -- the same triple upstream's own
+# udev rule matches on -- and it arrives in the uevent as `INTERFACE=7/1/4`
+# with `DEVTYPE=usb_interface`, which is exactly what the rule below says.
+# Nothing else on a laptop looks like that, and a laptop with no printer
+# plugged into it has no use for this process at all.
+#
+# `enabled = true` is not a contradiction and must stay: a demand-started
+# service is one the operator enabled and init deliberately did not start, so
+# `raven-rc list` shows it as `on demand`, and `demand::already_present` only
+# considers services that are enabled. Setting it false would disable the
+# trigger too.
+#
+# A printer that was already plugged in at power-on still starts it. The
+# coldplug uevents are long gone by the time the monitor exists, so init walks
+# /sys/bus/usb/devices at the top of the main loop and matches the same rule
+# against each device's own `uevent` file. Plugged in later, the broadcast on
+# the netlink socket matches it instead. Both paths run through the same
+# `matches_device`, which is the only way the two answers can be relied on to
+# agree.
+#
+# This is not socket activation and cannot be: nothing holds a connection open
+# while the daemon starts. It is safe here because the event that starts it is
+# the cable going in, and the print job is a human being's worth of seconds
+# later. `raven-rc start ipp-usb` remains the escape hatch.
+#
+# `after` is kept as it was. At trigger time init satisfies it the same way
+# boot does -- udev has already finished by definition, since a device event is
+# what got here, and avahi-daemon is started if it is not running, because the
+# whole point of this daemon is to re-export the printer as an ordinary
+# DNS-SD network device that CUPS can find.
+#
+# [services.demand] must come after every plain key of the block: TOML puts
+# everything following a sub-table header inside that sub-table, so a key
+# written below it would quietly become part of the trigger instead of part of
+# the service.
 [[services]]
 name = "ipp-usb"
 description = "Printing: expose a USB printer's IPP interface to CUPS"
@@ -19,3 +58,14 @@ after = ["udev", "avahi-daemon"]
 restart = true
 enabled = true
 critical = false
+
+[services.demand]
+
+# One rule, matched exactly. `7/*` would be "any printer" and would start this
+# for a device that speaks only raw USB printing, which ipp-usb has nothing to
+# do with; the trailing-star form is documented in config.rs and is right for
+# the looser question, not for this one.
+[[services.demand.device]]
+subsystem = "usb"
+devtype = "usb_interface"
+properties = { INTERFACE = "7/1/4" }

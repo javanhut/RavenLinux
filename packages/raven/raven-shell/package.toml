@@ -1,0 +1,64 @@
+# The rescue login shell.
+#
+# /etc/raven/init.toml runs agetty with --skip-login on tty1, which means there
+# is no login(1) and no PAM anywhere in the path -- and therefore nothing to
+# set up an environment either. This is what agetty execs instead: it exports
+# a sane PATH, HOME and TERM, runs first-boot setup if it has not been run, and
+# then hands off to the best shell on the machine.
+#
+# It is a package of its own rather than part of ravenshell because it has to
+# keep working on a base system built with RAVEN_SKIP=1, where ravenshell was
+# never installed -- the chain falls through to bash and then to /bin/sh. A
+# rescue shell that depended on the component it is the rescue path for would
+# be no rescue path at all.
+[package]
+name = "raven-shell"
+version = "2026.08"
+description = "RavenLinux rescue login shell - the PAM-free environment agetty --skip-login execs"
+license = "MIT"
+homepage = "https://github.com/javanhut/RavenLinux"
+repository = "https://github.com/javanhut/RavenLinux"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "shell", "base"]
+arch = "any"
+
+[source]
+type = "local"
+url = "https://github.com/javanhut/RavenLinux.git"
+
+[build]
+system = "none"
+
+[dependencies]
+# Nothing required: /bin/sh is the last link in the chain and every image has
+# one. ravenshell is preferred and bash is the fallback before that, so both
+# are optional in the strict sense -- the shell still comes up without either.
+runtime = []
+optional = [
+    "ravenshell: the shell this prefers, and what the Raven stage makes root's login shell",
+    "bash: the fallback when ravenshell is not installed",
+]
+build = []
+
+[install]
+files = [
+    { src = "etc/raven/raven-shell", dest = "/usr/bin/raven-shell", mode = 755 },
+]
+
+# No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS
+# /usr/bin: a link at /bin/<name> whose target is /usr/bin/<name> names the
+# same path on both sides, and creating it replaces the real binary with a
+# symlink to itself. Anything installed to /usr/bin is already reachable at
+# /bin/<name> through the merge link -- see scripts/lib/usrmerge.sh.
+#
+# init.toml passes --login-program "/bin/raven-shell", which is the file above.
+symlinks = []
+
+# /etc/raven/first-boot-setup is NOT in this package, although this script
+# execs it when /etc/.raven-first-boot-done is absent. It is in this repository
+# at etc/raven/first-boot-setup and no stage installs it -- grep the stages and
+# the only hit is a comment -- so claiming it here would ship a file the image
+# build does not, and `rvn build` and the stages would disagree about /etc.
+# The script already treats it as optional (`[ -x ... ]`), so the effect today
+# is that a first boot asks nothing. Add it to the [install] files above at the
+# same time as the stage that installs it.

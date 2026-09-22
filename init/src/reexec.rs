@@ -231,9 +231,7 @@ fn write_state(path: &Path, handoff: &Handoff) -> Result<()> {
 /// lost in the first place. The services are restored by the caller, from the
 /// value returned; the timeline has one global home and is restored into it.
 pub fn take() -> Option<Handoff> {
-    if std::env::var_os(ENV_MARK).is_none() {
-        return None;
-    }
+    std::env::var_os(ENV_MARK)?;
     std::env::remove_var(ENV_MARK);
 
     let path = state_path();

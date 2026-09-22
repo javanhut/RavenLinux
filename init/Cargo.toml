@@ -98,3 +98,16 @@ path = "src/mount.rs"
 [[bin]]
 name = "raven-fprintd"
 path = "src/fprintd.rs"
+
+# The firewall's front end: the three things a person does to a packet filter
+# between reboots, without having to learn nft to do them. In this crate for
+# the same reason raven-powerd and raven-timed are -- it is the client half of
+# something PID 1 starts. The `nftables` one-shot in /etc/raven/init.toml is
+# what loads the ruleset at boot; this is what answers "is it on?", opens a
+# port, and puts an edited /etc/nftables.conf back into force. Unlike those two
+# it fronts no daemon of its own, because a loaded ruleset lives in the kernel
+# rather than in a process -- which is the same fact that makes the boot
+# service a one-shot. It shares no code with init itself.
+[[bin]]
+name = "raven-firewall"
+path = "src/firewall.rs"

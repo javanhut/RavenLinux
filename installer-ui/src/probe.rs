@@ -266,11 +266,45 @@ pub struct Probe {
 
     pub firmware: String,
     pub secureboot: String,
+    /// Whether the firmware is in Secure Boot setup mode: "on", "off" or
+    /// "unknown". A separate fact from `secureboot`, and the one that decides
+    /// whether keys can be enrolled: "off" covers both "no Platform Key is
+    /// enrolled, write what you like" and "the vendor's key is enrolled and
+    /// the firmware will refuse anything else", and only the first of those is
+    /// a machine this installer can set up for Secure Boot.
+    pub setupmode: String,
+    /// Whether the tree being installed already carries sbctl. When it does
+    /// not, `sbctl_profiles` says which package profiles would bring it.
+    pub sbctl: bool,
+    /// The package profiles whose lists name sbctl. Read from the lists by the
+    /// installer, so this follows the packaging rather than restating it.
+    pub sbctl_profiles: Vec<String>,
     pub tools_missing: Vec<String>,
+    /// The root filesystems this image can actually create, from
+    /// `preflight.fs`. btrfs appears only when both of its binaries are
+    /// present -- see `btrfs_progs`.
     pub filesystems: Vec<String>,
+    /// Whether the `btrfs` binary is on the image, as opposed to mkfs.btrfs.
+    /// They ship in one package and are copied into the sysroot one name at a
+    /// time, so an image can have the second without the first -- and an
+    /// install that can make a btrfs filesystem but not the @ subvolume the
+    /// root is mounted from is an install that fails after the disk has been
+    /// erased. The installer already leaves btrfs out of `filesystems` in that
+    /// case; this is here so the page can say which of the two is missing
+    /// instead of silently offering one fewer choice.
+    pub btrfs_progs: bool,
     pub chpasswd: bool,
     pub mkswap: bool,
     pub efibootmgr: bool,
+    /// Whether this image can encrypt a disk at all. False greys out the
+    /// encryption switch: the installer would refuse at preflight, and an
+    /// offer it cannot keep is worse than no offer.
+    pub cryptsetup: bool,
+    /// Whether the kernel has an AES-NI driver. Encryption is correct either
+    /// way; without it the encrypted root runs generic AES and is a fraction
+    /// of the disk's speed, which is worth saying next to the switch and is
+    /// not worth refusing over.
+    pub aes_ni: bool,
     /// The two resizers. Not required for an install; required for an install
     /// alongside a filesystem of the matching kind.
     pub resize2fs: bool,
@@ -315,7 +349,22 @@ impl Probe {
             w.push(
                 "Secure Boot is enabled. RavenBoot is unsigned, so the installed \
                  system will not boot until you turn Secure Boot off in the \
-                 firmware setup."
+                 firmware setup. It can be kept on, but only the long way round: \
+                 clear the Secure Boot keys in the firmware to put it in setup \
+                 mode, start this installer again, and let it enrol this \
+                 machine's own keys."
+                    .to_string(),
+            );
+        } else if self.setupmode == "on" {
+            // Not a problem -- it is an opportunity, and it is the one state
+            // in which this installer can do anything about Secure Boot at
+            // all. Somebody who cleared their keys in the firmware did it on
+            // purpose and should be told that the installer noticed.
+            w.push(
+                "This firmware is in Secure Boot setup mode, so the installer can \
+                 enrol this machine's own keys and sign RavenBoot and the kernel \
+                 with them. It is off by default; the Secure Boot section on the \
+                 disk page turns it on."
                     .to_string(),
             );
         }
@@ -337,6 +386,28 @@ impl Probe {
             );
         }
         w
+    }
+
+    /// Will the installed system have sbctl, given the package profile chosen?
+    ///
+    /// Two ways for it to be there: the tree being copied already carries it,
+    /// or the profile's package list names it. The second only counts when the
+    /// packages go in during the install rather than at first boot -- a
+    /// machine whose sbctl arrives an hour after the installer finished cannot
+    /// have been signed by the installer. `postinstall` is the answer that
+    /// decides, and "auto" is honestly unknowable from here (it depends on
+    /// whether the live session has a network), so it is treated as "yes, but
+    /// say so" -- see the wording on the page, which does.
+    pub fn sbctl_with_profile(&self, profile: &str, postinstall: &str) -> bool {
+        self.sbctl
+            || (postinstall != "later" && self.sbctl_profiles.iter().any(|p| p == profile))
+    }
+
+    /// Can this firmware be given a new Platform Key without a trip into the
+    /// firmware setup first? Only in setup mode, and never while Secure Boot
+    /// is enforcing.
+    pub fn can_enroll_keys(&self) -> bool {
+        self.setupmode == "on" && self.secureboot != "on"
     }
 
     /// The disks a person may actually pick.
@@ -627,6 +698,12 @@ pub fn parse(text: &str) -> Probe {
     p.ok = b("probe.ok");
     p.firmware = s("preflight.firmware");
     p.secureboot = s("preflight.secureboot");
+    p.setupmode = s("preflight.setupmode");
+    p.sbctl = b("preflight.sbctl");
+    p.sbctl_profiles = s("preflight.sbctl_profiles")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
     p.tools_missing = s("preflight.tools_missing")
         .split_whitespace()
         .map(str::to_string)
@@ -634,6 +711,9 @@ pub fn parse(text: &str) -> Probe {
     p.chpasswd = b("preflight.chpasswd");
     p.mkswap = b("preflight.mkswap");
     p.efibootmgr = b("preflight.efibootmgr");
+    p.btrfs_progs = b("preflight.btrfs_progs");
+    p.cryptsetup = b("preflight.cryptsetup");
+    p.aes_ni = b("preflight.aes_ni");
     p.resize2fs = b("preflight.resize2fs");
     p.ntfsresize = b("preflight.ntfsresize");
     p.source_kind = s("source.kind");
@@ -665,6 +745,7 @@ preflight.secureboot=off
 preflight.tools_missing=
 preflight.fs=ext4
 preflight.fs=btrfs
+preflight.btrfs_progs=1
 preflight.chpasswd=1
 source.kind=squashfs
 source.size_mb=1400
@@ -701,10 +782,82 @@ probe.end=1
         assert_eq!(p.protocol, "1");
         assert!(p.ok);
         assert_eq!(p.filesystems, vec!["ext4", "btrfs"]);
+        // The installer only lists btrfs when both of its binaries are there,
+        // so these two agree on a healthy image -- and the flag is reported
+        // separately so a page can tell "no btrfs at all" from "no btrfs
+        // subvolumes", which are different missing files.
+        assert!(p.btrfs_progs);
         assert_eq!(p.timezones, vec!["UTC", "America/New_York"]);
         assert_eq!(p.source_size_mb, 1400);
         assert!(p.has_desktop);
         assert!(p.tools_missing.is_empty());
+    }
+
+    /// "Secure Boot is off" is two different machines and only one of them can
+    /// be given a key. Treating them as one is how a front-end offers key
+    /// enrolment to somebody whose firmware will refuse it -- or, worse, hides
+    /// it from the one person who cleared their keys on purpose in order to be
+    /// offered it.
+    #[test]
+    fn setup_mode_is_a_separate_fact_from_secure_boot() {
+        let vendor_keys = parse(
+            "probe.protocol=1\npreflight.secureboot=off\npreflight.setupmode=off\nprobe.end=1\n",
+        );
+        assert!(!vendor_keys.can_enroll_keys());
+
+        let cleared = parse(
+            "probe.protocol=1\npreflight.secureboot=off\npreflight.setupmode=on\nprobe.end=1\n",
+        );
+        assert!(cleared.can_enroll_keys());
+
+        // An enforcing firmware will not take a Platform Key from anything,
+        // whatever it claims about setup mode -- and a firmware claiming both
+        // is claiming something the specification does not have. raven-install
+        // resolves it the same way and for the same reason.
+        let enforcing = parse(
+            "probe.protocol=1\npreflight.secureboot=on\npreflight.setupmode=on\nprobe.end=1\n",
+        );
+        assert!(!enforcing.can_enroll_keys());
+
+        // An older installer emits neither key. Unknown is not "yes".
+        let old = parse("probe.protocol=1\nprobe.end=1\n");
+        assert_eq!(old.setupmode, "");
+        assert!(!old.can_enroll_keys());
+        assert!(!old.sbctl);
+        assert!(old.sbctl_profiles.is_empty());
+    }
+
+    /// sbctl has to be on the system being installed, not on the live image:
+    /// it keeps its keys where it runs, and the live image's are on a tmpfs
+    /// that stops existing at the reboot the keys were enrolled for.
+    #[test]
+    fn sbctl_comes_from_the_image_or_from_the_profile() {
+        let p = parse(
+            "probe.protocol=1\npreflight.sbctl=0\n\
+             preflight.sbctl_profiles=desktop developer\nprobe.end=1\n",
+        );
+        assert_eq!(p.sbctl_profiles, vec!["desktop", "developer"]);
+        assert!(p.sbctl_with_profile("desktop", "now"));
+        assert!(p.sbctl_with_profile("developer", "auto"));
+        assert!(!p.sbctl_with_profile("minimal", "now"));
+        // Packages deferred to first boot arrive long after the installer
+        // could have signed anything.
+        assert!(!p.sbctl_with_profile("desktop", "later"));
+
+        // An image that already carries it needs no profile at all.
+        let onboard = parse("probe.protocol=1\npreflight.sbctl=1\nprobe.end=1\n");
+        assert!(onboard.sbctl_with_profile("minimal", "later"));
+    }
+
+    #[test]
+    fn a_missing_btrfs_binary_is_reported_even_when_the_key_is_absent() {
+        // An older raven-install does not emit preflight.btrfs_progs at all.
+        // Defaulting it to false is the safe direction: the page says btrfs is
+        // not on offer, which is what the same installer's filesystem list
+        // will also say, rather than promising subvolumes it cannot create.
+        let p = parse("probe.protocol=1\npreflight.fs=ext4\nprobe.end=1\n");
+        assert!(!p.btrfs_progs);
+        assert_eq!(p.filesystems, vec!["ext4"]);
     }
 
     #[test]

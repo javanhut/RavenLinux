@@ -24,12 +24,53 @@ struct Progress {
     /// Warnings raise it; a fail sets it. Read by the done page.
     warnings: RefCell<Vec<String>>,
     failure: RefCell<Option<String>>,
+    /// What the installer actually did about Secure Boot, from the
+    /// `info secure-boot: <word>` record -- one of none, skipped, signed,
+    /// enrolled, failed. Read by the done page, which must not tell somebody
+    /// to switch on a firmware check their machine cannot pass. Empty when the
+    /// record never arrived, which is what an older raven-install does, and is
+    /// treated the same as "none".
+    secure_boot: RefCell<String>,
 }
 
 /// Built once and called when the install ends, with the exit code, so the
 /// finished page can describe what actually happened rather than being a
 /// second copy of the wizard's assumptions.
 type DoneBuilder = Rc<dyn Fn(&Rc<App>, i32)>;
+
+/// The prefix of the one `info` record that is a value rather than a sentence.
+/// Spelled once here and once in raven-install's setup_secure_boot(); the
+/// PROTOCOL block at the top of that file is where the contract is written
+/// down.
+const SECURE_BOOT_RECORD: &str = "secure-boot:";
+
+/// Which of the closing page's Secure Boot notes to show.
+///
+/// The installer's own report decides, never the answer, and the two differ in
+/// exactly the case that matters: an install that asked for enrolment and did
+/// not get it. Taking the answer there would put "now turn Secure Boot on" in
+/// front of somebody whose firmware has never seen their key, and the place
+/// that fails is a black screen with no message.
+///
+/// "skipped" and "failed" are folded together because the difference between
+/// them -- the installer decided not to try, or tried and could not -- is a
+/// difference about the installer and not about what the person now has to do,
+/// which in both cases is "leave Secure Boot off, and here is why". The
+/// warnings that say which are already on this page.
+///
+/// An unrecognised or missing report is answered "none": no advice at all
+/// rather than advice that might be wrong. That case cannot arise from an
+/// older raven-install, which refuses an answers file containing a key it does
+/// not know -- so there is no version of this where the answer is the better
+/// source.
+fn secure_boot_outcome(reported: &str, asked: &str) -> &'static str {
+    match reported {
+        "enrolled" => "enrolled",
+        "signed" => "signed",
+        "skipped" | "failed" if asked != "skip" => "failed",
+        _ => "none",
+    }
+}
 
 thread_local! {
     static PROGRESS: RefCell<Option<Rc<Progress>>> = const { RefCell::new(None) };
@@ -133,6 +174,7 @@ fn build_progress(app: &Rc<App>) {
             log_scroll,
             warnings: RefCell::new(Vec::new()),
             failure: RefCell::new(None),
+            secure_boot: RefCell::new(String::new()),
         }))
     });
 }
@@ -268,6 +310,15 @@ pub fn begin(app: &Rc<App>) {
                 // during a configure, which is the point: the line under the
                 // heading is what shows an install is alive between the two
                 // phases that take minutes.
+                // One info record is a fixed string and not news: see
+                // PROTOCOL in raven-install. It is kept rather than shown,
+                // because the closing page's advice about turning Secure Boot
+                // on has to come from what the installer did and not from what
+                // it was asked to do.
+                Event::Info(t) if t.starts_with(SECURE_BOOT_RECORD) => {
+                    *progress.secure_boot.borrow_mut() =
+                        t[SECURE_BOOT_RECORD.len()..].trim().to_string();
+                }
                 Event::Ok(t) | Event::Info(t) => progress.status.set_text(&t),
                 Event::Log(line) => progress.append_log(&line),
                 Event::Done(code) => reported = Some(code),
@@ -315,13 +366,74 @@ fn build_done(app: &Rc<App>) {
                 "Before rebooting, so the firmware boots the disk rather than the stick.".into(),
                 "media-removable-symbolic",
             ));
-            if p.secureboot == "on" {
+            if a.encrypt {
+                // First in the list after the media, because it is the one
+                // thing on this page that changes what the next boot looks
+                // like: a machine that stops at a prompt nobody was expecting
+                // reads as a machine that failed to install.
                 notes.push((
-                    "Disable Secure Boot",
-                    "RavenBoot is unsigned and the firmware will not load it until you do."
+                    "This disk is encrypted",
+                    "Every boot stops and asks for the passphrase before anything else \
+                     happens. It is typed on a US keyboard layout, whatever layout the \
+                     installed system uses, and there is no recovery key."
+                        .into(),
+                    "dialog-password-symbolic",
+                ));
+            }
+            // Three different things to say, and the wrong one is dangerous
+            // in both directions: telling somebody to turn Secure Boot on when
+            // nothing was enrolled is telling them to make their new machine
+            // unbootable, and telling somebody to turn it off when their keys
+            // are enrolled throws away the whole point of the install they
+            // just chose. The answer is what decides, not the probe, because
+            // the probe was read before any of this happened.
+            //
+            // Whether the signing actually succeeded is a separate question
+            // that only raven-install can answer, and it answers it on the
+            // stream: its warnings are already collected below, so a run that
+            // could not sign says so there.
+            match secure_boot_outcome(&progress.secure_boot.borrow(), &a.secureboot) {
+                "enrolled" => notes.push((
+                    "Boot once with Secure Boot still off, then turn it on",
+                    "This machine's own keys were enrolled and RavenBoot and the kernel \
+                     were signed with them. Check the machine starts before changing the \
+                     firmware, because the place it would fail has no error message. \
+                     \"sudo sbctl reset\" undoes the enrolment, and so does \"restore \
+                     factory keys\" in the firmware setup."
+                        .into(),
+                    "dialog-information-symbolic",
+                )),
+                "signed" => notes.push((
+                    "Leave Secure Boot off for now",
+                    "RavenBoot and the kernel are signed with this machine's own key, but \
+                     no key is enrolled in the firmware yet, so it would refuse them. With \
+                     the firmware in setup mode, \"sudo sbctl enroll-keys --microsoft\" \
+                     finishes it."
                         .into(),
                     "dialog-warning-symbolic",
-                ));
+                )),
+                // Asked for and did not happen. The whole reason the outcome
+                // is read from the installer rather than from the answer: the
+                // note above this one would have told somebody to turn Secure
+                // Boot on, and the place that fails has no error message.
+                "failed" => notes.push((
+                    "Secure Boot was not set up -- leave it off",
+                    "The install asked for it and it did not complete; the reason is in \
+                     the warnings above and in the log. The firmware was not changed and \
+                     nothing is half done, so the machine boots exactly as it would have \
+                     otherwise. docs/secure-boot.md has the commands to finish it by hand."
+                        .into(),
+                    "dialog-warning-symbolic",
+                )),
+                _ if p.secureboot == "on" => notes.push((
+                    "Disable Secure Boot",
+                    "RavenBoot is unsigned and the firmware will not load it until you do. \
+                     To keep Secure Boot on instead, clear the Secure Boot keys in the \
+                     firmware to put it in setup mode and run this installer again."
+                        .into(),
+                    "dialog-warning-symbolic",
+                )),
+                _ => {}
             }
             if !a.efi_nvram {
                 notes.push((
@@ -483,4 +595,48 @@ fn confirm_reboot(app: &Rc<App>) {
         }
     });
     dialog.present();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The closing page must never invite somebody to turn Secure Boot on
+    /// unless the installer said it enrolled a key. That is the one mistake on
+    /// this page whose consequence is a machine that does not start, and the
+    /// answer alone cannot tell the difference.
+    #[test]
+    fn the_closing_advice_comes_from_what_happened_not_what_was_asked() {
+        assert_eq!(secure_boot_outcome("enrolled", "enroll"), "enrolled");
+        assert_eq!(secure_boot_outcome("signed", "sign"), "signed");
+
+        // Asked to enrol, and it did not happen. Anything but "enrolled" here
+        // would be an instruction to switch on a check the firmware cannot
+        // pass.
+        assert_eq!(secure_boot_outcome("failed", "enroll"), "failed");
+        assert_eq!(secure_boot_outcome("skipped", "enroll"), "failed");
+        // Signing was asked for and did not happen either; the machine is
+        // fine, and saying so is still better than saying nothing.
+        assert_eq!(secure_boot_outcome("skipped", "sign"), "failed");
+
+        // Nothing was asked for, so there is nothing to report.
+        assert_eq!(secure_boot_outcome("none", "skip"), "none");
+        assert_eq!(secure_boot_outcome("skipped", "skip"), "none");
+
+        // A record that never arrived, or one from a newer installer with a
+        // word this build does not know: no advice rather than wrong advice.
+        assert_eq!(secure_boot_outcome("", "enroll"), "none");
+        assert_eq!(secure_boot_outcome("half-enrolled", "enroll"), "none");
+    }
+
+    /// The record is a value on the `info` verb, so it must not also land in
+    /// the status line as if it were news -- and the prefix has to be the one
+    /// raven-install writes.
+    #[test]
+    fn the_secure_boot_record_is_recognised_by_its_prefix() {
+        let line = "secure-boot: enrolled";
+        assert!(line.starts_with(SECURE_BOOT_RECORD));
+        assert_eq!(line[SECURE_BOOT_RECORD.len()..].trim(), "enrolled");
+        assert!(!"Secure Boot is ENABLED".starts_with(SECURE_BOOT_RECORD));
+    }
 }

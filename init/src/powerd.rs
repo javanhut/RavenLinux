@@ -30,7 +30,8 @@
 //! That socket is group `video` and mode 0660 -- `video` because the session
 //! already holds it for the DRM device, so it names exactly "whoever owns the
 //! screen" without inventing a group -- and it takes one line. `suspend`,
-//! `poweroff` and `reboot` go down the same [`perform`] path as a lid close.
+//! `hibernate`, `poweroff` and `reboot` go down the same [`perform`] path as a
+//! lid close.
 //! `profile performance|balanced|power-saver` holds the machine in one preset
 //! regardless of the supply, until `profile auto` hands the choice back to the
 //! config or the daemon restarts; a bare `profile` asks what the machine is in
@@ -50,6 +51,30 @@
 //! contribution is to make sure they are actually armed -- see
 //! [`arm_wakeup_source`]. After that, the press or the lid opening is a
 //! firmware event, and Linux is running again before any of this code is.
+//!
+//! # The command line
+//!
+//! With no arguments this is the daemon, which is how `init.toml` starts it
+//! and is the only way it has ever been run. With arguments it is instead a
+//! client of its own control socket -- `raven-powerd status` prints the
+//! preset in force and what the buttons and the lid are set to do, and
+//! `raven-powerd profile [<preset>|auto]` asks and answers the same question
+//! the desktop panel does -- and it exits as soon as it has an answer.
+//!
+//! It is here rather than in a binary of its own because the alternative was
+//! to have no way at all to ask a machine its power policy from a terminal.
+//! `/usr/bin/raven-power` is a GTK window from a separate repository, not a
+//! command: run it without arguments and it opens on the screen and stays
+//! open, which from a terminal is indistinguishable from a hang and is what
+//! sent somebody looking for one. It was never going to answer `raven-power`
+//! the way `raven-rc` answers, and a settings window is the wrong place to
+//! look when the question is why a machine on mains is running at 800MHz.
+//!
+//! Every client path in here is bounded. A daemon that is not running, a
+//! socket left behind by one that died, and a daemon that has stopped
+//! answering are three different messages and none of them is a wait -- see
+//! [`ask_powerd`], which is where the bound lives and why it is a thread
+//! rather than a socket option.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -134,6 +159,21 @@ const COOLDOWN: Duration = Duration::from_secs(5);
 /// which ticks every 100ms.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Longest the command line waits for the daemon, at every step of the
+/// exchange and for the exchange as a whole.
+///
+/// Three seconds rather than one because the daemon answers from its own main
+/// loop, and that loop can be inside [`REPLY_TIMEOUT`] of its own -- two
+/// seconds waiting on init for a suspend somebody asked for a moment earlier.
+/// A client that gave up in one second would report a wedged daemon every
+/// time a person pressed the power button and then typed a command.
+///
+/// Three seconds rather than ten because this is a command somebody is
+/// waiting on at a prompt. Past about three seconds the honest answer is that
+/// the daemon is not answering, and saying so is more use than another seven
+/// seconds of nothing.
+const CLI_TIMEOUT: Duration = Duration::from_secs(3);
+
 // ---------------------------------------------------------------------------
 // evdev
 // ---------------------------------------------------------------------------
@@ -173,6 +213,17 @@ const KEY_PRESSED: i32 = 1;
 enum PowerAction {
     /// Suspend to RAM.
     Suspend,
+    /// Write the session to swap and power off, to be resumed at the next
+    /// boot.
+    ///
+    /// Not the default for anything and never will be. It is here because a
+    /// machine that hibernates on a lid close is a real configuration -- a
+    /// laptop carried in a bag all day survives it and a suspended one does
+    /// not -- and until this existed there was no way to ask for it at all.
+    /// Whether the machine can actually resume is init's question, asked in
+    /// `power::hibernate`; a `close = "hibernate"` on a machine with no resume
+    /// device is refused there and logged, and the lid does nothing.
+    Hibernate,
     /// Orderly shutdown, then power off.
     Poweroff,
     /// Orderly shutdown, then reboot.
@@ -186,6 +237,7 @@ impl PowerAction {
     fn request(self) -> Option<&'static str> {
         match self {
             PowerAction::Suspend => Some("suspend"),
+            PowerAction::Hibernate => Some("hibernate"),
             PowerAction::Poweroff => Some("poweroff"),
             PowerAction::Reboot => Some("reboot"),
             PowerAction::Ignore => None,
@@ -198,23 +250,41 @@ impl PowerAction {
     fn acknowledgement(self) -> &'static str {
         match self {
             PowerAction::Suspend => "Suspending\n",
+            PowerAction::Hibernate => "Hibernating\n",
             PowerAction::Poweroff => "Powering off\n",
             PowerAction::Reboot => "Rebooting\n",
             PowerAction::Ignore => "Ignored\n",
         }
     }
 
+    /// What this action does, for a person reading `raven-powerd status`.
+    ///
+    /// Not [`PowerAction::request`]: that is the protocol's word and `Ignore`
+    /// has none, which is exactly the case a status line most needs to state
+    /// out loud. A lid configured to do nothing is the commonest reason
+    /// somebody comes looking, and "nothing" is the answer, not a blank.
+    fn describe(self) -> &'static str {
+        match self {
+            PowerAction::Suspend => "suspend",
+            PowerAction::Hibernate => "hibernate",
+            PowerAction::Poweroff => "power off",
+            PowerAction::Reboot => "reboot",
+            PowerAction::Ignore => "nothing",
+        }
+    }
+
     /// One line from the desktop socket, or `None` if it is not one of the
-    /// three words.
+    /// four words.
     ///
     /// Stricter than init's parser on purpose: there is no `sleep` alias and
-    /// no `halt`, because the only client is a panel with three fixed rows,
-    /// and every spelling accepted here is one more the panel could send by
-    /// mistake. `Ignore` is not a request either -- it is a thing a config
+    /// no `halt`, because the only client is a panel with a handful of fixed
+    /// rows, and every spelling accepted here is one more the panel could send
+    /// by mistake. `Ignore` is not a request either -- it is a thing a config
     /// says, not a thing a person asks for.
     fn parse_request(line: &str) -> Option<Self> {
         match line.trim() {
             "suspend" => Some(PowerAction::Suspend),
+            "hibernate" => Some(PowerAction::Hibernate),
             "poweroff" => Some(PowerAction::Poweroff),
             "reboot" => Some(PowerAction::Reboot),
             _ => None,
@@ -225,7 +295,8 @@ impl PowerAction {
 /// One line from the desktop socket, in full.
 #[derive(Debug)]
 enum CtlRequest {
-    /// `suspend`, `poweroff` or `reboot`: the words the socket always knew.
+    /// `suspend`, `hibernate`, `poweroff` or `reboot`: the words the socket
+    /// takes as an instruction to change the machine's power state.
     Action(PowerAction),
     /// `profile <preset>`: hold the machine in one preset whatever the supply
     /// says, until `profile auto` or a restart of this daemon. Deliberately
@@ -371,9 +442,37 @@ enum Signal {
     Request(CtlRequest, UnixStream),
 }
 
+/// Argument dispatch, and the one place that decides whether this process is
+/// a daemon or a command.
+///
+/// No arguments is the daemon, unconditionally and forever: `init.toml` execs
+/// `/usr/bin/raven-powerd` with an empty `args` list, so anything else here
+/// would be a machine whose lid stops working the first time somebody adds a
+/// verb. Every command is therefore a word, and there is no bare `raven-powerd`
+/// that prints status -- see [`USAGE`], which says so to the person who
+/// expected one.
+///
+/// The logger is set up differently on the two paths. The daemon logs at
+/// `info` into its service log, as it always has. A command gets `warn`, so
+/// that a `power.toml` which does not parse is still complained about on
+/// stderr -- [`Config::load`] reports that at `error` -- while the "no
+/// /etc/raven/power.toml; using defaults" line, which is an `info` and is
+/// normal, stays out of the way of the output the person asked for.
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let invocation = invocation(&args);
 
+    if invocation == Invocation::Daemon {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        run_daemon();
+        return;
+    }
+
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    std::process::exit(run_command(invocation));
+}
+
+fn run_daemon() {
     let config = Config::load();
     log::info!(
         "raven-powerd: power={:?} sleep={:?} lid-close={:?} profile={}",
@@ -912,6 +1011,423 @@ fn reply(mut stream: UnixStream, text: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// The command line
+// ---------------------------------------------------------------------------
+
+/// What this process was asked to be.
+#[derive(Debug, PartialEq, Eq)]
+enum Invocation {
+    /// No arguments: the daemon, as `init.toml` runs it.
+    Daemon,
+    /// `status`: the preset in force and the button and lid policy.
+    Status,
+    /// `profile`: which preset is in force, and why.
+    ProfileQuery,
+    /// `profile <preset>`: hold the machine in one preset for this session.
+    ProfileSet(profile::Preset),
+    /// `profile auto`: hand the choice back to `power.toml`.
+    ProfileAuto,
+    /// `help`, `--help`, `-h`.
+    Help,
+    /// Something else, kept whole so the error can quote what was typed.
+    Unknown(String),
+}
+
+/// Decide what the arguments mean, without doing any of it.
+///
+/// Separated from [`main`] so the table below is a thing the tests can read.
+/// The strictness matches [`CtlRequest::parse`] and is there for the same
+/// reason: `profile` takes exactly zero or one word, and the word is a
+/// preset's public name or `auto`. A near miss is [`Invocation::Unknown`] and
+/// gets the usage text, never a socket connection -- a typo should cost a
+/// message, not a governor.
+fn invocation(args: &[String]) -> Invocation {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    match words.as_slice() {
+        [] => Invocation::Daemon,
+        ["help"] | ["--help"] | ["-h"] => Invocation::Help,
+        ["status"] => Invocation::Status,
+        ["profile"] => Invocation::ProfileQuery,
+        ["profile", "auto"] => Invocation::ProfileAuto,
+        ["profile", word] => match profile::Preset::parse(word) {
+            Some(preset) => Invocation::ProfileSet(preset),
+            None => Invocation::Unknown(format!("profile {}", word)),
+        },
+        _ => Invocation::Unknown(words.join(" ")),
+    }
+}
+
+/// What `raven-powerd help` prints, and what an unknown word prints on stderr.
+///
+/// Built rather than written down, for one line of it: the presets come from
+/// [`profile::Preset::ALL`], so a fourth preset is offered here the moment it
+/// exists instead of being a help text somebody forgot. Everything else is
+/// fixed and the cost is one allocation on a path that is about to exit.
+///
+/// It names `/usr/bin/raven-power` at the end on purpose. That is the GTK
+/// window, it is a different program from a different repository, and the
+/// reason this paragraph exists is that running it from a terminal looks like
+/// a hang -- it opens a window and then, quite correctly, does not return.
+/// Somebody who reaches this text was probably looking for that.
+fn usage() -> String {
+    let presets: Vec<&str> = profile::Preset::ALL.iter().map(|p| p.name()).collect();
+    USAGE.replace("<presets>", &presets.join(", "))
+}
+
+const USAGE: &str = "\
+raven-powerd -- the power button, the sleep button and the lid.
+
+With no arguments this is the daemon itself; that is how init starts it and
+it does not return. The verbs below are a client of its control socket and
+answer at once.
+
+  raven-powerd status              What the machine's power policy is now
+  raven-powerd profile             Which preset is in force, and why
+  raven-powerd profile <preset>    Hold the machine in one preset
+  raven-powerd profile auto        Hand the choice back to power.toml
+  raven-powerd help                This text
+
+<preset> is one of: <presets>.
+
+A preset set here lasts until `profile auto`, until the daemon restarts, or
+until the machine reboots. It is deliberately not written to a file: a choice
+made at a prompt is a choice about now, and a laptop that boots into last
+Tuesday's `performance` runs hot for a reason nobody remembers. To change
+what the machine does by default, edit the [profile] table in
+/etc/raven/power.toml and `raven-rc restart powerd`.
+
+/usr/bin/raven-power is something else: the graphical Raven Power window. It
+opens on the screen and stays open, which from a terminal looks like a hang.
+";
+
+/// Run one command and return the process's exit status.
+///
+/// Three statuses, and they mean what they mean everywhere else in this tree:
+/// 0 the question was answered, 1 the machine could not answer it, 2 the
+/// command was not one we have. The split matters to a shell script deciding
+/// whether to retry.
+fn run_command(invocation: Invocation) -> i32 {
+    match invocation {
+        // Handled in main before we get here; kept so the match is total and
+        // so adding a variant is a compile error rather than a silent arm.
+        Invocation::Daemon => 0,
+        Invocation::Help => {
+            print!("{}", usage());
+            0
+        }
+        Invocation::Status => command_status(),
+        Invocation::ProfileQuery => command_profile("profile"),
+        Invocation::ProfileAuto => command_profile("profile auto"),
+        Invocation::ProfileSet(preset) => command_profile(&format!("profile {}", preset.name())),
+        Invocation::Unknown(what) => {
+            eprintln!("raven-powerd: not a command: {}", what);
+            eprintln!();
+            eprint!("{}", usage());
+            2
+        }
+    }
+}
+
+/// `profile`, `profile auto` and `profile <preset>`: one line in, one line out.
+///
+/// The daemon's reply is printed verbatim rather than reworded. It is already
+/// written for a person -- "balanced (auto)", "performance (override)" -- and
+/// it is the same text the desktop panel reads, so two clients cannot end up
+/// describing the same machine differently.
+fn command_profile(request: &str) -> i32 {
+    match ask_powerd(request) {
+        Ok(reply) => {
+            print!("{}", with_newline(reply.trim_end()));
+            // The daemon refuses in init's words, beginning `error:`. A
+            // refusal printed with a zero status is a refusal a script does
+            // not notice.
+            if reply_is_error(&reply) {
+                1
+            } else {
+                0
+            }
+        }
+        Err(e) => {
+            eprint!("{}", e.explain());
+            1
+        }
+    }
+}
+
+/// `status`: everything this daemon decides, on one screen.
+///
+/// The preset comes from the daemon because only the daemon knows whether a
+/// desktop override is holding one; the buttons, the lid and the ac/battery
+/// mapping come from `power.toml`, which is where they live and which can be
+/// read whether or not anything is running. That split is why a stopped
+/// daemon still gets you most of this page, with one line saying which part
+/// is missing and why.
+fn command_status() -> i32 {
+    let config = Config::load();
+    let (in_force, summary, trouble) = profile_in_force();
+
+    row("profile", &in_force);
+    if let Some(summary) = summary {
+        // Indented under the preset, unlabelled: it is the same fact said
+        // again for somebody who does not already know what the word buys.
+        row("", summary);
+    }
+    row(
+        "supply",
+        match profile::supply() {
+            profile::Supply::Mains => "mains",
+            profile::Supply::Battery => "battery",
+        },
+    );
+
+    // What the config maps each supply to. Said even when `manage = false`,
+    // because the commonest reason to run this is that the machine is not
+    // doing what the file says and the answer is that nothing is applying it.
+    let unmanaged = if config.profile.manage {
+        ""
+    } else {
+        "   (not applied: manage = false)"
+    };
+    row(
+        "on mains",
+        &format!("{}{}", config.profile.ac.name(), unmanaged),
+    );
+    row(
+        "on battery",
+        &format!("{}{}", config.profile.battery.name(), unmanaged),
+    );
+
+    row("power button", config.buttons.power.describe());
+    row("sleep button", config.buttons.sleep.describe());
+    row("lid close", config.lid.close.describe());
+    row(
+        "wakeup",
+        if config.manage_wakeup {
+            "power button and lid armed at start"
+        } else {
+            "left to /proc/acpi/wakeup (manage_wakeup = false)"
+        },
+    );
+    row("config", CONFIG_PATH);
+
+    match trouble {
+        Some(e) => {
+            eprintln!();
+            eprint!("{}", e.explain());
+            1
+        }
+        None => 0,
+    }
+}
+
+/// One `label  value` line. The width fits the longest label above with room
+/// to spare, so a label added later does not silently run into its value.
+fn row(label: &str, value: &str) {
+    println!("{:<15}{}", label, value);
+}
+
+/// The preset in force, its one-line summary, and whatever went wrong asking.
+///
+/// The fallback when the daemon does not answer is `/run/raven-power/profile`,
+/// the marker the daemon writes on every change. It is the last preset that
+/// was actually applied, and since the governor it set is still set, it is
+/// very probably still true -- so saying it, labelled as what it is, beats
+/// saying "unknown" to somebody who only wanted to know whether the machine
+/// is in power-saver. The marker lives in `/run` and so cannot outlive a boot
+/// and start lying about a machine that has been restarted.
+fn profile_in_force() -> (String, Option<&'static str>, Option<CtlError>) {
+    match ask_powerd("profile") {
+        Ok(reply) => {
+            let text = reply.trim().to_string();
+            // The reply's first word is the preset and the rest is for
+            // people, exactly as `serve_ctl` writes it. `unmanaged` is a
+            // first word that is not a preset, and has no summary.
+            let first = text.split_whitespace().next().unwrap_or_default();
+            let summary = profile::Preset::parse(first).map(profile::Preset::summary);
+            (text, summary, None)
+        }
+        Err(e) => match last_applied_preset() {
+            Some(preset) => (
+                format!("{} (last applied; the daemon is not answering)", preset.name()),
+                Some(preset.summary()),
+                Some(e),
+            ),
+            None => ("unknown".to_string(), None, Some(e)),
+        },
+    }
+}
+
+/// Read [`PROFILE_MARKER`]. `None` when it is absent, unreadable, or holds a
+/// word this build does not know -- all of which mean the same thing to the
+/// caller, which is that it has to say so.
+fn last_applied_preset() -> Option<profile::Preset> {
+    let text = fs::read_to_string(PROFILE_MARKER).ok()?;
+    profile::Preset::parse(text.trim())
+}
+
+/// Print with a trailing newline, once, however the daemon punctuated it.
+fn with_newline(text: &str) -> String {
+    format!("{}\n", text)
+}
+
+/// Why a request to the daemon did not produce an answer.
+///
+/// Four cases and not one, because they want four different things done about
+/// them and a client that cannot tell them apart sends everybody to the same
+/// wrong place.
+#[derive(Debug)]
+enum CtlError {
+    /// No socket, or a socket file with nothing listening on it: the daemon
+    /// is not running.
+    NotRunning,
+    /// The socket is there and we are not in group `video`.
+    Denied,
+    /// It accepted, or it did not, and either way nothing came back inside
+    /// [`CLI_TIMEOUT`].
+    Timeout,
+    /// Anything else, quoted rather than interpreted.
+    Other(std::io::Error),
+}
+
+impl CtlError {
+    /// The operator-facing text, ending in the command that fixes it -- the
+    /// shape every error in this tree takes (see `control.rs`'s start
+    /// failures and `rc.rs`'s connection failures).
+    fn explain(&self) -> String {
+        match self {
+            CtlError::NotRunning => format!(
+                "raven-powerd is not answering on {}.\n\
+                 \x20 It is the daemon that decides the profile, so there is nothing else\n\
+                 \x20 to ask which one is in force.\n\
+                 \x20 Start it with `raven-rc start powerd`, or find out why it stopped\n\
+                 \x20 with `raven-rc logs powerd`.\n",
+                CTL_SOCKET_PATH
+            ),
+            CtlError::Denied => format!(
+                "{}: permission denied.\n\
+                 \x20 The socket is group `{}` and mode 0660 -- whoever owns the screen may\n\
+                 \x20 put the machine to sleep, and nobody else.\n\
+                 \x20 Add yourself to that group and log in again, or run this as root.\n",
+                CTL_SOCKET_PATH, CTL_GROUP
+            ),
+            CtlError::Timeout => format!(
+                "raven-powerd did not answer within {}s.\n\
+                 \x20 Something is listening on {} -- so the\n\
+                 \x20 daemon is there -- but its main loop has not reached the request.\n\
+                 \x20 Read `raven-rc logs powerd`; if it is wedged, `raven-rc restart powerd`.\n",
+                CLI_TIMEOUT.as_secs(),
+                CTL_SOCKET_PATH
+            ),
+            CtlError::Other(e) => format!(
+                "Could not ask raven-powerd on {}: {}\n\
+                 \x20 See `raven-rc status powerd`.\n",
+                CTL_SOCKET_PATH, e
+            ),
+        }
+    }
+
+    /// Which of the four an `io::Error` from the exchange is.
+    ///
+    /// `ConnectionRefused` is grouped with `NotFound` deliberately: it is the
+    /// socket file a daemon left behind when it died without unlinking, and
+    /// to the person at the prompt that is the same fact as no file at all --
+    /// the daemon is not running. `bind_ctl_socket` removes such a file on
+    /// the next start, so there is nothing for them to clean up either.
+    fn from_io(e: std::io::Error) -> Self {
+        match e.kind() {
+            ErrorKind::NotFound | ErrorKind::ConnectionRefused => CtlError::NotRunning,
+            ErrorKind::PermissionDenied => CtlError::Denied,
+            ErrorKind::TimedOut | ErrorKind::WouldBlock => CtlError::Timeout,
+            _ => CtlError::Other(e),
+        }
+    }
+}
+
+/// Send one request to the daemon and return its reply, or give up.
+///
+/// # Why a thread
+///
+/// The read and the write are bounded by `SO_RCVTIMEO` and `SO_SNDTIMEO`, but
+/// the `connect` is not: `std` has no connect timeout for a Unix socket, and
+/// `connect` on `AF_UNIX` really can block -- it waits when the listener's
+/// backlog is full, and a daemon whose accept thread has stopped accepting is
+/// exactly the state in which somebody types this command. Setting the socket
+/// non-blocking to dodge that would mean hand-rolling the connect, the
+/// `SO_ERROR` check and the poll, in a binary that has no other reason to
+/// touch raw file descriptors.
+///
+/// So the whole exchange happens on a thread and this waits on a channel for
+/// [`CLI_TIMEOUT`]. When the wait expires we return and the process exits; the
+/// thread goes with it. Nothing is leaked that outlives the command, because
+/// the command is the process. That is only true of a short-lived client --
+/// do not copy this shape into the daemon, where a thread stuck in `connect`
+/// would accumulate once per attempt forever.
+fn ask_powerd(request: &str) -> Result<String, CtlError> {
+    ask_powerd_at(Path::new(CTL_SOCKET_PATH), request, CLI_TIMEOUT)
+}
+
+/// [`ask_powerd`], with the socket and the bound named rather than assumed.
+///
+/// Both are arguments for the tests' sake -- a temporary socket and a bound
+/// of a few hundred milliseconds, rather than an environment variable that
+/// would also be read by the daemon and by every other client on the machine.
+/// Nothing in the shipped binary calls this with anything but the two
+/// constants above.
+fn ask_powerd_at(path: &Path, request: &str, timeout: Duration) -> Result<String, CtlError> {
+    let (tx, rx) = mpsc::channel::<std::io::Result<String>>();
+    let owned = request.to_string();
+    let owned_path = path.to_path_buf();
+
+    let spawned = thread::Builder::new()
+        .name("powerd-ask".to_string())
+        .stack_size(64 * 1024)
+        .spawn(move || {
+            // The receiver is gone if we timed out; that send failing is the
+            // expected end of this thread and not worth a word.
+            let _ = tx.send(ctl_exchange(&owned_path, &owned, timeout));
+        });
+
+    if spawned.is_err() {
+        // A machine that cannot make a thread will not do better for being
+        // told again. Fall back to doing it here, which is bounded by the
+        // socket timeouts and unbounded only in `connect`.
+        return ctl_exchange(path, request, timeout).map_err(CtlError::from_io);
+    }
+
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(reply)) => Ok(reply),
+        Ok(Err(e)) => Err(CtlError::from_io(e)),
+        // Timeout is the case this function exists for. Disconnected means
+        // the thread ended without sending, which it has no path to do --
+        // reporting it as a timeout keeps the impossible case from needing a
+        // message of its own that nobody would ever read.
+        Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
+            Err(CtlError::Timeout)
+        }
+    }
+}
+
+/// One request, one reply, on the caller's thread.
+///
+/// The same shape as [`ask_init`], down to reading to end-of-file: the daemon
+/// closes the stream after answering (see [`reply`]), so a short read is the
+/// end of the message and not a truncation.
+fn ctl_exchange(path: &Path, request: &str, timeout: Duration) -> std::io::Result<String> {
+    let mut stream = UnixStream::connect(path)?;
+    stream.set_write_timeout(Some(timeout))?;
+    stream.set_read_timeout(Some(timeout))?;
+
+    stream.write_all(request.as_bytes())?;
+    // The daemon reads a line, so the newline is not decoration.
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply)?;
+    Ok(reply)
+}
+
+// ---------------------------------------------------------------------------
 // Devices
 // ---------------------------------------------------------------------------
 
@@ -1274,6 +1790,35 @@ mod tests {
         assert_eq!(config.buttons.power, PowerAction::Suspend);
     }
 
+    /// A lid or a button can be set to hibernate.
+    ///
+    /// This is the whole user-visible half of the change that made
+    /// hibernation reachable: before it, `close = "hibernate"` was a value
+    /// serde had never heard of, so the file failed to parse, the daemon fell
+    /// back to its defaults, and the lid suspended -- with one `info` line to
+    /// say why. Asserting the request word as well as the variant is what ties
+    /// this to the verb `control::dispatch` answers; a rename on either side
+    /// that did not happen on both would be a lid that asks init for something
+    /// it does not know.
+    #[test]
+    fn a_lid_or_a_button_can_be_set_to_hibernate() {
+        let config: Config =
+            toml::from_str("[lid]\nclose = \"hibernate\"\n").expect("hibernate is a value");
+        assert_eq!(config.lid.close, PowerAction::Hibernate);
+        assert_eq!(config.lid.close.request(), Some("hibernate"));
+
+        let config: Config =
+            toml::from_str("[buttons]\npower = \"hibernate\"\n").expect("hibernate is a value");
+        assert_eq!(config.buttons.power, PowerAction::Hibernate);
+
+        // It is nobody's default, on any machine. A lid that hibernates has to
+        // have been asked for, because a machine that cannot resume loses the
+        // session and this daemon is not the thing that knows whether it can.
+        assert_eq!(Lid::default().close, PowerAction::Suspend);
+        assert_eq!(Buttons::default().power, PowerAction::Suspend);
+        assert_eq!(Buttons::default().sleep, PowerAction::Suspend);
+    }
+
     /// The file this repo ships must deserialize with the schema the daemon
     /// actually uses. Without this, a renamed key is only discovered on a
     /// machine whose lid has stopped working.
@@ -1301,6 +1846,7 @@ mod tests {
     #[test]
     fn every_action_but_ignore_has_a_request() {
         assert_eq!(PowerAction::Suspend.request(), Some("suspend"));
+        assert_eq!(PowerAction::Hibernate.request(), Some("hibernate"));
         assert_eq!(PowerAction::Poweroff.request(), Some("poweroff"));
         assert_eq!(PowerAction::Reboot.request(), Some("reboot"));
         assert_eq!(PowerAction::Ignore.request(), None);
@@ -1388,6 +1934,7 @@ mod tests {
     fn a_request_is_acknowledged_in_init_words() {
         for (word, ack) in [
             ("suspend", "Suspending\n"),
+            ("hibernate", "Hibernating\n"),
             ("poweroff", "Powering off\n"),
             ("reboot", "Rebooting\n"),
         ] {
@@ -1396,6 +1943,207 @@ mod tests {
             assert_eq!(action.acknowledgement(), ack);
             assert!(!reply_is_error(ack));
         }
+    }
+
+    // -----------------------------------------------------------------
+    // The command line
+    // -----------------------------------------------------------------
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    /// The one property nothing may ever break: `init.toml` execs this with
+    /// an empty `args` list, so no arguments has to stay the daemon. A verb
+    /// added carelessly here is a machine whose lid stops working.
+    #[test]
+    fn no_arguments_is_still_the_daemon() {
+        assert_eq!(invocation(&argv(&[])), Invocation::Daemon);
+    }
+
+    #[test]
+    fn the_command_line_knows_its_verbs() {
+        assert_eq!(invocation(&argv(&["status"])), Invocation::Status);
+        assert_eq!(invocation(&argv(&["profile"])), Invocation::ProfileQuery);
+        assert_eq!(invocation(&argv(&["profile", "auto"])), Invocation::ProfileAuto);
+        assert_eq!(
+            invocation(&argv(&["profile", "performance"])),
+            Invocation::ProfileSet(profile::Preset::Performance)
+        );
+        assert_eq!(
+            invocation(&argv(&["profile", "power-saver"])),
+            Invocation::ProfileSet(profile::Preset::PowerSaver)
+        );
+        for word in ["help", "--help", "-h"] {
+            assert_eq!(invocation(&argv(&[word])), Invocation::Help, "{}", word);
+        }
+    }
+
+    /// A near miss must not reach the socket. Every one of these used to be
+    /// the shape of a typo that would otherwise have set a governor or, on
+    /// the argument-less path, silently forked a second daemon.
+    #[test]
+    fn a_near_miss_is_a_usage_error_and_never_a_request() {
+        for words in [
+            vec!["profile", "banana"],
+            vec!["profile", "eco"],
+            vec!["profile", "performance", "now"],
+            vec!["profiles"],
+            vec!["suspend"],
+            vec!["status", "powerd"],
+            vec!["--daemon"],
+            vec![""],
+        ] {
+            assert!(
+                matches!(invocation(&argv(&words)), Invocation::Unknown(_)),
+                "{:?} should not be a command",
+                words
+            );
+        }
+    }
+
+    /// Every preset the daemon will accept is a preset the help text offers,
+    /// and every word the help text offers parses back. This is the check
+    /// that a fourth preset cannot be added to `profile.rs` and forgotten
+    /// here.
+    #[test]
+    fn the_usage_text_offers_exactly_the_presets_that_exist() {
+        let text = usage();
+        for preset in profile::Preset::ALL {
+            assert!(
+                text.contains(preset.name()),
+                "usage does not mention {}",
+                preset.name()
+            );
+            assert_eq!(
+                invocation(&argv(&["profile", preset.name()])),
+                Invocation::ProfileSet(preset)
+            );
+        }
+        assert!(!text.contains("<presets>"), "the preset list was not filled in");
+        // The paragraph that exists to stop the next person losing an
+        // afternoon to a window that will not return.
+        assert!(text.contains("/usr/bin/raven-power"));
+    }
+
+    /// The four failures are four messages, each naming the socket and ending
+    /// in something to type. A client that cannot tell them apart sends
+    /// everybody to the same wrong place.
+    #[test]
+    fn every_failure_to_reach_the_daemon_says_what_to_do() {
+        let errors = [
+            CtlError::NotRunning,
+            CtlError::Denied,
+            CtlError::Timeout,
+            CtlError::Other(std::io::Error::new(ErrorKind::BrokenPipe, "gone")),
+        ];
+        for e in &errors {
+            let text = e.explain();
+            assert!(text.contains(CTL_SOCKET_PATH), "{:?} does not name the socket", e);
+            assert!(text.ends_with('\n'), "{:?} does not end in a newline", e);
+            assert!(text.contains('`'), "{:?} names no command to run", e);
+        }
+        assert!(errors[0].explain().contains("raven-rc start powerd"));
+        assert!(errors[1].explain().contains(CTL_GROUP));
+    }
+
+    /// A socket file left behind by a daemon that died is the same fact, to
+    /// the person at the prompt, as no socket at all.
+    #[test]
+    fn a_stale_socket_reads_as_a_daemon_that_is_not_running() {
+        let cases = [
+            (ErrorKind::NotFound, "NotRunning"),
+            (ErrorKind::ConnectionRefused, "NotRunning"),
+            (ErrorKind::PermissionDenied, "Denied"),
+            (ErrorKind::WouldBlock, "Timeout"),
+            (ErrorKind::TimedOut, "Timeout"),
+        ];
+        for (kind, expected) in cases {
+            let got = match CtlError::from_io(std::io::Error::new(kind, "x")) {
+                CtlError::NotRunning => "NotRunning",
+                CtlError::Denied => "Denied",
+                CtlError::Timeout => "Timeout",
+                CtlError::Other(_) => "Other",
+            };
+            assert_eq!(got, expected, "{:?}", kind);
+        }
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "raven-powerd-{}-{}",
+            name,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("a temporary directory");
+        dir
+    }
+
+    /// A daemon that is not running costs a message, not the terminal. This
+    /// is the reported bug's shape: something asks the power socket a
+    /// question and nothing is there to answer it.
+    #[test]
+    fn asking_a_daemon_that_is_not_there_answers_instead_of_waiting() {
+        let dir = scratch("absent");
+        let started = Instant::now();
+        let result = ask_powerd_at(&dir.join("ctl"), "profile", Duration::from_millis(500));
+        assert!(matches!(result, Err(CtlError::NotRunning)), "{:?}", result);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A socket somebody is listening on but nobody is answering on is the
+    /// case the bound exists for: `connect` succeeds, the write succeeds, and
+    /// the reply never comes. Before there was a timeout this is where a
+    /// client sat for as long as anyone was willing to wait.
+    #[test]
+    fn a_daemon_that_never_answers_is_given_up_on() {
+        let dir = scratch("silent");
+        let path = dir.join("ctl");
+        // Bound and never accepted: the connection sits in the backlog.
+        let listener = UnixListener::bind(&path).expect("bind");
+
+        let started = Instant::now();
+        let result = ask_powerd_at(&path, "profile", Duration::from_millis(300));
+        assert!(matches!(result, Err(CtlError::Timeout)), "{:?}", result);
+        // The bound is the bound, not a suggestion.
+        assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
+
+        drop(listener);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// And the case that has to keep working: a daemon that answers is
+    /// answered, with the reply it wrote.
+    #[test]
+    fn a_daemon_that_answers_is_read_verbatim() {
+        let dir = scratch("answers");
+        let path = dir.join("ctl");
+        let listener = UnixListener::bind(&path).expect("bind");
+
+        let server = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut line = String::new();
+                let Ok(peer) = stream.try_clone() else { return };
+                let _ = BufReader::new(peer).read_line(&mut line);
+                assert_eq!(line, "profile\n", "the newline is part of the request");
+                let _ = stream.write_all(b"performance (override)\n");
+            }
+        });
+
+        let reply = ask_powerd_at(&path, "profile", Duration::from_secs(2));
+        assert_eq!(reply.ok().as_deref(), Some("performance (override)\n"));
+
+        let _ = server.join();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The reply is printed as the daemon wrote it, punctuated once.
+    #[test]
+    fn a_reply_gets_exactly_one_newline() {
+        assert_eq!(with_newline("balanced (auto)"), "balanced (auto)\n");
+        assert_eq!(with_newline(""), "\n");
     }
 
     #[test]

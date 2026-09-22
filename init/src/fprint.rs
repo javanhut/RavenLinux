@@ -311,6 +311,12 @@ impl Retry {
     }
 
     /// What to tell the person, in the imperative and without blaming them.
+    ///
+    /// Unused inside this crate: the wording belongs with the codes it
+    /// translates, and the caller that will print it is the enrolment UI,
+    /// which is not in this tree yet. Kept here rather than in that UI so the
+    /// two cannot disagree about what a code means.
+    #[allow(dead_code)]
     pub fn advice(self) -> &'static str {
         match self {
             Self::Centre => "move your finger to the middle of the sensor",
@@ -841,7 +847,7 @@ mod tests {
     /// enrol.
     #[test]
     fn an_over_long_name_is_truncated_rather_than_refused() {
-        let data = user_data(&vec![b'a'; 200]);
+        let data = user_data(&[b'a'; 200]);
         assert_eq!(data.len(), USER_DATA_LEN);
         assert_eq!(data[2], MAX_NAME as u8);
     }

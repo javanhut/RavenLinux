@@ -94,6 +94,21 @@ DEPENDENCIES=(
     "wipefs:util-linux:-:-:-:-:-:Filesystem signature eraser"
     "mkfs.ext4:e2fsprogs:-:-:-:-:-:Create ext4 filesystem"
     "mkfs.fat:dosfstools:-:-:-:-:-:Create FAT filesystem"
+    # Encryption, and btrfs. These are build dependencies for the same reason
+    # sfdisk and wipefs above are: the build copies the binary into something
+    # it ships, so a host without the package produces an image that refuses a
+    # feature it advertises. They are required rather than optional because
+    # both failures are silent by construction -- build-initramfs.sh warns that
+    # the image "CANNOT boot an encrypted disk" and then ships it, and
+    # raven-install's preflight reports cryptsetup 0 or btrfs_progs 0 and
+    # soft_dies at install time, on somebody else's machine, hours later.
+    #
+    # `btrfs` and not mkfs.btrfs: one package provides both, and the multicall
+    # binary is the one that was missing from the staging list, so probing for
+    # it is what catches the half-staged case as well as the absent one.
+    "cryptsetup:cryptsetup:cryptsetup-bin:-:-:-:-:Open and create LUKS2 volumes (raven-install --encrypt, initramfs unlock)"
+    "dmsetup:device-mapper:-:device-mapper:device-mapper:device-mapper:device-mapper:Device-mapper control, which cryptsetup's mappings are made of"
+    "btrfs:btrfs-progs:btrfs-progs:btrfs-progs:btrfsprogs:btrfs-progs:btrfs-progs:Btrfs administration -- subvolumes, snapshots, and raven-snapshot"
     "mcopy:mtools:-:-:-:-:-:Copy files to FAT images"
     "mmd:mtools:-:-:-:-:-:Create directories in FAT images"
     
@@ -242,12 +257,23 @@ OPTIONAL_PACKAGES_ALPINE="qemu-system-x86_64 ovmf"
 # build starts, so a host missing any of them loses the media player and
 # nothing else. Arch ships FFmpeg's headers with its libraries; most of the
 # others split them into a -dev package, which is the name used below.
-EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja oniguruma libdrm libinput mesa libxkbcommon wayland alsa-lib libwacom libevdev mtdev seatd parted gptfdisk efibootmgr kbd python-freetype-py adwaita-cursors breeze-icons hicolor-icon-theme ttf-dejavu noto-fonts-emoji gtk4 libadwaita glib2-devel gsettings-desktop-schemas shared-mime-info desktop-file-utils glycin glycin-gtk4 bubblewrap librsvg dconf ntfs-3g ntfsprogs ffmpeg clang lld"
-EXTRA_PACKAGES_DEBIAN="build-essential linux-headers-generic libelf-dev python3-jinja2 libonig-dev libdrm-dev libinput-dev libseat-dev libgbm-dev libegl-dev libxkbcommon-dev libwayland-dev libwacom-dev libevdev-dev libmtdev-dev seatd adwaita-icon-theme breeze-icon-theme hicolor-icon-theme fonts-dejavu fonts-noto-color-emoji libgtk-4-dev libadwaita-1-dev libglib2.0-dev gsettings-desktop-schemas shared-mime-info desktop-file-utils glycin-loaders bubblewrap librsvg2-common dconf-gsettings-backend ntfs-3g libavformat-dev libavcodec-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev libclang-dev lld"
-EXTRA_PACKAGES_FEDORA="kernel-devel elfutils-libelf-devel python3-jinja2 oniguruma-devel libdrm-devel libinput-devel libseat-devel mesa-libgbm-devel mesa-libEGL-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd adwaita-cursor-theme breeze-icon-theme hicolor-icon-theme dejavu-fonts-all google-noto-emoji-color-fonts gtk4-devel libadwaita-devel glib2-devel gsettings-desktop-schemas shared-mime-info desktop-file-utils glycin-loaders bubblewrap librsvg2 dconf ntfs-3g ntfsprogs ffmpeg-devel clang-devel lld"
-EXTRA_PACKAGES_SUSE="kernel-devel libelf-devel python3-Jinja2 oniguruma-devel libdrm-devel libinput-devel libseat-devel Mesa-libgbm-devel Mesa-libEGL-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd adwaita-icon-theme breeze5-icons hicolor-icon-theme dejavu-fonts noto-coloremoji-fonts gtk4-devel libadwaita-devel glib2-devel gsettings-desktop-schemas shared-mime-info desktop-file-utils bubblewrap rsvg-view dconf ntfs-3g ntfsprogs ffmpeg-devel clang-devel lld"
-EXTRA_PACKAGES_VOID="base-devel linux-headers elfutils-devel python3-Jinja2 oniguruma-devel libdrm-devel libinput-devel seatd-devel MesaLib-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd adwaita-icon-theme breeze-icons hicolor-icon-theme dejavu-fonts-ttf noto-fonts-emoji gtk4-devel libadwaita-devel glib-devel gsettings-desktop-schemas shared-mime-info desktop-file-utils bubblewrap librsvg dconf ntfs-3g ffmpeg-devel clang lld"
-EXTRA_PACKAGES_ALPINE="build-base linux-headers elfutils-dev py3-jinja2 oniguruma-dev libdrm-dev libinput-dev libseat-dev mesa-dev libxkbcommon-dev wayland-dev libwacom-dev libevdev-dev mtdev-dev seatd adwaita-icon-theme breeze-icons hicolor-icon-theme ttf-dejavu font-noto-emoji gtk4.0-dev libadwaita-dev glib-dev gsettings-desktop-schemas shared-mime-info desktop-file-utils bubblewrap librsvg dconf ntfs-3g-progs ffmpeg-dev clang-dev lld"
+#
+# xdg-desktop-portal and its GTK backend close the last of these lists. They
+# are not linked against anything either: stage-desktop-runtime.py copies a
+# package's own files out of the build host, the way it does for cups and
+# sane, and what the portal carries -- the D-Bus service files, the .portal
+# definitions, /usr/lib/xdg-desktop-portal itself -- cannot be reconstructed
+# from a library. The user service in configs/raven/user-services ships
+# `enabled = true`, so a host without these packages produces an image whose
+# every login starts a program that is not there and restarts it forever.
+# The name is the same on all six package families, which is rare enough here
+# to be worth saying.
+EXTRA_PACKAGES_ARCH="base-devel linux-headers libelf pahole python-jinja meson ninja oniguruma libdrm libinput mesa libxkbcommon wayland alsa-lib libwacom libevdev mtdev seatd parted gptfdisk efibootmgr kbd python-freetype-py adwaita-cursors breeze-icons hicolor-icon-theme ttf-dejavu noto-fonts-emoji gtk4 libadwaita glib2-devel gsettings-desktop-schemas shared-mime-info desktop-file-utils glycin glycin-gtk4 bubblewrap librsvg dconf ntfs-3g ntfsprogs ffmpeg clang lld xdg-desktop-portal xdg-desktop-portal-gtk"
+EXTRA_PACKAGES_DEBIAN="build-essential linux-headers-generic libelf-dev python3-jinja2 libonig-dev libdrm-dev libinput-dev libseat-dev libgbm-dev libegl-dev libxkbcommon-dev libwayland-dev libwacom-dev libevdev-dev libmtdev-dev seatd adwaita-icon-theme breeze-icon-theme hicolor-icon-theme fonts-dejavu fonts-noto-color-emoji libgtk-4-dev libadwaita-1-dev libglib2.0-dev gsettings-desktop-schemas shared-mime-info desktop-file-utils glycin-loaders bubblewrap librsvg2-common dconf-gsettings-backend ntfs-3g libavformat-dev libavcodec-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev libclang-dev lld xdg-desktop-portal xdg-desktop-portal-gtk"
+EXTRA_PACKAGES_FEDORA="kernel-devel elfutils-libelf-devel python3-jinja2 oniguruma-devel libdrm-devel libinput-devel libseat-devel mesa-libgbm-devel mesa-libEGL-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd adwaita-cursor-theme breeze-icon-theme hicolor-icon-theme dejavu-fonts-all google-noto-emoji-color-fonts gtk4-devel libadwaita-devel glib2-devel gsettings-desktop-schemas shared-mime-info desktop-file-utils glycin-loaders bubblewrap librsvg2 dconf ntfs-3g ntfsprogs ffmpeg-devel clang-devel lld xdg-desktop-portal xdg-desktop-portal-gtk"
+EXTRA_PACKAGES_SUSE="kernel-devel libelf-devel python3-Jinja2 oniguruma-devel libdrm-devel libinput-devel libseat-devel Mesa-libgbm-devel Mesa-libEGL-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd adwaita-icon-theme breeze5-icons hicolor-icon-theme dejavu-fonts noto-coloremoji-fonts gtk4-devel libadwaita-devel glib2-devel gsettings-desktop-schemas shared-mime-info desktop-file-utils bubblewrap rsvg-view dconf ntfs-3g ntfsprogs ffmpeg-devel clang-devel lld xdg-desktop-portal xdg-desktop-portal-gtk"
+EXTRA_PACKAGES_VOID="base-devel linux-headers elfutils-devel python3-Jinja2 oniguruma-devel libdrm-devel libinput-devel seatd-devel MesaLib-devel libxkbcommon-devel wayland-devel libwacom-devel libevdev-devel mtdev-devel seatd adwaita-icon-theme breeze-icons hicolor-icon-theme dejavu-fonts-ttf noto-fonts-emoji gtk4-devel libadwaita-devel glib-devel gsettings-desktop-schemas shared-mime-info desktop-file-utils bubblewrap librsvg dconf ntfs-3g ffmpeg-devel clang lld xdg-desktop-portal xdg-desktop-portal-gtk"
+EXTRA_PACKAGES_ALPINE="build-base linux-headers elfutils-dev py3-jinja2 oniguruma-dev libdrm-dev libinput-dev libseat-dev mesa-dev libxkbcommon-dev wayland-dev libwacom-dev libevdev-dev mtdev-dev seatd adwaita-icon-theme breeze-icons hicolor-icon-theme ttf-dejavu font-noto-emoji gtk4.0-dev libadwaita-dev glib-dev gsettings-desktop-schemas shared-mime-info desktop-file-utils bubblewrap librsvg dconf ntfs-3g-progs ffmpeg-dev clang-dev lld xdg-desktop-portal xdg-desktop-portal-gtk"
 
 # =============================================================================
 # Functions

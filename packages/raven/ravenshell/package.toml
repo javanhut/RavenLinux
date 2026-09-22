@@ -3,6 +3,11 @@
 # stage3 leaves bash as the default so the base system stands on its own.
 [package]
 name = "ravenshell"
+# The upstream version only, and the base a build appends a revision to. This
+# component is cloned from its own repository and tracks that repository's
+# default branch unless RAVEN_USE_MANIFEST_PINS=1, so the package carries
+# +r<committer date>.g<commit> for the checkout that was actually compiled --
+# raven_component_version in scripts/lib/components.sh composes it.
 version = "0.1.0"
 description = "Raven Shell - interactive command line interpreter and scripting language"
 license = "NOASSERTION"
@@ -10,6 +15,11 @@ homepage = "https://github.com/javanhut/RavenShell"
 repository = "https://github.com/javanhut/RavenShell"
 maintainers = ["RavenLinux Team"]
 categories = ["raven", "shell"]
+# Stated rather than derived. rvn takes the architecture from [build]
+# target when [package] does not say, which is right for a Rust triple
+# and wrong for a Go package path -- `.` would become the
+# architecture and land in the package filename.
+arch = "x86_64"
 
 [source]
 type = "git"

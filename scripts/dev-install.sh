@@ -18,8 +18,12 @@
 # Targets (default: init installer tools):
 #   init        build init/ natively; install raven-init, raven-rc,
 #               raven-powerd, raven-ports, raven-timed, raven-mount,
-#               raven-fprintd to /usr/bin
+#               raven-fprintd, raven-firewall to /usr/bin
 #               (stage-raven.sh:build_raven_init)
+#   faced       build faced/ natively; install raven-faced to /usr/bin and
+#               fetch-models.sh to /usr/share/raven-face. Not in the default
+#               set: it builds an inference engine and takes a few minutes the
+#               first time. (stage-raven.sh:build_raven_faced)
 #   installer-ui  build installer-ui/ natively; install raven-installer-ui and
 #               its launcher entry, icon and metainfo. Not in the default set:
 #               it is a GTK4 build, and it is only worth waiting for when the
@@ -27,10 +31,13 @@
 #   installer   scripts/installer/* -> /usr/bin, configs/installer/profiles
 #               -> /etc/raven/install-profiles (stage4-iso.sh:install_installer)
 #   tools       configs/raven-console-font, configs/raven-udev,
-#               configs/raven-dhcp, etc/raven/raven-shell -> /usr/bin
+#               configs/raven-dhcp, configs/raven-snapshot,
+#               etc/raven/raven-shell -> /usr/bin
 #   configs     etc/raven/{init,power,time}.toml -> /etc/raven,
 #               configs/raven/services/*.toml -> /etc/raven/init.d,
 #               configs/raven/session.d/* -> /etc/raven/session.d,
+#               configs/sysctl.d/*.conf -> /usr/lib/sysctl.d,
+#               configs/rvn/hooks.d/*.toml -> /usr/share/rvn/hooks.d,
 #               configs/wireplumber/wireplumber.conf.d/*.conf
 #               -> /etc/wireplumber/wireplumber.conf.d.
 #               Diff-only unless --force-configs: the live init.toml carries
@@ -71,8 +78,8 @@ for arg in "$@"; do
         --no-restart)      NO_RESTART=1 ;;
         --allow-non-raven) ALLOW_NON_RAVEN=1 ;;
         -h|--help)         sed -n '2,/^# ====.*$/{/^# ====/d;s/^# \{0,1\}//p}' "$0"; exit 0 ;;
-        init|installer|installer-ui|tools|configs) TARGETS+=("$arg") ;;
-        all)               TARGETS+=(init installer installer-ui tools configs) ;;
+        init|faced|installer|installer-ui|tools|configs) TARGETS+=("$arg") ;;
+        all)               TARGETS+=(init faced installer installer-ui tools configs) ;;
         *) log_error "unknown argument: $arg"; exit 2 ;;
     esac
 done
@@ -160,7 +167,7 @@ install_config() {
 # --locked only when a Cargo.lock is present, as in the build stages: the
 # checkout does not always carry one, and --locked refuses to create it.
 do_init() {
-    log_section "init crate (raven-init, raven-rc, raven-powerd, raven-ports, raven-timed, raven-mount, raven-fprintd)"
+    log_section "init crate (raven-init, raven-rc, raven-powerd, raven-ports, raven-timed, raven-mount, raven-fprintd, raven-firewall)"
     local src="${RAVEN_ROOT}/init"
     local -a cargo_args=(build --release)
     [[ -f "${src}/Cargo.lock" ]] && cargo_args+=(--locked)
@@ -169,9 +176,36 @@ do_init() {
         return 1
     }
     local out="${src}/target/release"
-    for b in raven-init raven-rc raven-powerd raven-ports raven-timed raven-mount raven-fprintd; do
+    # raven-firewall is the eighth [[bin]] of this one crate. It fronts no
+    # daemon -- a loaded nftables ruleset lives in the kernel, not in a process
+    # -- so nothing restarts below when it changes; installing the file is the
+    # whole of making the new version live.
+    for b in raven-init raven-rc raven-powerd raven-ports raven-timed raven-mount raven-fprintd raven-firewall; do
         install_file "${out}/${b}" "/usr/bin/${b}" 0755
     done
+}
+
+# Its own target and not part of `init`, because it is a separate crate with a
+# separate build: `init` compiles in seconds and this one compiles an inference
+# engine. Somebody iterating on PID 1 should not wait for tract.
+do_faced() {
+    log_section "faced (raven-faced)"
+    local src="${RAVEN_ROOT}/faced"
+    local -a cargo_args=(build --release)
+    [[ -f "${src}/Cargo.lock" ]] && cargo_args+=(--locked)
+    ( cd "$src" && "${BUILD_AS[@]}" cargo "${cargo_args[@]}" ) || {
+        log_error "cargo build failed; nothing installed"
+        return 1
+    }
+    install_file "${src}/target/release/raven-faced" /usr/bin/raven-faced 0755
+    install_file "${src}/fetch-models.sh" /usr/share/raven-face/fetch-models.sh 0755
+    # The models are not installed here and are not in this repository: they
+    # are 37 MB, they are fetched by hash, and doing it here would mean every
+    # dev-install reaching the network. The daemon says "nomodel" without them
+    # and the settings page says what to run.
+    if [[ ! -f /usr/share/raven-face/models/face_recognition_sface_2021dec.onnx ]]; then
+        log_warn "face unlock has no models yet; run: sudo /usr/share/raven-face/fetch-models.sh"
+    fi
 }
 
 do_installer() {
@@ -231,6 +265,13 @@ do_tools() {
     install_file "${RAVEN_ROOT}/configs/raven-os-release-guard" /usr/bin/raven-os-release-guard 0755
     install_file "${RAVEN_ROOT}/configs/raven-udev"         /usr/bin/raven-udev         0755
     install_file "${RAVEN_ROOT}/configs/raven-dhcp"         /usr/bin/raven-dhcp         0755
+    # raven-snapshot is a tool and not a config even though it lives beside
+    # them: rvn's pre-transaction hook execs /usr/bin/raven-snapshot by that
+    # absolute path (configs/rvn/hooks.d/50-snapshot.toml), and the hook file
+    # itself goes in with the configs target below. Installing one without the
+    # other is a hook that cannot run or a tool nothing calls, so a dev-install
+    # that means to test snapshots needs both targets.
+    install_file "${RAVEN_ROOT}/configs/raven-snapshot"     /usr/bin/raven-snapshot     0755
     install_file "${RAVEN_ROOT}/etc/raven/raven-shell"      /usr/bin/raven-shell        0755
     local rule
     for rule in "${RAVEN_ROOT}"/configs/udev/*.rules; do
@@ -256,6 +297,32 @@ do_configs() {
     for f in "${RAVEN_ROOT}"/configs/raven/session.d/*; do
         [[ -e "$f" ]] || continue
         install_config "$f" "/etc/raven/session.d/$(basename "$f")" 0755
+    done
+    # The kernel parameter policy. install_file and not install_config,
+    # because /usr/lib/sysctl.d is the vendor directory: the file's own header
+    # says not to edit it on an installed machine and to drop an overriding
+    # fragment into /etc/sysctl.d instead, which is read last and wins. Nothing
+    # under /usr/lib carries machine-local edits worth protecting, so the
+    # diff-only guard would only ever stand between a developer and the policy
+    # they just changed.
+    #
+    # Nothing applies this now: raven-init reads the sysctl.d directories once,
+    # in its boot stage. The keys take effect at the next boot, or immediately
+    # for whichever ones are written by hand with `sysctl -w`.
+    for f in "${RAVEN_ROOT}"/configs/sysctl.d/*.conf; do
+        [[ -e "$f" ]] || continue
+        install_file "$f" "/usr/lib/sysctl.d/$(basename "$f")" 0644
+    done
+    # rvn's transaction hooks. /usr/share/rvn/hooks.d is the vendor half of the
+    # pair rvn reads -- RavenPackageManager/src/txhooks.rs DIRS is
+    # ["usr/share/rvn/hooks.d", "etc/rvn/hooks.d"], in that order, with the
+    # second replacing a file of the same name in the first -- so this is where
+    # a hook the repository ships belongs, and an admin who wants it changed
+    # shadows it under /etc. rvn rediscovers hooks on every transaction, so
+    # there is nothing to reload.
+    for f in "${RAVEN_ROOT}"/configs/rvn/hooks.d/*.toml; do
+        [[ -e "$f" ]] || continue
+        install_file "$f" "/usr/share/rvn/hooks.d/$(basename "$f")" 0644
     done
     # Raven's WirePlumber defaults (stage2-native.sh stages the same files).
     # Diff-only like the rest unless --force-configs; WirePlumber reads them

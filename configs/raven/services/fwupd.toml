@@ -6,13 +6,29 @@
 #
 # This drop-in is for the other case -- someone who wants `fwupdmgr`, or a
 # graphical updater, both of which talk to this daemon over D-Bus. The daemon
-# authorises every call through polkit, and Raven does not run polkitd (see the
-# note at the end of /etc/raven/init.toml). Enabling this alone therefore gets
-# a daemon that refuses everything it is asked. The full sequence is:
+# authorises every call through polkit, and the base image does not run polkitd
+# (see the note at the end of /etc/raven/init.toml). Enabling this alone
+# therefore gets a daemon that refuses everything it is asked.
+#
+# That used to be where this comment stopped, next to an instruction to "add a
+# polkitd service drop-in" -- which meant writing one from upstream's systemd
+# unit, and was the one step in the sequence with no supported path. There is
+# one now. `rvn install polkit` creates the polkitd account from the package's
+# sysusers.d fragment and activates the shipped polkitd template, which lands
+# in /etc/raven/init.d disabled exactly as this file does, so the whole
+# sequence is commands you can type and nothing you have to write:
 #
 #   rvn install polkit
-#   # add a polkitd service drop-in, then
+#   raven-rc enable polkitd && raven-rc start polkitd
+#   raven-rc enable fwupd
 #   raven-rc start fwupd
+#
+# Read /usr/share/raven/services/polkitd.toml before the first of those: it
+# says what polkit costs (a setuid-root /usr/bin/pkexec) and what it still
+# will not do on Raven (no authentication agent ships, so any rule that would
+# raise a password prompt fails rather than prompting). For fwupdmgr that is
+# usually fine, because a wheel user updating firmware is a rule that resolves
+# without a prompt.
 #
 # Left disabled rather than removed because that is a legitimate thing to want
 # and rebuilding the drop-in from memory is not.

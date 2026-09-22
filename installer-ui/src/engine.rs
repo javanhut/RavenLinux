@@ -52,10 +52,17 @@ pub const PHASES: &[(&str, &str, u32)] = &[
     ("confirm", "Confirming the plan", 1),
     ("partition", "Partitioning", 4),
     ("format", "Creating filesystems", 6),
-    ("copy", "Copying the system", 58),
+    ("copy", "Copying the system", 57),
     ("configure", "Configuring the new system", 8),
     ("boot", "Installing the bootloader", 7),
     ("packages", "Installing the package profile", 7),
+    // After the packages rather than with the bootloader, because sbctl
+    // arrives with the desktop and developer profiles and does not exist a
+    // moment earlier. Weight 1: on the overwhelming majority of installs this
+    // phase says "not touched" and returns, and the one where it does not is
+    // three signatures and an EFI variable write -- none of which takes long
+    // enough to be worth taking a share of the bar away from the copy.
+    ("secureboot", "Secure Boot", 1),
     ("finish", "Finishing up", 2),
 ];
 

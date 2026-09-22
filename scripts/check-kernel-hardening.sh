@@ -75,6 +75,19 @@ DEFAULT_CONFIG="${PROJECT_ROOT}/configs/kernel/config-6.17-raven"
 # or something the rest of this list depends on. The full argument for each one
 # is in docs/kernel-hardening.md and in a comment at the symbol itself in
 # configs/kernel/config-6.17-raven.
+#
+# The three nf_tables entries are the odd ones out, and they are here for a
+# reason worth stating: they are the only options in this list that guard a
+# userspace file rather than a kernel behaviour. /etc/nftables.conf is the
+# machine's entire packet filter, and NF_TABLES has no default -- so a
+# regenerated config answers it with n, and the firewall is compiled out
+# without one line of the ruleset, the service or raven-firewall changing.
+# Nothing downstream notices the way a missing driver would: nft fails at boot,
+# the service exits non-zero, and the machine comes up serving nobody and
+# filtering nothing. That is the same shape as the HARDENED_USERCOPY
+# regression this script was written for -- an option nobody turned off on
+# purpose, silently absent, found only by going looking -- which is why the
+# firewall is checked here rather than in a script of its own.
 REQUIRED=$(cat <<'REQ'
 SECURITY y                        the LSM framework itself; without it every option below is unreachable
 SECURITYFS y                      /sys/kernel/security, where the active LSM list is readable from
@@ -104,6 +117,9 @@ INTEL_HFI_THERMAL y               Hardware Feedback Interface: the firmware's li
 THERMAL_NETLINK y                 how HFI updates reach user space; INTEL_HFI_THERMAL selects it
 DEBUG_FS y                        the ITMT switch moved from sysctl to debugfs; without this there is no switch at all
 MODULES y                         graphics and wireless ship as modules on purpose, see etc/raven/init.toml
+NF_TABLES y                       nf_tables itself; without it /etc/nftables.conf loads no rule and the machine has no packet filter
+NF_TABLES_INET y                  the `table inet filter` the whole ruleset is written as, covering IPv4 and IPv6 in one set of chains
+NFT_CT y                          the `ct state` match; nft refuses a ruleset it cannot fully express, so without it the file does not load at all
 REQ
 )
 

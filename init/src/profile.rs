@@ -96,6 +96,37 @@ impl Preset {
             _ => None,
         }
     }
+
+    /// Every preset, in the order a person thinks of them: fastest first.
+    ///
+    /// Used by `raven-powerd`'s usage text and by the tests that assert each
+    /// preset resolves to something on a machine that offers nothing exotic,
+    /// so a fourth preset added here cannot be forgotten in either place.
+    pub const ALL: [Preset; 3] = [Preset::Performance, Preset::Balanced, Preset::PowerSaver];
+
+    /// One line saying what this preset actually does to the machine.
+    ///
+    /// It exists because the mapping used to live only in the `match` arms
+    /// below, which meant the only way to find out what `performance` was
+    /// going to do was to read Rust. `power.toml` now carries the full table
+    /// in its comments and `raven-powerd status` prints this line beside the
+    /// preset in force, so the answer is reachable from a terminal by somebody
+    /// who has never seen this file.
+    ///
+    /// Kept deliberately short and free of sysfs paths: the paths belong in
+    /// the table in `power.toml`, which has the room to explain them, and a
+    /// status line that wraps is a status line nobody reads.
+    pub fn summary(self) -> &'static str {
+        match self {
+            Preset::Performance => {
+                "every core at its top clock; the platform's performance mode"
+            }
+            Preset::Balanced => "scale with load; the platform's default mode",
+            Preset::PowerSaver => {
+                "scale with load, leaning lower; PCIe links and the audio codec allowed to sleep"
+            }
+        }
+    }
 }
 
 /// The `[profile]` table in `power.toml`.
@@ -166,9 +197,8 @@ fn supply_in(dir: &Path) -> Supply {
                 // "Discharging" is the only status that means the wall is not
                 // involved. "Charging", "Full", "Not charging" and "Unknown"
                 // all happen on mains.
-                if read_trimmed(&p.join("status")).as_deref() == Some("Discharging") {
-                    battery_discharging = true;
-                }
+                let status = read_trimmed(&p.join("status"));
+                battery_discharging |= status.as_deref() == Some("Discharging");
             }
             _ => {}
         }
@@ -291,33 +321,74 @@ fn apply_platform(preset: Preset) {
     // switch. Only where the firmware offers it, and only a choice it lists.
     if let Some(choices) = read_trimmed(Path::new(PLATFORM_PROFILE_CHOICES)) {
         let choices: Vec<&str> = choices.split_whitespace().collect();
-        let wanted: &[&str] = match preset {
-            Preset::Performance => &["performance", "balanced-performance", "balanced"],
-            Preset::Balanced => &["balanced", "balanced-performance"],
-            Preset::PowerSaver => &["low-power", "quiet", "balanced"],
-        };
-        if let Some(choice) = wanted.iter().find(|c| choices.contains(c)) {
+        if let Some(choice) = platform_choice(preset, &choices) {
             write_if_different(Path::new(PLATFORM_PROFILE), choice);
         }
     }
 
-    // PCIe link power management. `powersave` lets idle links drop to L1,
-    // which matters on battery and costs latency nobody notices; `default`
-    // is whatever the firmware set up, which is the right thing on mains.
-    let aspm = match preset {
+    write_bracketed_if_different(Path::new(ASPM_POLICY), aspm_policy(preset));
+    write_if_different(Path::new(HDA_POWER_SAVE), hda_power_save(preset));
+}
+
+/// The ACPI platform profile a preset asks for, given what this firmware
+/// lists in `platform_profile_choices`.
+///
+/// Every preset has an ordered preference and takes the first match, because
+/// the set of names is the vendor's and not the kernel's: a ThinkPad offers
+/// `low-power balanced performance`, a machine from somebody else offers
+/// `quiet balanced balanced-performance performance`, and several offer
+/// nothing at all. Writing a name the firmware does not list is an EINVAL and
+/// leaves the platform where it was, so the fallbacks are what make the preset
+/// mean something on more than one laptop.
+///
+/// `performance` falls back to `balanced-performance` before `balanced`: on
+/// the firmwares that have both, `balanced-performance` is the one that lifts
+/// the sustained power limit, and asking for the top end and getting the
+/// middle is a worse answer than asking for it and getting most of it.
+/// `None` -- firmware that lists none of the names we know -- leaves the
+/// platform on whatever it booted with, which is the honest thing to do with
+/// a switch whose values we cannot interpret; the governor half of the preset
+/// still applies.
+///
+/// Returned as `&'static str` rather than as a borrow of `choices` on
+/// purpose: these are the only four names this module is willing to write
+/// into firmware, and taking them from our own list rather than from the
+/// file means a `platform_profile_choices` full of surprises cannot become a
+/// write.
+fn platform_choice(preset: Preset, choices: &[&str]) -> Option<&'static str> {
+    let wanted: &[&'static str] = match preset {
+        Preset::Performance => &["performance", "balanced-performance", "balanced"],
+        Preset::Balanced => &["balanced", "balanced-performance"],
+        Preset::PowerSaver => &["low-power", "quiet", "balanced"],
+    };
+    wanted.iter().copied().find(|c| choices.contains(c))
+}
+
+/// PCIe link power management. `powersave` lets idle links drop to L1, which
+/// matters on battery and costs latency nobody notices; `default` is whatever
+/// the firmware set up, which is the right thing on mains.
+///
+/// `performance` gets `default` rather than `performance`: the policy named
+/// `performance` disables ASPM outright on every link, including the ones
+/// whose firmware never enabled it, and on more than one machine that is how
+/// you turn a working NVMe into one that runs hot for no measurable gain.
+/// Leaving the firmware's own arrangement alone is what "do not idle down" is
+/// supposed to mean here.
+fn aspm_policy(preset: Preset) -> &'static str {
+    match preset {
         Preset::PowerSaver => "powersave",
         Preset::Performance | Preset::Balanced => "default",
-    };
-    write_bracketed_if_different(Path::new(ASPM_POLICY), aspm);
+    }
+}
 
-    // HDA codec power-down after idle, in seconds. Ten is what most
-    // distributions ship on battery; zero keeps it awake, which avoids the
-    // pop some codecs make coming back.
-    let hda = match preset {
+/// HDA codec power-down after idle, in seconds. Ten is what most
+/// distributions ship on battery; zero keeps it awake, which avoids the pop
+/// some codecs make coming back.
+fn hda_power_save(preset: Preset) -> &'static str {
+    match preset {
         Preset::PowerSaver => "10",
         Preset::Performance | Preset::Balanced => "0",
-    };
-    write_if_different(Path::new(HDA_POWER_SAVE), hda);
+    }
 }
 
 /// Every `policyN` directory under `cpufreq`, sorted. `None` if there is no
@@ -432,6 +503,93 @@ mod tests {
         assert_eq!(choose(Preset::Balanced, &g, false), (Some("performance"), None));
         let g = ["userspace"];
         assert_eq!(choose(Preset::Balanced, &g, false), (None, None));
+    }
+
+    /// The performance preset end to end, because it is the one nothing on
+    /// this machine selects by default and so the one nothing exercises. Every
+    /// cell here is a cell of the table in `etc/raven/power.toml`; if one of
+    /// them moves, that table is wrong and somebody has to be told.
+    #[test]
+    fn performance_asks_for_the_top_end_of_every_knob() {
+        // The dial that matters on intel_pstate and amd-pstate: the governor
+        // is pinned rather than handed to the firmware, and the preference
+        // says so too, for the driver that reads one and not the other.
+        let epp = ["performance", "powersave"];
+        assert_eq!(
+            choose(Preset::Performance, &epp, true),
+            (Some("performance"), Some("performance"))
+        );
+
+        // acpi-cpufreq and the p-state drivers in passive mode: the governor
+        // is the whole policy.
+        let kernel = ["conservative", "ondemand", "userspace", "powersave", "performance", "schedutil"];
+        assert_eq!(
+            choose(Preset::Performance, &kernel, false),
+            (Some("performance"), None)
+        );
+
+        // The vendor's switch, on the three shapes of firmware we have seen.
+        assert_eq!(
+            platform_choice(Preset::Performance, &["low-power", "balanced", "performance"]),
+            Some("performance")
+        );
+        assert_eq!(
+            platform_choice(Preset::Performance, &["quiet", "balanced", "balanced-performance"]),
+            Some("balanced-performance")
+        );
+        assert_eq!(
+            platform_choice(Preset::Performance, &["low-power", "balanced"]),
+            Some("balanced")
+        );
+
+        // And the two rows that are power-saver's alone: performance leaves
+        // the firmware's PCIe arrangement where it is and keeps the codec up.
+        assert_eq!(aspm_policy(Preset::Performance), "default");
+        assert_eq!(hda_power_save(Preset::Performance), "0");
+    }
+
+    /// Firmware whose `platform_profile_choices` we do not recognise leaves
+    /// the platform alone rather than guessing at one of its words.
+    #[test]
+    fn unknown_platform_choices_are_not_written() {
+        assert_eq!(platform_choice(Preset::Performance, &["turbo", "eco"]), None);
+        assert_eq!(platform_choice(Preset::Balanced, &["low-power", "quiet"]), None);
+        assert_eq!(platform_choice(Preset::PowerSaver, &[]), None);
+    }
+
+    /// The other two presets' platform and module rows, so the table in
+    /// `power.toml` is asserted in full and not only for performance.
+    #[test]
+    fn balanced_and_power_saver_keep_their_half_of_the_table() {
+        let choices = ["low-power", "quiet", "balanced", "balanced-performance", "performance"];
+        assert_eq!(platform_choice(Preset::Balanced, &choices), Some("balanced"));
+        assert_eq!(platform_choice(Preset::PowerSaver, &choices), Some("low-power"));
+        // Lenovo and others call low-power `quiet`; it is the second choice.
+        assert_eq!(
+            platform_choice(Preset::PowerSaver, &["quiet", "balanced"]),
+            Some("quiet")
+        );
+
+        assert_eq!(aspm_policy(Preset::Balanced), "default");
+        assert_eq!(aspm_policy(Preset::PowerSaver), "powersave");
+        assert_eq!(hda_power_save(Preset::Balanced), "0");
+        assert_eq!(hda_power_save(Preset::PowerSaver), "10");
+    }
+
+    /// Every preset must resolve to something on the governor list this
+    /// machine's kernel actually offers. A preset that resolves to `None`
+    /// is a preset a person can select and nothing happens.
+    #[test]
+    fn no_preset_is_a_dead_word_on_an_ordinary_kernel() {
+        let kernel = ["conservative", "ondemand", "userspace", "powersave", "performance", "schedutil"];
+        let epp = ["performance", "powersave"];
+        for preset in Preset::ALL {
+            assert!(choose(preset, &kernel, false).0.is_some(), "{}", preset.name());
+            let (governor, preference) = choose(preset, &epp, true);
+            assert!(governor.is_some(), "{}", preset.name());
+            assert!(preference.is_some(), "{}", preset.name());
+            assert!(!preset.summary().is_empty());
+        }
     }
 
     #[test]

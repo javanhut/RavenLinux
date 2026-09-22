@@ -704,6 +704,14 @@ impl ChildResources {
 /// its hard limit just makes every library that calls `getrlimit` guess. A
 /// daemon that genuinely wants the split can call `setrlimit` itself, which is
 /// the only place the distinction is ever used deliberately.
+///
+/// The `as u32` on each `RLIMIT_*` constant is a portability cast, not a
+/// redundant one, and clippy is allowed to be wrong about it here: the libc
+/// crate types those constants as `__rlimit_resource_t`, which is `c_uint` on
+/// glibc and `c_int` on musl. On a glibc build the cast is a no-op and clippy
+/// says so; drop it for that reason and the musl build -- which is how several
+/// Raven components are shipped -- stops compiling.
+#[allow(clippy::unnecessary_cast)]
 fn rlimits_for(service: &str, limits: &ResourceLimits) -> Vec<(u32, libc::rlimit)> {
     let mut out = Vec::new();
 

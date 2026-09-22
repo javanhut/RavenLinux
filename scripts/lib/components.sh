@@ -71,7 +71,33 @@ declare -a RAVEN_COMPONENTS=(
 # row above -- but it is built by the same stage and it is just as required, so
 # the check has to know about it. raven-rc dispatches on argv[0], so
 # poweroff/reboot/halt/shutdown are symlinks to it and not separate binaries.
-RAVEN_INIT_BINARIES="raven-init,raven-rc,raven-powerd,raven-ports,raven-timed,raven-mount,raven-fprintd"
+#
+# raven-firewall is the eighth name and was missing from this constant for as
+# long as it has existed in init/Cargo.toml. That is worse than it sounds,
+# because this string is not a list of names to check: stage-raven.sh passes it
+# to build_rust_component as the set of binaries to copy out of the target
+# directory, and stage4's check_sysroot_layers reads it back to decide what the
+# image must carry. A [[bin]] that is not in here is compiled on every build
+# and then thrown away with the target directory -- documented in
+# ARCHITECTURE.md, built, and installed nowhere. Adding it here is what makes
+# the binary reach the staging directory at all; stage-raven.sh's build_raven_init
+# still has to `install -m 0755` it into the sysroot from there, beside the
+# seven lines that do the same for the others.
+#
+# Those two changes are one change and have to land together. stage4's
+# check_sysroot_layers reads this constant and returns 1 for anything it
+# cannot find in the sysroot, and main() treats that as fatal -- "Refusing an
+# incomplete desktop ISO" -- so a name added here without the matching install
+# line stops the ISO build rather than shipping an image quietly missing a
+# binary. That is the trade this file exists to make, and it is the right way
+# round; it is also why the missing install line cannot be deferred.
+RAVEN_INIT_BINARIES="raven-init,raven-rc,raven-powerd,raven-ports,raven-timed,raven-mount,raven-fprintd,raven-firewall"
+
+# Face unlock. Local to this repository like the init crate, and in a crate of
+# its own rather than a binary of init's: it links an ONNX inference engine,
+# and nothing that PID 1 builds should have to compile that. Its models are not
+# in the image -- see faced/fetch-models.sh.
+RAVEN_FACED_BINARIES="raven-faced"
 
 # =============================================================================
 # The base layer -- scripts/stages/stage2-native.sh
@@ -105,14 +131,37 @@ RAVEN_INIT_BINARIES="raven-init,raven-rc,raven-powerd,raven-ports,raven-timed,ra
 # installed by stage2's install_raven_firmware and would go missing exactly as
 # quietly as raven-dhcp did, with the same "there is no such program" outcome
 # for anyone who ran it.
-RAVEN_BASE_BINARIES="raven-udev,raven-console-font,agetty,dbus-daemon,raven-dhcp,dhcpcd,raven-firmware"
+#
+# raven-snapshot is the second such entry and is here for the same reason
+# raven-firmware is: no init.toml service names it, because what calls it is
+# rvn, once per transaction, through the hook in the file list below. An image
+# without it takes no snapshot before an upgrade, and the way anybody finds
+# that out is by needing one. stage2's install_raven_snapshot puts it in place.
+RAVEN_BASE_BINARIES="raven-udev,raven-console-font,agetty,dbus-daemon,raven-dhcp,dhcpcd,raven-firmware,raven-snapshot"
 
 # Base-layer files that are not programs and go missing just as quietly. The CA
 # bundle is the first: stage2's copy_ca_certificates stages it from the build
 # host, and an image without it builds, boots and logs in -- and then cannot
 # make one verified HTTPS connection, which on a running system is also the
 # only way to get the bundle back. Absolute paths inside the sysroot.
-RAVEN_BASE_FILES="/etc/ssl/certs/ca-certificates.crt"
+#
+# The other two are policy files, and they are here because policy that is not
+# installed is indistinguishable from policy that is:
+#
+#   50-raven.conf      the kernel parameter policy. raven-init's sysctl stage
+#                      reads /usr/lib/sysctl.d at boot and applies what it
+#                      finds; for every image built before stage2 started
+#                      installing this, it found nothing, so kptr_restrict,
+#                      dmesg_restrict, the protected_* symlink and FIFO
+#                      hardening and rp_filter all stayed at the kernel
+#                      defaults while the file in the repository said
+#                      otherwise. Nothing fails when it is missing, which is
+#                      exactly why the check has to be here.
+#   50-snapshot.toml   rvn's pre-transaction hook, in the vendor directory
+#                      txhooks.rs reads first. Without it rvn upgrades a btrfs
+#                      machine with no way back, silently -- the hook is the
+#                      only thing that calls raven-snapshot on its own.
+RAVEN_BASE_FILES="/etc/ssl/certs/ca-certificates.crt,/usr/lib/sysctl.d/50-raven.conf,/usr/share/rvn/hooks.d/50-snapshot.toml"
 
 # =============================================================================
 # The GUI layer -- scripts/stages/stage-gui.sh
@@ -524,4 +573,197 @@ raven_verify_source() {
     local records="${SYSROOT_DIR}/usr/share/raven/build/sources"
     mkdir -p "${records}"
     printf '%s\t%s\t%s\n' "${name}" "${url}" "${head}" > "${records}/${name}.tsv"
+}
+
+# =============================================================================
+# Versions
+# =============================================================================
+# What a package built from a component should call itself.
+#
+# WHY THIS EXISTS
+#
+# Every first-party manifest under packages/ says `version = "0.1.0"` (or
+# "0.0.1", which is the same statement said quieter). That was harmless while
+# nothing built packages. It stops being harmless the moment `rvn build` runs
+# over these manifests, because that string is the whole of what rvn knows
+# about a package: `crate::version::vercmp` decides every upgrade from it, and
+# two ISOs built a month apart would produce two different `crow` packages
+# both calling themselves 0.1.0-1. rvn would consider the second one already
+# installed and do nothing, which is the worst available outcome -- not an
+# error, just an upgrade that silently never happens.
+#
+# WHY NOT THE MANIFEST PIN
+#
+# The obvious version is the [source] commit in the manifest, and it would be
+# wrong. Manifest pins are OPT-IN (see raven_manifest_pins_enabled above):
+# unless RAVEN_USE_MANIFEST_PINS=1 is set, raven_resolve_ref returns `head`
+# and every component is cloned at its default branch. A version built from
+# the pin would therefore name a commit that, on a default build, was not the
+# one compiled -- a version string that is precisely and confidently false.
+# The revision here comes from the checkout's own HEAD, after the fetch, which
+# is the one thing that is true whichever way the pin policy is set.
+#
+# WHY A DATE AND NOT A COUNT
+#
+# The conventional shape for a package built from a moving branch is
+# `<upstream>+r<n>.g<short>`, where <n> is `git rev-list --count HEAD`. That
+# number is not available here: raven_fetch_repo clones with --depth 1 on
+# every path it has, so the count is 1 in every checkout this build produces.
+# Making it available means unshallowing nine Raven repositories and eighteen
+# GUI ones on every build, which is the whole of what --depth 1 was there to
+# avoid, for a number whose only job is to sort.
+#
+# So <n> is the commit's own committer date instead, as UTC YYYYMMDDHHMMSS.
+# It is already in the shallow clone, it needs no extra fetch, and under
+# rpmvercmp it sorts exactly as the count would: the digits are one numeric
+# segment, compared by value, and it only ever increases along a branch.
+#
+# Committer date rather than author date (%cd, not %ad) because a rebase or a
+# cherry-pick preserves the author date -- two genuinely different commits can
+# carry the same one, and a version must not repeat. The committer date is
+# when this commit entered this history, which is the question being asked.
+#
+# UTC rather than local time because the same commit must produce the same
+# version on a build machine in any timezone.
+#
+# THE SHAPE, AND WHAT EACH PART IS FOR
+#
+#   <upstream>+r<YYYYMMDDHHMMSS>.g<12 hex>[.dirty]
+#
+# The `+` is what makes the result sort above the bare upstream version under
+# rpmvercmp, so a stamped package upgrades an unstamped one rather than the
+# other way round. The `r` part is the ordering and the `g` part is the
+# identity: two commits made in the same second sort arbitrarily against each
+# other, but they are still distinguishable, and the full 40-character id is
+# in the sources record raven_verify_source writes either way. The width is
+# fixed at 12 rather than left to `git --short`, which auto-scales with the
+# size of the repository: a width that grows as a component gains commits
+# would give one commit two different version strings over time.
+#
+# No `-` appears anywhere in it, deliberately: rvn refuses a version
+# containing one, because that character separates version from release.
+
+# The upstream version a component's manifest declares -- the base a build
+# revision is appended to, and the whole version for a component that has no
+# checkout to read.
+#
+# Scoped to the [package] table for the same reason raven_manifest_ref is
+# scoped to [source]: `version` is a plausible key in more than one table, and
+# one picked up from the wrong place would be a silently misnamed package
+# rather than an error.
+#   raven_manifest_version <manifest-path-under-packages>
+raven_manifest_version() {
+    local rel="$1"
+    [[ -n "${rel}" ]] || return 1
+
+    local file="${PROJECT_ROOT:-.}/packages/${rel}/package.toml"
+    [[ -f "${file}" ]] || return 1
+
+    awk '
+        /^[[:space:]]*\[/ { inpackage = ($0 ~ /^[[:space:]]*\[package\]/); next }
+        !inpackage { next }
+        /^[[:space:]]*version[[:space:]]*=/ {
+            if (found) next
+            val = $0; sub(/^[^=]*=[[:space:]]*/, "", val)
+            sub(/[[:space:]]*#.*$/, "", val)
+            gsub(/"/, "", val); gsub(/[[:space:]]/, "", val)
+            if (val == "") next
+            version = val; found = 1
+        }
+        # The answer is printed here and not at the match, because awk runs END
+        # after an `exit` in a rule: printing there and exiting 0 would still
+        # leave this block to overwrite the status with 1.
+        END {
+            if (found) { print version; exit 0 }
+            exit 1
+        }
+    ' "${file}"
+}
+
+# The revision part for a checkout: r<date>.g<short>, with `.dirty` appended
+# when the tree has been edited since that commit.
+#
+# Returns 1 rather than guessing for anything that is not a git checkout, for
+# a git that cannot read it, and for a HEAD whose date or id does not come
+# back in the expected shape. A caller that gets nothing here must not fall
+# back to the bare manifest version: that is the collision this whole section
+# exists to prevent.
+#
+# The `.dirty` suffix matters even though raven_verify_source already refuses
+# a checkout with tracked modifications, because this function is also useful
+# on a tree nobody fetched -- a developer's local clone pointed at by
+# RAVEN_<KEY>_REF workflows, or a component built by hand. A version that
+# names a commit the built tree does not match is the same lie as the pin.
+#   raven_source_revision <checkout>
+raven_source_revision() {
+    local dest="$1" stamp short
+
+    [[ -n "${dest}" && -d "${dest}/.git" ]] || return 1
+    command -v git &>/dev/null || return 1
+
+    # format-local reads the timezone out of the environment, which is why TZ
+    # is set on the command rather than trusted.
+    stamp="$(TZ=UTC git -C "${dest}" show -s \
+        --date=format-local:%Y%m%d%H%M%S --format=%cd HEAD 2>/dev/null)" || return 1
+    short="$(git -C "${dest}" rev-parse --short=12 HEAD 2>/dev/null)" || return 1
+
+    # A malformed piece would produce an archive whose name cannot be parsed
+    # back into a version, so it is an error here instead.
+    [[ "${stamp}" =~ ^[0-9]{14}$ ]] || return 1
+    [[ "${short}" =~ ^[0-9a-f]{7,40}$ ]] || return 1
+
+    if [[ -n "$(git -C "${dest}" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+        printf 'r%s.g%s.dirty\n' "${stamp}" "${short}"
+    else
+        printf 'r%s.g%s\n' "${stamp}" "${short}"
+    fi
+}
+
+# The version a package built from a component should carry: what its manifest
+# calls upstream, plus the revision of the tree that was actually compiled.
+#
+#   raven_component_version <manifest-path-under-packages> [checkout]
+#
+# With a checkout, a revision that cannot be read is a failure -- see
+# raven_source_revision. Without one, the manifest version is the whole
+# answer, which is the right reading for an in-tree component: the seven init
+# binaries, faced, the installer UI and the configs/ shell tools are built
+# from this repository rather than cloned, their manifests say
+# `type = "local"` in [source], and their cadence is the distribution's own
+# RAVEN_VERSION. There is no component commit to name because there is no
+# component repository. This repository is tracked by ivaldi rather than git,
+# so there is no revision to read on this side either; if in-tree packages
+# ever need one, it has to come from ivaldi and RAVEN_VERSION is the honest
+# answer until then.
+raven_component_version() {
+    local manifest="$1" dest="${2:-}" upstream revision
+
+    upstream="$(raven_manifest_version "${manifest}")" || return 1
+
+    [[ -n "${dest}" ]] || { printf '%s\n' "${upstream}"; return 0; }
+
+    revision="$(raven_source_revision "${dest}")" || return 1
+    printf '%s+%s\n' "${upstream}" "${revision}"
+}
+
+# Records the version a component was packaged at, beside the commit record
+# raven_verify_source writes.
+#
+# A separate file rather than a fourth column in sources/<name>.tsv, because
+# that record has readers that count its fields: check-desktop-image.py
+# rejects an image whose provenance record is not exactly three
+# tab-separated fields, and scripts/test-desktop-build.py writes three. A
+# fourth column would turn every build red.
+#   raven_record_version <name> <version>
+raven_record_version() {
+    local name="$1" version="$2"
+    [[ -n "${name}" && -n "${version}" ]] || return 1
+
+    # No sysroot means no image to record into, which is a caller error
+    # rather than something to write to /usr/share on the build host.
+    [[ -n "${SYSROOT_DIR:-}" ]] || return 1
+
+    local records="${SYSROOT_DIR}/usr/share/raven/build/versions"
+    mkdir -p "${records}" || return 1
+    printf '%s\n' "${version}" > "${records}/${name}"
 }

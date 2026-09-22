@@ -1,0 +1,65 @@
+# Keep this machine describing itself as Raven.
+#
+# Raven's identity lives in /etc/os-release, at a path no Arch package claims.
+# /usr/lib/os-release is the path the spec calls canonical, and Arch's
+# `filesystem` package owns it and ships ID=arch in it -- and `filesystem` is a
+# dependency of essentially every Arch package, so the first `rvn install
+# <anything>` overwrites it and anything reading that path directly sees an
+# Arch box. Not shipping the symlink protected /etc; nothing protected
+# /usr/lib. This does, by mirroring /etc back over it, and it writes
+# /etc/raven-release for the same reason in the other direction: /etc/arch-
+# release can only say "is Arch", never "is Raven".
+[package]
+name = "raven-os-release-guard"
+version = "2026.08"
+description = "RavenLinux identity guard - keeps /usr/lib/os-release and /etc/raven-release in step with /etc/os-release"
+license = "MIT"
+homepage = "https://github.com/javanhut/RavenLinux"
+repository = "https://github.com/javanhut/RavenLinux"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "base"]
+arch = "any"
+
+[source]
+type = "local"
+url = "https://github.com/javanhut/RavenLinux.git"
+
+[build]
+system = "none"
+
+[dependencies]
+# Empty, and not for lack of a requirement. The guard rewrites os-release
+# through a temp file so nothing ever sources a truncated one, and mktemp is
+# the one program it runs that is not a shell builtin. mktemp comes from the
+# coreutils implementation the image already carries, which is
+# uutils-coreutils -- and that package declares no `provides = ["coreutils"]`,
+# so writing `runtime = ["coreutils"]` here would make this package
+# uninstallable on the only system it is for. Left empty until that manifest
+# declares what it provides; the requirement is recorded here instead.
+runtime = []
+build = []
+
+[install]
+files = [
+    { src = "configs/raven-os-release-guard", dest = "/usr/bin/raven-os-release-guard", mode = 755 },
+    # The template names /usr/bin/raven-os-release-guard, so it belongs to this
+    # package. stage4's activate_service_templates makes it live once the
+    # program exists.
+    { src = "configs/raven/services/os-release-guard.toml", dest = "/usr/share/raven/services/os-release-guard.toml", mode = 644 },
+]
+
+# No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS
+# /usr/bin: a link at /bin/<name> whose target is /usr/bin/<name> names the
+# same path on both sides, and creating it replaces the real binary with a
+# symlink to itself. Anything installed to /usr/bin is already reachable at
+# /bin/<name> through the merge link -- see scripts/lib/usrmerge.sh.
+#
+# /usr/local/bin is not used either, on purpose: /usr/local belongs to the
+# operator, and stage-gui hands it to wheel group-writable.
+symlinks = []
+
+# /etc/os-release itself is deliberately NOT in this package. It is written by
+# stage2 and it is the source this guard copies from; a package that owned it
+# would be a package that could replace Raven's identity on upgrade, which is
+# the exact failure this program exists to prevent. See the long note in
+# scripts/lib/skeleton.sh, and check-manifests.sh:154, which guards it.

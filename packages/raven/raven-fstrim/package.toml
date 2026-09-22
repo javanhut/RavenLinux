@@ -1,0 +1,54 @@
+# Periodic TRIM for the filesystems on flash storage.
+#
+# An SSD that is never told which blocks are free fills up from its own point
+# of view, and once it has no spare blocks every write becomes a
+# read-modify-write. It happens over months and nothing in a boot log points at
+# it. The root is mounted without `discard` on purpose -- inline discards are
+# latency spikes on the write path -- so the free blocks are reported
+# periodically instead, and with no cron on Raven this is what "weekly" looks
+# like: a daemon asleep nearly all the time.
+[package]
+name = "raven-fstrim"
+version = "2026.08"
+description = "RavenLinux periodic TRIM - reports free blocks to flash storage on a timer with no cron"
+license = "MIT"
+homepage = "https://github.com/javanhut/RavenLinux"
+repository = "https://github.com/javanhut/RavenLinux"
+maintainers = ["RavenLinux Team"]
+categories = ["raven", "storage", "base"]
+arch = "any"
+
+[source]
+type = "local"
+url = "https://github.com/javanhut/RavenLinux.git"
+
+[build]
+system = "none"
+
+[dependencies]
+# fstrim(8), from util-linux, is the program that does the work; this decides
+# when. Without it the daemon runs and finds nothing to run.
+runtime = ["util-linux"]
+build = []
+
+[install]
+files = [
+    { src = "configs/raven-fstrim", dest = "/usr/bin/raven-fstrim", mode = 755 },
+    # The drop-in template, which belongs here rather than with init: it names
+    # /usr/bin/raven-fstrim, so uninstalling this package should take the
+    # service definition with it. stage4's activate_service_templates turns it
+    # into a live drop-in once the binary exists.
+    { src = "configs/raven/services/fstrim.toml", dest = "/usr/share/raven/services/fstrim.toml", mode = 644 },
+]
+
+# No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS
+# /usr/bin: a link at /bin/<name> whose target is /usr/bin/<name> names the
+# same path on both sides, and creating it replaces the real binary with a
+# symlink to itself. Anything installed to /usr/bin is already reachable at
+# /bin/<name> through the merge link -- see scripts/lib/usrmerge.sh.
+symlinks = []
+
+# /etc/raven/fstrim.conf is not here. Every key in it -- INTERVAL_DAYS,
+# ENABLED, BOOT_DELAY_SECS -- has a default in the script, nothing in this
+# repository ships the file, and a package that created it would be writing an
+# administrator's policy file on their behalf.

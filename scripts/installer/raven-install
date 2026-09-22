@@ -11,7 +11,9 @@
 #   1. preflight   -- root, UEFI, required tools, a usable source tree
 #   2. wizard      -- disk, hostname, users, passwords, timezone, locale, swap
 #   3. confirm     -- prints the plan, requires a typed YES
-#   4. partition   -- GPT: ESP + optional swap + root, via sfdisk
+#   4. partition   -- GPT: ESP + optional swap + root, via sfdisk; on btrfs
+#                     the root is then divided into subvolumes (see
+#                     BTRFS_SUBVOLS)
 #   5. copy        -- the squashfs (preferred) or the running root, onto the disk
 #   6. configure   -- fstab, users, hostname, timezone, locale, init handoff
 #   7. bootloader  -- RavenBoot on the ESP, at both \EFI\raven and the fallback
@@ -30,7 +32,14 @@
 # firmware that will not take an NVRAM entry from us -- which is most laptop
 # firmware, ASUS included. --efi-nvram additionally registers a named entry.
 #
-# Secure Boot must be off: RavenBoot is unsigned.
+# Secure Boot is off by default because RavenBoot ships unsigned, and no
+# signature Microsoft has heard of can be put on it. --secure-boot is the way
+# out of that: it signs RavenBoot, the kernel and the fallback loader with a
+# key set belonging to this machine, and -- only when the firmware is in setup
+# mode, and only when asked -- enrols that key set as the machine's own
+# Platform Key. See docs/secure-boot.md, and read it before using it: every
+# step here is reversible, and the ways to make an unbootable machine out of
+# them all involve doing half of one.
 #
 # This is deliberately a shell script rather than a compiled binary. It shells
 # out to sfdisk/mkfs/blkid for everything that matters anyway, and being a
@@ -50,16 +59,106 @@ RAVEN_INSTALL_VERSION="1.0"
 # drive the installer rather than guess.
 RAVEN_INSTALL_PROTOCOL="1"
 
+# Where the firmware's variables are. A constant rather than a literal for the
+# same reason every other path here is one: the Secure Boot state read from it
+# decides whether this installer offers to write a Platform Key, and a check
+# that can only be exercised on the machine it is running on is a check nobody
+# exercises. The tests point it at a directory of fixtures.
+EFIVARS_DIR="/sys/firmware/efi/efivars"
+
 ESP_SIZE_DEFAULT="512M"
 ESP_LABEL="RAVEN_ESP"      # FAT labels are capped at 11 characters
 ROOT_LABEL="RAVEN_ROOT"
 SWAP_LABEL="RAVEN_SWAP"
 HOME_LABEL="RAVEN_HOME"
 
+# The device-mapper names the LUKS containers are opened under, here and in the
+# initramfs. They are a hard-coded pair rather than anything derived, because
+# they have to be agreed on by two programs that never meet: this installer
+# writes them into the kernel command line as `cryptdevice=UUID=...:ravenroot`,
+# and the initramfs opens the container under exactly that name and then mounts
+# /dev/mapper/ravenroot. Deriving them from the hostname or the disk would put
+# a second thing in the boot path that can disagree with itself, and the
+# failure is an unbootable machine with a correct-looking boot.cfg.
+CRYPT_ROOT_NAME="ravenroot"
+CRYPT_SWAP_NAME="ravenswap"
+
+# The btrfs subvolume layout, used when --fs btrfs is chosen. Each entry is
+# <subvolume>:<mountpoint>; @ is the root and the rest are mounted inside it.
+#
+# WHAT THIS LIST IS ACTUALLY DECIDING, because it is the part everybody gets
+# wrong: a btrfs snapshot stops at a subvolume boundary. Snapshotting @ copies
+# every file that lives in @ and does not descend into a subvolume mounted
+# inside it. So the question "which directories are subvolumes" is the same
+# question as "what does a rollback rewind", and it is answered here, once, at
+# install time -- not later by whichever snapshot tool someone installs, which
+# by then can only work with the layout it finds.
+#
+# @ and @home need no argument. The other three are the ones that do:
+#
+#   @log (/var/log) -- a rollback happens because something went wrong, and
+#     the log of what went wrong is the first thing anybody wants afterwards.
+#     If /var/log were inside @, rolling back would restore the log to how it
+#     looked before the problem, which destroys the evidence at precisely the
+#     moment it is needed. It also stops every snapshot pinning a copy of the
+#     logs that were current when it was taken -- on a machine keeping a week
+#     of them, that is the largest single thing in the pool and it is a week
+#     of duplicated text.
+#
+#   @cache (/var/cache) -- rvn's download directory, and reconstructible by
+#     definition: every file in it came off a mirror and can come off it
+#     again. A rollback that rewound it would throw away downloads that are
+#     still perfectly good, and a snapshot that included it would store a
+#     second copy of packages that are already installed. Neither costs
+#     correctness; both cost gigabytes.
+#
+#   @snapshots (/.snapshots) -- where the snapshots themselves live, and this
+#     one is a requirement rather than an economy. A snapshot directory inside
+#     @ would mean every snapshot contained all the earlier ones, growing
+#     quadratically, and the first rollback would restore a @ whose
+#     /.snapshots is a stale copy of the snapshot index -- so the tool that
+#     took the snapshots would come back to a view of its own storage that
+#     disagrees with what is on the disk.
+#
+# /var/tmp is deliberately NOT a subvolume here. It is on the root filesystem
+# on purpose (see the /tmp note in write_fstab for why), it is small, and a
+# rollback rewinding it is harmless -- nothing is supposed to survive in it
+# across the reboot a rollback implies anyway.
+BTRFS_SUBVOLS=(
+    "@:/"
+    "@home:/home"
+    "@snapshots:/.snapshots"
+    "@log:/var/log"
+    "@cache:/var/cache"
+)
+
+# What each of those is for, in one clause, for the plan confirm() prints
+# before anybody types YES.
+#
+# Kept as a second array rather than a third colon-separated field in the one
+# above, because that table is parsed by two functions and this is read only
+# by a person -- and because the reason a directory is a subvolume is exactly
+# the thing that gets lost when it becomes a flag in a data structure. If a
+# subvolume is added above and not described here the plan simply prints its
+# name, which is the failure that does the least harm.
+declare -A BTRFS_SUBVOL_NOTES=(
+    ["@"]="the system; this is what a rollback replaces"
+    ["@home"]="your files; snapshotted on their own, not with the system"
+    ["@snapshots"]="where the snapshots themselves are kept"
+    ["@log"]="NOT rolled back, so the logs that say why survive it"
+    ["@cache"]="NOT rolled back, so the package cache survives it"
+)
+
 # Where we do our work. Under /run so it is a tmpfs and never lands on disk.
 WORK="/run/raven-install"
 TARGET="${WORK}/target"
 SRCMNT="${WORK}/source"
+# The top-level subvolume of a new btrfs root, mounted just long enough to
+# create the subvolumes above on it. It is named here rather than inside
+# create_btrfs_layout() because cleanup() has to be able to unmount it after a
+# failure: a btrfs filesystem still mounted here keeps its LUKS container busy,
+# and close_crypt_devices() cannot close a busy container.
+BTRFS_TOP="${WORK}/btrfs-top"
 
 # =============================================================================
 # Output
@@ -89,6 +188,20 @@ fi
 #   pct   <id> <0-100>  progress *within* phase <id>
 #   dirty <0|1>         whether the target disk has been written to yet
 #   done  <exit-code>   the last record, always written, exactly once
+#
+# One `info` record is a fixed string rather than prose, and is the only one:
+#
+#   info  secure-boot: <none|skipped|signed|enrolled|failed>
+#
+# written once by setup_secure_boot(), at the end of that phase. It is here
+# because a front-end's closing page has to choose between telling somebody to
+# turn Secure Boot ON and telling them to leave it off, and that choice has to
+# come from what happened rather than from what was asked for: getting it from
+# the answer means a machine whose enrolment failed is told to switch on a
+# check it cannot pass, and the place that fails has no error message. It rides
+# on `info` rather than on a verb of its own so that a front-end written
+# against protocol 1 keeps working -- an unknown verb is a record dropped, an
+# unrecognised info line is a line shown.
 #
 # The verbs are a summary, deliberately. The full human log still goes to
 # stdout, escapes stripped when stdout is not a terminal, and a front-end is
@@ -185,6 +298,7 @@ OPT_MANUAL_USE=""
 OPT_SHRINK_PART=""     # which partition alongside mode takes space from
 OPT_ALONGSIDE_SIZE=""  # how much to take, or empty for "about half of what is free"
 OPT_FS="ext4"
+OPT_ENCRYPT=0        # --encrypt; the answers file's `encrypt` key feeds the same variable
 OPT_SWAP=""          # "", "none", or a size like 8G
 OPT_ESP_SIZE="${ESP_SIZE_DEFAULT}"
 OPT_NVRAM=0
@@ -202,6 +316,13 @@ OPT_POSTINSTALL=""   # now | later | auto; empty until the answers file or the d
 OPT_ANSWERS=""
 OPT_NONINTERACTIVE=0
 OPT_PROBE=0
+# skip | sign | enroll. See setup_secure_boot() for what each one does and for
+# the argument that they are three choices rather than a switch: "sign" is
+# entirely reversible and changes nothing about how the machine boots today,
+# "enroll" is the step that hands the firmware a new Platform Key, and keeping
+# them apart is what lets somebody sign now, confirm the machine still boots,
+# and enrol afterwards from the installed system with one command.
+OPT_SECUREBOOT="skip"
 
 usage() {
     cat <<USAGE
@@ -239,14 +360,47 @@ Options:
   --wipe             Erase the disk. The default, so this is only worth typing
                      to say so out loud in a script.
   --fs TYPE          Root filesystem: ext4 (default) or xfs or btrfs, if the
-                     matching mkfs is present.
+                     matching mkfs is present. btrfs additionally lays out
+                     subvolumes -- @ as the root, @home, @snapshots, and
+                     @log and @cache kept outside the snapshots so a
+                     rollback does not rewind /var/log or the package
+                     cache -- and needs the btrfs binary as well as
+                     mkfs.btrfs. ext4 stays the default: it has no
+                     snapshots, and it also has no copy-on-write
+                     fragmentation, no balance to think about and thirty
+                     years of recovery tools.
   --swap SIZE        Swap partition size (e.g. 8G), or "none" for no swap.
+  --encrypt          Encrypt the disk: LUKS2 with argon2id over the root
+                     partition, and over the swap partition as well, both
+                     opened by one passphrase typed at every boot. Off by
+                     default. The passphrase is asked for by the wizard or
+                     given as the answers file's encrypt_password; there is
+                     deliberately no option to pass it on the command line,
+                     where it would be visible in ps(1) to everyone on the
+                     machine. Nothing recovers a forgotten passphrase.
   --esp-size SIZE    EFI System Partition size. Default ${ESP_SIZE_DEFAULT}.
   --efi-nvram        Also register a "RavenLinux" UEFI NVRAM boot entry with
                      efibootmgr. Off by default when the disk is erased (the
                      fallback path boots without it); on by default next to
                      another OS -- on the same disk or another one -- whose own
                      entry would otherwise keep booting first.
+  --secure-boot MODE What to do about Secure Boot. "skip" (the default) leaves
+                     the firmware exactly as it is; the machine boots with
+                     Secure Boot off, which is what RavenBoot needs today.
+                     "sign" creates a key set for this machine with sbctl and
+                     signs RavenBoot, the fallback loader and the kernel with
+                     it -- a signature an EFI binary carries is ignored by
+                     firmware that is not checking, so this changes nothing
+                     about the next boot and can be undone by deleting the
+                     keys. "enroll" does all of that and then, ONLY if the
+                     firmware is in setup mode, enrols the key set as the
+                     Platform Key alongside Microsoft's certificates, so that
+                     Secure Boot can be switched on in the firmware afterwards
+                     and this machine still boots -- and so does Windows, and
+                     so do the option ROMs on the cards in it. Enrolment is
+                     refused outright unless the firmware is in setup mode,
+                     because that is the only state in which it does not need
+                     the firmware's permission. See docs/secure-boot.md.
   --profile NAME     Post-install package template: minimal (default), desktop,
                      or developer.
   --optional LIST    Optional applications to install, comma-separated (e.g.
@@ -314,8 +468,10 @@ while [[ $# -gt 0 ]]; do
         --size)      OPT_ALONGSIDE_SIZE="${2:-}"; shift 2 ;;
         --fs)        OPT_FS="${2:-}"; shift 2 ;;
         --swap)      OPT_SWAP="${2:-}"; shift 2 ;;
+        --encrypt)   OPT_ENCRYPT=1; shift ;;
         --esp-size)  OPT_ESP_SIZE="${2:-}"; shift 2 ;;
         --efi-nvram) OPT_NVRAM=1; shift ;;
+        --secure-boot) OPT_SECUREBOOT="${2:-}"; shift 2 ;;
         --profile)   OPT_PROFILE="${2:-}"; shift 2 ;;
         --postinstall) OPT_POSTINSTALL="${2:-}"; shift 2 ;;
         --optional)  OPT_OPTIONAL="${2:-}"; OPT_OPTIONAL_SET=1; shift 2 ;;
@@ -349,6 +505,16 @@ if (( OPT_NONINTERACTIVE )) && [[ -z "$OPT_ANSWERS" ]]; then
     exit 2
 fi
 
+# Checked here rather than at the point of use, because the point of use is
+# after the disk has been erased. A misspelt mode is a typo in a script, and
+# the two ways of getting it wrong that matter are "enrol" for "enroll" and
+# "none" for "skip" -- both of which would otherwise fall through to whatever
+# the case statement's default happened to be.
+case "$OPT_SECUREBOOT" in
+    skip|sign|enroll) ;;
+    *) echo "--secure-boot takes skip, sign or enroll, not '${OPT_SECUREBOOT}'" >&2; exit 2 ;;
+esac
+
 # =============================================================================
 # Cleanup
 # =============================================================================
@@ -359,13 +525,30 @@ DISK_DIRTY=0
 
 # "1" when the firmware reports Secure Boot on, "" when off or unreadable.
 SECUREBOOT_STATE=""
+# "1" when the firmware reports itself in setup mode -- no Platform Key is
+# enrolled, so anything may write one without the firmware's permission. This
+# is the only state in which raven-install will enrol keys, and it is a
+# separate fact from SECUREBOOT_STATE: a machine can be out of setup mode with
+# Secure Boot switched off (keys enrolled, enforcement disabled), which looks
+# identical from Linux until you try to write PK and the firmware refuses.
+SECUREBOOT_SETUP=""
+# Set by setup_secure_boot() so finish() can say what actually happened rather
+# than what was asked for: "" nothing was attempted, "signed", "enrolled", or
+# "failed".
+SECUREBOOT_RESULT=""
 
 cleanup() {
     # Unmount in reverse depth order so nested mounts come off first.
     for m in "${TARGET}/boot/efi" "${TARGET}/dev" "${TARGET}/proc" "${TARGET}/sys" \
-             "${TARGET}" "${SRCMNT}"; do
+             "${TARGET}" "${BTRFS_TOP}" "${SRCMNT}"; do
         mountpoint -q "$m" 2>/dev/null && umount -R "$m" 2>/dev/null
     done
+    # After the unmounts, because a container with a mounted filesystem on it
+    # will not close. An install that failed part way through leaves the
+    # target's LUKS containers open otherwise, and the next run's luksFormat
+    # then fails on a busy device -- having already written a new header over
+    # the old one.
+    close_crypt_devices
     return 0
 }
 
@@ -402,17 +585,119 @@ trap 'die "Interrupted."' INT TERM
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Where the compressed archive inside an initramfs image actually starts.
+#
+# It is not always byte zero, and assuming it was is what made every install
+# warn that a perfectly good image could not boot from a disk. build-initramfs.sh's
+# prepend_microcode() concatenates an *uncompressed* newc cpio carrying the CPU
+# microcode in front of the compressed image, because that is the only way the
+# kernel's early microcode loader can be fed: it reads the head of the initrd
+# before anything is decompressed. So an image built since that change begins
+# with the cpio magic 070701 and the zstd frame begins some tens of kilobytes
+# in, and anything that dispatches on the first four bytes sees a cpio, falls
+# through to plain cat, and never looks inside the compressed part at all.
+#
+# This walks the leading archive member by member -- newc's header is 110 ASCII
+# characters, of which the two that matter here are the file size at offset 54
+# and the name size at offset 94, both eight hex digits -- and returns the
+# offset of whatever follows it. Every field is validated because this parses a
+# file the installer was handed rather than one it wrote, and every way of
+# failing prints 0, which puts the caller back on exactly the behaviour it had
+# before this function existed: read the file whole and let the magic decide.
+#
+# 0 is also the right answer, and the fast one, for the two images that have no
+# leading cpio at all -- one built before the microcode change, and one from
+# another distribution -- because the very first header read does not match and
+# the walk stops there.
+initrd_payload_offset() {
+    local img="$1"
+    local size off=0 hdr name namesize filesize chunk zeros member=0
+
+    size="$(stat -c%s "$img" 2>/dev/null)"
+    [[ "$size" =~ ^[0-9]+$ ]] || { printf '0\n'; return 0; }
+
+    # A microcode archive has six members (three directories, two blobs and the
+    # trailer), so a bound of 64 is generous for the thing this is here to skip
+    # and still refuses to walk a whole uncompressed initramfs one head(1) at a
+    # time. Hitting the bound is not an error, it just means "not a short
+    # prefix", which is answered with 0 like every other unexpected shape.
+    while (( member < 64 )); do
+        member=$(( member + 1 ))
+        hdr="$(head -c $(( off + 110 )) "$img" 2>/dev/null | tail -c 110 | tr -d '\0')"
+        # The magic is checked before the length because at the end of the walk
+        # this read lands on the compressed payload, whose bytes are binary: the
+        # tr and the command substitution together eat NULs and trailing
+        # newlines out of it, so its length means nothing there and only the
+        # magic can be trusted. (The tr is also what keeps bash from printing
+        # "ignored null byte in input" to the installer's stderr on that last
+        # read; a real 110-byte newc header is ASCII and passes through it
+        # unchanged.)
+        [[ "${hdr:0:6}" == "070701" ]] || { printf '%s\n' "$off"; return 0; }
+        [[ ${#hdr} -eq 110 ]] || break
+        [[ "${hdr:54:8}" =~ ^[0-9a-fA-F]{8}$ ]] || break
+        [[ "${hdr:94:8}" =~ ^[0-9a-fA-F]{8}$ ]] || break
+        filesize=$(( 16#${hdr:54:8} ))
+        namesize=$(( 16#${hdr:94:8} ))
+        (( namesize > 1 && namesize <= 4096 )) || break
+        # namesize counts the name's terminating NUL, and the read stops one
+        # byte short of it so that no NUL ever reaches the command substitution.
+        name="$(head -c $(( off + 109 + namesize )) "$img" 2>/dev/null | tail -c $(( namesize - 1 )) | tr -d '\0')"
+        # Name and data each start on a four-byte boundary; the kernel's
+        # unpacker requires the same of the next archive, which is why the
+        # builder checks the microcode archive's size is a multiple of four.
+        off=$(( ( off + 110 + namesize + 3 ) / 4 * 4 ))
+        off=$(( ( off + filesize + 3 ) / 4 * 4 ))
+        (( off > 0 && off < size )) || break
+        [[ "$name" == "TRAILER!!!" ]] || continue
+
+        # cpio pads its output to a 512-byte block, so the trailer is followed
+        # by NULs that are part of no archive. Read the next block as hex and
+        # count the leading zero characters: two per padding byte, and an odd
+        # count when the first real byte is itself below 0x10 (0x07, as it
+        # happens, when a second cpio archive follows), hence the truncating
+        # divide.
+        chunk="$(od -An -j "$off" -N512 -tx1 -v "$img" 2>/dev/null | tr -d ' \n')"
+        [[ -n "$chunk" ]] || break
+        zeros="${chunk%%[!0]*}"
+        off=$(( off + ${#zeros} / 2 ))
+        (( off < size )) || break
+    done
+
+    printf '0\n'
+    return 0
+}
+
+# The four magic bytes at $2 (default 0) of $1, as lower-case hex.
+initrd_payload_magic() {
+    local img="$1" off="${2:-0}"
+    od -An -j "$off" -N4 -tx1 -v "$img" 2>/dev/null | tr -d ' \n'
+}
+
+# The image from its payload offset onwards, for feeding to a decompressor.
+initrd_payload_bytes() {
+    local img="$1" off="${2:-0}"
+    if (( off > 0 )); then
+        tail -c "+$(( off + 1 ))" "$img" 2>/dev/null
+    else
+        cat "$img" 2>/dev/null
+    fi
+}
+
 # Stream an initramfs decompressed, whichever way it was packed. The image is
 # zstd since the build switched from gzip -9; older images are gzip, and xz
 # is the other format the kernel is built to read. Decided by the magic
-# bytes, not the file name, because the name is initramfs.img either way.
+# bytes, not the file name, because the name is initramfs.img either way --
+# and by the magic bytes at the payload offset, not at byte zero, because of
+# the microcode archive described above. $2 is that offset when the caller has
+# already worked it out; otherwise it is worked out here.
 initrd_cat() {
-    local img="$1" magic
-    magic="$(od -An -N4 -tx1 "$img" 2>/dev/null | tr -d ' \n')"
+    local img="$1" off="${2:-}" magic
+    [[ -n "$off" ]] || off="$(initrd_payload_offset "$img")"
+    magic="$(initrd_payload_magic "$img" "$off")"
     case "$magic" in
-        28b52ffd) have zstd && zstd -dc "$img" 2>/dev/null ;;
-        1f8b*)    have zcat && zcat -f "$img" 2>/dev/null ;;
-        fd377a58) have xz && xz -dc "$img" 2>/dev/null ;;
+        28b52ffd) have zstd && initrd_payload_bytes "$img" "$off" | zstd -dc 2>/dev/null ;;
+        1f8b*)    have zcat && initrd_payload_bytes "$img" "$off" | zcat -f 2>/dev/null ;;
+        fd377a58) have xz && initrd_payload_bytes "$img" "$off" | xz -dc 2>/dev/null ;;
         *)        cat "$img" 2>/dev/null ;;
     esac
 }
@@ -421,18 +706,328 @@ initrd_cat() {
 # command line. "unknown" when the format cannot be read here, so a missing
 # tool never turns into a false warning about the image.
 initrd_root_support() {
-    local img="$1" magic
-    magic="$(od -An -N4 -tx1 "$img" 2>/dev/null | tr -d ' \n')"
+    local img="$1" off magic
+    off="$(initrd_payload_offset "$img")"
+    magic="$(initrd_payload_magic "$img" "$off")"
     case "$magic" in
         28b52ffd) have zstd || { echo unknown; return; } ;;
         1f8b*)    have zcat || { echo unknown; return; } ;;
         fd377a58) have xz || { echo unknown; return; } ;;
     esac
-    if initrd_cat "$img" | grep -aq 'raven_root_from_cmdline'; then
+    # The subshell exists to turn pipefail off for this one pipeline, and it is
+    # not cosmetic: grep -q stops at the first match and closes the pipe, the
+    # decompressor upstream dies of SIGPIPE, and under the `set -o pipefail` at
+    # the top of this file the pipeline then reports 141 -- a failure -- for an
+    # image in which grep found exactly what it was looking for. That is a
+    # second, independent way this function said "no" about a good image.
+    if ( set +o pipefail; initrd_cat "$img" "$off" | grep -aq 'raven_root_from_cmdline' ); then
         echo yes
     else
         echo no
     fi
+}
+
+# Can this image encrypt a disk, and what will it cost?
+#
+# Called from two places for one reason: --encrypt and the answers file are
+# known at preflight, but the wizard's own question is asked much later, and
+# the answer "cryptsetup is not here" must land before confirm() rather than
+# in the middle of format_partitions -- which runs after the disk has been
+# repartitioned, where the same discovery is a machine with its old system
+# erased and no new one able to start.
+# Read one EFI global variable's first data byte, as a decimal number.
+#
+# An efivarfs file is a 4-byte attribute word followed by the variable's data,
+# so the byte that matters is at offset 4. The name is globbed rather than
+# spelled out with its GUID because every variable here is an EFI global
+# (8be4df61-93ca-11d2-aa0d-00e098032b8c) and a firmware that spells that GUID
+# differently in its file names is a firmware whose Secure Boot state we are
+# better off reporting as unknown than guessing at.
+#
+# Prints nothing and returns 1 when the variable does not exist, which is the
+# ordinary case on a BIOS machine and on plenty of UEFI firmware that simply
+# does not implement Secure Boot. "Unknown" and "off" are told apart because
+# only one of them is a machine that could be asked to enrol keys.
+efi_global_var_byte() {
+    local name="$1" f
+    [[ -d "$EFIVARS_DIR" ]] || return 1
+    have od || return 1
+    # A glob rather than ls|head: ls of a missing pattern prints an error the
+    # caller's redirection has to swallow, and the loop below reads the first
+    # match and stops without a subshell.
+    local byte
+    for f in "${EFIVARS_DIR}/${name}"-*; do
+        [[ -r "$f" ]] || continue
+        byte="$(od -An -tu1 -j4 -N1 "$f" 2>/dev/null | tr -d ' \n')"
+        # A file that exists but reads empty -- a firmware bug, or a variable
+        # with no data -- is "unknown", not "0". The difference decides whether
+        # this installer would offer to write a Platform Key.
+        [[ "$byte" =~ ^[0-9]+$ ]] || return 1
+        printf '%s\n' "$byte"
+        return 0
+    done
+    return 1
+}
+
+# Fill SECUREBOOT_STATE and SECUREBOOT_SETUP from the firmware.
+#
+# Both are read, and read separately, because the three states they describe
+# want three different things said to the person installing:
+#
+#   SecureBoot=1                 enforcing. RavenBoot will not load. The fix is
+#                                in the firmware and nowhere else.
+#   SecureBoot=0, SetupMode=1    no Platform Key. Keys can be enrolled from
+#                                here, without a firmware password, without a
+#                                reboot, and without asking anything's
+#                                permission. This is the window --secure-boot
+#                                enroll exists for and it is not the default
+#                                state of a machine: somebody has cleared the
+#                                keys.
+#   SecureBoot=0, SetupMode=0    disabled but still owned by its vendor keys.
+#                                Signing is possible; enrolling is not, until
+#                                the keys are cleared in the firmware.
+read_secureboot_state() {
+    SECUREBOOT_STATE="$(efi_global_var_byte SecureBoot || true)"
+    SECUREBOOT_SETUP="$(efi_global_var_byte SetupMode || true)"
+    # A firmware that reports Secure Boot on and setup mode on at the same time
+    # is reporting something that cannot be true -- setup mode means no PK, and
+    # enforcement without a PK is not a state the specification has. Believe
+    # the enforcement bit, because that is the one that decides whether the
+    # next boot works, and drop the claim that keys can be written.
+    if [[ "$SECUREBOOT_STATE" == "1" && "$SECUREBOOT_SETUP" == "1" ]]; then
+        SECUREBOOT_SETUP="0"
+    fi
+    return 0
+}
+
+# Does the INSTALLED system have sbctl? Not the live one -- see
+# setup_secure_boot() for why the live image's copy would be the wrong tool
+# even when it is present.
+secureboot_tool() {
+    [[ -n "${TARGET:-}" && -x "${TARGET}/usr/bin/sbctl" ]]
+}
+
+# Is it going to? Asked by the wizard, which runs long before the target
+# exists, so this is a prediction and it is made from the two things that can
+# put sbctl on the new disk: the tree being copied already has it, or the
+# package profile names it and the packages are going in during this install
+# rather than at first boot.
+#
+# Prints a word saying which, so the caller can say something true rather than
+# "maybe": "image", "profile", or nothing at all.
+secureboot_tool_expected() {
+    if [[ -n "${SRC_ROOT:-}" && -x "${SRC_ROOT%/}/usr/bin/sbctl" ]]; then
+        echo image
+        return 0
+    fi
+    if (( ${POSTINSTALL_NOW:-0} )) && [[ -n "${INSTALL_PROFILE:-}" ]] \
+       && profile_names_sbctl "${INSTALL_PROFILE}"; then
+        echo profile
+        return 0
+    fi
+    return 1
+}
+
+# Does this package profile's list name sbctl? Read from the list rather than
+# hardcoded here, so adding sbctl to a profile is one edit in one file.
+profile_names_sbctl() {
+    local profile="$1" list
+    for list in "${SRC_ROOT:+${SRC_ROOT%/}}/etc/raven/install-profiles/${profile}.packages" \
+                "/etc/raven/install-profiles/${profile}.packages"; do
+        [[ -r "$list" ]] || continue
+        # A whole line, so a longer name that merely contains it (sbctl-git)
+        # and the comment block above the entry are both not matches.
+        grep -qxE '[[:space:]]*sbctl[[:space:]]*' "$list" && return 0
+        return 1
+    done
+    return 1
+}
+
+# The preflight report. Split from the reading above so --probe can have the
+# facts without the prose, and so the prose is in one place rather than
+# repeated in three.
+report_secureboot_state() {
+    if [[ "$SECUREBOOT_STATE" == "1" ]]; then
+        warn "Secure Boot is ENABLED"
+        echo "        RavenBoot is unsigned, so the installed system will not boot"
+        echo "        until either you disable Secure Boot in the firmware setup, or"
+        echo "        you enrol this machine's own keys and sign RavenBoot with them."
+        echo
+        echo "        To disable it -- the short way, and what everything here assumes:"
+        echo "          On ASUS ROG: F2 at power-on, Advanced Mode (F7),"
+        echo "          Security > Secure Boot > Secure Boot Control > Disabled."
+        echo
+        echo "        To keep it on with your own keys -- the long way, and it cannot"
+        echo "        be started from Linux because the firmware will not let anything"
+        echo "        write a Platform Key while one is already enrolled:"
+        echo "          1. In the same Secure Boot menu, find Key Management and"
+        echo "             choose 'Clear Secure Boot Keys' (it is sometimes called"
+        echo "             'Delete all Secure Boot variables', or 'Erase all secure"
+        echo "             boot settings'). That puts the firmware in SETUP MODE."
+        echo "          2. Leave Secure Boot itself OFF for now, save and exit."
+        echo "          3. Boot this installer again. It will see setup mode and"
+        echo "             offer to enrol keys and sign the bootloader."
+        echo "          4. Only once the installed system boots, go back in and turn"
+        echo "             Secure Boot on."
+        echo "        docs/secure-boot.md has the whole of this, including how to put"
+        echo "        the vendor's keys back if you change your mind."
+    elif [[ "$SECUREBOOT_SETUP" == "1" ]]; then
+        ok "Secure Boot is off, and the firmware is in SETUP MODE"
+        echo "        No Platform Key is enrolled, so this installer can enrol one"
+        echo "        and sign RavenBoot and the kernel with it -- which is what"
+        echo "        --secure-boot enroll does. Nothing happens unless you ask."
+    elif [[ "$SECUREBOOT_SETUP" == "0" ]]; then
+        ok "Secure Boot is off (the firmware still holds its vendor keys)"
+    else
+        ok "Secure Boot is not reported by this firmware"
+    fi
+    return 0
+}
+
+# One line for the plan confirm() prints. Says what will be done AND what the
+# firmware currently is, because those are two different facts and the pairing
+# is the whole story: "sign" on a machine whose firmware is enforcing is a
+# machine that still will not boot, and somebody reading the plan should be
+# able to see that without knowing the rules.
+secure_boot_plan_line() {
+    local state="off"
+    [[ "$SECUREBOOT_STATE" == "1" ]] && state="ON in firmware"
+    [[ "$SECUREBOOT_SETUP" == "1" ]] && state="off, firmware in setup mode"
+    [[ -z "$SECUREBOOT_STATE" && -z "$SECUREBOOT_SETUP" ]] && state="not reported by this firmware"
+
+    case "$OPT_SECUREBOOT" in
+        sign)
+            printf 'sign RavenBoot, the fallback loader and the kernel (%s)\n' "$state"
+            printf '                   No key is enrolled and nothing about the next boot changes.'
+            ;;
+        enroll)
+            printf 'enrol this machine'"'"'s own keys, and sign with them (%s)\n' "$state"
+            printf '                   Microsoft'"'"'s certificates are enrolled too, so Windows and\n'
+            printf '                   option ROMs keep working. Undo: sbctl reset, or the\n'
+            printf '                   firmware'"'"'s "restore factory keys". Modules are not signed.'
+            ;;
+        *)
+            printf 'not touched (%s)' "$state"
+            ;;
+    esac
+}
+
+check_encryption_support() {
+    have cryptsetup || soft_die "cryptsetup is not on this image; the disk cannot be encrypted.
+       It comes from the cryptsetup package and would be copied into the
+       sysroot by stage2. Rebuild the image, or install without encryption." || return 1
+    ok "cryptsetup present ($(cryptsetup --version 2>/dev/null | head -1))"
+
+    # The kernel this image installs is the kernel it is running, so
+    # /proc/crypto answers for the installed machine too. AES-NI is a separate
+    # Kconfig from the AES the kernel always has, and without it every block
+    # read and written on an encrypted root goes through the generic C
+    # implementation -- hundreds of MB/s where the accelerated one does
+    # several GB/s, which on an NVMe laptop is the difference between
+    # encryption being free and being the slowest part of the machine.
+    #
+    # A warning and not a refusal: the disk is encrypted and correct either
+    # way, and someone who wants their laptop encrypted today should not be
+    # made to rebuild a kernel first. But it should be said out loud, because
+    # the symptom on its own -- "the disk got slow after I reinstalled" --
+    # points nowhere near a kernel config option.
+    if [[ -r /proc/crypto ]] && ! grep -q 'aesni' /proc/crypto 2>/dev/null; then
+        warn "This kernel has no AES-NI driver; encryption will use generic AES."
+        echo "        The install is correct either way, but disk throughput on the"
+        echo "        encrypted root will be a fraction of this machine's native speed."
+        echo "        Fix: CONFIG_CRYPTO_AES_NI_INTEL=y in configs/kernel/config-6.17-raven."
+    fi
+    return 0
+}
+
+# Is the disk being installed to flash?
+#
+# Read from $DISK -- the whole disk -- rather than from ROOT_DEV, and that
+# distinction is the entire reason this is a function instead of a `cat`. On
+# an encrypted install ROOT_DEV is /dev/mapper/ravenroot by the time anything
+# here runs, and a device-mapper node's queue/rotational is not the underlying
+# disk's: dm reports 1 unless every underlying device said 0 and dm was asked
+# to work it out, so btrfs's own autodetection can conclude "spinning rust"
+# about an NVMe drive behind LUKS. That is exactly the machine the option was
+# chosen for, so the answer is taken from the disk the installer was pointed
+# at, which cannot lie about what it is.
+#
+# Unreadable is answered "no", which drops the option and leaves btrfs to
+# autodetect -- the behaviour there has always been.
+btrfs_target_is_ssd() {
+    # DISK is set by choose_disk, which runs before anything that reaches
+    # here, but this is under `set -u` and the cost of being wrong about that
+    # is the install aborting on a bare-variable expansion in the middle of
+    # laying out a filesystem. Unset is answered the same way unreadable is.
+    local disk="${DISK:-}"
+    [[ -n "$disk" ]] || return 1
+    local rot="/sys/block/${disk##*/}/queue/rotational"
+    [[ -r "$rot" ]] || return 1
+    [[ "$(cat "$rot" 2>/dev/null)" == "0" ]]
+}
+
+# The mount options every btrfs subvolume in BTRFS_SUBVOLS gets -- and, at the
+# bottom, the obvious fourth one that is deliberately not here.
+#
+#   noatime         the same decision write_fstab already made for ext4, for
+#                   the same reasons; the long note is there. It matters more
+#                   on btrfs, not less. An atime update is a metadata write,
+#                   and on a copy-on-write filesystem a metadata write
+#                   allocates new blocks instead of overwriting old ones -- so
+#                   the writes that buy nothing also fragment the tree and pin
+#                   blocks that snapshots would otherwise have let go.
+#
+#   compress=zstd:1 level 1, not btrfs's own default of 3. The trade is ratio
+#                   against CPU on the write path, and on NVMe the disk is not
+#                   the bottleneck, the compressor is: at level 3 the
+#                   compression can take longer than writing the uncompressed
+#                   bytes would have. Level 1 still roughly halves a root
+#                   filesystem of ELF binaries, text configuration and manual
+#                   pages, and is cheap enough not to show up on the write
+#                   path. Already-compressed data -- a .zst package, a JPEG --
+#                   btrfs detects and stores as-is, so nothing is paid twice.
+#
+#   ssd             a hint to the allocator to stop trying to keep writes
+#                   physically contiguous, which is work that buys nothing on
+#                   flash. btrfs sets this itself from queue/rotational, so on
+#                   a plain install it only makes the implicit explicit -- see
+#                   btrfs_target_is_ssd() for the encrypted case, where the
+#                   device btrfs looks at is a mapper node and can get it
+#                   wrong.
+#
+# AND THE ONE THAT IS NOT HERE: discard=async. It is the usual fourth item on
+# a list like this, and on RavenLinux it would be duplicated work rather than
+# an improvement, because this system already trims on a schedule.
+# configs/raven/services/fstrim.toml starts raven-fstrim, which sleeps nearly
+# all the time and runs `fstrim -av` at low priority once the stamp file is a
+# week old, and its header says in as many words that the root is mounted
+# without `discard` on purpose -- inline discards are latency on the write
+# path, which is the cost this whole option list is trying to avoid. Adding
+# discard=async would report the same freed blocks twice, once by the
+# filesystem as they are freed and once a week by the service. One of the two
+# has to go, and the service is the one that can be measured, configured from
+# /etc/raven/fstrim.conf and switched off; a mount option baked into the fstab
+# and the kernel command line of an installed machine is not. So the mount
+# option is the one that is not written.
+btrfs_common_opts() {
+    local opts="noatime,compress=zstd:1"
+    btrfs_target_is_ssd && opts="${opts},ssd"
+    printf '%s' "$opts"
+}
+
+# What rootflags= carries on a btrfs install.
+#
+# The root's mount options cannot come from /etc/fstab -- raven-init's
+# mount_fstab skips the root outright, because the initramfs mounted it
+# already -- so the kernel command line is the only channel that can name the
+# root's subvolume, and this is that name. Getting it wrong is not subtle: a
+# btrfs filesystem mounted with no subvol= gives you the top-level subvolume,
+# which is the directory that *contains* @, @home and the rest and has no
+# /sbin/init anywhere in it. The initramfs then stops at its "this does not
+# look like a RavenLinux root" check and drops to a rescue shell, having
+# mounted a perfectly healthy filesystem.
+btrfs_root_flags() {
+    printf 'subvol=@,%s' "$(btrfs_common_opts)"
 }
 
 preflight() {
@@ -460,24 +1055,8 @@ preflight() {
 
     # Secure Boot rejects RavenBoot before it gets a chance to run, and the
     # failure lands at the next boot rather than here -- so say it now.
-    if [[ -d /sys/firmware/efi/efivars ]] && have od; then
-        local sbvar
-        sbvar=$(ls /sys/firmware/efi/efivars/SecureBoot-* 2>/dev/null | head -1)
-        if [[ -n "$sbvar" ]]; then
-            # The variable is a 4-byte attribute prefix followed by one byte:
-            # 01 = Secure Boot enabled.
-            SECUREBOOT_STATE=$(od -An -tu1 -j4 -N1 "$sbvar" 2>/dev/null | tr -d ' ')
-        fi
-    fi
-    if [[ "$SECUREBOOT_STATE" == "1" ]]; then
-        warn "Secure Boot is ENABLED"
-        echo "        RavenBoot is unsigned, so the installed system will not boot"
-        echo "        until you disable Secure Boot in the firmware setup."
-        echo "        On ASUS ROG: F2 at power-on, Advanced Mode (F7),"
-        echo "        Security > Secure Boot > Secure Boot Control > Disabled."
-    else
-        ok "Secure Boot is off (or not reported)"
-    fi
+    read_secureboot_state
+    report_secureboot_state
 
     local missing=()
     local t
@@ -499,10 +1078,38 @@ preflight() {
         *) die "Unsupported root filesystem: ${OPT_FS} (ext4, xfs, btrfs)" ;;
     esac
     have "mkfs.${OPT_FS}" || soft_die "mkfs.${OPT_FS} is not installed; use --fs ext4." || return 1
+    if [[ "${OPT_FS}" == "btrfs" ]]; then
+        # Two binaries, not one. mkfs.btrfs makes the filesystem; the `btrfs`
+        # multicall binary makes the subvolumes the root is actually mounted
+        # from. They ship in the same package and are copied into the sysroot
+        # one name at a time -- stage2-native.sh:144 lists mkfs.btrfs and does
+        # not list btrfs -- so an image can very easily have the first without
+        # the second.
+        #
+        # Checked here, in preflight, rather than where it is used, because
+        # where it is used is format_partitions, which runs after the disk has
+        # been repartitioned. A missing btrfs discovered there is a machine
+        # whose old system has been erased and whose new root filesystem has
+        # no @ on it: unbootable, and nothing left to boot instead.
+        have btrfs || soft_die "btrfs-progs is not on this image, so the subvolume layout cannot be created.
+       mkfs.btrfs alone is not enough: the root is mounted from a subvolume
+       called @, and creating it needs the \`btrfs\` binary from the same
+       package. Add btrfs to the utils list in scripts/stages/stage2-native.sh
+       and rebuild, or install with --fs ext4." || return 1
+        ok "btrfs-progs present ($(btrfs --version 2>/dev/null | head -1))"
+    fi
     ok "Root filesystem: ${OPT_FS}"
 
     if [[ -n "${OPT_SWAP}" && "${OPT_SWAP}" != "none" ]]; then
         have mkswap || die "mkswap is not installed; use --swap none."
+    fi
+
+    # Encryption's two host requirements, checked here rather than at
+    # format_partitions, because format_partitions runs after the disk has
+    # been repartitioned. A missing cryptsetup discovered there is a machine
+    # with its old system erased and its new one unable to start.
+    if (( OPT_ENCRYPT )); then
+        check_encryption_support || return 1
     fi
 
     have chpasswd || warn "chpasswd not found; passwords will have to be set on first boot"
@@ -1527,9 +2134,10 @@ declare -A ANS=()
 # front-end reads the list rather than hardcoding it.
 ANSWER_KEYS=(
     disk mode shrink_part alongside_size
-    fs esp_size swap hostname username fullname user_password user_sudo
+    fs esp_size swap encrypt encrypt_password
+    hostname username fullname user_password user_sudo
     root_password timezone locale keymap profile efi_nvram postinstall
-    optional manual_delete manual_new manual_use rtc
+    optional manual_delete manual_new manual_use rtc secureboot
 )
 ANSWER_REQUIRED=(disk hostname username)
 
@@ -1601,9 +2209,30 @@ load_answers() {
         OPT_OPTIONAL_SET=1
     fi
     [[ -z "$OPT_SWAP"    ]] && OPT_SWAP="${ANS[swap]:-}"
+    # --encrypt wins over the file the same way every other flag does, and
+    # there is no --no-encrypt to undo it: the flag only ever turns encryption
+    # on, so a front-end that sends encrypt=0 cannot be overruled into
+    # encrypting a disk it did not ask to encrypt.
+    case "${ANS[encrypt]:-0}" in
+        1|yes|true) OPT_ENCRYPT=1 ;;
+        0|no|false) ;;
+        *) die "answers: encrypt must be 0 or 1, not '${ANS[encrypt]}'" ;;
+    esac
     [[ "$OPT_FS" == "ext4" && -n "${ANS[fs]:-}" ]] && OPT_FS="${ANS[fs]}"
     [[ "$OPT_ESP_SIZE" == "${ESP_SIZE_DEFAULT}" && -n "${ANS[esp_size]:-}" ]] \
         && OPT_ESP_SIZE="${ANS[esp_size]}"
+    # The flag wins, the same way every other one does -- but "skip" is the
+    # flag's default rather than an instruction, so an answers file is only
+    # overruled when --secure-boot actually asked for something. Getting this
+    # backwards would mean a front-end that asked for signing got none of it
+    # and was told nothing.
+    if [[ "$OPT_SECUREBOOT" == "skip" && -n "${ANS[secureboot]:-}" ]]; then
+        OPT_SECUREBOOT="${ANS[secureboot]}"
+        case "$OPT_SECUREBOOT" in
+            skip|sign|enroll) ;;
+            *) die "answers: secureboot must be skip, sign or enroll, not '${OPT_SECUREBOOT}'" ;;
+        esac
+    fi
     [[ "${ANS[efi_nvram]:-0}" == "1" ]] && OPT_NVRAM=1
     # Told apart from "absent": a front-end that writes the key every time is
     # answering the question, and decide_nvram must not overrule it.
@@ -1841,6 +2470,122 @@ run_wizard() {
     else
         SWAP_SIZE="${OPT_SWAP}"
     fi
+
+    # Asked last, and defaulting to no.
+    #
+    # The default is not timidity about the feature, it is about this
+    # question's failure mode. Every other answer in this wizard can be got
+    # wrong and fixed afterwards from a running system. This one cannot: a
+    # passphrase that was mistyped, or typed on a keyboard whose layout the
+    # initramfs does not have, is a disk that never opens again, and there is
+    # no recovery key, no escrow and no support line. It is also the only
+    # option here that has never been booted on real hardware -- see the note
+    # in encrypt_partitions() -- so until it has, saying yes has to be
+    # something a person did on purpose.
+    echo
+    if (( OPT_ENCRYPT )); then
+        ENCRYPT=1
+    elif ! have cryptsetup; then
+        # Not asked at all rather than asked and then refused. preflight has
+        # already said so for --encrypt; there is nothing to add by offering a
+        # question whose only answer is no.
+        info "cryptsetup is not on this image, so disk encryption is not offered."
+    elif ask_yn "Encrypt this disk? (LUKS2; a passphrase is required at every boot)" "N"; then
+        ENCRYPT=1
+        check_encryption_support || die "Cannot encrypt this disk."
+    fi
+    if (( ENCRYPT )); then
+        warn "There is no way to recover the data if the passphrase is lost."
+        if [[ "${KEYMAP:-us}" != "us" ]]; then
+            # The passphrase is typed into the initramfs, which loads no
+            # keymap at all: the console is whatever the kernel came up with,
+            # which is us. A passphrase containing a character that is
+            # somewhere else on a ${KEYMAP} keyboard is typed correctly here,
+            # stored correctly, and then cannot be entered at the one prompt
+            # that matters.
+            warn "The boot prompt uses a US keyboard layout, not ${KEYMAP}."
+            echo "        Use characters that are in the same place on both layouts."
+        fi
+        # ask_password offers "leave empty to skip", which is true of the two
+        # account passwords and is not true of this one -- an empty passphrase
+        # is a container nobody can open, not a container anybody can. Said
+        # before the prompt rather than only after an empty answer, so it is
+        # read as a requirement instead of as a telling-off.
+        info "This one cannot be left empty."
+        while true; do
+            ask_password ENCRYPT_PASSWORD "disk encryption"
+            [[ -n "$ENCRYPT_PASSWORD" ]] && break
+            warn "An encrypted disk needs a passphrase; there is no empty one."
+        done
+    fi
+
+    ask_secure_boot
+    resolve_secure_boot
+}
+
+# The Secure Boot offer.
+#
+# Asked only where there is something to offer, which is narrower than it
+# looks: the firmware has to be in setup mode (nothing else can enrol a key
+# without the firmware's own permission) and sbctl has to exist somewhere this
+# script can reach. Everywhere else this says what the state is and why the
+# question is not being asked -- because "the installer never mentioned it" is
+# how somebody concludes RavenLinux cannot do this at all.
+#
+# The default is no, and the reason is the same shape as the encryption
+# prompt's: of everything this installer does, enrolling a Platform Key is the
+# one that changes a machine outside the disk it was pointed at.
+ask_secure_boot() {
+    # --secure-boot already answered it.
+    [[ "$OPT_SECUREBOOT" != "skip" ]] && return 0
+
+    if ! secureboot_tool_expected >/dev/null; then
+        # Said once, quietly, and only where it would otherwise have been
+        # offered: on a machine that is not in setup mode there is nothing to
+        # regret about a missing tool.
+        if [[ "$SECUREBOOT_SETUP" == "1" ]]; then
+            echo
+            info "This firmware is in Secure Boot setup mode, and the system being installed"
+            info "will not have sbctl on it, so keys cannot be enrolled during the install."
+            info "Install sbctl afterwards and see docs/secure-boot.md; the firmware stays"
+            info "in setup mode until something enrols a key, so the window does not close."
+        fi
+        return 0
+    fi
+
+    if [[ "$SECUREBOOT_STATE" == "1" ]]; then
+        # preflight has already printed the firmware instructions in full.
+        # Nothing to ask: enrolment is impossible and signing alone would not
+        # make this machine boot.
+        return 0
+    fi
+
+    echo
+    if [[ "$SECUREBOOT_SETUP" == "1" ]]; then
+        info "This firmware is in Secure Boot setup mode: keys can be enrolled from here."
+        echo "        Enrolling lets you turn Secure Boot on afterwards and still boot"
+        echo "        RavenLinux. Microsoft's certificates are enrolled alongside ours,"
+        echo "        so Windows and the option ROMs on your cards keep working."
+        echo "        It is undone with 'sbctl reset', or by 'restore factory keys' in"
+        echo "        the firmware. Kernel modules are NOT signed either way."
+        if ask_yn "Enrol this machine's own Secure Boot keys and sign the bootloader?" "N"; then
+            OPT_SECUREBOOT="enroll"
+            return 0
+        fi
+    else
+        info "Secure Boot is off and this firmware still holds its vendor keys,"
+        info "so nothing here can enrol new ones -- that needs 'Clear Secure Boot"
+        info "Keys' in the firmware first. See docs/secure-boot.md."
+    fi
+
+    # Offered in both branches, because signing is useful in both: it is
+    # reversible, it changes nothing about the next boot, and it means that
+    # whenever somebody does get round to enrolling keys the binaries already
+    # carry a signature made by them.
+    if ask_yn "Sign RavenBoot and the kernel anyway, so enrolling later is one command?" "N"; then
+        OPT_SECUREBOOT="sign"
+    fi
+    return 0
 }
 
 # The answers file's half of run_wizard. Every value goes through the validator
@@ -1903,11 +2648,73 @@ apply_answers() {
     # the alongside planner had to apply before this ran.
     SWAP_SIZE="$(resolve_swap_size)"
 
+    # --encrypt has already folded `encrypt` into OPT_ENCRYPT in load_answers.
+    ENCRYPT=$(( OPT_ENCRYPT ))
+    ENCRYPT_PASSWORD="${ANS[encrypt_password]:-}"
+    if (( ENCRYPT )); then
+        # Refused rather than corrected, like every other answer here. The
+        # correction available -- installing without encryption -- is not a
+        # smaller version of what was asked for, it is the opposite of it, and
+        # a front-end that dropped the passphrase field would otherwise ship
+        # an install that silently is not encrypted.
+        [[ -n "$ENCRYPT_PASSWORD" ]] || die "answers: encrypt=1 needs a non-empty encrypt_password"
+    elif [[ -n "$ENCRYPT_PASSWORD" ]]; then
+        warn "answers: encrypt_password given but encrypt is not 1; the disk will NOT be encrypted."
+    fi
+
     ok "Hostname: ${HOSTNAME}"
     ok "User: ${USERNAME}${FULLNAME:+ (${FULLNAME})}"
     ok "Timezone: ${TIMEZONE}, locale ${LOCALE}, keymap ${KEYMAP}"
     ok "Profile: ${INSTALL_PROFILE}, swap: ${SWAP_SIZE:-none}"
     ok "Optional apps: $(optional_names)"
+
+    resolve_secure_boot
+}
+
+# The one Secure Boot answer that has to be refused rather than warned about.
+#
+# Enrolment needs the firmware to be in setup mode, and that is a fact about
+# the machine this is running on, known now, and not something the install can
+# change. Quietly downgrading it to "sign" would leave somebody believing their
+# machine is ready for Secure Boot to be switched on when the firmware has
+# never heard of their key -- and they would find out at the next boot, which
+# is a boot that does not happen. So this stops, here, before the first write.
+#
+# Everything else is a warning: whether sbctl actually reaches the new system
+# is not settled until the packages are in, and an install that is otherwise
+# correct should not be aborted over a signature it can be given afterwards.
+resolve_secure_boot() {
+    [[ "$OPT_SECUREBOOT" == "skip" ]] && return 0
+
+    if [[ "$OPT_SECUREBOOT" == "enroll" && "$SECUREBOOT_SETUP" != "1" ]]; then
+        if [[ "$SECUREBOOT_STATE" == "1" ]]; then
+            die "secureboot=enroll, but Secure Boot is switched ON in this firmware.
+       Nothing running under an enforcing firmware may replace its Platform
+       Key. Turn Secure Boot off, clear the Secure Boot keys in the same
+       firmware menu -- that is what puts it in setup mode -- and run this
+       again. docs/secure-boot.md walks through it."
+        fi
+        die "secureboot=enroll, but this firmware is not in setup mode.
+       It still holds a Platform Key -- its vendor's -- and will refuse to let
+       anything here write another. Clear the Secure Boot keys in the firmware
+       setup ('Clear Secure Boot Keys' under Key Management on most ASUS
+       boards), leave Secure Boot off, and run this again. Use
+       secureboot=sign if you only want the binaries signed for later.
+       docs/secure-boot.md walks through it."
+    fi
+
+    local where
+    if ! where="$(secureboot_tool_expected)"; then
+        warn "secureboot=${OPT_SECUREBOOT}, but the installed system will not have sbctl."
+        echo "        The install goes ahead; nothing is signed and no key is enrolled."
+        echo "        Add sbctl afterwards (it is in the desktop and developer profiles)"
+        echo "        and follow docs/secure-boot.md. The firmware stays in setup mode"
+        echo "        until something enrols a key, so nothing is lost by waiting."
+    elif [[ "$where" == "profile" ]]; then
+        info "sbctl comes with the ${INSTALL_PROFILE} profile, which is being installed now."
+        info "If that install fails, Secure Boot is skipped and the run says so."
+    fi
+    return 0
 }
 
 # =============================================================================
@@ -1918,6 +2725,25 @@ ESP_DEV=""
 SWAP_DEV=""
 ROOT_DEV=""
 ROOT_ALONGSIDE_BYTES=0
+
+# Encryption, decided by run_wizard or apply_answers before confirm() prints
+# the plan.
+#
+# ROOT_DEV and SWAP_DEV keep meaning "the device the root filesystem and the
+# swap signature live on", and on an encrypted install that is the mapper node,
+# not the partition. encrypt_partitions() does the swap, once, right after it
+# opens the containers -- so mkfs, mkswap, the mount, uuid_of, write_fstab and
+# the root=UUID= on the kernel command line all go on saying exactly what they
+# said before and all of them come out right. The partitions underneath are
+# kept here because three things still need them: luksUUID for the
+# cryptdevice= argument, the crypttab, and anything that has to close the
+# container again.
+ENCRYPT=0
+ENCRYPT_PASSWORD=""
+ROOT_CRYPT_PART=""     # the partition holding the root container
+SWAP_CRYPT_PART=""     # the partition holding the swap container
+ROOT_CRYPT_UUID=""     # LUKS header UUID, which is what cryptdevice= names
+SWAP_CRYPT_UUID=""
 
 plan_partitions() {
     if [[ "$OPT_MODE" == "manual" ]]; then
@@ -2315,6 +3141,25 @@ confirm() {
     plan_partitions
     decide_nvram
 
+    # Checked here because here is the last point at which the mode, the
+    # partition plan and the encryption answer are all settled and nothing has
+    # been written yet.
+    #
+    # Manual mode is refused rather than half-supported. Its whole purpose is
+    # reusing partitions that are already there -- an ESP shared with another
+    # OS, a /home whose data survives, an existing swap kept as it is -- and
+    # each of those is a plaintext filesystem that encrypting the root does
+    # nothing for. A "manual, encrypted" install would quietly produce a
+    # machine whose home directory is in the clear on a disk its owner has
+    # been told is encrypted, which is worse than not offering it.
+    if (( ENCRYPT )) && [[ "$OPT_MODE" == "manual" ]]; then
+        die "Encryption is not supported with manual partitioning yet.
+       Manual mode exists to reuse partitions that are already on the disk --
+       a shared ESP, an existing /home, an existing swap -- and those stay
+       unencrypted, so the result would not be an encrypted machine. Use
+       --wipe or --alongside with encryption, or manual without it."
+    fi
+
     phase confirm "Installation plan"
 
     if [[ "$OPT_MODE" == "manual" ]]; then
@@ -2367,6 +3212,38 @@ PLAN
         printf '      %s   rest  %s -> /\n' "$ROOT_DEV" "$OPT_FS"
     fi
 
+    if [[ "${OPT_FS}" == "btrfs" ]]; then
+        # On the plan because it is the half of a btrfs install that is
+        # invisible everywhere else until the day it matters: which
+        # directories a rollback will rewind and which it will leave alone.
+        # BTRFS_SUBVOLS is the same list create_btrfs_layout() builds from, so
+        # what is printed here cannot drift from what is created.
+        local sv sv_name sv_label="    Subvolumes  "
+        echo
+        for sv in "${BTRFS_SUBVOLS[@]}"; do
+            sv_name="${sv%%:*}"
+            [[ "$sv_name" == "@home" && -n "${HOME_DEV:-}" ]] && continue
+            printf '%s   %-11s -> %-12s %s\n' \
+                "$sv_label" "$sv_name" "${sv#*:}" "${BTRFS_SUBVOL_NOTES[$sv_name]:-}"
+            sv_label="                "
+        done
+        printf '    Mount options  %s\n' "$(btrfs_root_flags)"
+    fi
+
+    if (( ENCRYPT )); then
+        # An alongside install has no device names yet -- the partition
+        # numbers are sfdisk's to choose and partition_alongside fills them in
+        # afterwards -- so the plan says what is encrypted rather than which
+        # node it will be.
+        printf '\n    Encryption     LUKS2 (argon2id) on %s\n' "${ROOT_DEV:-the new root partition}"
+        if [[ -n "$SWAP_DEV" || -n "$SWAP_SIZE" ]]; then
+            printf '                   and on %s, so the hibernation image is encrypted too\n' \
+                "${SWAP_DEV:-the new swap partition}"
+        fi
+        printf '                   One passphrase opens both, and is asked for at every boot.\n'
+        printf '                   %sThere is no recovery key. A lost passphrase is lost data.%s\n' "$YELLOW" "$NC"
+    fi
+
     cat <<PLAN
 
     Hostname       ${HOSTNAME}
@@ -2378,6 +3255,7 @@ PLAN
     Package profile ${INSTALL_PROFILE} (applied later with raven-postinstall)
     Optional apps  $(optional_names)
     Bootloader     RavenBoot at \\EFI\\raven and \\EFI\\BOOT\\BOOTX64.EFI$([[ $OPT_NVRAM -eq 1 ]] && echo ", plus an NVRAM entry")
+    Secure Boot    $(secure_boot_plan_line)
 
 PLAN
 
@@ -2590,8 +3468,286 @@ partition_disk() {
     ok "Partition devices ready"
 }
 
+# =============================================================================
+# Encryption
+# =============================================================================
+# LUKS2 with argon2id, over the root partition and over the swap partition,
+# both opened by the one passphrase the person typed.
+#
+# WHY TWO CONTAINERS AND NOT ONE. The obvious shape for full-disk encryption
+# is one container holding an LVM volume group with root and swap inside it,
+# and that is what most distributions ship. It was not taken here, and the
+# reason is what the image contains rather than what is elegant: LVM would put
+# lvm2 and its libraries in the sysroot AND in the initramfs, and the
+# initramfs would then have to run `vgchange -ay` before it could find a root
+# -- a second userspace volume manager on the boot path of a system whose
+# whole design is that everything on that path is built into the kernel. Two
+# LUKS headers need cryptsetup, which is needed anyway, and nothing else.
+#
+# WHY NOT A RANDOM-KEY SWAP. The other common shape -- plain dm-crypt over
+# swap with a key from /dev/urandom at every boot -- is simpler still and is
+# what most "encrypted swap" recipes mean. It also makes hibernation
+# impossible: the image is written under one key and the next boot generates a
+# different one, so there is nothing to resume from, ever. That would throw
+# away the resume= support that was just added, on a laptop, which is the
+# machine that actually hibernates. So the swap gets a real LUKS2 header with
+# a real key, and the image survives the power cycle it was written for.
+#
+# WHY THE SAME PASSPHRASE. Two containers could take two passphrases, and
+# typing two at every boot is how people end up choosing a short one. The
+# initramfs reads the passphrase once and offers it to both containers, so
+# what the person experiences is one prompt -- the same as the LVM layout
+# would have given them.
+#
+# THE COST, STATED PLAINLY: unlocking runs argon2id twice, once per header,
+# so the boot prompt takes about twice as long to accept a correct passphrase
+# as a single-container layout would. With cryptsetup's default 2-second
+# iteration target that is roughly four seconds. It is tunable with
+# --iter-time below, and it was left at the default because a boot-time cost
+# is a much better thing to spend than a brute-force margin.
+#
+# NOTHING HERE HAS BEEN BOOTED. See the summary for this change: an encrypted
+# install has never completed on real hardware or in a VM, which is why
+# nothing in this file turns encryption on by itself.
+
+# Format DEVICE as a LUKS2 container and open it as /dev/mapper/NAME.
+#
+# The passphrase goes in on stdin, never as an argument: an argument is
+# visible in /proc/<pid>/cmdline to every user on the machine for as long as
+# the command runs, and this one command runs for seconds by design.
+#
+# `printf '%s'` and not `echo`, because the newline would be part of the
+# passphrase. cryptsetup reading a key file from a pipe takes the bytes it is
+# given and does not strip a trailing newline, while the prompt it shows at
+# boot strips the Enter -- so a passphrase written with `echo` here can never
+# be typed at that prompt. Verified against cryptsetup 2.8.8: formatted with
+# `printf '%s'`, a piped trailing newline is rejected with "No key available
+# with this passphrase."
+luks_create() {
+    local dev="$1" name="$2"
+
+    # --batch-mode: there is no "are you sure, type YES" here, because
+    # confirm() already asked it about this whole disk.
+    # aes-xts-plain64 with a 512-bit key is cryptsetup's own default for
+    # LUKS2 and is written out rather than inherited, so that a future
+    # cryptsetup changing its default cannot change what Raven installs
+    # without anybody noticing.
+    printf '%s' "$ENCRYPT_PASSWORD" | cryptsetup luksFormat \
+        --type luks2 \
+        --pbkdf argon2id \
+        --cipher aes-xts-plain64 \
+        --key-size 512 \
+        --batch-mode \
+        --key-file - \
+        "$dev" || return 1
+
+    printf '%s' "$ENCRYPT_PASSWORD" | cryptsetup open \
+        --type luks \
+        --key-file - \
+        "$dev" "$name" || return 1
+
+    [[ -b "/dev/mapper/${name}" ]]
+}
+
+# Close whatever this run opened. Safe to call when nothing is open, which is
+# every unencrypted install and every --probe.
+close_crypt_devices() {
+    local name
+    # Swap first: it is the one that was opened last, and on a machine where
+    # something still holds the root mapper open, closing the swap is still
+    # worth doing.
+    for name in "$CRYPT_SWAP_NAME" "$CRYPT_ROOT_NAME"; do
+        [[ -e "/dev/mapper/${name}" ]] || continue
+        have cryptsetup || return 0
+        cryptsetup close "$name" 2>/dev/null || true
+    done
+    return 0
+}
+
+# Put the containers on the partitions, then make ROOT_DEV and SWAP_DEV mean
+# the mapper nodes.
+#
+# That last sentence is the whole design. Every step after this one --
+# mkfs, mkswap, the mount, uuid_of, write_fstab's UUID= lines, the root=UUID=
+# on the kernel command line, and above all the resume=UUID= -- reads those
+# two variables, and all of them want the inside of the container rather than
+# the partition it sits on. Doing the substitution once, here, is what makes
+# encryption a change to three functions instead of a conditional in fifteen.
+#
+# resume= is the one that fails silently if this is got wrong, so it is worth
+# spelling out. blkid on the raw partition of an encrypted swap reports the
+# *LUKS header's* UUID, not the swap signature's -- the swap signature is
+# inside the container and blkid cannot see it from outside. A resume=UUID=
+# built from the partition therefore names a device that is not swap, the
+# kernel finds no hibernation image there, and the machine boots fresh with no
+# error printed anywhere: exactly the failure resume= was added to remove.
+# Because SWAP_DEV is the mapper node from here on, uuid_of reads the swap
+# signature and resume= names the mapped device, which is the only thing that
+# can be resumed from.
+encrypt_partitions() {
+    (( ENCRYPT )) || return 0
+
+    have cryptsetup || die "cryptsetup disappeared between preflight and now; nothing has been encrypted."
+    [[ -n "$ENCRYPT_PASSWORD" ]] \
+        || die "No encryption passphrase; refusing to write a container nobody can open."
+    [[ -b "$ROOT_DEV" ]] || die "No root partition to encrypt (${ROOT_DEV})"
+
+    # Anything the live session mounted or swapped on from the old contents of
+    # these partitions holds them open, and luksFormat on a busy device fails
+    # after it has already written the header.
+    close_crypt_devices
+
+    ROOT_CRYPT_PART="$ROOT_DEV"
+    step "Encrypting ${ROOT_CRYPT_PART}"
+    info "Deriving the key with argon2id; this takes a few seconds by design."
+    luks_create "$ROOT_CRYPT_PART" "$CRYPT_ROOT_NAME" \
+        || die "Could not create the LUKS container on ${ROOT_CRYPT_PART}"
+    ROOT_DEV="/dev/mapper/${CRYPT_ROOT_NAME}"
+    ROOT_CRYPT_UUID="$(cryptsetup luksUUID "$ROOT_CRYPT_PART" 2>/dev/null)"
+    [[ -n "$ROOT_CRYPT_UUID" ]] \
+        || die "Could not read the LUKS UUID of ${ROOT_CRYPT_PART}; the boot entry would have nothing to unlock."
+    ok "${ROOT_CRYPT_PART}: LUKS2 -> ${ROOT_DEV}"
+
+    if [[ -n "$SWAP_DEV" ]]; then
+        SWAP_CRYPT_PART="$SWAP_DEV"
+        step "Encrypting ${SWAP_CRYPT_PART}"
+        luks_create "$SWAP_CRYPT_PART" "$CRYPT_SWAP_NAME" \
+            || die "Could not create the LUKS container on ${SWAP_CRYPT_PART}"
+        SWAP_DEV="/dev/mapper/${CRYPT_SWAP_NAME}"
+        SWAP_CRYPT_UUID="$(cryptsetup luksUUID "$SWAP_CRYPT_PART" 2>/dev/null)"
+        [[ -n "$SWAP_CRYPT_UUID" ]] \
+            || die "Could not read the LUKS UUID of ${SWAP_CRYPT_PART}; the boot entry would have nothing to unlock."
+        ok "${SWAP_CRYPT_PART}: LUKS2 -> ${SWAP_DEV} (hibernation image is encrypted)"
+    fi
+}
+
+# The crypttab the installed system does not read.
+#
+# It is written for the same reason the fstab's root and /tmp lines are
+# written: nothing consumes it today, and a person opening the machine's
+# /etc expects to find the answer to "what is encrypted here" in the file
+# that is named after that question. The unlocking is done by the initramfs
+# from cryptdevice= on the kernel command line, before any filesystem on this
+# disk exists to read a crypttab out of, and RavenLinux has no systemd and so
+# no crypttab-reading generator. The header says so, in the file, because the
+# alternative is somebody editing this and expecting it to take effect.
+write_crypttab() {
+    (( ENCRYPT )) || return 0
+
+    {
+        echo "# /etc/crypttab -- written by raven-install"
+        echo "#"
+        echo "# DOCUMENTATION, NOT CONFIGURATION. Nothing on this system reads this"
+        echo "# file. The containers below are opened by the initramfs, from the"
+        echo "# cryptdevice= and cryptswap= arguments on the kernel command line,"
+        echo "# long before this filesystem is mounted -- it is inside the first of"
+        echo "# them. Changing a line here changes nothing; the command line is in"
+        echo "# \\EFI\\raven\\boot.cfg on the EFI System Partition."
+        echo "#"
+        echo "# <name> <device> <key> <options>"
+        printf '%-12s %-48s %-6s %s\n' \
+            "$CRYPT_ROOT_NAME" "UUID=${ROOT_CRYPT_UUID}" "none" "luks"
+        if [[ -n "$SWAP_CRYPT_UUID" ]]; then
+            # Not "swap" in the options column, which in a crypttab means
+            # "reformat this as swap with a fresh random key on every boot".
+            # This container is a permanent one with a real header, precisely
+            # so that a hibernation image written into it survives the reboot
+            # that is supposed to read it back.
+            printf '%-12s %-48s %-6s %s\n' \
+                "$CRYPT_SWAP_NAME" "UUID=${SWAP_CRYPT_UUID}" "none" "luks"
+        fi
+    } > "${TARGET}/etc/crypttab"
+    chmod 0600 "${TARGET}/etc/crypttab"
+    ok "/etc/crypttab written (documentation; the initramfs does the unlocking)"
+}
+
+# Lay out a fresh btrfs root and mount it the way the installed system will.
+#
+# Called instead of the plain `mount "$ROOT_DEV" "$TARGET"` at the bottom of
+# format_partitions, and it has to be: everything after it -- the copy, the
+# fstab, /home -- writes into whatever is mounted there, and on btrfs that has
+# to be @ rather than the top level, or the installed system's files end up
+# outside the subvolume the machine boots from.
+#
+# On an encrypted install ROOT_DEV is already /dev/mapper/ravenroot by the
+# time this runs: encrypt_partitions() reassigned it at the top of
+# format_partitions, before the mkfs. So btrfs-inside-LUKS needs no special
+# case anywhere in here, which is the point of doing the substitution once --
+# the subvolumes are created inside the container, the UUID write_fstab reads
+# is the btrfs superblock's from inside the container, and the initramfs opens
+# the container before it ever looks for a root to mount.
+create_btrfs_layout() {
+    local opts entry name mnt
+    opts="$(btrfs_common_opts)"
+
+    # Subvolumes can only be created on a mounted btrfs filesystem, and the
+    # only thing that exists on a fresh mkfs.btrfs is the top-level subvolume
+    # -- which is not where the system is going to live. So the top level is
+    # mounted out of the way for the second it takes, then unmounted again.
+    # Leaving it mounted would give the install two writable views of one
+    # filesystem, and `umount -R "$TARGET"` in cleanup() would never find this
+    # one, which on an encrypted install means a container that will not close.
+    mkdir -p "$BTRFS_TOP"
+    mount -o "$opts" "$ROOT_DEV" "$BTRFS_TOP" \
+        || die "Cannot mount ${ROOT_DEV} to create its subvolumes"
+
+    for entry in "${BTRFS_SUBVOLS[@]}"; do
+        name="${entry%%:*}"
+        # A separate /home partition wins over @home, and the subvolume is not
+        # created at all rather than created and left unmounted. An empty
+        # @home sitting in the layout is something a snapshot tool would have
+        # to have an opinion about, and something `btrfs subvolume list` would
+        # show to a person whose /home is demonstrably somewhere else.
+        [[ "$name" == "@home" && -n "${HOME_DEV:-}" ]] && continue
+        btrfs subvolume create "${BTRFS_TOP}/${name}" >/dev/null 2>&1 || {
+            umount "$BTRFS_TOP" 2>/dev/null
+            die "Could not create the ${name} subvolume on ${ROOT_DEV}"
+        }
+    done
+
+    umount "$BTRFS_TOP" || die "Cannot unmount ${BTRFS_TOP}"
+    rmdir "$BTRFS_TOP" 2>/dev/null || true
+
+    mount -o "subvol=@,${opts}" "$ROOT_DEV" "$TARGET" \
+        || die "Cannot mount the @ subvolume of ${ROOT_DEV} on ${TARGET}"
+    ok "${ROOT_DEV}: @ -> / (${opts})"
+
+    # The rest, in the order BTRFS_SUBVOLS is written, so a nested mount point
+    # is always created after the subvolume it sits inside is mounted.
+    #
+    # Mounted now, before copy_system rather than after it, and that ordering
+    # is load-bearing. The copy has to land *inside* these: a /var/log written
+    # onto @ and then hidden by a later mount of @log is a machine whose
+    # install-time logs are invisible from the running system and whose every
+    # @ snapshot carries a dead copy of them, which is the exact cost @log was
+    # created to avoid.
+    for entry in "${BTRFS_SUBVOLS[@]}"; do
+        name="${entry%%:*}"
+        mnt="${entry#*:}"
+        [[ "$name" == "@" ]] && continue
+        [[ "$name" == "@home" && -n "${HOME_DEV:-}" ]] && continue
+        mkdir -p "${TARGET}${mnt}"
+        mount -o "subvol=${name},${opts}" "$ROOT_DEV" "${TARGET}${mnt}" \
+            || die "Cannot mount the ${name} subvolume on ${mnt}"
+        ok "${ROOT_DEV}: ${name} -> ${mnt}"
+    done
+
+    # A snapshot of this system contains every file in /etc and every byte of
+    # every home directory. At 0755 that is all readable to any account on the
+    # machine by way of yesterday's copy of it, which would quietly undo the
+    # permissions on the originals.
+    chmod 0700 "${TARGET}/.snapshots" 2>/dev/null || true
+}
+
 format_partitions() {
     phase format "Creating filesystems"
+
+    # Before any mkfs, because every filesystem below has to be made *inside*
+    # the container rather than on the partition. It also reassigns ROOT_DEV
+    # and SWAP_DEV to the mapper nodes, which is what makes the rest of this
+    # function -- and write_fstab, and install_bootloader -- correct without
+    # knowing anything about encryption.
+    encrypt_partitions
 
     if (( ESP_REUSED )) && (( ! ${ESP_FORMAT:-0} )); then
         # Somebody else's ESP, holding the bootloader of the OS being installed
@@ -2650,7 +3806,11 @@ format_partitions() {
         ok "${HOME_DEV}: kept as /home, not formatted"
     fi
 
-    mount "$ROOT_DEV" "$TARGET" || die "Cannot mount ${ROOT_DEV} on ${TARGET}"
+    if [[ "${OPT_FS}" == "btrfs" ]]; then
+        create_btrfs_layout
+    else
+        mount "$ROOT_DEV" "$TARGET" || die "Cannot mount ${ROOT_DEV} on ${TARGET}"
+    fi
     mkdir -p "${TARGET}/boot/efi"
     mount "$ESP_DEV" "${TARGET}/boot/efi" || die "Cannot mount ${ESP_DEV}"
     ok "Target mounted"
@@ -2762,6 +3922,7 @@ SWAP_UUID=""
 
 write_fstab() {
     local root_uuid esp_uuid swap_uuid
+    local root_opts root_pass sv sv_name sv_mnt
     root_uuid=$(uuid_of "$ROOT_DEV")
     esp_uuid=$(uuid_of "$ESP_DEV")
 
@@ -2803,7 +3964,51 @@ write_fstab() {
         # writes. The two are kept saying the same thing so that a later
         # `mount -o remount /`, which reads this file, cannot quietly put
         # relatime back.
-        printf "$fmt" "UUID=${root_uuid}" "/" "${OPT_FS}" "rw,noatime" 0 1
+        root_opts="rw,noatime"
+        root_pass=1
+        if [[ "${OPT_FS}" == "btrfs" ]]; then
+            # subvol=@ is what makes this line describe the root the machine
+            # actually booted from. Without it a `mount -o remount /` reading
+            # this file would be asking for the top-level subvolume, and the
+            # two would disagree about what "/" means -- which is the same
+            # class of quiet mismatch the noatime note above is guarding
+            # against, one level further down.
+            #
+            # Pass 0, not 1: fsck.btrfs is a stub that exits 0 without looking
+            # at anything, because btrfs checks and repairs at mount time and
+            # with `btrfs scrub` rather than from a boot-time fsck. A pass of
+            # 1 here asks for a check that cannot happen and would read as a
+            # promise the system does not keep.
+            root_opts="rw,$(btrfs_root_flags)"
+            root_pass=0
+        fi
+        printf "$fmt" "UUID=${root_uuid}" "/" "${OPT_FS}" "$root_opts" 0 "$root_pass"
+        # One line per subvolume, each naming the subvolume it mounts, and
+        # subvol= here is neither optional nor cosmetic. A btrfs mount with no
+        # subvol= gets the top-level subvolume, so a `mount /var/log` taken
+        # from a line without it would mount the directory that contains @ --
+        # the running system would find its own root filesystem tree appearing
+        # inside its log directory. raven-init's mount_fstab passes any option
+        # it does not have a flag for straight through as the mount's data
+        # string (init/src/main.rs:934), so subvol= reaches the kernel exactly
+        # as it is written here.
+        #
+        # These are the lines that do take effect, unlike the root above:
+        # mount_fstab skips only the root and anything already mounted, and
+        # none of these is either.
+        if [[ "${OPT_FS}" == "btrfs" ]]; then
+            for sv in "${BTRFS_SUBVOLS[@]}"; do
+                sv_name="${sv%%:*}"
+                sv_mnt="${sv#*:}"
+                [[ "$sv_name" == "@" ]] && continue
+                # Skipped for the same reason create_btrfs_layout() does not
+                # create it: a separate /home partition owns /home, and its
+                # own line is written further down.
+                [[ "$sv_name" == "@home" && -n "${HOME_DEV:-}" ]] && continue
+                printf "$fmt" "UUID=${root_uuid}" "$sv_mnt" "btrfs" \
+                    "rw,subvol=${sv_name},$(btrfs_common_opts)" 0 0
+            done
+        fi
         if [[ -n "$esp_uuid" ]]; then
             printf "$fmt" "UUID=${esp_uuid}" "/boot/efi" "vfat" \
                 "rw,noatime,fmask=0077,dmask=0077" 0 2
@@ -2826,7 +4031,14 @@ write_fstab() {
             # mounts it with exactly the options on this line. An NTFS or
             # vfat /home carried over from another OS ignores the flag
             # harmlessly rather than refusing to mount.
-            printf "$fmt" "UUID=${home_uuid}" "/home" "${home_type:-auto}" "rw,noatime" 0 2
+            local home_opts="rw,noatime"
+            # A /home partition this installer just made with --fs btrfs is a
+            # btrfs filesystem in its own right -- no subvolume, because it is
+            # a whole separate filesystem and there is nothing for a subvolume
+            # to separate it from -- but it wants the same compression and the
+            # same allocator hint as the root does, for the same reasons.
+            [[ "${home_type}" == "btrfs" ]] && home_opts="rw,$(btrfs_common_opts)"
+            printf "$fmt" "UUID=${home_uuid}" "/home" "${home_type:-auto}" "$home_opts" 0 2
         fi
         # Redundant while raven-init mounts /tmp itself, and kept as the template
         # for anyone adding a mount by hand.
@@ -3572,6 +4784,7 @@ configure_system() {
 
     mount_home
     write_fstab
+    write_crypttab
     set_hostname
     create_user
     set_passwords
@@ -3654,6 +4867,60 @@ install_bootloader() {
     # noatime and not relatime.
     local base_cmdline="root=UUID=${ROOT_UUID} rw rootflags=noatime"
 
+    # A btrfs root is mounted from a subvolume, and rootflags= is the only
+    # channel that can say which one -- so on btrfs the noatime above grows
+    # into the full option string from btrfs_root_flags().
+    #
+    # It is folded into the existing rootflags= rather than appended as a
+    # second one. The initramfs parses the command line in a loop and the last
+    # rootflags= it sees wins, so two of them would work by accident; a person
+    # reading boot.cfg to find out how their root is mounted should not have
+    # to know which end of the line the parser started from.
+    #
+    # And the literal `rootflags=noatime` above is kept literal on purpose.
+    # test-raven-install.sh:561 greps this exact source line for that exact
+    # string, and that assertion is the one that catches the change that edits
+    # the fstab, forgets the command line, reviews perfectly and does nothing
+    # on the machine -- because raven-init's mount_fstab skips the root.
+    if [[ "${OPT_FS}" == "btrfs" ]]; then
+        local root_flags
+        root_flags="$(btrfs_root_flags)"
+        base_cmdline="${base_cmdline/rootflags=noatime/rootflags=${root_flags}}"
+        info "Root subvolume: @ (rootflags=${root_flags})"
+    fi
+
+    # cryptdevice=: which container holds that root, and what to call it.
+    #
+    # It goes in front of nothing and after nothing in particular -- the
+    # initramfs parses the whole line -- but the relationship between this and
+    # the root=UUID= above is worth being exact about, because getting it
+    # backwards produces a boot.cfg that looks right and a machine that never
+    # starts. root=UUID= names the *filesystem* UUID, which lives inside the
+    # container and is invisible until the container is open. cryptdevice=
+    # names the *LUKS header* UUID, which is on the partition and is what can
+    # be found before anything has been unlocked. They are two different
+    # UUIDs on two different devices and neither can stand in for the other.
+    #
+    # The form is `cryptdevice=<spec>:<name>`, which is mkinitcpio's, because
+    # somebody arriving here from Arch already knows it and because there is
+    # no value in inventing a fourth spelling of the same idea.
+    #
+    # cryptswap= is ours and has no equivalent elsewhere: the second container
+    # is opened with the same passphrase, so that hibernating writes its image
+    # into encrypted swap and the next boot can read it back. See
+    # encrypt_partitions() for why the swap is a second container rather than
+    # a volume inside the first.
+    if (( ENCRYPT )); then
+        [[ -n "$ROOT_CRYPT_UUID" ]] \
+            || die "Encrypted install with no LUKS UUID for the root container; refusing to write an unbootable boot.cfg."
+        base_cmdline+=" cryptdevice=UUID=${ROOT_CRYPT_UUID}:${CRYPT_ROOT_NAME}"
+        info "Root container: UUID=${ROOT_CRYPT_UUID} -> /dev/mapper/${CRYPT_ROOT_NAME}"
+        if [[ -n "$SWAP_CRYPT_UUID" ]]; then
+            base_cmdline+=" cryptswap=UUID=${SWAP_CRYPT_UUID}:${CRYPT_SWAP_NAME}"
+            info "Swap container: UUID=${SWAP_CRYPT_UUID} -> /dev/mapper/${CRYPT_SWAP_NAME}"
+        fi
+    fi
+
     # resume=: without it, hibernation on the installed machine is a trap.
     #
     # The kernel is perfectly willing to hibernate as things stand.
@@ -3695,6 +4962,18 @@ install_bootloader() {
     # If an initramfs does not do that, this is inert and not harmful: the
     # kernel cannot parse a filesystem UUID, says so once, and the machine
     # boots fresh exactly as it does today.
+    #
+    # ON AN ENCRYPTED INSTALL this line still says resume=UUID=<swap UUID>,
+    # and that is correct rather than an oversight -- but only because
+    # SWAP_DEV was pointed at /dev/mapper/ravenswap in encrypt_partitions()
+    # before write_fstab read it. The UUID below is therefore the swap
+    # signature's, written by mkswap *inside* the container, and the only
+    # device that can ever carry it is the open mapper node. The wrong version
+    # of this line -- the UUID of the raw partition -- is the LUKS header's,
+    # names a device that is not swap, and produces a machine that hibernates
+    # happily and then boots fresh every time with nothing in the log. The
+    # initramfs resolves this after it has opened the containers, which is the
+    # other half of the same requirement.
     if [[ -n "${SWAP_UUID:-}" ]]; then
         base_cmdline+=" resume=UUID=${SWAP_UUID}"
         info "Hibernate will resume from UUID=${SWAP_UUID}"
@@ -3850,6 +5129,320 @@ register_nvram_entry() {
 }
 
 # =============================================================================
+# Secure Boot
+# =============================================================================
+#
+# What this is for. RavenBoot is Raven's own EFI binary, built here, signed by
+# nobody a firmware has heard of. A machine with Secure Boot enabled will not
+# load it, which is why every other part of this installer says "turn Secure
+# Boot off". Turning it off is a real answer and stays the default. The other
+# real answer is to make the firmware trust THIS machine's own key instead of
+# the vendor's, and that is what the code below does.
+#
+# THE CHAIN THAT HAS TO BE SIGNED, and it is exactly three files:
+#
+#   \EFI\BOOT\BOOTX64.EFI     RavenBoot, as the firmware's fallback path
+#   \EFI\raven\raven-boot.efi RavenBoot, as an NVRAM entry points at it
+#   \EFI\raven\vmlinuz        the kernel
+#
+# The kernel is on that list because RavenBoot does not hand-roll the Linux
+# boot protocol: bootloader/src/linux.rs loads the kernel with the firmware's
+# own LoadImage and StartImage, so an enforcing firmware verifies the kernel
+# image the same way it verified the loader. A signed loader and an unsigned
+# kernel is a machine that shows its boot menu and then stops. The initramfs is
+# NOT on the list and cannot be: it is handed over through the LoadFile2
+# protocol, which has no signature check, and the kernel is what measures it.
+#
+# GRUB IS NOT ON THAT LIST EITHER, and the task that asked for this expected it
+# to be. It is not: raven-install never installs GRUB. configs/grub holds a
+# theme, grub.cfg is generated inside stage4-iso.sh for the live ISO, and
+# bootloader/preview/src/grub.rs says in as many words that GRUB here is BIOS-only. The
+# EFI binary an installed Raven machine boots is RavenBoot, so RavenBoot is
+# what gets signed.
+#
+# MODULES ARE NOT SIGNED AND THAT IS DELIBERATE. CONFIG_MODULE_SIG is off, with
+# the reasoning written out at the symbol in configs/kernel/config-6.17-raven
+# and in docs/kernel-hardening.md: turning it on means every DKMS rebuild of
+# evdi (the DisplayLink dock) and of the NVIDIA modules has to be signed on the
+# target machine with a key the target machine does not have. Secure Boot
+# without module signing verifies everything up to and including the kernel and
+# nothing after it. That is a smaller guarantee than a distribution with a
+# signing infrastructure offers, and it is a much larger one than nothing, and
+# it does not break anybody's dock. See docs/secure-boot.md.
+#
+# WHY THIS RUNS INSIDE THE TARGET rather than with the live image's sbctl.
+# sbctl keeps its key set and its list of files to re-sign in /var/lib/sbctl,
+# on the machine it was run on. The live image's copy of that is a tmpfs that
+# ceases to exist at the next reboot -- so keys made there would be enrolled
+# into the firmware and then thrown away, leaving a machine whose firmware
+# trusts a key nobody has, and whose next kernel update cannot be signed by
+# anyone. Running it in a chroot of the new system puts the keys where they
+# will still be tomorrow, and makes `sbctl sign-all` after a kernel update the
+# one command it should be.
+#
+# EVERY STEP HERE IS REVERSIBLE, and they are ordered so that the reversible
+# ones all happen before the one that touches the firmware:
+#
+#   create-keys  writes /var/lib/sbctl on the new disk. Undone with rm -rf.
+#   sign         adds a signature to an EFI binary. A firmware that is not
+#                checking ignores it completely, so this changes nothing about
+#                how the machine boots. Undone by copying the file back, or by
+#                reinstalling, or by ignoring it.
+#   enroll-keys  hands the firmware a new Platform Key. This is the one that
+#                matters, it is done last, it is done only in setup mode, and
+#                it is done only if every signature above succeeded. Undone
+#                with `sbctl reset` from the installed system, or with
+#                "restore factory keys" in the firmware setup.
+#
+# And the machine still boots with Secure Boot OFF at every point in that
+# sequence, including after a failure half way through, because none of it
+# removes anything.
+
+setup_secure_boot() {
+    phase secureboot "Secure Boot"
+    setup_secure_boot_step
+
+    # What actually happened, on the progress stream and nowhere else -- there
+    # is nothing here a person reading a terminal has not already been told in
+    # full sentences. It is emitted from a wrapper rather than from the step
+    # itself because the step returns early from five different places and this
+    # has to be true of all of them.
+    #
+    # It exists because the last page of the graphical front-end has to choose
+    # between "boot once, then turn Secure Boot on" and "leave Secure Boot
+    # off", and choosing from the ANSWER rather than from the outcome is how
+    # somebody whose enrolment failed gets told to switch on a firmware check
+    # their machine cannot pass. One of: none, skipped, signed, enrolled,
+    # failed.
+    emit info "secure-boot: ${SECUREBOOT_RESULT:-none}"
+    return 0
+}
+
+setup_secure_boot_step() {
+    if [[ "$OPT_SECUREBOOT" == "skip" ]]; then
+        info "Secure Boot: not touched. The machine boots with it off."
+        return 0
+    fi
+
+    if ! secureboot_tool; then
+        warn "sbctl is not on the installed system; nothing was signed."
+        echo "        No key was enrolled and the firmware was not touched, so this"
+        echo "        install is exactly what it would have been without the option."
+        echo "        From the installed system, once sbctl is there:"
+        secure_boot_manual_steps
+        SECUREBOOT_RESULT="skipped"
+        return 0
+    fi
+    if ! have chroot; then
+        warn "chroot is not on this image; Secure Boot setup needs it. Nothing was signed."
+        SECUREBOOT_RESULT="skipped"
+        return 0
+    fi
+
+    # The three files, as the installed system sees them. /boot/efi is where
+    # write_fstab mounts the ESP and where it is mounted right now.
+    local -a targets=(
+        /boot/efi/EFI/BOOT/BOOTX64.EFI
+        /boot/efi/EFI/raven/raven-boot.efi
+        /boot/efi/EFI/raven/vmlinuz
+    )
+    local t
+    for t in "${targets[@]}"; do
+        if [[ ! -f "${TARGET}${t}" ]]; then
+            warn "${t} is not on the ESP; Secure Boot setup skipped."
+            echo "        install_bootloader should have put it there. Nothing was signed"
+            echo "        and no key was enrolled."
+            SECUREBOOT_RESULT="skipped"
+            return 0
+        fi
+    done
+
+    # /sys is rbind rather than bind on purpose: efivarfs is a filesystem of
+    # its own mounted at /sys/firmware/efi/efivars, and a plain --bind of /sys
+    # gives the chroot an empty directory there -- which sbctl reads as "this
+    # machine has no EFI variables" rather than as "I cannot see them".
+    local -a binds=(proc sys dev)
+    local d bound=()
+    local mounted_ok=1
+    for d in "${binds[@]}"; do
+        mkdir -p "${TARGET}/${d}"
+        if mount --rbind "/${d}" "${TARGET}/${d}" 2>/dev/null; then
+            bound+=("$d")
+            # Made a slave immediately, and this is not a nicety. A recursive
+            # bind of a mount that is shared -- which / usually is -- creates
+            # peers, and an unmount of a peer PROPAGATES: the umount -R below,
+            # or finish()'s umount -R of the whole target, would take the live
+            # system's own /sys or /dev down with it, in the middle of an
+            # install, with no error to say what happened. Slave propagation
+            # still passes mounts in (so efivarfs is visible in the chroot) and
+            # passes nothing back out.
+            mount --make-rslave "${TARGET}/${d}" 2>/dev/null || \
+                warn "Could not make ${TARGET}/${d} a slave mount; unmounting it may affect the live system."
+        else
+            warn "Cannot bind /${d} into the new system; Secure Boot setup skipped."
+            mounted_ok=0
+            break
+        fi
+    done
+
+    if (( mounted_ok )); then
+        secure_boot_run_sbctl || true
+    else
+        SECUREBOOT_RESULT="skipped"
+    fi
+
+    # Reverse order, recursive, and unconditional. A bind of /sys left behind
+    # would keep the target mounted and finish()'s umount -R would take the
+    # host's /sys down with it.
+    local i
+    for (( i=${#bound[@]}-1; i>=0; i-- )); do
+        umount -R "${TARGET}/${bound[i]}" 2>/dev/null || \
+            warn "Could not unmount ${TARGET}/${bound[i]}"
+    done
+
+    sync
+    return 0
+}
+
+# The part that runs with the chroot's mounts in place. Split out so the
+# unmounts above are one block with no early return in front of them: leaving a
+# recursive bind of /sys on the target is how finish()'s umount -R takes the
+# live system's /sys with it.
+secure_boot_run_sbctl() {
+    local sb=(chroot "$TARGET" /usr/bin/sbctl)
+
+    local ver
+    ver="$("${sb[@]}" version 2>/dev/null | head -1)"
+    info "sbctl: ${ver:-version not reported}"
+
+    # create-keys is not idempotent in every version -- some refuse when a key
+    # set is already there, some say so and succeed -- so an existing key set
+    # is checked for first and its presence is the success condition either
+    # way. Both paths are looked at because sbctl moved from the second to the
+    # first in 0.14 and an installed system may have either.
+    local keydir found_keys=0
+    for keydir in /var/lib/sbctl/keys /usr/share/secureboot/keys; do
+        [[ -d "${TARGET}${keydir}" ]] && found_keys=1 && break
+    done
+    if (( found_keys )); then
+        info "A key set is already present at ${keydir}; keeping it."
+    else
+        if ! "${sb[@]}" create-keys; then
+            warn "sbctl create-keys failed; nothing was signed and no key was enrolled."
+            echo "        The firmware was not touched. docs/secure-boot.md has the"
+            echo "        manual route, which is the same commands run by hand."
+            SECUREBOOT_RESULT="failed"
+            return 1
+        fi
+        ok "Secure Boot key set created in the new system"
+    fi
+
+    # -s records the file in sbctl's own database, which is what makes
+    # `sbctl sign-all` after a kernel update re-sign the right files. Without
+    # it the signature is applied once and the first kernel update silently
+    # produces an unsigned kernel and a machine that stops at the boot menu.
+    local t signed=0 failed=0
+    for t in /boot/efi/EFI/BOOT/BOOTX64.EFI \
+             /boot/efi/EFI/raven/raven-boot.efi \
+             /boot/efi/EFI/raven/vmlinuz; do
+        if "${sb[@]}" sign -s "$t"; then
+            signed=$((signed + 1))
+        else
+            warn "sbctl could not sign ${t}"
+            failed=$((failed + 1))
+        fi
+    done
+
+    if (( failed )); then
+        warn "${failed} of $((signed + failed)) files could not be signed."
+        echo "        No key was enrolled: a firmware that trusts this machine's key"
+        echo "        and a boot chain that is only partly signed is a machine that"
+        echo "        stops at the loader. Secure Boot stays off and the install is"
+        echo "        otherwise complete."
+        SECUREBOOT_RESULT="failed"
+        return 1
+    fi
+    ok "RavenBoot, the fallback loader and the kernel are signed"
+    SECUREBOOT_RESULT="signed"
+
+    # Informational. Not the gate -- the gate is the per-file exit status
+    # above, because `sbctl verify` walks the whole ESP and reports on files
+    # that are not ours (another OS's loader, on a shared ESP) which are not
+    # this installer's to sign and must not make it look as if something went
+    # wrong.
+    "${sb[@]}" verify 2>/dev/null || true
+
+    [[ "$OPT_SECUREBOOT" == "enroll" ]] || return 0
+
+    # Read the firmware again rather than trusting what preflight saw. Minutes
+    # have passed, and the one thing that must not happen is writing a Platform
+    # Key into a firmware that is no longer in setup mode -- where the write is
+    # refused half way through with some of the other variables already
+    # changed.
+    read_secureboot_state
+    if [[ "$SECUREBOOT_SETUP" != "1" ]]; then
+        warn "The firmware is no longer in setup mode; no key was enrolled."
+        echo "        The binaries are signed, which is harmless and useful: enrolling"
+        echo "        later is one command. See docs/secure-boot.md."
+        return 0
+    fi
+
+    # --microsoft enrols Microsoft's KEK and their two db certificates
+    # alongside ours, and it is not a concession -- it is what keeps the
+    # machine working. Without them a dual-booting machine stops booting
+    # Windows (its loader is signed by exactly those certificates, and
+    # RavenBoot chainloads it through the firmware's LoadImage, which checks),
+    # and any card whose option ROM is signed by them stops initialising,
+    # which on some machines is the discrete GPU and on others is the network
+    # card the firmware boots from. Somebody who genuinely wants only their own
+    # key can run `sbctl enroll-keys` by hand afterwards; that is a decision to
+    # make deliberately on a machine that is already booting, not one to make
+    # for them here.
+    #
+    # The second attempt is for older sbctl, where the same option was spelled
+    # -m. A failed enroll-keys leaves setup mode intact -- there is no Platform
+    # Key either way -- so trying twice costs nothing and risks nothing.
+    info "Enrolling this machine's keys, with Microsoft's certificates alongside them."
+    if "${sb[@]}" enroll-keys --microsoft || "${sb[@]}" enroll-keys -m; then
+        read_secureboot_state
+        if [[ "$SECUREBOOT_SETUP" == "1" ]]; then
+            # The command succeeded and the firmware still says setup mode.
+            # Reported rather than celebrated: some firmware does not update
+            # the variable until the next boot, and some silently discards the
+            # write, and this installer cannot tell those apart.
+            warn "sbctl enroll-keys succeeded, but the firmware still reports setup mode."
+            echo "        That is either a firmware that updates the variable at the next"
+            echo "        boot, or a write it quietly discarded. Check with 'sbctl status'"
+            echo "        after rebooting, BEFORE turning Secure Boot on."
+            SECUREBOOT_RESULT="enrolled"
+            return 0
+        fi
+        ok "Secure Boot keys enrolled; the firmware now holds this machine's Platform Key"
+        SECUREBOOT_RESULT="enrolled"
+        return 0
+    fi
+
+    warn "sbctl enroll-keys failed; no key was enrolled."
+    echo "        The firmware is unchanged and still in setup mode, and the boot"
+    echo "        binaries are signed. Nothing is broken and nothing is half done."
+    echo "        Try it again from the installed system:"
+    secure_boot_manual_steps
+    return 1
+}
+
+# The commands somebody runs by hand when the installer could not. Printed by
+# more than one failure path, so there is one copy of them and it cannot drift
+# from what docs/secure-boot.md says.
+secure_boot_manual_steps() {
+    echo "          sudo sbctl create-keys"
+    echo "          sudo sbctl sign -s /boot/efi/EFI/BOOT/BOOTX64.EFI"
+    echo "          sudo sbctl sign -s /boot/efi/EFI/raven/raven-boot.efi"
+    echo "          sudo sbctl sign -s /boot/efi/EFI/raven/vmlinuz"
+    echo "          sudo sbctl enroll-keys --microsoft    # setup mode only"
+    echo "        Then turn Secure Boot on in the firmware. 'sbctl reset' undoes it."
+}
+
+# =============================================================================
 # Finish
 # =============================================================================
 
@@ -3861,6 +5454,9 @@ finish() {
     umount -R "$TARGET" 2>/dev/null
     # mount(8) attached the loop device for the squashfs; umount detaches it.
     mountpoint -q "$SRCMNT" && umount "$SRCMNT" 2>/dev/null
+    # The install is over, so the containers are locked again rather than left
+    # open on a live session somebody may walk away from.
+    close_crypt_devices
     ok "Filesystems unmounted"
 
     echo
@@ -3882,12 +5478,46 @@ finish() {
         echo "  ${YELLOW}No password was set, and the login screen cannot be passed without one.${NC}"
         echo "  ${YELLOW}Boot 'RavenLinux (rescue shell)' and run passwd ${USERNAME} first.${NC}"
     fi
+    if (( ENCRYPT )); then
+        echo "  ${YELLOW}This disk is encrypted.${NC} Every boot stops at"
+        echo "      Unlock ${DISK} (/dev/mapper/${CRYPT_ROOT_NAME}):"
+        echo "  and waits for the passphrase. It is typed on a US keyboard layout --"
+        echo "  the initramfs loads no keymap -- and there is no recovery key."
+        echo "  Add a second passphrase from the installed system with:"
+        echo "    ${WHITE}cryptsetup luksAddKey ${ROOT_CRYPT_PART}${NC}"
+        echo
+    fi
     echo
     echo "  Before rebooting:"
     echo "    - Remove the installation media."
-    if [[ "$SECUREBOOT_STATE" == "1" ]]; then
-        echo "    - ${YELLOW}Disable Secure Boot${NC} -- RavenBoot is unsigned and will not load."
-    fi
+    case "${SECUREBOOT_RESULT}" in
+        enrolled)
+            echo "    - ${YELLOW}Secure Boot keys are enrolled and the boot chain is signed.${NC}"
+            echo "      Boot this machine ONCE with Secure Boot still off and check that it"
+            echo "      works, then turn Secure Boot on in the firmware. Doing it the other"
+            echo "      way round means finding out in the one place with no error message."
+            echo "      To undo it: ${WHITE}sudo sbctl reset${NC}, or 'restore factory keys' in"
+            echo "      the firmware setup. Kernel modules are not signed and do not need to be."
+            ;;
+        signed)
+            echo "    - RavenBoot and the kernel are signed with this machine's own key,"
+            echo "      but no key is enrolled, so ${YELLOW}Secure Boot must stay off${NC} for now."
+            echo "      To finish: ${WHITE}sudo sbctl enroll-keys --microsoft${NC} with the firmware"
+            echo "      in setup mode, then turn Secure Boot on."
+            ;;
+        failed|skipped)
+            echo "    - ${YELLOW}Secure Boot was not set up${NC} (see the warning above), so it must"
+            echo "      stay off. Nothing was half done and the firmware was not touched."
+            ;;
+        *)
+            if [[ "$SECUREBOOT_STATE" == "1" ]]; then
+                echo "    - ${YELLOW}Disable Secure Boot${NC} -- RavenBoot is unsigned and will not load."
+                echo "      Or, to keep it on: clear the Secure Boot keys in the firmware to"
+                echo "      put it in setup mode, boot this installer again, and choose to"
+                echo "      enrol keys. See docs/secure-boot.md."
+            fi
+            ;;
+    esac
     if [[ $OPT_NVRAM -eq 0 ]]; then
         echo "    - The firmware boots this disk through the removable-media path."
         echo "      If it does not appear, choose the disk directly from the boot menu"
@@ -4165,6 +5795,23 @@ probe_report() {
         "") pk preflight.secureboot unknown ;;
         *)  pk preflight.secureboot off ;;
     esac
+    # Reported separately from `secureboot`, because "off" covers two firmware
+    # states that want opposite things said about them. With a Platform Key
+    # still enrolled, nothing here can put a new one in and the person has to
+    # visit the firmware first; in setup mode there is no Platform Key at all
+    # and enrolment is a command away. A front-end that greyed out the offer
+    # on both would be hiding the one case where it works.
+    case "${SECUREBOOT_SETUP}" in
+        1)  pk preflight.setupmode on ;;
+        "") pk preflight.setupmode unknown ;;
+        *)  pk preflight.setupmode off ;;
+    esac
+    # Whether the system being installed will have sbctl -- either because the
+    # tree being copied has it, or because it is in the package profile that
+    # is going in during this install. The live image's own copy is not asked
+    # about and would not help: sbctl keeps its keys on the machine it runs
+    # on, and the live image's are on a tmpfs. See setup_secure_boot().
+    pk preflight.sbctl "$([[ -n "${SRC_ROOT}" && -x "${SRC_ROOT%/}/usr/bin/sbctl" ]] && echo 1 || echo 0)"
 
     local t missing=()
     for t in sfdisk blkid lsblk findmnt mount umount mountpoint mkfs.vfat wipefs; do
@@ -4177,8 +5824,21 @@ probe_report() {
     # mkfs, three steps after the disk was erased.
     local fs
     for fs in ext4 xfs btrfs; do
-        have "mkfs.${fs}" && pk preflight.fs "$fs"
+        have "mkfs.${fs}" || continue
+        # btrfs needs its second binary too, and for the same reason the rest
+        # of this list exists: mkfs.btrfs makes the filesystem, `btrfs` makes
+        # the @ subvolume the root is mounted from, and offering btrfs on an
+        # image with only the first offers an install that dies after the disk
+        # has been erased. preflight refuses it there; this keeps a front-end
+        # from putting it on the menu in the first place.
+        [[ "$fs" == "btrfs" ]] && ! have btrfs && continue
+        pk preflight.fs "$fs"
     done
+    # Reported separately so a front-end can say *why* btrfs is not on the
+    # list above. "This image cannot make btrfs at all" and "this image can
+    # make the filesystem but not its subvolumes" are different bugs in
+    # different files, and the second one is the surprising one.
+    pk preflight.btrfs_progs "$(have btrfs && echo 1 || echo 0)"
     # The two resizers, reported separately from the required tools because
     # neither is required: they matter only for --alongside, and only for the
     # filesystem each one handles. A front-end greys out "install alongside
@@ -4188,6 +5848,13 @@ probe_report() {
     pk preflight.chpasswd   "$(have chpasswd   && echo 1 || echo 0)"
     pk preflight.mkswap     "$(have mkswap     && echo 1 || echo 0)"
     pk preflight.efibootmgr "$(have efibootmgr && echo 1 || echo 0)"
+    # Whether this image can encrypt a disk at all. A front-end with no
+    # cryptsetup here must not offer the switch: the answer would be accepted,
+    # the plan would say "encrypted", and the install would stop at preflight.
+    pk preflight.cryptsetup "$(have cryptsetup && echo 1 || echo 0)"
+    # And whether it would be fast. Reported separately because it changes
+    # nothing about whether the install works -- see check_encryption_support.
+    pk preflight.aes_ni "$( [[ -r /proc/crypto ]] && grep -q aesni /proc/crypto && echo 1 || echo 0)"
 
     pk source.kind   "${SRC_KIND}"
     pk source.root   "${SRC_ROOT}"
@@ -4234,12 +5901,14 @@ probe_report() {
     # What raven-postinstall will be able to apply, read from the directory
     # rather than listed here, so adding a .packages file adds a profile.
     local p found=0 dir
+    local profiles=()
     for dir in "${SRC_ROOT%/}/etc/raven/install-profiles" /etc/raven/install-profiles; do
         [[ -d "$dir" ]] || continue
         for p in "$dir"/*.packages; do
             [[ -e "$p" ]] || continue
             p="$(basename "$p")"
             pk profile "${p%.packages}"
+            profiles+=("${p%.packages}")
             found=1
         done
         (( found )) && break
@@ -4247,8 +5916,21 @@ probe_report() {
     if (( ! found )); then
         # The three run_wizard accepts. Named here only when the image ships no
         # profile directory to read them from.
-        for p in minimal desktop developer; do pk profile "$p"; done
+        for p in minimal desktop developer; do pk profile "$p"; profiles+=("$p"); done
     fi
+
+    # Which of those profiles would put sbctl on the new system. A front-end
+    # can then tell somebody who picked "desktop" that the Secure Boot option
+    # is open to them, and somebody who picked "minimal" why it is not --
+    # rather than greying out a switch for a reason it cannot name. Read from
+    # the package lists, so adding sbctl to a profile is one edit in one file
+    # and this follows it.
+    local sbprof=()
+    for p in "${profiles[@]:-}"; do
+        [[ -z "$p" ]] && continue
+        profile_names_sbctl "$p" && sbprof+=("$p")
+    done
+    pk preflight.sbctl_profiles "${sbprof[*]:-}"
 
     # The optional applications this media carries, for the front-end's
     # switches. Nothing here is installed unless the answers name it.
@@ -4294,6 +5976,11 @@ main() {
     configure_system
     install_bootloader
     apply_profile_now
+    # After the packages, not with the bootloader, and the ordering is the
+    # whole reason this is a step of its own: sbctl arrives with the desktop
+    # and developer profiles, so on a machine where the packages go in during
+    # the install it exists by now and did not exist an instant earlier.
+    setup_secure_boot
     finish
 
     trap - EXIT

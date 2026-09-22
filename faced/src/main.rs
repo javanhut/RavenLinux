@@ -149,9 +149,12 @@ fn selftest_run() -> anyhow::Result<()> {
         let started = Instant::now();
         let vector = models.embed(&frame, &face)?;
         println!(
-            "frame {frames}: {count} face(s), score {:.2}, fill {:.2},              detect {detect_ms} ms, embed {} ms{}",
+            "frame {frames}: score {:.2}, fill {:.2}, off-centre {:.2}{}, \
+             detect {detect_ms} ms, embed {} ms{}",
             face.score,
             face.fill(frame.width, frame.height),
+            face.off_centre(frame.width, frame.height),
+            if crowded { ", crowded" } else { "" },
             started.elapsed().as_millis(),
             match (&first, &vector) {
                 (Some(a), Some(b)) => format!(", same as the first: {:.3}", store::similarity(a, b)),
