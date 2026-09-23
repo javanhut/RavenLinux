@@ -4075,6 +4075,18 @@ main() {
 
     install_raven_open_names "${src}"
 
+    # The screen backlight is root's, so without this rule huginn's brightness
+    # keys draw their slider marked "not connected" and change nothing. The
+    # rule hands /sys/class/backlight/*/brightness to group video, which the
+    # session already holds for DRM. The keyboard backlight is a different
+    # device and a different rule: 90-raven-controls.rules, from RavenControls.
+    if install -Dm 0644 "${src}/data/90-backlight.rules" \
+            "${SYSROOT_DIR}/etc/udev/rules.d/90-backlight.rules" 2>/dev/null; then
+        log_info "  + 90-backlight.rules (screen backlight for group video)"
+    else
+        log_warn "  no backlight rule staged; the brightness keys will need root"
+    fi
+
     log_step "Staging shared libraries..."
     stage_gui_libraries "${built_paths[@]}"
     stage_gui_data
