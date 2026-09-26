@@ -1,16 +1,17 @@
 # ~/.config/roostbar/config.toml — every key is optional; these are the defaults.
 
 position = "top"          # "top" or "bottom"
-height = 26
+height = 25
 exclusive = true          # reserve the strip so windows never sit under it
 font = "/usr/share/fonts/JetBrainsMonoNerdFontMono-Regular.ttf"
-font_size = 13.0
+font_size = 12.2
 
-# #RRGGBB or #AARRGGBB. Default background is 85% opaque Raven dark.
-background = "#D916161F"
-foreground = "#C0CAF5"
-accent = "#22C5DD"
-muted = "#565F89"
+# #RRGGBB or #AARRGGBB. Default background is 85% opaque Raven dark. Raven
+# Settings rewrites these (and height/font_size, from its interface scale).
+background = "#D816161F"
+foreground = "#E8E8F0"
+accent = "#7AA2F7"
+muted = "#ABABC2"
 warning = "#F7768E"
 charging = ""             # battery reading while plugged in; empty = accent
 

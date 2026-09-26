@@ -13,7 +13,7 @@ show_status_bar = true
 show_sidebar = true
 sidebar_width = 200
 preview_panel_width = 300
-theme = "Frost"
+theme = "Raven"
 view_mode = "List"
 
 [navigation]

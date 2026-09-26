@@ -177,6 +177,7 @@ fn build(app: &adw::Application) {
         .default_height(660)
         .build();
     theme::apply_to_window(&window, &appearance);
+    theme::watch(&window);
 
     // The probe needs root to mount the squashfs and read the firmware's
     // Secure Boot variable, so privilege is settled before anything is asked
