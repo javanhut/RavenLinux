@@ -43,8 +43,9 @@ files = [
     { src = "data/com.ravenviewer.Raven.metainfo.xml", dest = "/usr/share/metainfo/com.ravenviewer.Raven.metainfo.xml", mode = 644 }
 ]
 
-# data/raven-glass*.css are deliberately absent: src/theme.rs include_str!s
-# both, so the stylesheets are inside the binary.
+# Raven Glass, the shared look, is not this package's: the ravengui package
+# installs it to /usr/share/raven/glass/, where src/theme.rs reads it through
+# the raven-glass crate (with a compiled-in copy when it is missing).
 #
 # The upstream data/com.ravenviewer.Raven.desktop is deliberately not in this
 # list either. install_desktop_entries() in scripts/stages/stage-gui.sh writes

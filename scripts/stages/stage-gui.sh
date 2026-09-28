@@ -2293,8 +2293,8 @@ stage_viewer() {
     log_success "  ${VIEWER_BIN} installed ($(du -h "${out}" | cut -f1))"
     stage_gui_libraries "${out}"
 
-    # data/raven-glass*.css are include_str!ed by src/theme.rs, so only the
-    # icon and metainfo ship; the entry is install_desktop_entries' job.
+    # The look comes from /usr/share/raven/glass/ (install_raven_glass), so
+    # only the icon and metainfo ship; the entry is install_desktop_entries' job.
     local appdata="${SYSROOT_DIR}/usr/share"
     install -Dm 0644 "${dest}/data/icons/hicolor/scalable/apps/${VIEWER_APPID}.svg" \
         "${appdata}/icons/hicolor/scalable/apps/${VIEWER_APPID}.svg" 2>/dev/null \
@@ -2373,9 +2373,8 @@ stage_eagleeye() {
     log_success "  ${EAGLEEYE_BIN} installed ($(du -h "${out}" | cut -f1))"
     stage_gui_libraries "${out}"
 
-    # As with Raven Viewer, data/raven-glass*.css are include_str!ed by
-    # src/theme.rs, so only the icon and metainfo ship; the entry is
-    # install_desktop_entries' job.
+    # As with Raven Viewer, the look comes from /usr/share/raven/glass/, so
+    # only the icon and metainfo ship; the entry is install_desktop_entries' job.
     local appdata="${SYSROOT_DIR}/usr/share"
     install -Dm 0644 "${dest}/data/icons/hicolor/scalable/apps/${EAGLEEYE_APPID}.svg" \
         "${appdata}/icons/hicolor/scalable/apps/${EAGLEEYE_APPID}.svg" 2>/dev/null \
@@ -2838,11 +2837,10 @@ stage_player() {
     # listed anywhere, which is the point of doing this with ldd.
     stage_gui_libraries "${out}"
 
-    # As with Raven Viewer and EagleEye, the stylesheets are include_str!ed --
-    # by crates/owl-player/src/theme.rs, which takes all three of
-    # data/raven-glass.css, data/raven-glass-light.css and data/owl-player.css
-    # into the binary -- so only the icon and metainfo ship; the entry is
-    # install_desktop_entries' job.
+    # As with Raven Viewer and EagleEye, the look comes from
+    # /usr/share/raven/glass/ and data/owl-player.css is include_str!ed by
+    # crates/owl-player/src/theme.rs, so only the icon and metainfo ship; the
+    # entry is install_desktop_entries' job.
     local appdata="${SYSROOT_DIR}/usr/share"
     install -Dm 0644 "${dest}/data/icons/hicolor/scalable/apps/${PLAYER_APPID}.svg" \
         "${appdata}/icons/hicolor/scalable/apps/${PLAYER_APPID}.svg" 2>/dev/null \
@@ -3737,6 +3735,31 @@ install_raven_open_names() {
     fi
 }
 
+# Raven Glass, the stylesheets every Raven app reads at start-up through the
+# raven-glass crate (RavenGUI, crates/raven-glass). They live beside the
+# compositor whose glass they match, and are installed here once rather than
+# compiled into each app, so a change to the look is a RavenGUI update and not
+# an edit and a rebuild in every app's repository. An app that cannot read
+# them falls back to the copy compiled into it, so a miss here costs
+# freshness, not the look.
+RAVEN_GLASS_SHEETS=(raven-glass.css raven-glass-light.css)
+install_raven_glass() {
+    local src="$1"
+    local from="${src}/crates/raven-glass/data"
+    local to="${SYSROOT_DIR}/usr/share/raven/glass"
+
+    local sheet
+    for sheet in "${RAVEN_GLASS_SHEETS[@]}"; do
+        if [[ -f "${from}/${sheet}" ]]; then
+            install -Dm 0644 "${from}/${sheet}" "${to}/${sheet}"
+            log_info "    + usr/share/raven/glass/${sheet}"
+        else
+            log_warn "  no crates/raven-glass/data/${sheet} in the RavenGUI checkout:"
+            log_warn "  apps will use the copy compiled into them"
+        fi
+    done
+}
+
 # =============================================================================
 # Summary
 # =============================================================================
@@ -4074,6 +4097,7 @@ main() {
     done
 
     install_raven_open_names "${src}"
+    install_raven_glass "${src}"
 
     # The screen backlight is root's, so without this rule huginn's brightness
     # keys draw their slider marked "not connected" and change nothing. The
