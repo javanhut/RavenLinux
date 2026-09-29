@@ -125,6 +125,10 @@
 #                              record the screen but Huginn's own Super+Print
 #   CAMERA_OFFLINE=1           as GUI_OFFLINE, for the camera app alone
 #   CAMERA_REF=<git-ref>       build a particular RavenCamera ref
+#   MAIL_SKIP=1                skip AirMail; nothing on the image answers a
+#                              mailto: link
+#   MAIL_OFFLINE=1             as GUI_OFFLINE, for the mail client alone
+#   MAIL_REF=<git-ref>         build a particular AirMail ref
 #
 #   TUTORIAL_SKIP=1            don't carry Raven Tutorial for the installer
 #   ORACLE_SKIP=1              don't carry Oracle for the installer
@@ -283,6 +287,18 @@ PLAYER_APPID="com.owlplayer.Raven"
 raven_gui_app_vars CAMERA
 CAMERA_BIN="${CAMERA_BINARIES}"
 CAMERA_APPID="com.ravencamera.Raven"
+
+# AirMail: the mail client, and the default handler for mailto: links on this
+# image. GTK4 + libadwaita like the rest, plus WebKitGTK for the reading pane's
+# HTML mail -- what that adds to the image is spelled out at stage_mail().
+#
+# Its application id is its .desktop stem, its icon name and the app_id its
+# window carries. It is dev.raven.* rather than the com.<name>.Raven every
+# other application here uses because that is the id upstream ships under,
+# and renaming it here would move every user's GApplication name and entry.
+raven_gui_app_vars MAIL
+MAIL_BIN="${MAIL_BINARIES}"
+MAIL_APPID="dev.raven.AirMail"
 
 # The installer's optional applications -- see OPTIONAL_APPS in
 # scripts/lib/components.sh and stage_optional_apps().
@@ -2639,6 +2655,126 @@ stage_camera() {
 }
 
 # =============================================================================
+# AirMail
+# =============================================================================
+# stage_camera's shape: GTK4, optional, every failure warns and returns 0, and
+# built against the RavenGUI checkout beside it -- its .cargo/config.toml
+# patches the raven-glass git dependency to ../RavenGUI, which under
+# GUI_SRC_DIR is the checkout fetch_gui_source() made for the compositor.
+#
+# One addition. The reading pane is a WebKitGTK view, and WebKit does not run
+# in the process that links it: it spawns WebKitWebProcess and
+# WebKitNetworkProcess (and WebKitGPUProcess) from /usr/lib/webkitgtk-6.0, and
+# loads an injected bundle into the first. None of those is NEEDED by airmail,
+# so ldd on the binary finds none of them -- they are staged here and resolved
+# with the same stage_gui_libraries() path as the glycin loaders. Without them
+# the application starts and every HTML message is a blank pane.
+#
+# The web process is sandboxed with bwrap (staged by stage_gtk_runtime for
+# glycin) and talks to D-Bus through xdg-dbus-proxy, which is staged here: a
+# WebKit that cannot start its proxy refuses to start the web process at all.
+#
+# Environment:
+#   MAIL_SKIP=1      skip it; mailto: links then open nothing
+#   MAIL_OFFLINE=1   never touch the network; use the existing clone
+#   MAIL_REF=<ref>   build a particular ref instead of the default
+stage_mail() {
+    if [[ "${MAIL_SKIP:-0}" == "1" ]]; then
+        log_info "  MAIL_SKIP=1: no mail client on the image"
+        return 0
+    fi
+
+    command -v cargo &>/dev/null || {
+        log_warn "  cargo not found; AirMail will not be built"
+        return 0
+    }
+
+    local -a missing=()
+    local mod
+    for mod in gtk4 libadwaita-1 glib-2.0 gio-2.0 webkitgtk-6.0; do
+        pkg-config --exists "${mod}" 2>/dev/null || missing+=("${mod}")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        log_warn "  missing build dependencies for AirMail: ${missing[*]}"
+        log_warn "  install them with: pacman -S --needed gtk4 libadwaita webkitgtk-6.0"
+        log_warn "  the desktop will ship without a mail client"
+        return 0
+    fi
+
+    local dest="${GUI_SRC_DIR}/${MAIL_REPO}"
+    if ! fetch_repo "${MAIL_REPO}" "${MAIL_URL}" "${dest}" \
+            "${MAIL_REF:-}" "${MAIL_OFFLINE:-${GUI_OFFLINE:-0}}" "${MAIL_MANIFEST}"; then
+        log_warn "  AirMail source unavailable; no mail client on the image"
+        return 0
+    fi
+
+    log_info "  building AirMail for ${GUI_TARGET}..."
+    local -a cargo_args=(build --release --target "${GUI_TARGET}")
+    [[ -f "${dest}/Cargo.lock" ]] && cargo_args+=(--locked)
+    if ! ( cd "${dest}" && cargo "${cargo_args[@]}" -j "${RAVEN_JOBS}" ); then
+        log_warn "  AirMail build failed; no mail client on the image"
+        return 0
+    fi
+
+    local out="${dest}/target/${GUI_TARGET}/release/${MAIL_BIN}"
+    if [[ ! -x "${out}" ]]; then
+        log_warn "  AirMail produced no binary; no mail client on the image"
+        return 0
+    fi
+
+    install -Dm 0755 "${out}" "${SYSROOT_DIR}/usr/bin/${MAIL_BIN}"
+    log_success "  ${MAIL_BIN} installed ($(du -h "${out}" | cut -f1))"
+    stage_gui_libraries "${out}"
+
+    # WebKit's helper processes and injected bundle; see above. The directory
+    # is the one pkg-config's libdir names, which is /usr/lib on Arch.
+    local webkit_libdir webkit_dir
+    webkit_libdir="$(pkg-config --variable=libdir webkitgtk-6.0 2>/dev/null || echo /usr/lib)"
+    webkit_dir="${webkit_libdir}/webkitgtk-6.0"
+    if [[ -d "${webkit_dir}" ]]; then
+        mkdir -p "${SYSROOT_DIR}${webkit_dir}"
+        # MiniBrowser is WebKit's test shell, not something this image runs.
+        cp -a "${webkit_dir}/." "${SYSROOT_DIR}${webkit_dir}/" 2>/dev/null || true
+        rm -f "${SYSROOT_DIR}${webkit_dir}/MiniBrowser"
+
+        local -a helpers=()
+        local helper
+        while IFS= read -r helper; do
+            helpers+=("${helper}")
+        done < <(find "${SYSROOT_DIR}${webkit_dir}" -type f \( -perm -u+x -o -name '*.so' \) 2>/dev/null)
+        (( ${#helpers[@]} > 0 )) && stage_gui_libraries "${helpers[@]}"
+        log_info "    + ${webkit_dir#/} (${#helpers[@]} helper(s))"
+    else
+        log_warn "    ${webkit_dir} not on the build host: AirMail will start, but"
+        log_warn "    every HTML message will be a blank pane"
+    fi
+
+    local dbus_proxy
+    dbus_proxy="$(command -v xdg-dbus-proxy 2>/dev/null || true)"
+    if [[ -n "${dbus_proxy}" ]]; then
+        install -Dm 0755 "${dbus_proxy}" "${SYSROOT_DIR}/usr/bin/xdg-dbus-proxy"
+        stage_gui_libraries "${dbus_proxy}"
+        log_info "    + xdg-dbus-proxy"
+    else
+        log_warn "    xdg-dbus-proxy not on the build host: WebKit will not start its"
+        log_warn "    web process, and HTML mail will not display"
+        log_warn "    install it with: pacman -S --needed xdg-dbus-proxy"
+    fi
+
+    # The look comes from /usr/share/raven/glass/ (install_raven_glass), so
+    # only the icon ships; the entry is install_desktop_entries' job.
+    local appdata="${SYSROOT_DIR}/usr/share"
+    install -Dm 0644 "${dest}/data/icons/hicolor/scalable/apps/${MAIL_APPID}.svg" \
+        "${appdata}/icons/hicolor/scalable/apps/${MAIL_APPID}.svg" 2>/dev/null \
+        && log_info "    + ${MAIL_APPID}.svg (hicolor/scalable)" \
+        || log_warn "    no icon in the checkout; the launcher entry will draw blank"
+
+    if declare -F stage_gtk_runtime &>/dev/null; then
+        stage_gtk_runtime
+    fi
+}
+
+# =============================================================================
 # Owl Player
 # =============================================================================
 # The media player. stage_eagleeye's shape again -- optional like every GTK4
@@ -3128,6 +3264,45 @@ ENTRY
         chmod 0644 "${dir}/${CAMERA_APPID}.desktop"
         written=$((written + 1))
         log_info "    + ${CAMERA_APPID}.desktop"
+    fi
+
+    # The mail client, and the only application here that claims a URL scheme
+    # rather than a file type: x-scheme-handler/mailto is what a mailto: link
+    # in a browser, raven-open and Raven Settings' Default applications card
+    # all look up. %u because AirMail takes one link at a time, and hands it
+    # to the running instance if there is one.
+    #
+    # StartupWMClass is the application id, for the same reason as every
+    # entry above: adw::Application sets the window's app_id from it, and
+    # dock::owns checks StartupWMClass first.
+    if [[ -x "${SYSROOT_DIR}/usr/bin/${MAIL_BIN}" ]]; then
+        cat > "${dir}/${MAIL_APPID}.desktop" << ENTRY
+[Desktop Entry]
+Type=Application
+Name=AirMail
+GenericName=Mail Client
+Comment=All your inboxes. One place.
+Exec=${MAIL_BIN} %u
+Icon=${MAIL_APPID}
+Categories=Network;Email;GTK;
+Keywords=Email;Mail;IMAP;SMTP;Inbox;
+MimeType=x-scheme-handler/mailto;
+StartupWMClass=${MAIL_APPID}
+StartupNotify=true
+Terminal=false
+ENTRY
+        chmod 0644 "${dir}/${MAIL_APPID}.desktop"
+        written=$((written + 1))
+        log_info "    + ${MAIL_APPID}.desktop"
+
+        # Appended, like the viewers' and the player's blocks above and for
+        # the same reason: the file manager writes the header, and may not
+        # have run. Nothing else here claims a scheme, so no key collides.
+        local list="${dir}/mimeapps.list"
+        [[ -f "${list}" ]] || printf '[Default Applications]\n' > "${list}"
+        printf 'x-scheme-handler/mailto=%s.desktop\n' "${MAIL_APPID}" >> "${list}"
+        chmod 0644 "${list}"
+        log_info "    + mimeapps.list (mailto)"
     fi
 
     # The one entry on this image that is copied rather than written here.
@@ -4183,6 +4358,12 @@ main() {
     # compiles against the RavenGUI checkout that build fetched.
     log_step "Staging the camera and screen recorder..."
     stage_camera
+
+    # Same rule, and after the camera for the same reason: it builds against
+    # the RavenGUI checkout the compositor build fetched (for raven-glass).
+    # install_desktop_entries() makes it the default for mailto: links.
+    log_step "Staging the mail client..."
+    stage_mail
 
     # Before install_desktop_entries, like the rest: the entry is written only
     # if the binary is there to see. This one also stages a udev rule and the

@@ -114,6 +114,7 @@ line:
 | `eagleeye` | EagleEye | Rust | Image viewer (GTK4, libadwaita); the default for every `image/*` on the image |
 | `owl-player` | OwlPlayer | Rust | Media player (GTK4, libadwaita) built on FFmpeg with its own GL renderer; the default for `video/*` and `audio/*` |
 | `raven-camera` | RavenCamera | Rust | Camera and screen recorder (GTK4, libadwaita): V4L2 webcams, Huginn's `raven_capture_v1`, PipeWire sound, and RavenGUI's own H.264, AAC and MP4 crates, built against the RavenGUI checkout beside it |
+| `airmail` | AirMail | Rust | Mail client (GTK4, libadwaita, WebKitGTK for HTML mail); the default `mailto:` handler |
 | `ravencanvasd`, `ravencanvas` | RavenCanvas | Rust | The wallpaper: a wlr-layer-shell client, and its control CLI |
 | `roostbar` | RoostBar | Rust | Layer-shell status bar, started through the global session.d drop-in |
 | `ravend`, `raven-greeter` | RavenLogin | Rust | The login daemon, which reads `/etc/shadow`, and the login screen, which does not |
@@ -673,7 +674,7 @@ Sets:
 - `packages/raven/` — ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw
 - `packages/gui/` — ravengui (huginn), ravenfilemanager, raven-settings,
   raven-store, raven-power, raven-gaming, raven-controls, raven-viewer,
-  eagleeye, owl-player, raven-camera, ravenlogin, ravencanvas, roostbar. raven-terminal is built by the same stage
+  eagleeye, owl-player, raven-camera, airmail, ravenlogin, ravencanvas, roostbar. raven-terminal is built by the same stage
   from its own repository and is the one GUI component with no manifest here
   yet, which is why its row in `scripts/lib/components.sh` has an empty
   manifest field and `fetch` reports it as unpinned rather than pretending

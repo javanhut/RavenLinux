@@ -327,6 +327,15 @@ RUN pacman -Syu --noconfirm --needed \
         # alsa-lib, which the player's audio output needs, is already in the
         # compositor group above.
         ffmpeg clang lld \
+        # AirMail's reading pane, and the two programs WebKit will not start
+        # its web process without. stage_mail() stages all three.
+        #
+        #   webkitgtk-6.0   the library and headers webkit6-sys links, and the
+        #                   WebKit*Process helpers in /usr/lib/webkitgtk-6.0
+        #                   that no ldd of airmail will ever name.
+        #   xdg-dbus-proxy  the filtered bus the sandboxed web process gets.
+        #                   bubblewrap, its sandbox, is already above.
+        webkitgtk-6.0 xdg-dbus-proxy \
         # The terminal needs no packages of its own. stage-gui.sh builds
         # RavenTerminal from source with `go build -tags wayland`, whose GLFW
         # compiles from vendored C against wayland-client/cursor/egl and
