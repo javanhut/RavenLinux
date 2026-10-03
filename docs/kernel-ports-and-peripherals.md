@@ -390,9 +390,12 @@ command-line transfer tools (`mtp-detect`, `mtp-files`, `gphoto2`). Browsing a
 phone in the file manager is a gvfs backend (`gvfs-mtp`, `gvfs-gphoto2`) and
 gvfs is not shipped -- see "What is still missing" below.
 
-`bluez-obex` is staged and `obexd` runs as a service, which is the receiving
-half of "send this file to that device"; it drops into
-`/var/spool/bluetooth`. Pairing and audio never needed it.
+`bluez-obex` is staged and `obexd` runs as a session service under
+`raven-init --user` -- it needs the session bus, which a boot-time service
+never has. It is the receiving half of "send this file to that device", and
+files land in `~/Downloads/Bluetooth`. Nothing on Raven registers an OBEX
+agent yet, so an incoming push is refused rather than accepted unasked.
+Pairing and audio never needed it.
 
 ## Firmware updates
 

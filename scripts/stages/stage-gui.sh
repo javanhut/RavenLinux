@@ -1843,8 +1843,10 @@ install_peripheral_services() {
         "cupsd:/usr/bin/cupsd:printing"
         "avahi-daemon:/usr/bin/avahi-daemon:network printer and scanner discovery"
         "ipp-usb:/usr/bin/ipp-usb:driverless printing over USB"
-        "obexd:/usr/lib/bluetooth/obexd:Bluetooth file transfer"
     )
+    # obexd is not here: it needs a session bus, so it is a session service
+    # (configs/raven/user-services/obexd.toml), which stage2 installs with the
+    # rest and `raven-init --user` skips when the binary is missing.
     local entry name binary what
     for entry in "${wanted[@]}"; do
         IFS=':' read -r name binary what <<< "${entry}"

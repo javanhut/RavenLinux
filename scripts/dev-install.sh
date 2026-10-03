@@ -169,6 +169,21 @@ install_config() {
     install_file "$src" "$dest" "$mode"
 }
 
+# retire_file <dest> <why>: remove a file the repo used to install and no
+# longer does. Copying configs over never deletes anything, so a drop-in that
+# moved or went away keeps being loaded on every machine that had it.
+retire_file() {
+    local dest="$1" why="$2"
+    [[ -e "$dest" ]] || return 0
+    CHANGED+=("$dest")
+    if (( DRY_RUN )); then
+        log_info "  would remove: $dest ($why)"
+        return 0
+    fi
+    "${SUDO[@]}" rm -f "$dest"
+    log_success "  removed: $dest ($why)"
+}
+
 # -----------------------------------------------------------------------------
 # Targets
 # -----------------------------------------------------------------------------
@@ -329,6 +344,10 @@ do_configs() {
         [[ -e "$f" ]] || continue
         install_file "$f" "/usr/share/raven/user-services/$(basename "$f")" 0644
     done
+    # The reload this triggers forgets obexd's system definition, which is
+    # what ends the once-a-minute restart loop; the session copy starts at
+    # the next login.
+    retire_file /etc/raven/init.d/obexd.toml "now a session service"
     for f in "${RAVEN_ROOT}"/configs/raven/session.d/*; do
         [[ -e "$f" ]] || continue
         install_config "$f" "/etc/raven/session.d/$(basename "$f")" 0755

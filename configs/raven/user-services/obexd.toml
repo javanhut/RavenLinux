@@ -1,0 +1,53 @@
+# obexd -- BlueZ's OBEX server: "send a file to this device", and the client
+# half that `bluetooth-sendto` and `obexctl` drive to send one.
+#
+# This used to be a system service, /etc/raven/init.d/obexd.toml, and it never
+# ran there once. obexd owns org.bluez.obex on the SESSION bus, and a service
+# PID 1 starts at boot has no session bus and cannot be given one: there is no
+# session yet, and later there may be several. Every start died the same way,
+#
+#   Using X11 for dbus-daemon autolaunch was disabled at compile time, set
+#   your DBUS_SESSION_BUS_ADDRESS instead
+#   obexd[9786]: manager_init failed
+#
+# and the supervisor restarted it at the backoff's ceiling, once a minute, for
+# the life of the machine -- 1663 restarts in one boot on the development
+# machine, and a megabyte of those two lines in /var/log/raven/obexd.log
+# across boots. Here it gets the one session bus the launcher
+# exports before backgrounding `raven-init --user`, and it dies with the
+# session it belongs to.
+#
+# The same ordering argument xdg-desktop-portal.toml makes applies: the bus
+# would also activate obexd from /usr/share/dbus-1/services/org.bluez.obex
+# .service, and does not, because this copy owns the name first.
+#
+# No `after`: bluetoothd is a system service, which a session service cannot
+# name. It does not need to. obexd watches org.bluez on the system bus and
+# registers its profiles when bluetoothd appears, so either may start first,
+# and bluetoothd restarting does not take this down with it.
+#
+# Received files land in ~/Downloads/Bluetooth. The subdirectory is not
+# decoration: --root is also the folder obexd's FTP profile serves to a
+# paired device that browses this machine, and the whole of ~/Downloads is
+# more than that device should be able to list. /var/spool/bluetooth, the
+# old root, was a root-owned spool no desktop program looked in. pre_exec
+# makes the directory because obexd only creates its *default* root: given a
+# --root that does not exist it starts, registers every profile, and has
+# nowhere to put the first file it is sent. mkdir -p is idempotent, which
+# pre_exec requires, since it runs before every restart too.
+#
+# Not --auto-accept. Without it an incoming push is offered to whatever has
+# registered an org.bluez.obex.Agent1, and nothing on Raven does yet -- so a
+# push is refused until something asks the person. That is a gap, and the
+# fix for it is an agent that prompts, not a flag that writes whatever any
+# device in range sends into the home directory without asking.
+[[services]]
+name = "obexd"
+description = "Bluetooth file transfer"
+exec = "/usr/lib/bluetooth/obexd"
+args = ["--nodetach", "--root", "${HOME}/Downloads/Bluetooth"]
+pre_exec = ["/usr/bin/mkdir", "-p", "${HOME}/Downloads/Bluetooth"]
+after = []
+restart = true
+enabled = true
+critical = false
