@@ -613,6 +613,30 @@ Each stage is a standalone script under `scripts/stages/` that can be run on its
 own; `scripts/build.sh` sequences them and owns the shared environment
 (`RAVEN_ROOT`, `RAVEN_BUILD`, `SYSROOT_DIR`, and friends).
 
+### Rebuilding the kernel on Raven itself
+
+The stages above run in the Arch build container. A running Raven machine that
+only needs a new kernel (a config change, say) uses
+`scripts/build-kernel-native.sh` instead, via `imlazy kernel-native`. It
+compiles nothing of its own: the kernel comes from the same
+`build-kernel.sh` and evdi from the same `build-evdi.sh` that stage 1 runs, so
+the result is the image's kernel. Around them it:
+
+1. installs the missing build tools with `rvn`, recording every package the
+   install added, dependencies included;
+2. builds as the invoking user;
+3. backs up the running kernel and its modules under
+   `/var/lib/raven/kernel-backup`, installs the new ones on the ESP, in
+   `/boot` and in `/usr/lib/modules`, and adds a RavenBoot entry, "previous
+   kernel, rescue shell", that boots the old kernel;
+4. uninstalls exactly the packages step 1 added and deletes the kernel
+   sources.
+
+The initramfs is left alone: it holds no modules, so the one on the ESP serves
+any kernel built from `configs/kernel/config-6.17-raven`. `imlazy
+kernel-rollback` restores the backup, from the rescue entry if the new kernel
+will not boot. `imlazy kernel-native-stage` builds without installing.
+
 ### Where State Lives
 
 ```

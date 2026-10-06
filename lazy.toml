@@ -127,6 +127,24 @@ desc = "Rebuild only the early userspace image"
 dep = ["permission"]
 run = ["{{run}} {{flags}} initramfs"]
 
+# The native path: build the kernel on a running Raven system, with rvn for
+# the build tools, rather than in the Arch build container. Installs onto
+# this machine's ESP with a backup; see scripts/build-kernel-native.sh.
+[commands.kernel-native]
+desc = "Build the kernel on Raven (rvn deps), install it with a backup, clean up"
+dep = ["permission"]
+run = ["./scripts/build-kernel-native.sh --jobs {{jobs}}"]
+
+[commands.kernel-native-stage]
+desc = "Build the kernel on Raven and stop: staged in build/kernel, not installed"
+dep = ["permission"]
+run = ["./scripts/build-kernel-native.sh --no-install --jobs {{jobs}}"]
+
+[commands.kernel-rollback]
+desc = "Restore the kernel and modules backed up by the last kernel-native install"
+dep = ["permission"]
+run = ["./scripts/build-kernel-native.sh --rollback"]
+
 [commands.test]
 desc = "Run manifest, init, installer, and console-font tests"
 dep = ["permission"]
