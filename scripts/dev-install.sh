@@ -39,6 +39,7 @@
 #               etc/raven/raven-shell -> /usr/bin
 #   configs     etc/raven/{init,power,time}.toml -> /etc/raven,
 #               configs/raven/services/*.toml -> /etc/raven/init.d,
+#               configs/raven/libvirt/*.conf -> /usr/share/raven/libvirt,
 #               configs/raven/session.d/* -> /etc/raven/session.d,
 #               configs/sysctl.d/*.conf -> /usr/lib/sysctl.d,
 #               configs/rvn/hooks.d/*.toml -> /usr/share/rvn/hooks.d,
@@ -343,6 +344,13 @@ do_configs() {
     for f in "${RAVEN_ROOT}"/configs/raven/user-services/*.toml; do
         [[ -e "$f" ]] || continue
         install_file "$f" "/usr/share/raven/user-services/$(basename "$f")" 0644
+    done
+    # libvirtd.toml above starts the daemon with --config pointing here;
+    # without this the drop-in lands and names a file that does not exist.
+    # Vendor directory, as stage2 stages it, so install_file.
+    for f in "${RAVEN_ROOT}"/configs/raven/libvirt/*.conf; do
+        [[ -e "$f" ]] || continue
+        install_file "$f" "/usr/share/raven/libvirt/$(basename "$f")" 0644
     done
     # The reload this triggers forgets obexd's system definition, which is
     # what ends the once-a-minute restart loop; the session copy starts at

@@ -100,9 +100,12 @@ class ImageContract(unittest.TestCase):
         script = source[start:end] + '\nchown() { :; }\ninstall_desktop_defaults\n'
         env = dict(os.environ, PROJECT_ROOT=str(PROJECT), SYSROOT_DIR=str(self.root))
         subprocess.run(['bash', '-e', '-c', script], env=env, check=True)
+        # The shipped defaults, not a second copy of them: the accent was once
+        # pinned here as a literal and drifted from the file it was checking.
+        shipped = contract.tomllib.loads((PROJECT / 'configs/desktop/desktop.toml').read_text())
         for home in ['etc/skel', 'home/raven']:
             config = contract.tomllib.loads((self.root / home / '.config/raven/desktop.toml').read_text())
-            self.assertEqual(config['appearance']['accent'], '#22C5DD')
+            self.assertEqual(config['appearance']['accent'], shipped['appearance']['accent'])
             self.assertEqual(config['appearance']['scale'], 0.9)
             self.assertNotIn('/home/javanstorm', (self.root / home / '.config/raven/config.toml').read_text())
             self.assertFalse((self.root / home / '.config/raven/session.d').exists())
