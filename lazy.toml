@@ -13,16 +13,21 @@ run = "RAVEN_IMAGE='{{image}}' RAVEN_ENGINE='{{engine}}' ./scripts/docker-build.
 flags = "-j {{jobs}} -a {{arch}}"
 rootfs_image = "ravenlinux:latest"
 
-# The VCS checkout doesn't preserve the executable bit on scripts/, so the
-# tasks that run a script fail with "Permission denied". They all depend on
-# this. Scripts call each other across subdirectories and not all end in .sh,
-# so anything with a shebang is marked. No elevation needed: the files belong
-# to the user.
+# The VCS checkout doesn't preserve the executable bit, so the tasks that run
+# a script fail with "Permission denied". They all depend on this. Scripts live
+# well outside scripts/ -- configs/raven-udev, configs/raven-fstrim,
+# etc/raven/raven-shell, installer-ui/dev/fake-raven-install, which the tests
+# execute directly -- and not all end in .sh, so the whole tree is searched and
+# anything with a shebang is marked. build/ and every target/ are skipped:
+# they are build output, not repo files, and build/sysroot holds root-owned
+# files a chmod here would fail on. No elevation needed: the repo's files
+# belong to the user.
 [commands.permission]
-desc = "Make every script under scripts/ (anything with a #! line) executable"
+desc = "Make every script in the repo (anything with a #! line) executable"
 run = ["""
-find scripts -type f | while read -r f; do
-  if head -n1 "$f" | grep -q '^#!'; then chmod +x "$f" || exit 1; fi
+find . \\( -path ./build -o -name target -o -name .ivaldi -o -name node_modules \\) -prune \
+     -o -type f ! -perm -u+x -print | while read -r f; do
+  if head -c2 "$f" 2>/dev/null | grep -q '^#!'; then chmod +x "$f" || exit 1; fi
 done
 """]
 
