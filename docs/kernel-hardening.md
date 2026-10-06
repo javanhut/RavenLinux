@@ -113,7 +113,7 @@ the canonical order. It is now `"landlock,yama"`.
 
 The removed names fall into two groups. Most of them were never built at all:
 `lockdown`, `loadpin`, `safesetid`, `smack`, `tomoyo`, `ipe`, and `bpf` (which
-needs `BPF_SYSCALL`, off here). The other two, `selinux` and `apparmor`, are
+needs `BPF_LSM`, off here). The other two, `selinux` and `apparmor`, are
 compiled in and were being initialised with no policy to load. RavenLinux ships
 no `/etc/selinux`, no `apparmor_parser`, no profiles and no service that would
 load them; an LSM that initialises empty costs its hooks on every syscall path

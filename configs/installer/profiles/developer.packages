@@ -181,3 +181,42 @@ sbctl
 # not install over a file it does not own, so an image-side copy would make
 # `rvn install base-devel` refuse on binutils's own files later.
 binutils
+
+# Virtual machines: QEMU with KVM, and libvirt to manage them.
+#
+# Developer-only, and not in desktop.packages. qemu-desktop and its
+# dependencies are several hundred megabytes, and most desktops never start
+# a VM. Booting a test image of the system you are working on is part of
+# developer work, though, and this repository's own `imlazy qemu` targets
+# assume a qemu-system-x86_64 on the machine.
+#
+#   qemu-desktop  qemu-system-x86_64 with the display, audio and USB
+#                 modules a desktop guest uses (GTK and SDL windows, SPICE,
+#                 virtio-gpu with GL, PipeWire audio, USB redirection).
+#                 Pulls in edk2-ovmf, the UEFI firmware a guest boots.
+#                 qemu-base is the headless subset; qemu-full adds every
+#                 other architecture.
+#   libvirt       libvirtd and virsh. Two service templates come with it,
+#                 libvirtd.toml and virtlogd.toml, and both ship disabled:
+#                 `raven-rc enable virtlogd` and then `raven-rc enable
+#                 libvirtd`. Clients are authorised by membership in the
+#                 libvirt group, not by polkit, because Raven runs no
+#                 polkitd. /usr/share/raven/libvirt/libvirtd.conf says why
+#                 that group is root-equivalent.
+#   dnsmasq       a libvirt optional dependency in name only. libvirt's
+#                 default NAT network (virbr0) runs a dnsmasq for its
+#                 guests' DHCP and DNS, and without it `virsh net-start
+#                 default` fails and every new guest has no network.
+#   swtpm         a software TPM 2.0 for guests. Windows 11 will not
+#                 install without one, and a Linux guest uses it for
+#                 measured boot and to unlock an encrypted disk.
+#
+# The host side is in place already. KVM, vhost, tun, bridge and veth are
+# in the kernel (scripts/kernel-virtualization.sh), and the firewall
+# forwards traffic for virbr* (the guest_bridges rules in
+# /etc/nftables.conf). libvirt's NAT rules go in through nft, which
+# nftables above provides; iptables is not needed.
+qemu-desktop
+libvirt
+dnsmasq
+swtpm

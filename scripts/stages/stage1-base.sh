@@ -100,6 +100,7 @@ build_kernel() {
     local kernel_out="${BUILD_DIR}/kernel/boot/vmlinuz-raven"
     if [[ -f "${kernel_out}" ]]; then
         if find "${PROJECT_ROOT}/scripts/build-kernel.sh" "${PROJECT_ROOT}/scripts/kernel-ports.sh" \
+            "${PROJECT_ROOT}/scripts/kernel-performance.sh" "${PROJECT_ROOT}/scripts/kernel-virtualization.sh" \
             "${PROJECT_ROOT}/configs/kernel" \
             -type f -newer "${kernel_out}" -print -quit 2>/dev/null | grep -q .; then
             # A config edit that only produced a warning here shipped the old

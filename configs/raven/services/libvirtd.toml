@@ -1,0 +1,58 @@
+# libvirtd -- the libvirt daemon that virsh, virt-manager and GNOME Boxes
+# talk to. SHIPPED DISABLED, and a template only: it becomes a drop-in once
+# `rvn install libvirt` has put /usr/bin/libvirtd on the machine. The
+# developer install profile carries libvirt; see
+# configs/installer/profiles/developer.packages.
+#
+# Monolithic libvirtd rather than the split daemons (virtqemud,
+# virtnetworkd, virtstoraged, ...). Upstream prefers the split daemons now,
+# but they are designed around systemd socket activation: each one is
+# started by the first connection to its socket and exits when idle. On
+# raven-init that would mean six supervised processes that all have to be
+# running all the time. libvirtd is all of them in one process, and the
+# package still ships it.
+#
+# Who may connect: the libvirt group, checked by the socket's file mode.
+# Upstream's default asks polkit, and Raven runs no polkitd (see
+# polkitd.toml for why), so with the default, every connection from a
+# non-root user fails with an authentication error. Instead,
+# /usr/share/raven/libvirt/libvirtd.conf sets the read-write socket to mode
+# 0770, group libvirt, with no further authentication. That is the same rule
+# raven-rc and cawd use: group membership on the socket decides. Its header
+# explains why that group is root-equivalent and who should be in it.
+#
+# The --config argument replaces /etc/libvirt/libvirtd.conf rather than
+# adding to it. To go back to the package's own file (to use polkit after
+# all, or to turn on TCP listening), remove the two arguments from
+# /etc/raven/init.d/libvirtd.toml.
+#
+# Why `after = ["dbus", "virtlogd"]`:
+#
+#   dbus      libvirtd uses the system bus to look for firewalld and to
+#             publish its own interface. It starts without the bus, but
+#             logs an error on every network operation.
+#   virtlogd  every QEMU guest's console output goes through it, so a
+#             guest cannot start while it is down. See virtlogd.toml, and
+#             enable that one too.
+#
+#   raven-rc enable virtlogd
+#   raven-rc enable libvirtd
+#
+# Guest networking needs two things outside this file, and both are in the
+# tree already. The kernel needs KVM, vhost, tun and bridge support
+# (scripts/kernel-virtualization.sh). The firewall must forward traffic
+# from virbr* and accept DHCP and DNS from it (the guest_bridges rules in
+# /etc/nftables.conf). libvirt's own NAT rules go into a table of its own
+# through nft, which the nftables package provides.
+[[services]]
+name = "libvirtd"
+description = "libvirt virtualization daemon (QEMU/KVM guests, virtual networks, storage pools)"
+exec = "/usr/bin/libvirtd"
+args = ["--config", "/usr/share/raven/libvirt/libvirtd.conf"]
+after = ["dbus", "virtlogd"]
+runtime_dirs = ["/run/libvirt"]
+ready_path = "/run/libvirt/libvirt-sock"
+ready_timeout = 15
+restart = true
+enabled = false
+critical = false
