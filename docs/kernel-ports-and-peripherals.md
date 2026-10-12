@@ -249,7 +249,11 @@ An input someone already set to 100% keeps what they chose; `wpctl set-volume
 
 Game controllers: `INPUT_JOYDEV`, `JOYSTICK_XPAD` (Xbox, wired and wireless
 dongle), `HID_PLAYSTATION`, `HID_NINTENDO`, `HID_STEAM`, `HID_GOOGLE_STADIA_FF`,
-all with force feedback. `INPUT_UINPUT=y` for virtual input devices. The HID
+all with force feedback. `INPUT_UINPUT=y` for virtual input devices, and
+`UHID=y` for Bluetooth ones: BlueZ creates every Bluetooth keyboard, mouse and
+controller through `/dev/uhid`, and without it they pair and connect but send
+no input. `CRYPTO_USER_API_HASH` and `CRYPTO_USER_API_SKCIPHER` give
+bluetoothd the AF_ALG sockets it does its AES over. The HID
 sensor hub with accelerometer and ambient-light drivers over IIO, for
 auto-rotate and auto-brightness on convertibles. Card readers over USB
 (`MISC_RTSX_USB`, `MMC_REALTEK_USB`) alongside the PCI ones. Webcams via

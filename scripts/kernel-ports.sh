@@ -164,6 +164,17 @@ m BT_HCIBTUSB BT_HCIUART BT_INTEL_PCIE BT_MTKUART BT_NXPUART
 m BT_HCIBCM203X BT_HCIBFUSB
 m BT_INTEL BT_BCM BT_RTL BT_QCA BT_MTK
 
+# --- Bluetooth: what bluetoothd asks the kernel for ----------------------------
+# bluetoothd does its AES in the kernel, over AF_ALG sockets: cmac(aes) for
+# the GATT database hash and signed writes, ecb(aes) to resolve a private LE
+# address and for the LE Audio set key. Without the two interfaces socket()
+# fails with EAFNOSUPPORT, bluetoothd carries on without a crypto handle, and
+# each of those quietly does not happen. Only the two it opens: RNG and AEAD
+# stay off (AEAD is bluetooth-meshd's, which is not shipped), and so do the
+# obsolete algorithms the interface would otherwise expose.
+y CRYPTO_USER_API_HASH CRYPTO_USER_API_SKCIPHER
+n CRYPTO_USER_API_ENABLE_OBSOLETE
+
 # --- Mobile broadband: the WWAN card in a business laptop --------------------
 # Without the WWAN class the modem enumerates and stops there: no /dev/wwan*,
 # no control port, nothing for a userspace dialler to talk to. The USB side
