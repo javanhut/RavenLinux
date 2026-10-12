@@ -126,6 +126,7 @@ m MISC_RTSX_USB MMC_REALTEK_USB       # USB card readers in docks
 
 # --- Input: controllers, virtual devices, sensors ------------------------------
 y INPUT_JOYDEV INPUT_UINPUT
+y UHID                                # BlueZ creates every Bluetooth keyboard, mouse and pad through /dev/uhid
 y HID_PLAYSTATION HID_NINTENDO HID_STEAM HID_GOOGLE_STADIA_FF
 y PLAYSTATION_FF NINTENDO_FF
 y JOYSTICK_XPAD JOYSTICK_XPAD_FF JOYSTICK_XPAD_LEDS INPUT_JOYSTICK
