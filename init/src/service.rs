@@ -344,6 +344,13 @@ pub struct ServiceSnapshot {
     pub restart_count: u32,
     #[serde(default)]
     pub manually_stopped: bool,
+    /// The most recent failure, as `raven-rc status` words it, and when. Only
+    /// the words cross the exec: the record in failures.log was written by
+    /// the supervisor that saw it, and must not be written twice.
+    #[serde(default)]
+    pub last_failure: Option<String>,
+    #[serde(default)]
+    pub last_failure_mono: Option<f64>,
     /// The seconds-since-then fields this file carried before the readings
     /// above. Still written, and still read when the reading beside them is
     /// absent.
@@ -459,6 +466,30 @@ pub struct Service {
     /// happened. Two console lines a second for the life of the boot is
     /// precisely the flood it exists to stop.
     start_failed: bool,
+    /// Set when the supervisor or an operator asked this run to end, by
+    /// [`Service::stop`] or [`Service::kill`], and cleared when the next run
+    /// starts.
+    ///
+    /// `manually_stopped` cannot answer "was this death asked for": shutdown
+    /// and `restart` stop services without setting it, and a SIGTERM the
+    /// supervisor sent itself is not a crash however the process reports it.
+    /// Only the failure record reads this; the restart decision does not.
+    stopping: bool,
+    /// How long `<name>.log` was when this run started, so the failure record
+    /// shows this run's output rather than the last thing anyone printed.
+    log_offset: Option<u64>,
+    /// How the most recent run ended, or why the most recent start did not
+    /// produce one. What the restart line on the console says.
+    last_cause: Option<crate::failures::Cause>,
+    /// The most recent failure, for `raven-rc status`.
+    last_failure: Option<crate::failures::Failure>,
+    /// Whether `last_failure` is still to be written to failures.log. Taken
+    /// by the main loop, which is the one place every detection path -- the
+    /// reaper, `poll_exit`, a failed restart -- passes through.
+    failure_unrecorded: bool,
+    /// A fingerprint of the output under this service's previous failure
+    /// record, so a crash loop repeats the header but not the backtrace.
+    last_output: Option<u64>,
 }
 
 impl Service {
@@ -482,6 +513,12 @@ impl Service {
             manually_stopped: false,
             kill_at: None,
             start_failed: false,
+            stopping: false,
+            log_offset: None,
+            last_cause: None,
+            last_failure: None,
+            failure_unrecorded: false,
+            last_output: None,
         };
 
         service.do_start()?;
@@ -504,6 +541,11 @@ impl Service {
             last_restart_mono: self.last_restart.map(crate::timeline::instant_secs),
             restart_count: self.restart_count,
             manually_stopped: self.manually_stopped,
+            last_failure: self.last_failure.as_ref().map(|f| f.summary()),
+            last_failure_mono: self
+                .last_failure
+                .as_ref()
+                .map(|f| crate::timeline::instant_secs(f.at)),
             // Written for an older raven-init that reads nothing else; see
             // `ServiceSnapshot::uptime_secs`.
             uptime_secs: self
@@ -561,6 +603,21 @@ impl Service {
         let first_started_at = at(snapshot.first_started_mono).or(started_at);
         let first_ready_at = at(snapshot.first_ready_mono).or(ready_at);
         let last_restart = at(snapshot.last_restart_mono);
+        // Rebuilt for `status` alone. The words already include the run's
+        // length, so `ran_for` stays empty rather than being said twice, and
+        // the wall time is a reconstruction nothing reads: a failure carried
+        // across an exec is never written to failures.log again.
+        let last_failure = snapshot.last_failure.as_ref().and_then(|text| {
+            let at = at(snapshot.last_failure_mono)?;
+            Some(crate::failures::Failure {
+                cause: crate::failures::Cause::failed(text.clone()),
+                at,
+                wall: std::time::SystemTime::now()
+                    .checked_sub(now.saturating_duration_since(at))
+                    .unwrap_or_else(std::time::SystemTime::now),
+                ran_for: None,
+            })
+        });
 
         match alive {
             Some(pid) => Self {
@@ -601,6 +658,12 @@ impl Service {
                 // still there -- so the run they describe is a run the
                 // stability test is entitled to believe.
                 start_failed: false,
+                stopping: false,
+                log_offset: None,
+                last_cause: None,
+                last_failure: last_failure.clone(),
+                failure_unrecorded: false,
+                last_output: None,
             },
             None => Self {
                 config,
@@ -637,6 +700,12 @@ impl Service {
                 // the failure this flag is about is one this supervisor has
                 // not had yet.
                 start_failed: false,
+                stopping: false,
+                log_offset: None,
+                last_cause: None,
+                last_failure,
+                failure_unrecorded: false,
+                last_output: None,
             },
         }
     }
@@ -754,6 +823,10 @@ impl Service {
         // set without each of them having to remember to. What depends on it
         // is the restart backoff; see the field's own comment.
         self.start_failed = true;
+
+        // Before the pre_exec hook, whose output is this start's as much as
+        // the daemon's is. A log that does not exist yet starts at zero.
+        self.log_offset = Some(crate::failures::log_len(&Self::log_dir(), &self.config.name));
 
         // Checked before anything is created or forked, so the reply names the
         // real problem instead of an errno from deep inside spawn().
@@ -944,6 +1017,8 @@ impl Service {
         // There is a process, so `started_at` above now describes this run and
         // the stability test may believe it again.
         self.start_failed = false;
+        // Nobody has asked *this* run to stop.
+        self.stopping = false;
 
         log::debug!("Service {} started with PID {}", self.config.name, pid);
 
@@ -1099,6 +1174,7 @@ impl Service {
                 // As in `do_start`: the fork returned a child, so this run is
                 // real and the times just recorded describe it.
                 self.start_failed = false;
+                self.stopping = false;
 
                 log::info!(
                     "Service {} started with PID {} on TTY {}",
@@ -1252,9 +1328,19 @@ impl Service {
                 let delay = restart_delay(attempt);
                 let at = now + delay;
                 self.retry_at = Some(at);
-                log::warn!(
-                    "Service {} died; restarting in {}s (attempt {})",
+                // The one console line a death gets, so it carries the cause:
+                // "died" said the same about a segfault and a clean exit. A
+                // crash is said at ERROR, everything else at WARN, as before.
+                let (why, level) = match &self.last_cause {
+                    Some(cause) if cause.is_failure() => (cause.text.as_str(), cause.level()),
+                    Some(cause) => (cause.text.as_str(), log::Level::Warn),
+                    None => ("died", log::Level::Warn),
+                };
+                log::log!(
+                    level,
+                    "Service {} {}; restarting in {}s (attempt {})",
                     self.config.name,
+                    why,
                     delay.as_secs(),
                     attempt
                 );
@@ -1332,10 +1418,21 @@ impl Service {
         } else {
             log::info!("Service {} exited with status {}", self.config.name, status);
         }
+
+        self.note_death(crate::failures::Cause::from_exit(status));
     }
 
-    /// Mark service as killed by signal
-    pub fn mark_signaled(&mut self, signal: Signal) {
+    /// Mark service as killed by signal.
+    ///
+    /// `core_dumped` is the flag `waitpid` reports beside the signal.
+    pub fn mark_signaled(&mut self, signal: Signal, core_dumped: bool) {
+        // Before the cgroup goes: its OOM counter is the only witness to who
+        // sent a SIGKILL, and it is removed with the directory.
+        let oom_killed = signal == Signal::SIGKILL
+            && crate::cgroup::Cgroup::existing(&self.config.name)
+                .and_then(|c| c.oom_kills())
+                .is_some_and(|n| n > 0);
+
         self.state = ServiceState::Signaled;
         self.exit_signal = Some(signal);
         self.exited_at = Some(Instant::now());
@@ -1344,6 +1441,87 @@ impl Service {
         self.release_cgroup();
 
         log::info!("Service {} killed by signal {:?}", self.config.name, signal);
+
+        self.note_death(crate::failures::Cause::from_signal(signal, core_dumped, oom_killed));
+    }
+
+    /// Remember how a run ended, and queue it for failures.log if it failed.
+    ///
+    /// A death somebody asked for is never a failure, whatever it looks like:
+    /// a daemon that answers SIGTERM by exiting 1, or by dying of the SIGTERM,
+    /// did what it was told. The cause is kept all the same, as a clean one,
+    /// so the console says what happened if it is restarted anyway.
+    fn note_death(&mut self, cause: crate::failures::Cause) {
+        let cause = if self.stopping || self.manually_stopped {
+            crate::failures::Cause {
+                kind: crate::failures::Kind::Clean,
+                text: format!("stopped ({})", cause.text),
+            }
+        } else {
+            cause
+        };
+
+        if cause.is_failure() {
+            let ran_for = match (self.started_at, self.exited_at) {
+                (Some(started), Some(exited)) => Some(exited.saturating_duration_since(started)),
+                _ => None,
+            };
+            self.note_failure(crate::failures::Failure::now(cause.clone(), ran_for));
+        }
+        self.last_cause = Some(cause);
+    }
+
+    /// Queue a failure for the main loop to write down.
+    fn note_failure(&mut self, failure: crate::failures::Failure) {
+        self.last_cause = Some(failure.cause.clone());
+        self.last_failure = Some(failure);
+        self.failure_unrecorded = true;
+    }
+
+    /// A start that produced no process is a failure like any other, and the
+    /// reason it gives is the only thing worth knowing about it.
+    fn note_start_failure(&mut self, error: &anyhow::Error) {
+        self.note_failure(crate::failures::Failure::now(
+            crate::failures::Cause::failed(format!("failed to start: {:#}", error)),
+            None,
+        ));
+    }
+
+    /// The failure still to be written to failures.log, if there is one, and
+    /// what to put under it. Taking it marks it written.
+    ///
+    /// The output is the run's own -- from where the log stood when it
+    /// started -- and is replaced by a one-line note when it is the same as
+    /// under this service's previous record, which in a crash loop it usually
+    /// is.
+    pub fn take_unrecorded_failure(
+        &mut self,
+    ) -> Option<(crate::failures::Failure, crate::failures::Output)> {
+        if !std::mem::take(&mut self.failure_unrecorded) {
+            return None;
+        }
+        let failure = self.last_failure.clone()?;
+
+        let lines = crate::failures::output_since(
+            &crate::failures::log_path(&Self::log_dir(), &self.config.name),
+            self.log_offset,
+        );
+        let output = if lines.is_empty() {
+            crate::failures::Output::None
+        } else {
+            let digest = crate::failures::digest(&lines);
+            if self.last_output.replace(digest) == Some(digest) {
+                crate::failures::Output::Unchanged
+            } else {
+                crate::failures::Output::Lines(lines)
+            }
+        };
+        Some((failure, output))
+    }
+
+    /// The most recent failure, for `raven-rc status`.
+    pub fn last_failure(&self) -> Option<&crate::failures::Failure> {
+        self.last_failure.as_ref()
     }
 
     /// Restart the service
@@ -1366,6 +1544,7 @@ impl Service {
         );
 
         self.do_start()
+            .inspect_err(|e| self.note_start_failure(e))
     }
 
     /// Whether this service has a stop command configured.
@@ -1445,6 +1624,7 @@ impl Service {
     /// this too, and there the distinction is meaningless. Use
     /// [`Service::stop_by_request`] for an operator-initiated stop.
     pub fn stop(&mut self) {
+        self.stopping = true;
         if let Some(pid) = self.pid {
             log::debug!("Sending SIGTERM to {} (leader {})", self.config.name, pid);
             self.signal_everything(pid, Signal::SIGTERM);
@@ -1583,7 +1763,7 @@ impl Service {
 
         match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::Exited(_, status)) => self.mark_exited(status),
-            Ok(WaitStatus::Signaled(_, sig, _)) => self.mark_signaled(sig),
+            Ok(WaitStatus::Signaled(_, sig, core)) => self.mark_signaled(sig, core),
             Ok(WaitStatus::StillAlive) => {}
             // ECHILD: the main loop's reaper got there first.
             Err(_) => {
@@ -1616,8 +1796,8 @@ impl Service {
                     self.mark_exited(status);
                     return;
                 }
-                Ok(WaitStatus::Signaled(_, sig, _)) => {
-                    self.mark_signaled(sig);
+                Ok(WaitStatus::Signaled(_, sig, core)) => {
+                    self.mark_signaled(sig, core);
                     return;
                 }
                 Ok(WaitStatus::StillAlive) => {
@@ -1729,6 +1909,7 @@ impl Service {
         self.state = ServiceState::Stopped;
 
         self.do_start()
+            .inspect_err(|e| self.note_start_failure(e))
     }
 
     /// True while the service has a live process.
@@ -1918,6 +2099,7 @@ impl Service {
 
     /// Kill the service (SIGKILL)
     pub fn kill(&mut self) {
+        self.stopping = true;
         if let Some(pid) = self.pid {
             log::debug!("Sending SIGKILL to {} (leader {})", self.config.name, pid);
             self.signal_everything(pid, Signal::SIGKILL);
@@ -1981,6 +2163,12 @@ mod restart_backoff_tests {
             manually_stopped: false,
             kill_at: None,
             start_failed: false,
+            stopping: false,
+            log_offset: None,
+            last_cause: None,
+            last_failure: None,
+            failure_unrecorded: false,
+            last_output: None,
         }
     }
 

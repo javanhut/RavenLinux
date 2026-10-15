@@ -31,6 +31,11 @@ mod service;
 #[allow(dead_code)]
 #[path = "../src/user.rs"]
 mod user;
+// service.rs classifies every death and queues failures through
+// `crate::failures`, and control.rs records a start that never ran there.
+#[allow(dead_code)]
+#[path = "../src/failures.rs"]
+mod failures;
 // reload re-runs the boot-time transforms, so control.rs names `crate::overrides`
 // as well. It in turn reaches for `crate::config` and `crate::user`, both above.
 #[allow(dead_code)]
@@ -76,6 +81,11 @@ static CGROUP_ROOT_ENV: Mutex<()> = Mutex::new(());
 /// path and reports a refusal where it expected a plan. The failure names the
 /// wrong test and looks like a broken `reexec`.
 static INIT_EXE_ENV: Mutex<()> = Mutex::new(());
+
+/// The same treatment for `$RAVEN_SERVICE_LOG_DIR`, which `Service::log_dir`
+/// reads on every start and every failure record: a test that set it and one
+/// that removed it in between would find each other's logs, or none.
+static SERVICE_LOG_DIR_ENV: Mutex<()> = Mutex::new(());
 
 use config::{InitConfig, ServiceConfig, SystemConfig};
 use control::Action;
@@ -1061,6 +1071,7 @@ fn runtime_dirs_are_created_and_output_goes_to_the_log() {
     let logs = root.join("logs");
     let rundir = root.join("run/dbus-like");
 
+    let _env = SERVICE_LOG_DIR_ENV.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("RAVEN_SERVICE_LOG_DIR", &logs);
 
     let cfg_svc = ServiceConfig {
@@ -3576,4 +3587,198 @@ fn a_service_leads_its_own_session_and_process_group() {
     );
 
     svc.kill();
+}
+
+/// A scratch log directory, with `$RAVEN_SERVICE_LOG_DIR` pointed at it for as
+/// long as the guard lives.
+struct LogDir {
+    root: std::path::PathBuf,
+    _env: std::sync::MutexGuard<'static, ()>,
+}
+
+impl LogDir {
+    fn new(tag: &str) -> Self {
+        let env = SERVICE_LOG_DIR_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("raven-fail-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("RAVEN_SERVICE_LOG_DIR", &root);
+        Self { root, _env: env }
+    }
+}
+
+impl Drop for LogDir {
+    fn drop(&mut self) {
+        std::env::remove_var("RAVEN_SERVICE_LOG_DIR");
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// A service that prints a line and then dies of SIGSEGV, the way a real
+/// crash looks from outside: output first, then a signal nobody sent.
+fn crasher(name: &str) -> ServiceConfig {
+    ServiceConfig {
+        name: name.to_string(),
+        description: "segfaults".to_string(),
+        exec: "/bin/sh".to_string(),
+        args: vec!["-c".to_string(), "echo about to fall over; kill -SEGV $$".to_string()],
+        restart: true,
+        ..ServiceConfig::default()
+    }
+}
+
+/// The whole point of failures.log: a crash is named as one, and the record
+/// carries what the service printed on the way down.
+#[test]
+fn a_crash_is_recorded_as_a_crash_with_the_runs_output() {
+    let logs = LogDir::new("crash");
+    let mut svc = Service::start(&crasher("crashy")).expect("starts");
+    svc.wait_for_exit(Duration::from_secs(5));
+
+    let (failure, output) = svc.take_unrecorded_failure().expect("a crash is a failure");
+    assert_eq!(failure.cause.kind, failures::Kind::Crashed);
+    assert!(
+        failure.cause.text.starts_with("crashed: SIGSEGV (segmentation fault)"),
+        "{}",
+        failure.cause.text
+    );
+    assert_eq!(
+        output,
+        failures::Output::Lines(vec!["about to fall over".to_string()])
+    );
+    assert!(
+        svc.take_unrecorded_failure().is_none(),
+        "taking it marks it written; a second pass must not write it again"
+    );
+
+    failures::record(&logs.root, "crashy", &failure, &output).unwrap();
+    let text = std::fs::read_to_string(failures::path_in(&logs.root)).unwrap();
+    assert!(text.contains(" crashy: crashed: SIGSEGV"), "{text}");
+    assert!(text.contains("    | about to fall over"), "{text}");
+}
+
+/// A crash loop repeats the header, which is what happened, and not the
+/// output, which is the same backtrace forty times.
+#[test]
+fn the_same_output_twice_is_not_written_twice() {
+    let _logs = LogDir::new("repeat");
+    let mut svc = Service::start(&crasher("loopy")).expect("starts");
+    svc.wait_for_exit(Duration::from_secs(5));
+    let (_, first) = svc.take_unrecorded_failure().expect("first crash");
+    assert!(matches!(first, failures::Output::Lines(_)), "{first:?}");
+
+    svc.restart().expect("restarts");
+    svc.wait_for_exit(Duration::from_secs(5));
+    let (failure, second) = svc.take_unrecorded_failure().expect("second crash");
+    assert_eq!(failure.cause.kind, failures::Kind::Crashed);
+    assert_eq!(
+        second,
+        failures::Output::Unchanged,
+        "only this run's output is compared, and it is the same as last time"
+    );
+}
+
+/// A death somebody asked for is not a failure, however the process takes it.
+/// `sleep` dies of the SIGTERM, which without the `stopping` flag would read
+/// exactly like a service killed by a stranger.
+#[test]
+fn a_requested_stop_is_not_a_failure() {
+    let _logs = LogDir::new("stop");
+    let mut svc = Service::start(&sleeper("asked-to-go")).expect("starts");
+    svc.stop_by_request();
+    svc.wait_for_exit(Duration::from_secs(5));
+
+    assert!(svc.take_unrecorded_failure().is_none());
+    assert!(svc.last_failure().is_none());
+}
+
+/// Shutdown stops services with `stop`, which does not set `manually_stopped`;
+/// a machine powering off must not log every daemon as killed.
+#[test]
+fn a_shutdown_stop_is_not_a_failure_either() {
+    let _logs = LogDir::new("shutdown");
+    let mut svc = Service::start(&sleeper("going-down")).expect("starts");
+    svc.stop();
+    svc.wait_for_exit(Duration::from_secs(5));
+
+    assert!(svc.take_unrecorded_failure().is_none());
+}
+
+/// A non-zero exit is a failure, and a start that never reached a process is
+/// one too -- with the reason it gave.
+#[test]
+fn a_failed_exit_and_a_failed_start_are_both_recorded() {
+    let _logs = LogDir::new("exit");
+    let cfg_svc = ServiceConfig {
+        name: "quits".to_string(),
+        exec: "/bin/sh".to_string(),
+        args: vec!["-c".to_string(), "exit 3".to_string()],
+        restart: true,
+        ..ServiceConfig::default()
+    };
+    let mut svc = Service::start(&cfg_svc).expect("starts");
+    svc.wait_for_exit(Duration::from_secs(5));
+    let (failure, _) = svc.take_unrecorded_failure().expect("exit 3 is a failure");
+    assert_eq!(failure.cause.kind, failures::Kind::Failed);
+    assert_eq!(failure.cause.text, "exited with status 3");
+
+    // The binary disappears between runs.
+    let mut svc = Service::adopt(
+        service::ServiceSnapshot {
+            config: ServiceConfig {
+                exec: "/nonexistent/raven-failure-probe".to_string(),
+                ..cfg_svc.clone()
+            },
+            ..Default::default()
+        },
+        ServiceConfig {
+            exec: "/nonexistent/raven-failure-probe".to_string(),
+            ..cfg_svc
+        },
+    );
+    assert!(svc.restart().is_err());
+    let (failure, output) = svc.take_unrecorded_failure().expect("a failed start is a failure");
+    assert!(
+        failure.cause.text.starts_with("failed to start: "),
+        "{}",
+        failure.cause.text
+    );
+    assert!(failure.ran_for.is_none(), "there was no run to time");
+    assert_eq!(output, failures::Output::None);
+}
+
+/// `status` says why a service last went wrong, which the restart count alone
+/// cannot -- and keeps saying it after the service is back up.
+#[test]
+fn status_names_the_last_failure() {
+    let _logs = LogDir::new("status");
+    let cfg_svc = crasher("flaky");
+    let mut cfg = config_with(vec![cfg_svc.clone()]);
+    let mut svc = Service::start(&cfg_svc).expect("starts");
+    svc.wait_for_exit(Duration::from_secs(5));
+
+    let mut services = HashMap::new();
+    services.insert("flaky".to_string(), svc);
+    let (reply, _) = control::dispatch("status flaky", &mut services, &mut cfg);
+    assert!(reply.contains("last failure"), "{reply}");
+    assert!(reply.contains("crashed: SIGSEGV"), "{reply}");
+    assert!(reply.contains("raven-rc failures flaky"), "{reply}");
+}
+
+/// The words survive a re-exec, so `status` does not forget a crash because
+/// PID 1 was swapped -- but the record is not queued again, because the
+/// supervisor that saw it already wrote it.
+#[test]
+fn the_last_failure_crosses_a_reexec_without_being_rewritten() {
+    let _logs = LogDir::new("reexec");
+    let mut svc = Service::start(&crasher("handed-over")).expect("starts");
+    svc.wait_for_exit(Duration::from_secs(5));
+    let _ = svc.take_unrecorded_failure();
+    let summary = svc.last_failure().expect("failed").summary();
+
+    let snapshot = svc.snapshot();
+    let config = snapshot.config.clone();
+    let mut adopted = Service::adopt(snapshot, config);
+    assert_eq!(adopted.last_failure().map(|f| f.summary()), Some(summary));
+    assert!(adopted.take_unrecorded_failure().is_none());
 }

@@ -5,6 +5,7 @@
 //!   status [NAME]    - System status, or one service in detail
 //!   blame            - Boot timeline: when each service started and was ready, slowest first
 //!   logs NAME [-f]   - Show the tail of a service's log, and follow it with -f
+//!   failures [NAME]  - Crashes and failed starts from failures.log; -b this boot, -n N
 //!   start NAME       - Start a stopped service
 //!   stop NAME        - Stop a running service, and keep it stopped
 //!   restart NAME     - Stop then start a service
@@ -37,6 +38,10 @@
 //! socket: init answers a request on PID 1's own thread with a 200ms client
 //! timeout (control.rs), and a connection held open for as long as somebody
 //! watches a log would be a connection holding the supervisor still.
+//!
+//! `failures` is the same kind of verb for the same reasons: init appends a
+//! record to failures.log beside the service logs whenever a service crashes,
+//! exits non-zero or cannot be started (see failures.rs), and this reads it.
 
 use std::collections::VecDeque;
 use std::env;
@@ -186,6 +191,13 @@ const SERVICE_VERBS: &[(&str, Arity, &str)] = &[
         Arity::Required,
         "Show a service's log; -f follows it",
     ),
+    // Optional, and dispatched by hand like `logs`: the record is a file,
+    // and its flags are parsed by `parse_failures_args`.
+    (
+        "failures",
+        Arity::Optional,
+        "Crashes and failed starts; -b this boot, -n N",
+    ),
     ("start", Arity::Required, "Start a stopped service"),
     (
         "stop",
@@ -308,6 +320,7 @@ fn main() {
         // the same, so it is advertised and so `every_advertised_verb_has_an_arity`
         // still covers it.
         "logs" => do_logs(operands),
+        "failures" => do_failures(operands),
         verb => match arity_of(verb) {
             Some(Arity::None) => do_ask(verb),
             Some(Arity::Optional) => match operand {
@@ -1367,6 +1380,201 @@ fn emit(out: &mut dyn Write, bytes: &[u8]) {
     }
 }
 
+/// Must match `failures::FILE_NAME` in init.
+const FAILURES_FILE: &str = "failures.log";
+
+/// How many records `failures` shows unless told otherwise.
+const FAILURES_SHOWN: usize = 20;
+
+/// How many lines of failures.log to read back through looking for them. A
+/// record is a header and at most ten lines of output, so this holds hundreds
+/// of records whatever the filter -- far more than anyone reads at once --
+/// while still bounding the read on a file rotation lets grow to 10MB.
+const FAILURES_LINES: usize = 20_000;
+
+/// What `raven-rc failures ...` was asked for.
+#[derive(Debug, PartialEq)]
+struct FailuresRequest {
+    name: Option<String>,
+    this_boot: bool,
+    count: usize,
+}
+
+/// `[NAME] [-b] [-n N]`, in any order, as `logs` takes its `-f`.
+fn parse_failures_args(operands: &[String]) -> Result<FailuresRequest, String> {
+    let usage = "try: raven-rc failures [service] [-b] [-n N]";
+    let mut request = FailuresRequest {
+        name: None,
+        this_boot: false,
+        count: FAILURES_SHOWN,
+    };
+    let mut args = operands.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-b" | "--boot" => request.this_boot = true,
+            "-n" => {
+                request.count = args
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| format!("failures: -n needs a positive number\n{usage}"))?;
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("failures: unknown option '{other}'\n{usage}"));
+            }
+            other => {
+                if other.contains('/') || other.starts_with('.') {
+                    return Err(format!("failures: no such service '{other}'"));
+                }
+                if let Some(first) = &request.name {
+                    return Err(format!(
+                        "failures: one service at a time ('{first}' and then '{other}')\n{usage}"
+                    ));
+                }
+                request.name = Some(other.to_string());
+            }
+        }
+    }
+    Ok(request)
+}
+
+/// The records in `text` that match, oldest first, at most `count` of them.
+///
+/// A record is a header line and the indented lines under it; the header is
+/// `<time> [<boot clock>] boot <id> <service>: <what>`. Pure, so the shape
+/// init writes and the shape this reads can be tested against each other
+/// without a file.
+fn select_failures(text: &str, name: Option<&str>, boot: Option<&str>, count: usize) -> Vec<String> {
+    let mut records: Vec<String> = Vec::new();
+    let mut keep = false;
+    for line in text.lines() {
+        if line.starts_with(' ') {
+            // Under a header this tail cut off, or under one filtered out.
+            if keep {
+                if let Some(last) = records.last_mut() {
+                    last.push_str(line);
+                    last.push('\n');
+                }
+            }
+            continue;
+        }
+        keep = match failure_header(line) {
+            Some((id, service)) => {
+                name.is_none_or(|n| n == service) && boot.is_none_or(|b| b == id)
+            }
+            None => false,
+        };
+        if keep {
+            records.push(format!("{line}\n"));
+        }
+    }
+    let skip = records.len().saturating_sub(count);
+    records.split_off(skip)
+}
+
+/// The boot id and service a record's header names.
+fn failure_header(line: &str) -> Option<(&str, &str)> {
+    let (_, rest) = line.split_once("] boot ")?;
+    let (id, rest) = rest.split_once(' ')?;
+    let (service, _) = rest.split_once(": ")?;
+    Some((id, service))
+}
+
+/// This boot's id as failures.log abbreviates it.
+fn this_boot_id() -> Option<String> {
+    let id = fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let id: String = id.trim().chars().take(8).collect();
+    (id.len() == 8).then_some(id)
+}
+
+/// `raven-rc failures [NAME] [-b] [-n N]`.
+fn do_failures(operands: &[String]) {
+    let request = match parse_failures_args(operands) {
+        Ok(request) => request,
+        Err(e) => {
+            eprintln!("{e}");
+            process::exit(1);
+        }
+    };
+    let dir = match log_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("{e}");
+            process::exit(1);
+        }
+    };
+    let path = dir.join(FAILURES_FILE);
+
+    let mut file = match File::open(&path) {
+        Ok(file) => file,
+        // Nothing has failed since the record began, which is good news and
+        // is said as such rather than as an error.
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            println!("No failures recorded ({} does not exist).", path.display());
+            return;
+        }
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+            eprintln!(
+                "raven-rc: permission denied on {}.\n\
+                 It is written by init as root; try again with sudo.",
+                path.display()
+            );
+            process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("raven-rc: cannot open {}: {}", path.display(), e);
+            process::exit(1);
+        }
+    };
+
+    // Across the rotated generations, like `logs`, so a rotation does not
+    // make last week's crash disappear from the answer.
+    let tail = match read_tail(&mut file, &path, FAILURES_LINES) {
+        Ok(tail) => tail,
+        Err(e) => {
+            eprintln!("raven-rc: cannot read {}: {}", path.display(), e);
+            process::exit(1);
+        }
+    };
+    for line in &tail.trouble {
+        eprintln!("raven-rc: {line}");
+    }
+
+    let boot = if request.this_boot {
+        match this_boot_id() {
+            Some(id) => Some(id),
+            None => {
+                eprintln!("raven-rc: cannot read this boot's id, so -b cannot be applied");
+                process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
+    let text = String::from_utf8_lossy(&tail.bytes);
+    let records = select_failures(&text, request.name.as_deref(), boot.as_deref(), request.count);
+    if records.is_empty() {
+        println!(
+            "No failures recorded{}{}.",
+            request
+                .name
+                .as_deref()
+                .map(|n| format!(" for {n}"))
+                .unwrap_or_default(),
+            if request.this_boot { " in this boot" } else { "" }
+        );
+        return;
+    }
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    for record in records {
+        emit(&mut out, record.as_bytes());
+    }
+    let _ = out.flush();
+}
+
 fn parse_meminfo_line(line: &str) -> Option<u64> {
     let parts: Vec<&str> = line.split_whitespace().collect();
     if parts.len() >= 2 {
@@ -1756,6 +1964,89 @@ mod tests {
         assert_eq!(
             compressed(&generation(log, 2)),
             PathBuf::from("/var/log/raven/dbus.log.2.gz")
+        );
+    }
+}
+
+#[cfg(test)]
+mod failures_tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    const LOG: &str = "\
+2026-10-14T09:00:00Z [    3.100] boot aaaaaaaa sshd: failed to start: cannot exec /usr/bin/sshd
+2026-10-15T11:52:03Z [   12.345] boot bbbbbbbb cawd: crashed: SIGSEGV (segmentation fault), after 0.4s
+    | cawd: no wireless port
+    | panic here
+2026-10-15T11:52:10Z [   19.000] boot bbbbbbbb sshd: exited with status 255, after 2.0s
+2026-10-15T11:53:10Z [   79.000] boot bbbbbbbb cawd: crashed: SIGSEGV (segmentation fault), after 0.4s
+    (output as in the previous record for this service)
+";
+
+    #[test]
+    fn failures_is_advertised_and_takes_an_optional_name() {
+        assert_eq!(arity_of("failures"), Some(Arity::Optional));
+    }
+
+    #[test]
+    fn the_flags_go_anywhere() {
+        assert_eq!(
+            parse_failures_args(&args(&["-b", "cawd", "-n", "3"])),
+            Ok(FailuresRequest {
+                name: Some("cawd".to_string()),
+                this_boot: true,
+                count: 3
+            })
+        );
+        assert_eq!(
+            parse_failures_args(&[]),
+            Ok(FailuresRequest {
+                name: None,
+                this_boot: false,
+                count: FAILURES_SHOWN
+            })
+        );
+        assert!(parse_failures_args(&args(&["-n", "0"])).is_err());
+        assert!(parse_failures_args(&args(&["-x"])).is_err());
+        assert!(parse_failures_args(&args(&["../etc"])).is_err());
+    }
+
+    #[test]
+    fn a_record_keeps_the_output_under_it() {
+        let got = select_failures(LOG, Some("cawd"), None, 10);
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            got[0],
+            "2026-10-15T11:52:03Z [   12.345] boot bbbbbbbb cawd: crashed: SIGSEGV \
+             (segmentation fault), after 0.4s\n    | cawd: no wireless port\n    | panic here\n"
+        );
+        assert!(got[1].ends_with("(output as in the previous record for this service)\n"));
+    }
+
+    #[test]
+    fn the_boot_filter_drops_other_boots() {
+        let got = select_failures(LOG, Some("sshd"), Some("bbbbbbbb"), 10);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].contains("status 255"));
+    }
+
+    #[test]
+    fn the_newest_records_are_the_ones_kept() {
+        let got = select_failures(LOG, None, None, 2);
+        assert_eq!(got.len(), 2);
+        assert!(got[0].contains("status 255"));
+        assert!(got[1].contains("[   79.000]"));
+    }
+
+    #[test]
+    fn a_tail_that_starts_mid_record_does_not_misattribute_its_output() {
+        let cut = "    | orphaned line\n2026-10-15T11:52:10Z [   19.000] boot bbbbbbbb sshd: exited with status 1\n";
+        assert_eq!(
+            select_failures(cut, None, None, 10),
+            vec!["2026-10-15T11:52:10Z [   19.000] boot bbbbbbbb sshd: exited with status 1\n".to_string()]
         );
     }
 }

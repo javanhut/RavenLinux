@@ -189,6 +189,7 @@ filesystems, and hands off to `raven-rc` for service supervision.
 | `init/src/readiness.rs` | The inotify watches that say when a service's ready path appeared, rather than when the loop next looked |
 | `init/src/cgroup.rs` | `raven.slice`, the per-service cgroup, and the `setrlimit`/`nice`/`oom_score_adj` applied between fork and exec |
 | `init/src/logrotate.rs` | Keeping `/var/log/raven` from filling the root filesystem |
+| `init/src/failures.rs` | `failures.log`: every crash, failed exit and failed start, with the output of the run that failed |
 | `init/src/demand.rs` | Services started by a device arriving rather than at boot |
 | `init/src/sysctl.rs` | The kernel parameters written to `/proc/sys` during early boot |
 | `init/src/timeline.rs` | The boot clock and the milestones `raven-rc blame` reports against |
@@ -310,6 +311,36 @@ of the machine's uptime appending to `<name>.log.1` while `<name>.log` stayed
 empty. There is no way to hand it a fresh descriptor -- it has already execed,
 and a service adopted across `raven-rc reexec` was never held by this init at
 all, which inherited a pid and not a file.
+
+#### Failures
+
+`init/src/failures.rs` keeps `failures.log` beside the service logs: one record
+per crash, non-zero exit, failed start or service the boot could never order,
+so the answer to "what broke?" survives a reboot and does not depend on finding
+one line in `init.log`. Each record is a greppable header -- wall clock, boot
+clock, the first eight characters of the kernel's boot id, the service and
+what happened -- and under it the last lines that *run* printed, from the
+offset its log had reached when it started:
+
+```
+2026-10-15T11:52:03Z [   12.345] boot 3f2a9c1e cawd: crashed: SIGSEGV (segmentation fault), core dumped, after 0.4s
+    | cawd: no wireless port
+```
+
+A crash is a signal that means the program broke (SIGSEGV, SIGABRT, SIGBUS,
+SIGILL, SIGFPE, SIGSYS, SIGTRAP) or a SIGKILL the service's cgroup counted as
+an OOM kill in `memory.events`; it is logged at ERROR. Any other unexpected
+death or a failed start is WARN. A death after `stop`, `kill`, shutdown or an
+operator's `raven-rc stop` is never a failure, whatever the process does with
+the signal. The console still gets one line per death -- the restart line, now
+naming the cause -- and a daemon with `restart = false` gets one saying it is
+staying down. A crash loop repeats the header once per backoff and prints the
+output only when it changes.
+
+`raven-rc failures [NAME] [-b] [-n N]` reads the file the way `logs` reads a
+service log, across rotated generations, without asking init; `-b` keeps this
+boot's records. `raven-rc status NAME` shows the last failure. It is a `.log`
+in the log directory, so `logrotate.rs` bounds it like any other.
 
 #### Sleep
 

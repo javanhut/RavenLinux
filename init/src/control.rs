@@ -954,6 +954,19 @@ fn status_one(
         }
     }
 
+    // Why it last went wrong, which the restart count cannot say. Shown on a
+    // running service too: one that is up now after crashing all morning is
+    // the case the count exists for, and this is the cause behind it. The
+    // run's output is in failures.log, which the hint names.
+    if let Some(failure) = svc.last_failure() {
+        out.push_str(&format!(
+            "  last failure {}\n               {}\n               (`raven-rc failures {}` for more)\n",
+            boot_clock(failure.at, counters),
+            failure.summary(),
+            name
+        ));
+    }
+
     if let Some(cfg) = cfg {
         out.push_str(&format!("  exec         {}\n", cfg.exec));
     }
@@ -1275,13 +1288,21 @@ fn start_service_raw(
         return format!("error: no such service '{}'\n", name);
     };
 
+    let log_offset = crate::failures::log_len(&Service::log_dir(), name);
     match Service::start(cfg) {
         Ok(mut svc) => {
             let reply = confirm_started(name, &mut svc);
             services.insert(name.to_string(), svc);
             reply
         }
-        Err(e) => format!("error: failed to start {}: {:#}\n", name, e),
+        Err(e) => {
+            // No `Service` survives this to carry the failure to the main
+            // loop, so it is written down here. A start that fails for a
+            // service already in the set goes the other way, through
+            // `start_by_request`, and is recorded on the next pass.
+            let _ = crate::failures::record_start_failure(&Service::log_dir(), name, &e, log_offset);
+            format!("error: failed to start {}: {:#}\n", name, e)
+        }
     }
 }
 

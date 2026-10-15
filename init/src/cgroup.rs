@@ -448,6 +448,21 @@ impl Cgroup {
         self.read_u64("pids.current")
     }
 
+    /// How many of this cgroup's processes the OOM killer has chosen, from the
+    /// `oom_kill` line of `memory.events`.
+    ///
+    /// Per run, for the reason `cpu_stat` is: the directory is removed when
+    /// the service exits. Counted for a machine-wide OOM as well as for one
+    /// against a `memory_max` here, which is what lets a bare SIGKILL be told
+    /// apart from the OOM killer's. Read it before [`Cgroup::remove`].
+    pub fn oom_kills(&self) -> Option<u64> {
+        let text = std::fs::read_to_string(self.path.join("memory.events")).ok()?;
+        text.lines().find_map(|line| {
+            let (key, value) = line.split_once(' ')?;
+            (key == "oom_kill").then(|| value.trim().parse().ok())?
+        })
+    }
+
     /// The CPU time this cgroup has accumulated, from `cpu.stat`.
     ///
     /// Cumulative over the life of the cgroup, which means over the life of

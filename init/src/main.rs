@@ -26,6 +26,7 @@ mod cgroup;
 mod config;
 mod control;
 mod demand;
+mod failures;
 mod logrotate;
 mod overrides;
 mod power;
@@ -1659,6 +1660,9 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
                 progressed = true;
                 continue;
             }
+            // Where this start's output will begin, for the failure record
+            // if it never gets as far as a `Service` to remember it.
+            let log_offset = failures::log_len(&Service::log_dir(), &svc_config.name);
             match Service::start(svc_config) {
                 Ok(svc) => {
                     log::info!("Started service: {}", svc_config.name);
@@ -1666,6 +1670,17 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
                 }
                 Err(e) => {
                     log::error!("Failed to start {}: {:#}", svc_config.name, e);
+                    let dir = Service::log_dir();
+                    if let Err(why) =
+                        failures::record_start_failure(&dir, &svc_config.name, &e, log_offset)
+                    {
+                        log::info!(
+                            "Cannot record {}'s failure in {}: {}",
+                            svc_config.name,
+                            failures::path_in(&dir).display(),
+                            why
+                        );
+                    }
                     if svc_config.critical {
                         return Err(e)
                             .context(format!("Critical service {} failed", svc_config.name));
@@ -1683,6 +1698,18 @@ fn start_services(config: &InitConfig) -> Result<HashMap<String, Service>> {
                     "Service {} not started: unresolved dependencies {:?}",
                     svc.name,
                     svc.after
+                );
+                record_failure(
+                    &Service::log_dir(),
+                    &svc.name,
+                    &failures::Failure::now(
+                        failures::Cause::failed(format!(
+                            "not started: unresolved dependencies {:?}",
+                            svc.after
+                        )),
+                        None,
+                    ),
+                    &failures::Output::None,
                 );
             }
             break;
@@ -2244,11 +2271,11 @@ fn reap_zombies(services: &mut HashMap<String, Service>) {
                     }
                 }
             }
-            Ok(WaitStatus::Signaled(pid, signal, _)) => {
+            Ok(WaitStatus::Signaled(pid, signal, core_dumped)) => {
                 log::debug!("Process {} killed by signal {:?}", pid, signal);
                 for svc in services.values_mut() {
                     if svc.pid() == Some(pid) {
-                        svc.mark_signaled(signal);
+                        svc.mark_signaled(signal, core_dumped);
                     }
                 }
             }
@@ -2259,7 +2286,29 @@ fn reap_zombies(services: &mut HashMap<String, Service>) {
 }
 
 fn check_services(services: &mut HashMap<String, Service>, _config: &InitConfig) {
+    let log_dir = Service::log_dir();
     for svc in services.values_mut() {
+        // Before the restart decision, so the record of a death is written
+        // before anything is done about it -- and so a failed start from the
+        // last pass is written down before this pass tries again.
+        if let Some((failure, output)) = svc.take_unrecorded_failure() {
+            record_failure(&log_dir, svc.name(), &failure, &output);
+            // A service that will be restarted says so, with the cause, from
+            // `should_restart`. One that will not has nothing else to put a
+            // console line on, and a daemon that is down for good is exactly
+            // what the console is for. A one-shot that exited non-zero is
+            // excepted: `mark_exited` already said "failed" about it at ERROR.
+            let already_said = svc.is_oneshot() && svc.exit_status().is_some_and(|s| s != 0);
+            if !svc.restart_configured() && !already_said {
+                log::log!(
+                    failure.cause.level(),
+                    "Service {} {}; not restarting it (restart = false)",
+                    svc.name(),
+                    failure.summary()
+                );
+            }
+        }
+
         // Signaled counts as died, not just Exited. A service killed by
         // SIGSEGV, SIGKILL or the OOM killer is the case `restart = true`
         // exists for -- checking only Exited meant a clean exit was restarted
@@ -2276,6 +2325,27 @@ fn check_services(services: &mut HashMap<String, Service>, _config: &InitConfig)
                 log::error!("Failed to restart {}: {:#}", svc.name(), e);
             }
         }
+    }
+}
+
+/// Write one failure to failures.log, and say so only when that fails.
+///
+/// At INFO, so into init.log alone: a read-only or full /var/log is already
+/// reported once by the log sweep, and a crash loop must not turn that into a
+/// second console line a minute.
+fn record_failure(
+    dir: &Path,
+    service: &str,
+    failure: &failures::Failure,
+    output: &failures::Output,
+) {
+    if let Err(e) = failures::record(dir, service, failure, output) {
+        log::info!(
+            "Cannot record {}'s failure in {}: {}",
+            service,
+            failures::path_in(dir).display(),
+            e
+        );
     }
 }
 
