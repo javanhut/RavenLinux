@@ -2891,6 +2891,16 @@ EOF
 	        cp "${PROJECT_ROOT}/configs/raven/services/"*.toml \
 	            "${SYSROOT_DIR}/usr/share/raven/services/" 2>/dev/null || true
 	    fi
+	    # Configuration a template's daemon is started with, for a package
+	    # Raven does not ship: libvirtd.toml passes --config with this path.
+	    # Under /usr/share beside the templates rather than in /etc, so a
+	    # base image without libvirt has no /etc/libvirt that rvn would later
+	    # refuse to install over.
+	    if [[ -d "${PROJECT_ROOT}/configs/raven/libvirt" ]]; then
+	        mkdir -p "${SYSROOT_DIR}/usr/share/raven/libvirt"
+	        cp "${PROJECT_ROOT}/configs/raven/libvirt/"*.conf \
+	            "${SYSROOT_DIR}/usr/share/raven/libvirt/" 2>/dev/null || true
+	    fi
 	    # Session services, for the raven-init each login runs as itself. Read
 	    # straight from here by `raven-init --user`; no drop-in step, since a
 	    # template is taken whenever its program is installed.

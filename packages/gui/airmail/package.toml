@@ -1,0 +1,56 @@
+[package]
+name = "airmail"
+# The upstream version only, and the base a build appends a revision to. This
+# component is cloned from its own repository and tracks that repository's
+# default branch unless RAVEN_USE_MANIFEST_PINS=1, so the package carries
+# +r<committer date>.g<commit> for the checkout that was actually compiled --
+# raven_component_version in scripts/lib/components.sh composes it.
+version = "0.1.0"
+description = "AirMail - the mail client, and the default for mailto: links"
+# The repository carries no licence file yet.
+license = "Unspecified"
+homepage = "https://github.com/javanhut/AirMail"
+repository = "https://github.com/javanhut/AirMail"
+maintainers = ["RavenLinux Team"]
+categories = ["gui", "wayland", "application"]
+
+[source]
+type = "git"
+url = "https://github.com/javanhut/AirMail.git"
+# Unpinned: nothing has been tagged in that repository yet. A `commit` added
+# here is read by the GUI stage through raven_resolve_ref.
+
+[build]
+system = "cargo"
+# GTK4 + libadwaita, glibc target, like every other GTK application here, and
+# WebKitGTK for the HTML reading pane. IMAP, SMTP and TLS are pure Rust
+# (async-imap, lettre, rustls); SQLite is rusqlite's bundled copy, compiled
+# in. raven-glass comes from ../RavenGUI through the checkout's
+# .cargo/config.toml (see stage_mail()).
+target = "x86_64-unknown-linux-gnu"
+build_flags = ["--release", "--locked"]
+
+[dependencies]
+# The toolkit, as for raven-viewer, plus WebKit and the two programs WebKit
+# runs its web process through: bubblewrap for the sandbox, xdg-dbus-proxy for
+# the bus inside it. huginn-keyring is where account passwords live; without
+# it AirMail starts and cannot sign in to anything.
+runtime = [
+    "gtk4", "libadwaita", "glib2", "gsettings-desktop-schemas",
+    "shared-mime-info", "desktop-file-utils", "hicolor-icon-theme",
+    "webkitgtk-6.0", "bubblewrap", "xdg-dbus-proxy", "huginn-keyring",
+]
+build = ["rust", "cargo", "pkg-config", "gtk4", "libadwaita", "glib2", "webkitgtk-6.0"]
+
+[install]
+files = [
+    { src = "target/x86_64-unknown-linux-gnu/release/airmail", dest = "/usr/bin/airmail", mode = 755 },
+    { src = "data/icons/hicolor/scalable/apps/dev.raven.AirMail.svg", dest = "/usr/share/icons/hicolor/scalable/apps/dev.raven.AirMail.svg", mode = 644 }
+]
+
+# The upstream data/dev.raven.AirMail.desktop is deliberately not in this list.
+# install_desktop_entries() in scripts/stages/stage-gui.sh writes every entry on
+# this image -- this one with MimeType=x-scheme-handler/mailto -- and adds the
+# mailto line to /usr/share/applications/mimeapps.list that makes AirMail the
+# default mail client.
+symlinks = []

@@ -87,6 +87,11 @@ librsvg
 glycin
 bubblewrap
 dconf
+# AirMail's HTML reading pane. WebKit runs its web process in a bwrap sandbox
+# (above) and gives it the bus through xdg-dbus-proxy; without either the pane
+# stays blank.
+webkitgtk-6.0
+xdg-dbus-proxy
 
 # Two names the ISO already carries as unowned copied files.
 #

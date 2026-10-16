@@ -87,7 +87,7 @@ die()  { echo "unexpected die: $*" >&2; exit 9; }
 declare -A ANS=()
 
 import_fn install_postinstall_service decide_postinstall have_default_route
-import_fn initrd_cat initrd_root_support
+import_fn initrd_payload_offset initrd_payload_magic initrd_payload_bytes initrd_cat initrd_root_support
 import_fn partdev valid_username valid_hostname \
           ensure_group add_group_member remove_group_member next_free_uid \
           create_user grant_sudo open_local_prefix set_hostname set_locale_and_time \
@@ -271,6 +271,10 @@ matches "seat group created"              '^seat:x:[0-9]+:javan$' "$TARGET/etc/g
 # image ships it with only the placeholder as a member, which the placeholder
 # removal strips, so the new user has to be put back in.
 matches "added to caw"                    '^caw:x:970:javan$' "$TARGET/etc/group"
+# libvirtd's read-write socket is group libvirt, so this is what lets the
+# installed (sudo) user run virt-manager without sudo. The image ships no such
+# group; ensure_group creates it, like render and seat above.
+matches "libvirt group created"           '^libvirt:x:[0-9]+:javan$' "$TARGET/etc/group"
 matches "sudoers.d grants wheel"          '^%wheel ALL=\(ALL:ALL\) ALL$' "$TARGET/etc/sudoers.d/10-wheel"
 matches "sudoers reads sudoers.d"         '@includedir /etc/sudoers\.d' "$TARGET/etc/sudoers"
 # /usr/local is wheel's, setgid and group-writable, so `imlazy install` into

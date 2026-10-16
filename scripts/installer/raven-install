@@ -4279,8 +4279,16 @@ SUDOERS_EOF
     # with the placeholder as its only member, and remove_group_member has
     # just stripped that -- so without this the installed user can scan but
     # never join a network except through sudo.
+    #
+    # `libvirt` follows the same logic. libvirtd's read-write socket is group
+    # libvirt, mode 0770 (/usr/share/raven/libvirt/libvirtd.conf), so
+    # virt-manager and `virsh -c qemu:///system` work without sudo. Being in
+    # the group is root-equivalent, which is why it is granted here, inside
+    # grant_sudo, and nowhere else. On a profile without libvirt the group
+    # is created empty of purpose and harmless. When the package arrives,
+    # its sysusers fragment finds the group already there and leaves it.
     local g
-    for g in audio video input render seat caw; do
+    for g in audio video input render seat caw libvirt; do
         ensure_group "$g" || true
         add_group_member "$g" "$USERNAME" || true
     done

@@ -629,6 +629,34 @@ menu offers -- the second is the way back to a recording whose window was
 minimised out of it. It claims no MIME type: it makes files, and the videos it
 saves are Owl Player's to open.
 
+## Mail
+
+| Status | Binary | Repo |
+|--------|--------|------|
+| **wired** | `airmail` | [javanhut/AirMail](https://github.com/javanhut/AirMail) |
+
+Built by `stage_mail()` in `stage-gui.sh`, from its own repository, with the
+other GTK4 applications and after the camera. `imlazy gui` builds it;
+`MAIL_SKIP=1` leaves it out, and an image without it has nothing that answers
+a `mailto:` link.
+
+**It is the default mail client.** `install_desktop_entries()` writes its entry
+with `MimeType=x-scheme-handler/mailto;` and `Exec=airmail %u`, and adds
+`x-scheme-handler/mailto=dev.raven.AirMail.desktop` to
+`/usr/share/applications/mimeapps.list`. That one line is what `raven-open`
+(and so every browser's `mailto:` link), GIO and Raven Settings' *Default
+applications* card all read; a user's choice in Settings goes to
+`~/.config/mimeapps.list` and outranks it. A link opened while AirMail is
+running goes to the open window rather than a second process.
+
+**WebKit is most of its footprint.** The reading pane is WebKitGTK, which runs
+HTML in separate `WebKitWebProcess` / `WebKitNetworkProcess` helpers from
+`/usr/lib/webkitgtk-6.0`, sandboxed with `bwrap` and given the bus through
+`xdg-dbus-proxy`. None of those appears in `ldd airmail`, so `stage_mail()`
+stages the directory and the proxy itself and resolves their libraries the
+same way as the glycin loaders. Like the camera, it builds against the
+RavenGUI checkout beside it for `raven-glass`.
+
 ## Optional Applications (offered by the installer)
 
 | Status | Binary | Repo |
