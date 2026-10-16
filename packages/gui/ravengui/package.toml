@@ -74,6 +74,10 @@ files = [
     # What raven-open stands in for, read by rvn so it never installs
     # xdg-utils over it. See src/provides.rs in RavenPackageManager.
     { src = "crates/tools/raven-open/dist/rvn-provides", dest = "/usr/share/rvn/provides.d/raven-open", mode = 644 },
+    # Raven Glass, read by every Raven app at start-up through the raven-glass
+    # crate; each app also compiles a copy in, used only when these are missing.
+    { src = "crates/raven-glass/data/raven-glass.css",       dest = "/usr/share/raven/glass/raven-glass.css",       mode = 644 },
+    { src = "crates/raven-glass/data/raven-glass-light.css", dest = "/usr/share/raven/glass/raven-glass-light.css", mode = 644 },
 ]
 
 # No /bin -> /usr/bin aliases here. This root is usr-merged, so /bin IS

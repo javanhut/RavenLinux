@@ -249,7 +249,11 @@ An input someone already set to 100% keeps what they chose; `wpctl set-volume
 
 Game controllers: `INPUT_JOYDEV`, `JOYSTICK_XPAD` (Xbox, wired and wireless
 dongle), `HID_PLAYSTATION`, `HID_NINTENDO`, `HID_STEAM`, `HID_GOOGLE_STADIA_FF`,
-all with force feedback. `INPUT_UINPUT=y` for virtual input devices. The HID
+all with force feedback. `INPUT_UINPUT=y` for virtual input devices, and
+`UHID=y` for Bluetooth ones: BlueZ creates every Bluetooth keyboard, mouse and
+controller through `/dev/uhid`, and without it they pair and connect but send
+no input. `CRYPTO_USER_API_HASH` and `CRYPTO_USER_API_SKCIPHER` give
+bluetoothd the AF_ALG sockets it does its AES over. The HID
 sensor hub with accelerometer and ambient-light drivers over IIO, for
 auto-rotate and auto-brightness on convertibles. Card readers over USB
 (`MISC_RTSX_USB`, `MMC_REALTEK_USB`) alongside the PCI ones. Webcams via
@@ -390,9 +394,12 @@ command-line transfer tools (`mtp-detect`, `mtp-files`, `gphoto2`). Browsing a
 phone in the file manager is a gvfs backend (`gvfs-mtp`, `gvfs-gphoto2`) and
 gvfs is not shipped -- see "What is still missing" below.
 
-`bluez-obex` is staged and `obexd` runs as a service, which is the receiving
-half of "send this file to that device"; it drops into
-`/var/spool/bluetooth`. Pairing and audio never needed it.
+`bluez-obex` is staged and `obexd` runs as a session service under
+`raven-init --user` -- it needs the session bus, which a boot-time service
+never has. It is the receiving half of "send this file to that device", and
+files land in `~/Downloads/Bluetooth`. Nothing on Raven registers an OBEX
+agent yet, so an incoming push is refused rather than accepted unasked.
+Pairing and audio never needed it.
 
 ## Firmware updates
 

@@ -582,11 +582,12 @@ critical = false
 # after = ["udev"] for the module path: nf_tables and its expression modules
 # are loaded on demand when nft asks for them, and the udev stage is what
 # makes on-demand module loading work at all this early. The ruleset itself
-# needs no hardware -- it names exactly one interface, `lo`, which exists
-# before anything is probed. It names no other, deliberately: nft resolves an
-# interface name to an index when the rule is loaded, so a rule mentioning the
-# wifi or the dock would fail to load on a boot where that device is not
-# plugged in yet.
+# needs no hardware -- it binds exactly one interface by index, `lo`, which
+# exists before anything is probed. It binds no other, deliberately: `iif`
+# resolves an interface name to an index when the rule is loaded, so a rule
+# binding the wifi or the dock would fail to load on a boot where that device
+# is not plugged in yet. The VM and container bridge rules use `iifname`,
+# which compares names per packet, so they load before any bridge exists.
 #
 # SHIPPED DISABLED, and it has to be, for three reasons that will not go away
 # in the same commit. There is no nft binary in the image (nftables is in the

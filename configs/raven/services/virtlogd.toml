@@ -1,0 +1,36 @@
+# virtlogd -- libvirt's log daemon. SHIPPED DISABLED, and a template only:
+# it becomes a drop-in once `rvn install libvirt` has put /usr/bin/virtlogd on
+# the machine.
+#
+# libvirtd's QEMU driver does not write a guest's console output itself. It
+# hands the guest's stdout and stderr to virtlogd, which writes
+# /var/log/libvirt/qemu/<guest>.log and rotates it, so the log survives a
+# libvirtd restart and a runaway guest cannot fill the disk. With no virtlogd
+# listening, starting any guest fails with "Failed to connect socket to
+# '/run/libvirt/virtlogd-sock'". That is why libvirtd.toml has
+# `after = ["virtlogd"]`.
+#
+# Upstream starts it through a systemd socket unit. raven-init runs it
+# directly instead. With no inherited socket, virtlogd binds
+# /run/libvirt/virtlogd-sock itself, and `ready_path` waits for that
+# socket.
+#
+# Turn on both daemons, not just this one:
+#
+#   raven-rc enable virtlogd
+#   raven-rc enable libvirtd
+#
+# The order matters only at boot. A service whose `after` names a disabled
+# service is reported as unresolved and not started, so enabling libvirtd
+# alone leaves it down on the next boot even though `raven-rc start
+# libvirtd` works today -- that starts virtlogd along the way.
+[[services]]
+name = "virtlogd"
+description = "libvirt log daemon: guest console logs for libvirtd"
+exec = "/usr/bin/virtlogd"
+args = []
+runtime_dirs = ["/run/libvirt"]
+ready_path = "/run/libvirt/virtlogd-sock"
+restart = true
+enabled = false
+critical = false

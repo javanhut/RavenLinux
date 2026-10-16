@@ -49,7 +49,8 @@ files = [
     { src = "data/com.ravencamera.Raven.metainfo.xml", dest = "/usr/share/metainfo/com.ravencamera.Raven.metainfo.xml", mode = 644 }
 ]
 
-# data/*.css are include_str!ed into the binary. The upstream .desktop file is
+# data/*.css are include_str!ed into the binary; Raven Glass, the shared look,
+# is read from the ravengui package's /usr/share/raven/glass/. The upstream .desktop file is
 # deliberately absent: install_desktop_entries() in scripts/stages/stage-gui.sh
 # writes every entry on this image, with StartupWMClass set to the GTK
 # application id and the Screenshot and Stop Recording actions.

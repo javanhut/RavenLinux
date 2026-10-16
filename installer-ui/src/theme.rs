@@ -16,14 +16,25 @@
 //! reason, and its own comment says so: "Alpha only -- the blur behind it is
 //! the compositor's to draw."
 //!
-//! ## Dark only
+//! ## Light and dark
 //!
-//! There is no light variant, because there is nothing to match one against:
-//! `huginn`'s theme has a single palette and it is this one. A light installer
-//! would be a light window in front of a dark desktop.
+//! Dark is Huginn's palette, below. Light is the desktop's other mode: when
+//! RavenSettingsUI's `theme_mode` is `light`, `LIGHT_CSS` is layered over the
+//! palette with the same named colours RavenSettingsUI's
+//! `raven-glass-light.css` uses, so a light desktop gets a light installer.
+//! `auto` is dark, as it is everywhere in Raven. On the live ISO there is no
+//! desktop file at all, and the installer is dark.
+//!
+//! The file is followed while the installer runs (`watch`), which costs one
+//! directory monitor; an installer is short-lived, but it is also the first
+//! thing a person sees after changing the look in Settings on a live session.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::Duration;
 
 use adw::prelude::*;
-use gtk::gdk;
+use gtk::{gdk, gio, glib};
 
 /// Huginn's `theme::ACCENT`, and the value RavenSettingsUI ships as
 /// `DEFAULT_ACCENT`. Overridden by `~/.config/raven/desktop.toml`.
@@ -35,7 +46,9 @@ pub const DEFAULT_ACCENT: &str = "#7AA2F7";
 /// can change, and changing it must not mean rebuilding the rest.
 const BASE_CSS: &str = r#"
 /* Huginn's theme.rs, as libadwaita's named colours, so every stock widget
-   follows without being asked. Identical to RavenSettingsUI's BASE_CSS. */
+   follows without being asked. The same values RavenSettingsUI started from;
+   Settings now ships the fuller raven-glass.css, which this does not embed --
+   this is the installer's own, smaller sheet in the same palette. */
 @define-color window_bg_color #16161f;
 @define-color window_fg_color #d0d0e0;
 @define-color headerbar_bg_color #16161f;
@@ -139,8 +152,60 @@ window.raven .page-title { font-size: 24px; font-weight: 700; }
 window.raven .mono { font-family: monospace; }
 "#;
 
+/// Layered over `BASE_CSS` when the desktop is light: RavenSettingsUI's
+/// `raven-glass-light.css` named colours, and light twins of every
+/// white-on-dark alpha the base sheet hardcodes.
+const LIGHT_CSS: &str = r#"
+@define-color window_bg_color #f2f2f7;
+@define-color window_fg_color #1c1c22;
+@define-color headerbar_bg_color #f2f2f7;
+@define-color headerbar_fg_color #1c1c22;
+@define-color headerbar_border_color alpha(#000000, 0.08);
+@define-color headerbar_shade_color alpha(#000000, 0.07);
+@define-color view_bg_color #ffffff;
+@define-color view_fg_color #1c1c22;
+@define-color card_bg_color alpha(#ffffff, 0.70);
+@define-color card_fg_color #1c1c22;
+@define-color dialog_bg_color #f7f7fa;
+@define-color dialog_fg_color #1c1c22;
+@define-color popover_bg_color #ffffff;
+@define-color popover_fg_color #1c1c22;
+@define-color sidebar_bg_color #e9e9ef;
+@define-color borders alpha(#000000, 0.09);
+
+window.raven.glass { background-color: alpha(#f2f2f7, 0.88); }
+window.raven.glass list.boxed-list {
+  background-color: alpha(#ffffff, 0.72);
+  border-color: alpha(#000000, 0.07);
+}
+window.raven.glass headerbar,
+window.raven.glass .nav-bar { border-color: alpha(#000000, 0.07); }
+window.raven.glass entry,
+window.raven.glass dropdown > button,
+window.raven.glass .log-view {
+  background-color: alpha(#ffffff, 0.85);
+}
+window.raven.glass .card { background-color: alpha(#ffffff, 0.72); border-color: alpha(#000000, 0.07); }
+window.raven .danger-row { background-color: alpha(#f7768e, 0.16); }
+window.raven progressbar > trough { background-color: alpha(#000000, 0.10); }
+window.raven .log-view { background-color: #fafafc; }
+window.raven .log-view text { color: #3a3a46; }
+"#;
+
+/// `[appearance] theme_mode` in `desktop.toml`. Auto is dark, as it is
+/// everywhere in Raven.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThemeMode {
+    Light,
+    #[default]
+    Dark,
+    Auto,
+}
+
 /// What the desktop is set to, or what it is when nothing has set it.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Appearance {
+    pub theme_mode: ThemeMode,
     pub accent: String,
     pub glass: bool,
 }
@@ -148,34 +213,40 @@ pub struct Appearance {
 impl Default for Appearance {
     fn default() -> Self {
         Self {
+            theme_mode: ThemeMode::Dark,
             accent: DEFAULT_ACCENT.into(),
             glass: true,
         }
     }
 }
 
-/// Read `accent` and `transparency` out of `~/.config/raven/desktop.toml`.
-///
-/// Scanned line by line rather than parsed, and deliberately: the two values
-/// wanted are a quoted string and a bool, the file is written by
-/// RavenSettingsUI with `toml::to_string_pretty` so they are one per line, and
-/// a TOML parser in the dependency tree of a program that reads two keys is
-/// not a trade worth making. Anything it does not understand -- a multi-line
-/// value, an inline table -- leaves that key at its default, which is what a
-/// missing file does too.
+/// `$XDG_CONFIG_HOME/raven/desktop.toml`, else `~/.config/raven/desktop.toml`.
+fn desktop_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".config")))
+        .map(|c| c.join("raven/desktop.toml"))
+}
+
+/// Read `theme_mode`, `accent` and `transparency` out of the desktop file.
 ///
 /// On the live ISO there is no such file, and the defaults are Huginn's own.
 pub fn read_appearance() -> Appearance {
+    desktop_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|text| parse_appearance(&text))
+        .unwrap_or_default()
+}
+
+/// Scanned line by line rather than parsed, and deliberately: the three
+/// values wanted are two quoted strings and a bool, the file is written by
+/// RavenSettingsUI with `toml::to_string_pretty` so they are one per line, and
+/// a TOML parser in the dependency tree of a program that reads three keys is
+/// not a trade worth making. Anything it does not understand -- a multi-line
+/// value, an inline table, an unknown mode -- leaves that key at its default,
+/// which is what a missing file does too.
+fn parse_appearance(text: &str) -> Appearance {
     let mut a = Appearance::default();
-
-    let Some(home) = std::env::var_os("HOME") else {
-        return a;
-    };
-    let path = std::path::Path::new(&home).join(".config/raven/desktop.toml");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return a;
-    };
-
     let mut in_appearance = false;
     for line in text.lines() {
         let line = line.trim();
@@ -193,6 +264,12 @@ pub fn read_appearance() -> Appearance {
         match key.trim() {
             "accent" if is_hex(value) => a.accent = value.to_string(),
             "transparency" => a.glass = value == "true",
+            "theme_mode" => match value {
+                "light" => a.theme_mode = ThemeMode::Light,
+                "dark" => a.theme_mode = ThemeMode::Dark,
+                "auto" => a.theme_mode = ThemeMode::Auto,
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -203,14 +280,22 @@ fn is_hex(s: &str) -> bool {
     s.len() == 7 && s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
+thread_local! {
+    /// The accent-and-mode sheet, kept so a change replaces it rather than
+    /// stacking another on top.
+    static OVERLAY: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
+    static DESKTOP_MONITOR: RefCell<Option<gio::FileMonitor>> = const { RefCell::new(None) };
+}
+
+/// How long the desktop file has to stay quiet before it is re-read.
+/// RavenSettingsUI writes it by rename, which arrives as a burst of events.
+const DESKTOP_SETTLE: Duration = Duration::from_millis(150);
+
 /// Install the palette. Called once, before any window is built.
 pub fn load(appearance: &Appearance) {
     let Some(display) = gdk::Display::default() else {
         return;
     };
-
-    // Dark, always. See the module comment: there is no light Huginn to match.
-    adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
 
     let base = gtk::CssProvider::new();
     base.load_from_string(BASE_CSS);
@@ -220,21 +305,50 @@ pub fn load(appearance: &Appearance) {
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 
-    // A second provider at a higher priority, exactly as RavenSettingsUI does
-    // it, so the accent is one small sheet layered over the palette rather
-    // than a string substituted into it.
-    let accent = gtk::CssProvider::new();
-    accent.load_from_string(&format!(
+    apply_mode(appearance);
+}
+
+/// The light/dark scheme and the accent. A second provider at a higher
+/// priority, exactly as RavenSettingsUI does it, so the accent (and, when
+/// light, `LIGHT_CSS`) is one small sheet layered over the palette rather than
+/// a string substituted into it. Replaced, never stacked, on every call.
+fn apply_mode(appearance: &Appearance) {
+    let Some(display) = gdk::Display::default() else {
+        return;
+    };
+    adw::StyleManager::default().set_color_scheme(match appearance.theme_mode {
+        ThemeMode::Dark => adw::ColorScheme::ForceDark,
+        ThemeMode::Light => adw::ColorScheme::ForceLight,
+        ThemeMode::Auto => adw::ColorScheme::PreferDark,
+    });
+    let css = overlay_css(appearance);
+    OVERLAY.with(|slot| {
+        if let Some(old) = slot.borrow_mut().take() {
+            gtk::style_context_remove_provider_for_display(&display, &old);
+        }
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(&css);
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+        );
+        *slot.borrow_mut() = Some(provider);
+    });
+}
+
+fn overlay_css(appearance: &Appearance) -> String {
+    format!(
         "@define-color accent_bg_color {a};\n\
          @define-color accent_color {a};\n\
-         @define-color accent_fg_color #16161f;\n",
-        a = appearance.accent
-    ));
-    gtk::style_context_add_provider_for_display(
-        &display,
-        &accent,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
-    );
+         @define-color accent_fg_color #16161f;\n{light}",
+        a = appearance.accent,
+        light = if appearance.theme_mode == ThemeMode::Light {
+            LIGHT_CSS
+        } else {
+            ""
+        },
+    )
 }
 
 /// Mark a window as one of ours. `.raven` is the palette; `.glass` is the
@@ -244,7 +358,61 @@ pub fn apply_to_window(window: &adw::ApplicationWindow, appearance: &Appearance)
     window.add_css_class("raven");
     if appearance.glass {
         window.add_css_class("glass");
+    } else {
+        window.remove_css_class("glass");
     }
+}
+
+/// Follow `desktop.toml` while `window` is open: mode, accent and glass all
+/// change in place. The directory is watched rather than the file, because
+/// the file may not exist yet and RavenSettingsUI replaces it by rename.
+pub fn watch(window: &adw::ApplicationWindow) {
+    let Some(path) = desktop_path() else {
+        return;
+    };
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let name = name.to_os_string();
+    let Ok(monitor) = gio::File::for_path(dir)
+        .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
+    else {
+        return;
+    };
+    let window = window.downgrade();
+    let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+    monitor.connect_changed(move |_, file, other, event| {
+        if matches!(
+            event,
+            gio::FileMonitorEvent::AttributeChanged
+                | gio::FileMonitorEvent::PreUnmount
+                | gio::FileMonitorEvent::Unmounted
+        ) {
+            return;
+        }
+        let names_desktop = |f: Option<&gio::File>| {
+            f.and_then(|f| f.basename())
+                .is_some_and(|b| b.as_os_str() == name.as_os_str())
+        };
+        if !names_desktop(Some(file)) && !names_desktop(other) {
+            return;
+        }
+        if let Some(id) = pending.borrow_mut().take() {
+            id.remove();
+        }
+        let fired = pending.clone();
+        let window = window.clone();
+        let id = glib::timeout_add_local_once(DESKTOP_SETTLE, move || {
+            fired.borrow_mut().take();
+            let appearance = read_appearance();
+            apply_mode(&appearance);
+            if let Some(window) = window.upgrade() {
+                apply_to_window(&window, &appearance);
+            }
+        });
+        *pending.borrow_mut() = Some(id);
+    });
+    DESKTOP_MONITOR.with(|m| *m.borrow_mut() = Some(monitor));
 }
 
 #[cfg(test)]
@@ -266,6 +434,25 @@ mod tests {
         // the line that has to move with it.
         assert_eq!(DEFAULT_ACCENT, "#7AA2F7");
         assert!(is_hex(DEFAULT_ACCENT));
+    }
+
+    #[test]
+    fn appearance_is_read_from_its_section_only() {
+        let a = parse_appearance(
+            "[appearance]\ntheme_mode = \"light\"\naccent = \"#F7768E\"\ntransparency = false\n\
+             [panel]\ntheme_mode = \"dark\"\n",
+        );
+        assert_eq!(a.theme_mode, ThemeMode::Light);
+        assert_eq!(a.accent, "#F7768E");
+        assert!(!a.glass);
+        assert!(overlay_css(&a).contains("window_bg_color #f2f2f7"));
+
+        // Unknown or bad values keep the defaults; auto is its own mode.
+        let a = parse_appearance("[appearance]\ntheme_mode = \"sepia\"\naccent = \"red\"\n");
+        assert_eq!(a, Appearance::default());
+        assert!(!overlay_css(&a).contains("window_bg_color"));
+        let a = parse_appearance("[appearance]\ntheme_mode = \"auto\"\n");
+        assert_eq!(a.theme_mode, ThemeMode::Auto);
     }
 
     #[test]

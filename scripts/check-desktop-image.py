@@ -146,10 +146,15 @@ def validate(root, binaries, desktop=True, sources=()):
         # filesystem tour to answer. validate() returns errors, so these go in
         # a list the caller prints rather than out of here directly.
         for what, marker in [('printing', 'cupsd'), ('printer discovery', 'avahi-daemon'),
-                             ('driverless USB printing', 'ipp-usb'),
-                             ('Bluetooth file transfer', 'obexd')]:
+                             ('driverless USB printing', 'ipp-usb')]:
             if marker not in enabled:
                 NOTES.append(f'no {what} on this image ({marker} is not enabled)')
+        # obexd is a session service, not one of init.d's: it needs the
+        # session bus. Its template is only taken when the binary exists.
+        for marker in ['usr/share/raven/user-services/obexd.toml', 'usr/lib/bluetooth/obexd']:
+            if not (root / marker).exists():
+                NOTES.append(f'no Bluetooth file transfer on this image (/{marker} is missing)')
+                break
     # Inspect ELF metadata only: do not execute programs or resolve libraries
     # against the builder's root. Check plugins as well as launchable programs.
     #

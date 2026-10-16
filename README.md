@@ -74,6 +74,7 @@ And a graphical layer, built separately because it cannot be static:
 | `eagleeye` | [EagleEye](https://github.com/javanhut/EagleEye), the image viewer — the only thing on the image that opens a picture, and the default for all 27 image types |
 | `owl-player` | [OwlPlayer](https://github.com/javanhut/OwlPlayer), the media player — FFmpeg with its own GPU renderer in front of it, and the default for all 29 video and audio types |
 | `raven-camera` | [RavenCamera](https://github.com/javanhut/RavenCamera), the camera and screen recorder — photos and video from the built-in or any USB webcam, screenshots, and screen, window and region recording with system sound, microphone and a webcam overlay, saved as MP4 through Raven's own H.264, AAC and MP4 writer |
+| `airmail` | [AirMail](https://github.com/javanhut/AirMail), the mail client — IMAP and SMTP accounts in one inbox, and the default for `mailto:` links |
 | `raven-installer-ui` | the graphical installer — `installer-ui/` in this repository rather than its own, because it is the front-end for `scripts/installer/raven-install` and a version skew between the two is a wizard that cannot drive the installer it is looking at |
 | `ravend`, `raven-greeter` | [RavenLogin](https://github.com/javanhut/RavenLogin), the login screen — and the root daemon behind it, which is not the process that draws |
 
@@ -356,6 +357,7 @@ VIEWER_SKIP=1 imlazy gui                    # no PDF/DOCX reader
 EAGLEEYE_SKIP=1 imlazy gui                  # nothing opens an image
 PLAYER_SKIP=1 imlazy gui                    # nothing plays a film or a song
 CAMERA_SKIP=1 imlazy gui                    # no camera app or screen recorder
+MAIL_SKIP=1 imlazy gui                      # no mail client; mailto: opens nothing
 TUTORIAL_SKIP=1 imlazy gui                  # installer does not offer the tutorial
 ORACLE_SKIP=1 imlazy gui                    # installer does not offer Oracle
 ```

@@ -531,7 +531,7 @@ generate_config() {
     $config_script --set-str DEFAULT_SECURITY ""
 
     # ==========================================================================
-    # Containers/namespaces (for future container support)
+    # Containers/namespaces (host side is in kernel-virtualization.sh)
     # ==========================================================================
     $config_script --enable NAMESPACES
     $config_script --enable USER_NS
@@ -554,6 +554,10 @@ generate_config() {
     # PCIe ASPM policy. In their own script so the restore path below can
     # apply the same floor to a saved config.
     bash "${SCRIPT_DIR}/kernel-performance.sh" "$KERNEL_BUILD_DIR"
+
+    # KVM, vhost, bridges and veth, VFIO, cgroup BPF: what it takes to run
+    # VMs and containers rather than only be one. Same floor contract.
+    bash "${SCRIPT_DIR}/kernel-virtualization.sh" "$KERNEL_BUILD_DIR"
 
     # Update config with defaults for new options
     make olddefconfig
@@ -778,6 +782,7 @@ main() {
             # Idempotent: on a config that already has it this is a no-op.
             bash "${SCRIPT_DIR}/kernel-ports.sh" "$KERNEL_BUILD_DIR"
             bash "${SCRIPT_DIR}/kernel-performance.sh" "$KERNEL_BUILD_DIR"
+            bash "${SCRIPT_DIR}/kernel-virtualization.sh" "$KERNEL_BUILD_DIR"
             make olddefconfig
             log_success "Kernel config restored from ${CONFIG_DIR}/config-${KERNEL_VERSION}-raven"
         else

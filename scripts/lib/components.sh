@@ -207,6 +207,7 @@ declare -a GUI_APPS=(
     "EAGLEEYE|EagleEye|eagleeye|gui/eagleeye|EagleEye - the image viewer"
     "PLAYER|OwlPlayer|owl-player|gui/owl-player|Owl Player - the media player"
     "CAMERA|RavenCamera|raven-camera|gui/raven-camera|Raven Camera - photos, video, screenshots and screen recording"
+    "MAIL|AirMail|airmail|gui/airmail|AirMail - the mail client, and the default for mailto: links"
     "LOGIN|RavenLogin|ravend,raven-greeter,raven-lock|gui/ravenlogin|Raven Login - the display manager, its greeter and the lock screen"
     "CANVAS|RavenCanvas|ravencanvasd,ravencanvas|gui/ravencanvas|Raven Canvas - the wallpaper daemon and its CLI"
     "ROOSTBAR|RoostBar|roostbar|gui/roostbar|RoostBar - the layer-shell status bar"

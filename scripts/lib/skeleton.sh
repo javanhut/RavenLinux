@@ -183,7 +183,6 @@ RAVEN_SKELETON_DIRS_VAR=(
     "var/log/cups:755"
     "var/lib/cups:755"
     "var/lib/avahi:755:84"
-    "var/spool/bluetooth:775:92"   # obexd inbox; group audio, as bluetooth is
     "var/lib/fwupd:755"            # fwupd state: pending updates and the history db
     "var/cache/fwupd:755"          # downloaded LVFS metadata and firmware cabinets
     "var/tmp:1777"

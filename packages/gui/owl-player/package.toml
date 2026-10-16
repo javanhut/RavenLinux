@@ -95,9 +95,10 @@ files = [
     { src = "data/com.owlplayer.Raven.metainfo.xml", dest = "/usr/share/metainfo/com.owlplayer.Raven.metainfo.xml", mode = 644 }
 ]
 
-# data/raven-glass*.css and data/owl-player.css are deliberately absent:
-# crates/owl-player/src/theme.rs include_str!s all three, so the stylesheets
-# are inside the binary. The GL shaders are the same story one crate over --
+# data/owl-player.css is deliberately absent: crates/owl-player/src/theme.rs
+# include_str!s it, so it is inside the binary. Raven Glass, the shared look
+# under it, is the ravengui package's /usr/share/raven/glass/, read through
+# the raven-glass crate. The GL shaders are the same story one crate over --
 # owl-render's src/lib.rs include_str!s each of the six.
 #
 # The upstream data/com.owlplayer.Raven.desktop is deliberately not in this
