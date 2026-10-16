@@ -1359,13 +1359,10 @@ stage_controls() {
 #
 # WHY TUI PROGRAMS ARE WRAPPED EXPLICITLY AND NOT MARKED Terminal=true
 #
-# `raven_desktop::Entry` parses `Terminal=` into a field that nothing reads:
-# `Huginn::launch` hands `Entry::argv` straight to `Command::spawn` either way.
-# A `Terminal=true` entry would therefore exec the bare TUI with no controlling
-# terminal, which does not open a window and does not report an error -- it
-# just silently does nothing. Wrapping in `raven-terminal -e` is what actually
-# runs today. Setting the key as well, so the entry stays honest if huginn
-# learns to read it, would then wrap it twice.
+# huginn (launcher::in_terminal) and raven-open both wrap `Terminal=true`
+# entries in `raven-terminal -e`. These entries spell the wrapper out in
+# `Exec=` instead, so they also start from launchers that ignore the key;
+# setting `Terminal=true` as well would wrap them twice.
 #
 # ONLY ENTRIES THAT DO SOMETHING
 #
