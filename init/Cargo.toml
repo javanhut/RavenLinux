@@ -73,7 +73,7 @@ name = "raven-ports"
 path = "src/ports.rs"
 
 # The clock daemon: SNTP sync and the /etc/localtime symlink. In this crate
-# because it is the other half of init's `hwclock --hctosys` -- init reads the
+# because it is the other half of init's boot-time RTC read -- init reads the
 # RTC at boot, this keeps it worth reading -- and its socket follows powerd's
 # pattern exactly.
 [[bin]]

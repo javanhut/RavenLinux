@@ -1371,13 +1371,99 @@ fn seed_random() -> Result<()> {
     Ok(())
 }
 
+/// Set the system clock from the RTC.
+///
+/// Read from sysfs rather than with `hwclock --hctosys` when the RTC keeps
+/// UTC. hwclock waits for the RTC's next second boundary before it reads, so
+/// that the time it sets is right to the millisecond, and the wait is up to a
+/// second of PID 1's early boot with nothing else running beside it: the gap
+/// between "Hostname set" and "Environment configured" in init.log was 0.8s,
+/// on a step that is otherwise a handful of mkdirs. The precision it buys is
+/// replaced by raven-timed's first SNTP answer anyway. `since_epoch` is the
+/// RTC read as UTC in whole seconds, so the true time is somewhere in the
+/// second after it; setting the middle of that second keeps the error under
+/// half a second either way instead of up to a whole one behind.
+///
+/// An RTC in local time still goes through hwclock. Turning it into UTC needs
+/// the zone's offset at an instant that may fall inside a DST change, and the
+/// kernel has to be told the RTC is local for its own writes to it; hwclock
+/// does both, and only the machines that also boot Windows pay for it. So
+/// does any RTC sysfs cannot read.
 fn set_system_clock() {
-    // Try to set system clock from RTC
+    if rtc::hwclock_flag() == "--utc" {
+        let since_epoch = fs::read_to_string("/sys/class/rtc/rtc0/since_epoch")
+            .ok()
+            .and_then(|text| parse_rtc_since_epoch(&text));
+        match since_epoch.map(set_clock_from_utc_rtc) {
+            Some(Ok(())) => {
+                log::info!("System clock set from rtc0 (UTC)");
+                return;
+            }
+            Some(Err(e)) => {
+                log::warn!("Could not set the system clock from rtc0: {}; trying hwclock", e)
+            }
+            None => log::info!("rtc0 has no readable time in sysfs; trying hwclock"),
+        }
+    }
+
     let _ = Command::new("/sbin/hwclock")
         .args(["--hctosys", rtc::hwclock_flag()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+}
+
+/// `/sys/class/rtc/rtcN/since_epoch`: seconds, or nothing when the RTC holds
+/// no valid time (the kernel answers EINVAL, or a dead battery reads 0).
+fn parse_rtc_since_epoch(text: &str) -> Option<i64> {
+    text.trim().parse::<i64>().ok().filter(|&secs| secs > 0)
+}
+
+/// What `hwclock --hctosys --utc` does to the kernel, without the wait.
+///
+/// The two timezone calls are hwclock's, in hwclock's order. The first
+/// settimeofday that carries a timezone is the one the kernel may treat as a
+/// "the RTC is local time, warp the clock" request; making it a zero offset
+/// says UTC and uses that up. The second gives the kernel the local offset
+/// that FAT uses for timestamps -- /boot/efi is vfat. Both go through the
+/// raw syscall, since musl's settimeofday ignores its timezone argument, and
+/// neither is a reason not to set the clock if it fails.
+fn set_clock_from_utc_rtc(since_epoch: i64) -> std::io::Result<()> {
+    #[repr(C)]
+    struct KernelTimezone {
+        minuteswest: libc::c_int,
+        dsttime: libc::c_int,
+    }
+    let set_timezone = |minuteswest: libc::c_int| {
+        let tz = KernelTimezone { minuteswest, dsttime: 0 };
+        // SAFETY: settimeofday with a null timeval only reads the timezone,
+        // which lives on the stack for the duration of the call.
+        unsafe {
+            libc::syscall(
+                libc::SYS_settimeofday,
+                std::ptr::null::<libc::timeval>(),
+                &tz as *const KernelTimezone,
+            )
+        }
+    };
+
+    let _ = set_timezone(0);
+    let mut local: libc::tm = unsafe { std::mem::zeroed() };
+    let time = since_epoch as libc::time_t;
+    // SAFETY: both pointers are to locals that outlive the call.
+    if !unsafe { libc::localtime_r(&time, &mut local) }.is_null() && local.tm_gmtoff != 0 {
+        let _ = set_timezone((-local.tm_gmtoff / 60) as libc::c_int);
+    }
+
+    let now = libc::timespec {
+        tv_sec: since_epoch as libc::time_t,
+        tv_nsec: 500_000_000,
+    };
+    // SAFETY: a plain syscall on a stack value.
+    if unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &now) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn setup_signal_handlers() -> Result<()> {
@@ -2677,6 +2763,18 @@ fn emergency_shell() -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The RTC's sysfs time is the only thing the boot clock is set from on a
+    // UTC machine, so an RTC with nothing in it must fall through to hwclock
+    // rather than set the clock to 1970.
+    #[test]
+    fn rtc_since_epoch_parses_only_a_real_time() {
+        assert_eq!(parse_rtc_since_epoch("1792107190\n"), Some(1_792_107_190));
+        assert_eq!(parse_rtc_since_epoch("0\n"), None);
+        assert_eq!(parse_rtc_since_epoch(""), None);
+        assert_eq!(parse_rtc_since_epoch("-5"), None);
+        assert_eq!(parse_rtc_since_epoch("garbage"), None);
+    }
 
     // /etc/fstab options are a mix of two different things: flags that go to
     // mount(2) as bits, and filesystem-specific options that go through as a

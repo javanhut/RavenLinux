@@ -14,8 +14,8 @@
 //!   answer disagrees by more than [`STEP_THRESHOLD`]. Stepping rather than
 //!   slewing on purpose: adjtimex discipline is what chrony is for, and a
 //!   desktop that is four hours wrong wants the four hours *now*, not smeared
-//!   over a week. After a step the RTC is written back through the same
-//!   `hwclock` init reads it with, so the correction survives a power cut.
+//!   over a week. After a step the RTC is written back with `hwclock`, in the
+//!   UTC-or-local mode init reads it in, so the correction survives a power cut.
 //!
 //! * **Zone.** `/etc/localtime` is a symlink into `/usr/share/zoneinfo`, and
 //!   changing it is one atomic rename -- but a root-owned one, which is the

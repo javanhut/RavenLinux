@@ -262,10 +262,10 @@ pub(crate) fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<
     // The account the session service runs as, or None to stay root.
     let session_account = session_user.as_ref().map(|a| a.name.clone());
 
-    // Settle udev before the session starts, as root.
+    // Wait for the udev coldplug before the session starts, as root.
     //
-    // The GPU drivers are modules and nothing waits for the coldplug, so a
-    // compositor that starts too early takes the only DRM device that exists
+    // The GPU drivers are modules, so a compositor that starts before the
+    // coldplug has bound them takes the only DRM device that exists
     // yet -- simpledrm, the EFI framebuffer -- and dies when the real driver
     // loads and the kernel revokes it. The session script used to do this
     // itself, which worked only while the session was root; it now runs as a
@@ -273,10 +273,18 @@ pub(crate) fn apply_kernel_cmdline_overrides(config: &mut InitConfig) -> Result<
     //
     // pre_exec is the right place because init runs it before dropping
     // privilege, so it still happens as root no matter who the session
-    // belongs to. raven-udev is idempotent -- whoever runs second settles and
-    // moves on.
+    // belongs to.
+    //
+    // `--wait`, not the whole script. Both services are ordered after the
+    // udev one-shot, so at boot the coldplug has normally finished before
+    // this runs; the hook is for the boot where udev overran its
+    // ready_timeout and they were started anyway. Running the script whole
+    // re-triggered every device and settled a second time on the greeter's
+    // critical path, and once never finished: the hook hit PRE_EXEC_TIMEOUT
+    // and the greeter was not started at all. `--wait` returns at once when
+    // the coldplug is done and waits for it, below that limit, when it is not.
     let udev_settle = find_program("raven-udev")
-        .map(|p| vec![p])
+        .map(|p| vec![p, "--wait".to_string()])
         .unwrap_or_default();
 
     // A login screen, if this image has one and this boot is one that wants it.

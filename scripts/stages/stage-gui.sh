@@ -3558,9 +3558,10 @@ command -v "${COMPOSITOR}" >/dev/null 2>&1 || {
 # pre_exec, which happens before the privilege drop. The call is kept here,
 # guarded, for a session started by hand from a root shell; as a normal user
 # raven-udev would fail, and under `set -e` that failure would end the session
-# before the compositor ever started.
+# before the compositor ever started. --wait returns at once when the boot's
+# coldplug has finished, and only does the coldplug itself when nothing has.
 if [ "$(id -u)" = 0 ] && [ -x /usr/sbin/raven-udev ]; then
-    /usr/sbin/raven-udev || true
+    /usr/sbin/raven-udev --wait || true
 fi
 
 # Belt and braces for slow GPUs: if a real card's module is loaded but its DRM

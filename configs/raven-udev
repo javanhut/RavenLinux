@@ -30,6 +30,11 @@
 # Nothing here is on the path to the root filesystem: storage, USB and the
 # filesystems stay built into the kernel precisely so that early boot does not
 # depend on any of this working.
+#
+# --wait
+#
+# What a compositor runs before it starts: return once the coldplug is done,
+# without doing it again. See the block below the udevadm check.
 # =============================================================================
 
 set -u
@@ -40,6 +45,39 @@ UDEVADM="$(command -v udevadm 2>/dev/null || true)"
 if [ -z "${UDEVD}" ] || [ -z "${UDEVADM}" ]; then
     echo "raven-udev: udevd/udevadm not installed; devices stay on devtmpfs alone" >&2
     exit 0
+fi
+
+# --wait is the pre_exec overrides.rs gives ravend and the wayland session,
+# and what the session script runs when it is started by hand as root. All
+# they need is for the coldplug to have finished, so the GPU's real driver is
+# bound before their compositor looks for a DRM device and takes simpledrm.
+#
+# They used to run this script whole, on the grounds that it is idempotent.
+# It is not cheap: a second run triggers an `add` for every device on the
+# machine again and settles again, on the login screen's critical path, and
+# by the time the greeter starts `after = ["udev"]` has already waited for
+# the first run to exit. On one boot the second settle never finished: the
+# hook was killed at init's 30-second pre_exec limit, and ravend, failed at
+# start, was never tried again -- a machine with no login screen.
+#
+# So: done means the marker the end of this script writes. Running means
+# udevd is up and the marker is not there yet, and the wait is bounded below
+# init's limit so a slow coldplug costs a late greeter rather than none. Not
+# started means nothing has run this script this boot (udev disabled, or a
+# session started by hand), and then the whole job is still this caller's.
+if [ "${1:-}" = "--wait" ]; then
+    [ -e /run/raven-udev/ready ] && exit 0
+    if [ -S /run/udev/control ]; then
+        i=0
+        while [ ! -e /run/raven-udev/ready ] && [ "${i}" -lt 250 ]; do
+            i=$((i + 1))
+            sleep 0.1
+        done
+        if [ ! -e /run/raven-udev/ready ]; then
+            echo "raven-udev: coldplug still running after 25s; not waiting longer" >&2
+        fi
+        exit 0
+    fi
 fi
 
 # modules.dep is what modprobe resolves against, and udev's autoloading is
@@ -88,13 +126,10 @@ fi
 # hung. Anything still arriving after this lands as an ordinary hotplug.
 "${UDEVADM}" settle --timeout=30 2>/dev/null || true
 
-# Coldplug is done, or timed out: say so where a service definition can wait
-# for it. Nothing waits by default -- `after = ["udev"]` means udevd is up,
-# not that every device has been probed, and making dbus, cawd and powerd
-# wait out a settle would move the whole boot behind the slowest driver.
-# A service that genuinely needs the hardware to exist before it starts can
-# declare `ready_path = "/run/raven-udev/ready"` on udev instead of guessing;
-# `raven-rc blame` shows what that costs.
+# Coldplug is done, or timed out: say so where --wait can see it. init.toml
+# declares this service a one-shot, so everything ordered `after = ["udev"]`
+# already waits for this script to exit, settle included; the note above the
+# udev entry there says why that was chosen over "udevd is up".
 mkdir -p /run/raven-udev && : > /run/raven-udev/ready
 
 exit 0
