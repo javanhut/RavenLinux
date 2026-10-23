@@ -1405,7 +1405,10 @@ CONFIG_NF_NAT_MASQUERADE=y
 # bridge out through the host, and they come from
 # scripts/kernel-virtualization.sh. They are =m for the same reason as
 # NFT_LOG: nf_tables loads them by name the first time such a table is
-# created.
+# created. NFT_FIB_INET (with NFT_FIB_IPV4 and NFT_FIB_IPV6 in the per-family
+# sections below, and NFT_FIB, which they select) comes from the same script:
+# netavark's `fib daddr type local` rule for published ports, without which
+# a podman bridge network with a published port fails to come up.
 #
 # NF_TABLES_NETDEV stays off: it exists for ingress hooks bound to a named
 # interface, and this ruleset names no interface but lo -- deliberately, per
@@ -1426,6 +1429,8 @@ CONFIG_NFT_MASQ=m
 CONFIG_NFT_NAT=m
 CONFIG_NFT_REJECT=m
 CONFIG_NFT_REJECT_INET=m
+CONFIG_NFT_FIB=m
+CONFIG_NFT_FIB_INET=m
 CONFIG_NETFILTER_XTABLES=y
 # CONFIG_NETFILTER_XTABLES_COMPAT is not set
 # CONFIG_NETFILTER_XTABLES_LEGACY is not set
@@ -1469,6 +1474,7 @@ CONFIG_NF_DEFRAG_IPV4=y
 # Selected by NF_TABLES_INET above; the inet table has no IPv4 half without it.
 CONFIG_NF_TABLES_IPV4=y
 CONFIG_NFT_REJECT_IPV4=m
+CONFIG_NFT_FIB_IPV4=m
 # CONFIG_NF_TABLES_ARP is not set
 # CONFIG_NF_DUP_IPV4 is not set
 CONFIG_NF_LOG_ARP=m
@@ -1486,6 +1492,7 @@ CONFIG_IP_NF_IPTABLES=y
 # and the ICMPv6 rules that keep IPv6 from half-working live in that half.
 CONFIG_NF_TABLES_IPV6=y
 CONFIG_NFT_REJECT_IPV6=m
+CONFIG_NFT_FIB_IPV6=m
 # CONFIG_NF_DUP_IPV6 is not set
 CONFIG_NF_REJECT_IPV6=m
 CONFIG_NF_LOG_IPV6=m

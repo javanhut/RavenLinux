@@ -83,6 +83,15 @@ m BRIDGE VETH
 # name the first time a rule uses it, the same as NFT_LOG and NFT_LIMIT.
 m NFT_NAT NFT_MASQ
 
+# The "fib" expression: a routing-table lookup from inside a rule. netavark
+# guards its port-forwarding jump with `fib daddr type local`, so that only
+# traffic addressed to the host itself is DNATed into a container. Its table is
+# `inet`, which needs NFT_FIB_INET, and that depends on both per-family
+# halves. Without them, creating any bridge network that publishes a port
+# fails when netavark loads its ruleset. Modules, loaded by name like the two
+# above.
+m NFT_FIB_IPV4 NFT_FIB_IPV6 NFT_FIB_INET
+
 # --- Device passthrough -------------------------------------------------------
 # VFIO hands a PCI device (a second GPU, a NIC, a USB controller) to a guest
 # through the IOMMU. The IOMMU drivers are already built. Intel's is off by

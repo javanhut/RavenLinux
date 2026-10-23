@@ -133,4 +133,4 @@ jobs:
       # continue-on-error: a dropped hardening option is a regression, not a
       # style note.
       - name: Check kernel hardening floor (offline)
-        run: ./scripts/check-kernel-hardening.sh
+        run: bash scripts/check-kernel-hardening.sh

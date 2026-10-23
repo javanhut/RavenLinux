@@ -1316,3 +1316,22 @@ fn boot_entry(
         | EntryType::FirmwareSetup => Err(KernelError::NotImplemented),
     }
 }
+
+/// `wcslen` for the UEFI target, which has no C library to supply it.
+///
+/// Nothing here calls it by name. LLVM's loop-idiom pass recognizes a
+/// "count 16-bit units until NUL" loop and replaces it with a call to
+/// `wcslen` on targets where `wchar_t` is 16 bits, which UEFI is. uefi's
+/// `CStr16::from_ptr` is exactly that loop, so `File::get_info::<FileInfo>`
+/// ends up referencing a symbol that compiler_builtins does not provide for
+/// x86_64-unknown-uefi, and rust-lld fails the link with "undefined symbol:
+/// wcslen". The loads are volatile so the same pass cannot turn this loop
+/// into a call to itself.
+#[no_mangle]
+pub unsafe extern "C" fn wcslen(s: *const u16) -> usize {
+    let mut len = 0;
+    while core::ptr::read_volatile(s.add(len)) != 0 {
+        len += 1;
+    }
+    len
+}

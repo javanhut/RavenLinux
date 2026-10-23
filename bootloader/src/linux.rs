@@ -269,9 +269,9 @@ pub fn boot_efi_stub(
             let status = ((*bs_ptr).install_multiple_protocol_interfaces)(
                 &mut new_handle,
                 &EFI_DEVICE_PATH_PROTOCOL_GUID,
-                &INITRD_DEVICE_PATH as *const InitrdDevicePath as *const c_void,
+                &raw const INITRD_DEVICE_PATH as *const InitrdDevicePath as *const c_void,
                 &EFI_LOAD_FILE2_PROTOCOL_GUID,
-                &INITRD_PROTOCOL as *const LoadFile2Protocol as *const c_void,
+                &raw const INITRD_PROTOCOL as *const LoadFile2Protocol as *const c_void,
                 ptr::null::<c_void>(),
             );
 
