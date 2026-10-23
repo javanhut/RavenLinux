@@ -1,5 +1,9 @@
 # RavenLinux
 
+[![CI](https://github.com/javanhut/RavenLinux/actions/workflows/ci.yml/badge.svg)](https://github.com/javanhut/RavenLinux/actions/workflows/ci.yml)
+
+[![Build RavenLinux](https://github.com/javanhut/RavenLinux/actions/workflows/build.yml/badge.svg)](https://github.com/javanhut/RavenLinux/actions/workflows/build.yml)
+
 A minimal Linux distribution built from scratch, meant to be rebuilt on.
 
 ```
@@ -39,15 +43,15 @@ What's here:
 On top of that base sits the **Raven layer** — the software RavenLinux provides
 for itself rather than inheriting:
 
-| Tool | What it is |
-|------|------------|
-| `ravenshell` | [Raven Shell](https://github.com/javanhut/RavenShell) — the default login shell and scripting language |
-| `rvn` | [Raven Package Manager](https://github.com/javanhut/RavenPackageManager) |
-| `poxy` | [Poxy](https://github.com/javanhut/Poxy), a universal package manager |
-| `ivaldi` | [Ivaldi](https://github.com/javanhut/Ivaldi), the version control system |
-| `crow` | [Crow](https://github.com/javanhut/CrowTextEditor), the text editor |
-| `imlazy` | [ImLazy](https://github.com/javanhut/ImLazy), the task runner |
-| `oxigen` | [OxigenLang](https://github.com/javanhut/OxigenLang), the interpreted language |
+| Tool          | What it is                                                                                             |
+| ------------- | ------------------------------------------------------------------------------------------------------ |
+| `ravenshell`  | [Raven Shell](https://github.com/javanhut/RavenShell) — the default login shell and scripting language |
+| `rvn`         | [Raven Package Manager](https://github.com/javanhut/RavenPackageManager)                               |
+| `poxy`        | [Poxy](https://github.com/javanhut/Poxy), a universal package manager                                  |
+| `ivaldi`      | [Ivaldi](https://github.com/javanhut/Ivaldi), the version control system                               |
+| `crow`        | [Crow](https://github.com/javanhut/CrowTextEditor), the text editor                                    |
+| `imlazy`      | [ImLazy](https://github.com/javanhut/ImLazy), the task runner                                          |
+| `oxigen`      | [OxigenLang](https://github.com/javanhut/OxigenLang), the interpreted language                         |
 | `caw`, `cawd` | [CAW](https://github.com/javanhut/CAW), the wireless stack — netlink and WPA in-process, no supplicant |
 
 Every one of those is built as a **static** binary — Go with `CGO_ENABLED=0`,
@@ -56,33 +60,33 @@ link dependency to the base sysroot.
 
 And a graphical layer, built separately because it cannot be static:
 
-| Tool | What it is |
-|------|------------|
-| `huginn` | [RavenGUI](https://github.com/javanhut/RavenGUI)'s Wayland compositor, which also draws the desktop — dock, launcher, notifications |
-| `raven-output` | RavenGUI's display utility — layout and scaling for the screens huginn drives |
-| `raven-lock` | the session lock screen — from RavenLogin, and the same screen as the login prompt; on `Super`+`L`, after ten idle minutes, and on resume from suspend |
-| `raven-terminal` | [RavenTerminal](https://github.com/javanhut/RavenTerminal), the terminal the desktop opens — on the dock and on `Super`+`Shift`+`T` |
-| `ravenfilemanager` | [RavenFileManager](https://github.com/javanhut/RavenFileManager), the file manager — the other icon on the dock, and the first GTK client the image had |
-| `raven-settings`, `raven-keycast` | [RavenSettingsUI](https://github.com/javanhut/RavenSettingsUI), the settings window — network, Bluetooth, sound, screens, appearance and updates; on `Super`+`Ctrl`+`P` — and the on-screen keystroke overlay its Key Overlay page switches on |
-| `ravencanvasd`, `ravencanvas` | [RavenCanvas](https://github.com/javanhut/RavenCanvas), the wallpaper — a layer-shell client, started by the session script before the compositor it draws behind |
-| `roostbar` | [RoostBar](https://github.com/javanhut/RoostBar), the layer-shell status bar — date, Wi-Fi, Bluetooth, volume, battery and clock |
-| `raven-store` | [RavenStore](https://github.com/javanhut/RavenStore), the software store — a GTK front-end that runs `rvn --json` underneath; on `Super`+`Ctrl`+`I` |
-| `raven-gaming` | [RavenGaming](https://github.com/javanhut/RavenGaming), game readiness in one window — graphics drivers, the kernel settings games run into, launch options, controllers, audio latency and Huginn's recordings |
-| `raven-power` | [RavenBatteryManagement](https://github.com/javanhut/RavenBatteryManagement), native battery profiles, energy diagnostics, application Eco mode and battery health — linked from Settings > General |
-| `raven-controls`, `raven-controlsd` | [RavenControls](https://github.com/javanhut/RavenControls), keyboard backlight, fan speeds and thermal profiles — and the daemon that owns the fan writes, which raven-init starts as the `controlsd` service |
-| `raven-viewer` | [RavenViewer](https://github.com/javanhut/RavenViewer), the document reader — PDF and DOCX, and the default for both |
-| `eagleeye` | [EagleEye](https://github.com/javanhut/EagleEye), the image viewer — the only thing on the image that opens a picture, and the default for all 27 image types |
-| `owl-player` | [OwlPlayer](https://github.com/javanhut/OwlPlayer), the media player — FFmpeg with its own GPU renderer in front of it, and the default for all 29 video and audio types |
-| `raven-camera` | [RavenCamera](https://github.com/javanhut/RavenCamera), the camera and screen recorder — photos and video from the built-in or any USB webcam, screenshots, and screen, window and region recording with system sound, microphone and a webcam overlay, saved as MP4 through Raven's own H.264, AAC and MP4 writer |
-| `airmail` | [AirMail](https://github.com/javanhut/AirMail), the mail client — IMAP and SMTP accounts in one inbox, and the default for `mailto:` links |
-| `raven-installer-ui` | the graphical installer — `installer-ui/` in this repository rather than its own, because it is the front-end for `scripts/installer/raven-install` and a version skew between the two is a wizard that cannot drive the installer it is looking at |
-| `ravend`, `raven-greeter` | [RavenLogin](https://github.com/javanhut/RavenLogin), the login screen — and the root daemon behind it, which is not the process that draws |
+| Tool                                | What it is                                                                                                                                                                                                                                                                                                         |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `huginn`                            | [RavenGUI](https://github.com/javanhut/RavenGUI)'s Wayland compositor, which also draws the desktop — dock, launcher, notifications                                                                                                                                                                                |
+| `raven-output`                      | RavenGUI's display utility — layout and scaling for the screens huginn drives                                                                                                                                                                                                                                      |
+| `raven-lock`                        | the session lock screen — from RavenLogin, and the same screen as the login prompt; on `Super`+`L`, after ten idle minutes, and on resume from suspend                                                                                                                                                             |
+| `raven-terminal`                    | [RavenTerminal](https://github.com/javanhut/RavenTerminal), the terminal the desktop opens — on the dock and on `Super`+`Shift`+`T`                                                                                                                                                                                |
+| `ravenfilemanager`                  | [RavenFileManager](https://github.com/javanhut/RavenFileManager), the file manager — the other icon on the dock, and the first GTK client the image had                                                                                                                                                            |
+| `raven-settings`, `raven-keycast`   | [RavenSettingsUI](https://github.com/javanhut/RavenSettingsUI), the settings window — network, Bluetooth, sound, screens, appearance and updates; on `Super`+`Ctrl`+`P` — and the on-screen keystroke overlay its Key Overlay page switches on                                                                     |
+| `ravencanvasd`, `ravencanvas`       | [RavenCanvas](https://github.com/javanhut/RavenCanvas), the wallpaper — a layer-shell client, started by the session script before the compositor it draws behind                                                                                                                                                  |
+| `roostbar`                          | [RoostBar](https://github.com/javanhut/RoostBar), the layer-shell status bar — date, Wi-Fi, Bluetooth, volume, battery and clock                                                                                                                                                                                   |
+| `raven-store`                       | [RavenStore](https://github.com/javanhut/RavenStore), the software store — a GTK front-end that runs `rvn --json` underneath; on `Super`+`Ctrl`+`I`                                                                                                                                                                |
+| `raven-gaming`                      | [RavenGaming](https://github.com/javanhut/RavenGaming), game readiness in one window — graphics drivers, the kernel settings games run into, launch options, controllers, audio latency and Huginn's recordings                                                                                                    |
+| `raven-power`                       | [RavenBatteryManagement](https://github.com/javanhut/RavenBatteryManagement), native battery profiles, energy diagnostics, application Eco mode and battery health — linked from Settings > General                                                                                                                |
+| `raven-controls`, `raven-controlsd` | [RavenControls](https://github.com/javanhut/RavenControls), keyboard backlight, fan speeds and thermal profiles — and the daemon that owns the fan writes, which raven-init starts as the `controlsd` service                                                                                                      |
+| `raven-viewer`                      | [RavenViewer](https://github.com/javanhut/RavenViewer), the document reader — PDF and DOCX, and the default for both                                                                                                                                                                                               |
+| `eagleeye`                          | [EagleEye](https://github.com/javanhut/EagleEye), the image viewer — the only thing on the image that opens a picture, and the default for all 27 image types                                                                                                                                                      |
+| `owl-player`                        | [OwlPlayer](https://github.com/javanhut/OwlPlayer), the media player — FFmpeg with its own GPU renderer in front of it, and the default for all 29 video and audio types                                                                                                                                           |
+| `raven-camera`                      | [RavenCamera](https://github.com/javanhut/RavenCamera), the camera and screen recorder — photos and video from the built-in or any USB webcam, screenshots, and screen, window and region recording with system sound, microphone and a webcam overlay, saved as MP4 through Raven's own H.264, AAC and MP4 writer |
+| `airmail`                           | [AirMail](https://github.com/javanhut/AirMail), the mail client — IMAP and SMTP accounts in one inbox, and the default for `mailto:` links                                                                                                                                                                         |
+| `raven-installer-ui`                | the graphical installer — `installer-ui/` in this repository rather than its own, because it is the front-end for `scripts/installer/raven-install` and a version skew between the two is a wizard that cannot drive the installer it is looking at                                                                |
+| `ravend`, `raven-greeter`           | [RavenLogin](https://github.com/javanhut/RavenLogin), the login screen — and the root daemon behind it, which is not the process that draws                                                                                                                                                                        |
 
 Two more are built by the same stage but are **not** part of the system:
 [RavenTutorial](https://github.com/javanhut/RavenTutorial) (`raven-tutorial`)
 and [Oracle](https://github.com/javanhut/Oracle) (`oracle`, `raven-oracle`).
 They ride on the ISO under `/usr/share/raven/optional/`, where the live session
-does not see them, and the installer's *Optional applications* switches (or
+does not see them, and the installer's _Optional applications_ switches (or
 `raven-install --optional tutorial,oracle`) decide whether they are copied onto
 the disk, into `/usr/local`. Both default to off.
 
@@ -230,12 +234,12 @@ is not RavenLinux (`ID=raven` in `/etc/os-release`, or `raven-init` as PID 1),
 builds as your user, installs through `sudo`, and copies only files whose
 content differs from what is installed. Targets can be named directly:
 
-| Target | Repo source -> live destination |
-|---|---|
-| `init` | `cargo build --release` in `init/` -> `/usr/bin/raven-{init,rc,powerd}` |
+| Target      | Repo source -> live destination                                                                    |
+| ----------- | -------------------------------------------------------------------------------------------------- |
+| `init`      | `cargo build --release` in `init/` -> `/usr/bin/raven-{init,rc,powerd}`                            |
 | `installer` | `scripts/installer/*` -> `/usr/bin`; `configs/installer/profiles` -> `/etc/raven/install-profiles` |
-| `tools` | `configs/raven-console-font`, `configs/raven-udev`, `etc/raven/raven-shell` -> `/usr/bin` |
-| `configs` | `etc/raven/*.toml`, `configs/raven/services`, `configs/raven/session.d` -> `/etc/raven/...` |
+| `tools`     | `configs/raven-console-font`, `configs/raven-udev`, `etc/raven/raven-shell` -> `/usr/bin`          |
+| `configs`   | `etc/raven/*.toml`, `configs/raven/services`, `configs/raven/session.d` -> `/etc/raven/...`        |
 
 ```bash
 scripts/dev-install.sh                  # default: init installer tools
@@ -277,7 +281,6 @@ session's environment expand in `exec`, `args`, `environment`, `pre_exec`,
 `ready_path` and `runtime_dirs`. Logs go to `~/.local/state/raven/log`, one
 file per service plus `init.log`.
 
-
 - **Configs under `/etc/raven` are diff-only by default.** An installed system
   carries machine-local edits in `init.toml` (hostname, agetty arguments,
   drop-ins moved to `init.d/`) that a blind copy would erase, so the `configs`
@@ -291,15 +294,15 @@ next `imlazy build` ships it.
 
 ## Build Stages
 
-| Stage | Script | What it does |
-|-------|--------|--------------|
-| `stage0` | `scripts/stages/stage0-toolchain.sh` | musl cross-compilation toolchain (binutils, gcc, musl) |
-| `stage1` | `scripts/stages/stage1-base.sh` | Base system cross-built with that toolchain; kernel and initramfs |
-| `stage2` | `scripts/stages/stage2-native.sh` | Native rebuild of the sysroot: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data |
-| `stage3` | `scripts/stages/stage3-packages.sh` | Base packages: core libraries (zlib, ncurses, readline, attr, acl), shells, OpenSSH, RavenBoot |
-| `raven` | `scripts/stages/stage-raven.sh` | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw |
-| `gui` | `scripts/stages/stage-gui.sh` | The desktop: huginn, raven-terminal, ravenfilemanager, the eight other GTK4 applications (Settings, Store, Power, Controls, Viewer, EagleEye, Owl Player, Camera) and the graphical installer, ravencanvasd, roostbar, ravend, raven-lock, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
-| `stage4` | `scripts/stages/stage4-iso.sh` | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO |
+| Stage    | Script                               | What it does                                                                                                                                                                                                                                                                                                                                   |
+| -------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stage0` | `scripts/stages/stage0-toolchain.sh` | musl cross-compilation toolchain (binutils, gcc, musl)                                                                                                                                                                                                                                                                                         |
+| `stage1` | `scripts/stages/stage1-base.sh`      | Base system cross-built with that toolchain; kernel and initramfs                                                                                                                                                                                                                                                                              |
+| `stage2` | `scripts/stages/stage2-native.sh`    | Native rebuild of the sysroot: shells, system utilities, networking, PAM/NSS, libraries, locale and timezone data                                                                                                                                                                                                                              |
+| `stage3` | `scripts/stages/stage3-packages.sh`  | Base packages: core libraries (zlib, ncurses, readline, attr, acl), shells, OpenSSH, RavenBoot                                                                                                                                                                                                                                                 |
+| `raven`  | `scripts/stages/stage-raven.sh`      | The Raven layer: ravenshell, rvn, poxy, ivaldi, crow, imlazy, oxigen, caw                                                                                                                                                                                                                                                                      |
+| `gui`    | `scripts/stages/stage-gui.sh`        | The desktop: huginn, raven-terminal, ravenfilemanager, the eight other GTK4 applications (Settings, Store, Power, Controls, Viewer, EagleEye, Owl Player, Camera) and the graphical installer, ravencanvasd, roostbar, ravend, raven-lock, the application menu, and the shared libraries, GTK runtime, icon themes and cursor theme they need |
+| `stage4` | `scripts/stages/stage4-iso.sh`       | Squashfs root, RavenBoot/GRUB setup, EFI image, bootable ISO                                                                                                                                                                                                                                                                                   |
 
 The Raven layer is unnumbered on purpose. Stages 0–4 build a base system that
 has to stand on its own; the Raven layer sits on top of stage3 and must run
@@ -529,7 +532,7 @@ so there is nothing to configure for the other side of the dual boot.
 
 **Two disks** work too, and are a different shape. RavenBoot scans every
 filesystem the firmware can see rather than only the partition it was loaded
-from, so a Windows on the machine's *other* disk is in the menu as well — and
+from, so a Windows on the machine's _other_ disk is in the menu as well — and
 it is chainloaded by device path, which is what lets Windows Boot Manager find
 its own BCD store on its own ESP. There is nothing to install alongside on a
 blank second disk, so that install is an ordinary `--wipe`; what it does need
@@ -605,12 +608,12 @@ and is reported by name instead of failing the whole install.
 More importantly, it does the half that installing packages does not cover.
 Four toolkit caches are derived state that no package on this image rebuilds:
 
-| Cache | What its absence looks like |
-|---|---|
+| Cache               | What its absence looks like                                                                          |
+| ------------------- | ---------------------------------------------------------------------------------------------------- |
 | `gschemas.compiled` | **every GTK application aborts on startup** — GSettings reads only the compiled cache, never the XML |
-| `mime.cache` | every file reads as `application/octet-stream`: one icon, no "Open With" |
-| `mimeinfo.cache` | "Open Containing Folder" resolves to nothing |
-| `icon-theme.cache` | stale icons, or slow theme lookups |
+| `mime.cache`        | every file reads as `application/octet-stream`: one icon, no "Open With"                             |
+| `mimeinfo.cache`    | "Open Containing Folder" resolves to nothing                                                         |
+| `icon-theme.cache`  | stale icons, or slow theme lookups                                                                   |
 
 They are missing on a freshly staged image, because the ISO stages those trees
 as plain files copied off a build host — and they go stale again on a package
@@ -624,11 +627,11 @@ raven-desktopinstall -n toolkit      # dry run, one set, no root needed
 raven-desktopinstall --caches-only   # rebuild the caches, install nothing
 ```
 
-| Partition | Size | Filesystem | Mount |
-|-----------|------|------------|-------|
-| 1 | 512M | FAT32 | `/boot/efi` |
-| 2 | RAM-sized, optional | swap | — |
-| 3 | the rest | ext4 | `/` |
+| Partition | Size                | Filesystem | Mount       |
+| --------- | ------------------- | ---------- | ----------- |
+| 1         | 512M                | FAT32      | `/boot/efi` |
+| 2         | RAM-sized, optional | swap       | —           |
+| 3         | the rest            | ext4       | `/`         |
 
 RavenBoot is installed to the ESP twice: at `\EFI\raven\raven-boot.efi`, and
 at `\EFI\BOOT\BOOTX64.EFI`. The second is the removable-media fallback path,
@@ -659,12 +662,12 @@ repository and turned by the build into the two formats a Linux system actually
 needs. Two more families come from the build host, because a desktop cannot be
 drawn in a monospace face alone:
 
-| Where | Format | Built by |
-|-------|--------|----------|
-| tty1, the console | JetBrains Mono as a PSF2 bitmap at 8x16, 10x20, 12x24 and 16x32 | `scripts/make-console-font.py`, run by stage4 |
-| the Wayland session | JetBrains Mono's `.ttf`, through fontconfig | copied to `/usr/share/fonts` by stage4 |
-| the shell's own text | **DejaVu Sans/Serif** — the proportional faces the dock, launcher and notifications draw in | `ttf-dejavu` on the build host, copied by stage2 |
-| emoji, anywhere | **Noto Color Emoji** | `noto-fonts-emoji` on the build host, copied by stage2 |
+| Where                | Format                                                                                      | Built by                                               |
+| -------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| tty1, the console    | JetBrains Mono as a PSF2 bitmap at 8x16, 10x20, 12x24 and 16x32                             | `scripts/make-console-font.py`, run by stage4          |
+| the Wayland session  | JetBrains Mono's `.ttf`, through fontconfig                                                 | copied to `/usr/share/fonts` by stage4                 |
+| the shell's own text | **DejaVu Sans/Serif** — the proportional faces the dock, launcher and notifications draw in | `ttf-dejavu` on the build host, copied by stage2       |
+| emoji, anywhere      | **Noto Color Emoji**                                                                        | `noto-fonts-emoji` on the build host, copied by stage2 |
 
 Only the first is vendored. The other two are host packages named in the
 `Dockerfile`, and stage2's `copy_system_utils()` copies `/usr/share/fonts`
