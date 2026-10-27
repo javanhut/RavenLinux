@@ -1314,7 +1314,8 @@ CONFIG_NETWORK_SECMARK=y
 CONFIG_NET_PTP_CLASSIFY=y
 # CONFIG_NETWORK_PHY_TIMESTAMPING is not set
 CONFIG_NETFILTER=y
-# CONFIG_NETFILTER_ADVANCED is not set
+CONFIG_NETFILTER_ADVANCED=y
+# CONFIG_BRIDGE_NETFILTER is not set
 
 #
 # Core Netfilter Configuration
@@ -1324,16 +1325,33 @@ CONFIG_NETFILTER_EGRESS=y
 CONFIG_NETFILTER_SKIP_EGRESS=y
 CONFIG_NETFILTER_NETLINK=y
 CONFIG_NETFILTER_BPF_LINK=y
+# CONFIG_NETFILTER_NETLINK_HOOK is not set
+# CONFIG_NETFILTER_NETLINK_ACCT is not set
+# CONFIG_NETFILTER_NETLINK_QUEUE is not set
 CONFIG_NETFILTER_NETLINK_LOG=y
+# CONFIG_NETFILTER_NETLINK_OSF is not set
 CONFIG_NF_CONNTRACK=y
 CONFIG_NF_LOG_SYSLOG=m
+CONFIG_NF_CONNTRACK_MARK=y
 CONFIG_NF_CONNTRACK_SECMARK=y
+# CONFIG_NF_CONNTRACK_ZONES is not set
 # CONFIG_NF_CONNTRACK_PROCFS is not set
+# CONFIG_NF_CONNTRACK_EVENTS is not set
+# CONFIG_NF_CONNTRACK_TIMEOUT is not set
+# CONFIG_NF_CONNTRACK_TIMESTAMP is not set
 # CONFIG_NF_CONNTRACK_LABELS is not set
+# CONFIG_NF_CT_PROTO_SCTP is not set
+# CONFIG_NF_CT_PROTO_UDPLITE is not set
+# CONFIG_NF_CONNTRACK_AMANDA is not set
 CONFIG_NF_CONNTRACK_FTP=y
+# CONFIG_NF_CONNTRACK_H323 is not set
 CONFIG_NF_CONNTRACK_IRC=y
 # CONFIG_NF_CONNTRACK_NETBIOS_NS is not set
+# CONFIG_NF_CONNTRACK_SNMP is not set
+# CONFIG_NF_CONNTRACK_PPTP is not set
+# CONFIG_NF_CONNTRACK_SANE is not set
 CONFIG_NF_CONNTRACK_SIP=y
+# CONFIG_NF_CONNTRACK_TFTP is not set
 CONFIG_NF_CT_NETLINK=y
 # CONFIG_NETFILTER_NETLINK_GLUE_CT is not set
 CONFIG_NF_NAT=y
@@ -1391,11 +1409,13 @@ CONFIG_NF_NAT_MASQUERADE=y
 # and nothing else. Building them in would be paying kernel text for a rule
 # that ships off.
 #
-# NFT_REJECT and its inet companion are not a Raven decision. NFT_REJECT is
-# `default m if NETFILTER_ADVANCED=n` upstream and NETFILTER_ADVANCED is off a
-# few lines above, so olddefconfig turns them on by itself the moment NF_TABLES
-# goes on. They are written out rather than left to appear on their own so that
-# the checked-in file is what the build produces. The shipped policy drops
+# NFT_REJECT and its inet companion started as an upstream default, not a
+# Raven decision: NFT_REJECT is `default m if NETFILTER_ADVANCED=n`, and with
+# NETFILTER_ADVANCED off olddefconfig turned them on by itself the moment
+# NF_TABLES went on. NETFILTER_ADVANCED is on now (scripts/kernel-
+# virtualization.sh needs it for NF_CONNTRACK_MARK), which removes that
+# default, so the =m lines below are what keep them; olddefconfig respects an
+# explicit answer. The shipped policy drops
 # rather than rejects, so nothing loads them; an edited ruleset that would
 # rather reject is a likely enough change that overriding the default here
 # would be churn for no saving.
@@ -1410,16 +1430,6 @@ CONFIG_NF_NAT_MASQUERADE=y
 # netavark's `fib daddr type local` rule for published ports, without which
 # a podman bridge network with a published port fails to come up.
 #
-# That on-demand load only happens for root: libvirt, rootful podman. Rootless
-# podman applies netavark's table inside a user namespace, and the kernel does
-# not load a module on a request from there, so any of these not already
-# loaded fails the rule with "Operation not supported" and the container never
-# starts. configs/raven/services/container-nat.toml loads them, and the
-# nft_chain_nat module netavark's nat chain needs, at boot as root; it ships
-# disabled, and a machine running rootless podman enables it.
-# Building them in (=y) would make that service unnecessary, at the cost of
-# kernel text on every machine that runs no containers at all.
-#
 # NF_TABLES_NETDEV stays off: it exists for ingress hooks bound to a named
 # interface, and this ruleset names no interface but lo -- deliberately, per
 # the comment at the `iif "lo"` rule about interface names being resolved at
@@ -1433,6 +1443,7 @@ CONFIG_NF_TABLES=y
 CONFIG_NF_TABLES_INET=y
 # CONFIG_NF_TABLES_NETDEV is not set
 CONFIG_NFT_CT=y
+# CONFIG_NFT_CONNLIMIT is not set
 CONFIG_NFT_LOG=m
 CONFIG_NFT_LIMIT=m
 CONFIG_NFT_MASQ=m
@@ -1441,6 +1452,8 @@ CONFIG_NFT_REJECT=m
 CONFIG_NFT_REJECT_INET=m
 CONFIG_NFT_FIB=m
 CONFIG_NFT_FIB_INET=m
+# CONFIG_NFT_OSF is not set
+# CONFIG_NFT_SYNPROXY is not set
 CONFIG_NETFILTER_XTABLES=y
 # CONFIG_NETFILTER_XTABLES_COMPAT is not set
 # CONFIG_NETFILTER_XTABLES_LEGACY is not set
@@ -1449,17 +1462,28 @@ CONFIG_NETFILTER_XTABLES=y
 # Xtables combined modules
 #
 CONFIG_NETFILTER_XT_MARK=m
+# CONFIG_NETFILTER_XT_CONNMARK is not set
+# CONFIG_NETFILTER_XT_TARGET_AUDIT is not set
+# CONFIG_NETFILTER_XT_TARGET_CLASSIFY is not set
+# CONFIG_NETFILTER_XT_TARGET_CONNMARK is not set
 
 #
 # Xtables targets
 #
 CONFIG_NETFILTER_XT_TARGET_CONNSECMARK=y
+# CONFIG_NETFILTER_XT_TARGET_HMARK is not set
+# CONFIG_NETFILTER_XT_TARGET_IDLETIMER is not set
+# CONFIG_NETFILTER_XT_TARGET_LED is not set
 CONFIG_NETFILTER_XT_TARGET_LOG=m
+# CONFIG_NETFILTER_XT_TARGET_MARK is not set
 # CONFIG_NETFILTER_XT_NAT is not set
 # CONFIG_NETFILTER_XT_TARGET_NETMAP is not set
 CONFIG_NETFILTER_XT_TARGET_NFLOG=y
+# CONFIG_NETFILTER_XT_TARGET_NFQUEUE is not set
+# CONFIG_NETFILTER_XT_TARGET_RATEEST is not set
 # CONFIG_NETFILTER_XT_TARGET_REDIRECT is not set
 CONFIG_NETFILTER_XT_TARGET_MASQUERADE=m
+# CONFIG_NETFILTER_XT_TARGET_TEE is not set
 CONFIG_NETFILTER_XT_TARGET_SECMARK=y
 CONFIG_NETFILTER_XT_TARGET_TCPMSS=y
 
@@ -1467,9 +1491,49 @@ CONFIG_NETFILTER_XT_TARGET_TCPMSS=y
 # Xtables matches
 #
 CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=m
+# CONFIG_NETFILTER_XT_MATCH_BPF is not set
+# CONFIG_NETFILTER_XT_MATCH_CGROUP is not set
+# CONFIG_NETFILTER_XT_MATCH_CLUSTER is not set
+# CONFIG_NETFILTER_XT_MATCH_COMMENT is not set
+# CONFIG_NETFILTER_XT_MATCH_CONNBYTES is not set
+# CONFIG_NETFILTER_XT_MATCH_CONNLABEL is not set
+# CONFIG_NETFILTER_XT_MATCH_CONNLIMIT is not set
+# CONFIG_NETFILTER_XT_MATCH_CONNMARK is not set
 CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y
+# CONFIG_NETFILTER_XT_MATCH_CPU is not set
+# CONFIG_NETFILTER_XT_MATCH_DCCP is not set
+# CONFIG_NETFILTER_XT_MATCH_DEVGROUP is not set
+# CONFIG_NETFILTER_XT_MATCH_DSCP is not set
+# CONFIG_NETFILTER_XT_MATCH_ECN is not set
+# CONFIG_NETFILTER_XT_MATCH_ESP is not set
+# CONFIG_NETFILTER_XT_MATCH_HASHLIMIT is not set
+# CONFIG_NETFILTER_XT_MATCH_HELPER is not set
+# CONFIG_NETFILTER_XT_MATCH_HL is not set
+# CONFIG_NETFILTER_XT_MATCH_IPCOMP is not set
+# CONFIG_NETFILTER_XT_MATCH_IPRANGE is not set
+# CONFIG_NETFILTER_XT_MATCH_L2TP is not set
+# CONFIG_NETFILTER_XT_MATCH_LENGTH is not set
+# CONFIG_NETFILTER_XT_MATCH_LIMIT is not set
+# CONFIG_NETFILTER_XT_MATCH_MAC is not set
+# CONFIG_NETFILTER_XT_MATCH_MARK is not set
+# CONFIG_NETFILTER_XT_MATCH_MULTIPORT is not set
+# CONFIG_NETFILTER_XT_MATCH_NFACCT is not set
+# CONFIG_NETFILTER_XT_MATCH_OSF is not set
+# CONFIG_NETFILTER_XT_MATCH_OWNER is not set
 CONFIG_NETFILTER_XT_MATCH_POLICY=y
+# CONFIG_NETFILTER_XT_MATCH_PKTTYPE is not set
+# CONFIG_NETFILTER_XT_MATCH_QUOTA is not set
+# CONFIG_NETFILTER_XT_MATCH_RATEEST is not set
+# CONFIG_NETFILTER_XT_MATCH_REALM is not set
+# CONFIG_NETFILTER_XT_MATCH_RECENT is not set
+# CONFIG_NETFILTER_XT_MATCH_SCTP is not set
+# CONFIG_NETFILTER_XT_MATCH_SOCKET is not set
 CONFIG_NETFILTER_XT_MATCH_STATE=y
+# CONFIG_NETFILTER_XT_MATCH_STATISTIC is not set
+# CONFIG_NETFILTER_XT_MATCH_STRING is not set
+# CONFIG_NETFILTER_XT_MATCH_TCPMSS is not set
+# CONFIG_NETFILTER_XT_MATCH_TIME is not set
+# CONFIG_NETFILTER_XT_MATCH_U32 is not set
 # end of Core Netfilter Configuration
 
 # CONFIG_IP_SET is not set
@@ -1491,6 +1555,10 @@ CONFIG_NF_LOG_ARP=m
 CONFIG_NF_LOG_IPV4=m
 CONFIG_NF_REJECT_IPV4=m
 CONFIG_IP_NF_IPTABLES=y
+# CONFIG_IP_NF_MATCH_AH is not set
+# CONFIG_IP_NF_MATCH_ECN is not set
+# CONFIG_IP_NF_MATCH_TTL is not set
+# CONFIG_IP_NF_TARGET_SYNPROXY is not set
 # end of IP: Netfilter Configuration
 
 #
@@ -1507,7 +1575,16 @@ CONFIG_NFT_FIB_IPV6=m
 CONFIG_NF_REJECT_IPV6=m
 CONFIG_NF_LOG_IPV6=m
 CONFIG_IP6_NF_IPTABLES=y
+# CONFIG_IP6_NF_MATCH_AH is not set
+# CONFIG_IP6_NF_MATCH_EUI64 is not set
+# CONFIG_IP6_NF_MATCH_FRAG is not set
+# CONFIG_IP6_NF_MATCH_OPTS is not set
+# CONFIG_IP6_NF_MATCH_HL is not set
 CONFIG_IP6_NF_MATCH_IPV6HEADER=y
+# CONFIG_IP6_NF_MATCH_MH is not set
+# CONFIG_IP6_NF_MATCH_RT is not set
+# CONFIG_IP6_NF_MATCH_SRH is not set
+# CONFIG_IP6_NF_TARGET_SYNPROXY is not set
 # end of IPv6: Netfilter Configuration
 
 CONFIG_NF_DEFRAG_IPV6=y
@@ -1604,6 +1681,8 @@ CONFIG_NET_CLS_ACT=y
 # CONFIG_NET_ACT_MPLS is not set
 # CONFIG_NET_ACT_VLAN is not set
 # CONFIG_NET_ACT_BPF is not set
+# CONFIG_NET_ACT_CONNMARK is not set
+# CONFIG_NET_ACT_CTINFO is not set
 # CONFIG_NET_ACT_SKBMOD is not set
 # CONFIG_NET_ACT_IFE is not set
 # CONFIG_NET_ACT_TUNNEL_KEY is not set

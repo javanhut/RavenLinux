@@ -35,6 +35,7 @@ cd "$src"
 
 y() { for o in "$@"; do "$cfg" --enable "$o"; done; }
 m() { for o in "$@"; do "$cfg" --module "$o"; done; }
+n() { for o in "$@"; do "$cfg" --disable "$o"; done; }
 
 # --- KVM: hardware-accelerated guests -----------------------------------------
 # Modules: kvm_intel and kvm_amd carry x86cpu modaliases for VMX and SVM, so
@@ -80,10 +81,7 @@ m BRIDGE VETH
 # netavark's nftables backends use to give that bridge outbound access.
 # NF_NAT and NF_NAT_MASQUERADE are already built in for the firewall, and
 # these two are only the nf_tables front ends. nf_tables loads each one by
-# name the first time a rule uses it, the same as NFT_LOG and NFT_LIMIT --
-# but only when root asks. Rootless podman's rules come from a user namespace,
-# where the kernel loads no modules; configs/raven/services/container-nat.toml
-# loads these and the fib modules below at boot for machines that need it.
+# name the first time a rule uses it, the same as NFT_LOG and NFT_LIMIT.
 m NFT_NAT NFT_MASQ
 
 # The "fib" expression: a routing-table lookup from inside a rule. netavark
@@ -94,6 +92,24 @@ m NFT_NAT NFT_MASQ
 # fails when netavark loads its ruleset. Modules, loaded by name like the two
 # above.
 m NFT_FIB_IPV4 NFT_FIB_IPV6 NFT_FIB_INET
+
+# Connection marks. Every bridge network netavark creates puts
+# `ct mark & 0x1000 == 0x1000 accept` in its FORWARD chain, and without
+# NF_CONNTRACK_MARK the kernel refuses that rule with "Operation not
+# supported" -- the whole ruleset is applied as one batch, so no podman bridge
+# network comes up at all, rootful or rootless, published port or not. It is
+# a bool on the conntrack core, not a module, and it depends on
+# NETFILTER_ADVANCED.
+#
+# NETFILTER_ADVANCED is a visibility switch: turning it on changes the value
+# of nothing already set in the config. What it does is reveal options that
+# were hidden -- 87 on 6.17, NF_CONNTRACK_MARK among them. olddefconfig leaves
+# 84 of the rest off (the xt matches and targets, the IPv4/IPv6 xtables
+# extras, bridge netfilter) and would turn on the other two, SCTP and UDP-Lite
+# connection tracking, which default y. Nothing on Raven asked for those, so
+# they are pinned off and this change adds exactly the one feature it is for.
+y NETFILTER_ADVANCED NF_CONNTRACK_MARK
+n NF_CT_PROTO_SCTP NF_CT_PROTO_UDPLITE
 
 # --- Device passthrough -------------------------------------------------------
 # VFIO hands a PCI device (a second GPU, a NIC, a USB controller) to a guest
