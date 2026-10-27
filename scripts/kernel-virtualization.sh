@@ -80,7 +80,10 @@ m BRIDGE VETH
 # netavark's nftables backends use to give that bridge outbound access.
 # NF_NAT and NF_NAT_MASQUERADE are already built in for the firewall, and
 # these two are only the nf_tables front ends. nf_tables loads each one by
-# name the first time a rule uses it, the same as NFT_LOG and NFT_LIMIT.
+# name the first time a rule uses it, the same as NFT_LOG and NFT_LIMIT --
+# but only when root asks. Rootless podman's rules come from a user namespace,
+# where the kernel loads no modules; configs/raven/services/container-nat.toml
+# loads these and the fib modules below at boot for machines that need it.
 m NFT_NAT NFT_MASQ
 
 # The "fib" expression: a routing-table lookup from inside a rule. netavark

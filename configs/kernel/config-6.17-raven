@@ -1410,6 +1410,16 @@ CONFIG_NF_NAT_MASQUERADE=y
 # netavark's `fib daddr type local` rule for published ports, without which
 # a podman bridge network with a published port fails to come up.
 #
+# That on-demand load only happens for root: libvirt, rootful podman. Rootless
+# podman applies netavark's table inside a user namespace, and the kernel does
+# not load a module on a request from there, so any of these not already
+# loaded fails the rule with "Operation not supported" and the container never
+# starts. configs/raven/services/container-nat.toml loads them, and the
+# nft_chain_nat module netavark's nat chain needs, at boot as root; it ships
+# disabled, and a machine running rootless podman enables it.
+# Building them in (=y) would make that service unnecessary, at the cost of
+# kernel text on every machine that runs no containers at all.
+#
 # NF_TABLES_NETDEV stays off: it exists for ingress hooks bound to a named
 # interface, and this ruleset names no interface but lo -- deliberately, per
 # the comment at the `iif "lo"` rule about interface names being resolved at
