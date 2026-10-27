@@ -1,0 +1,39 @@
+# container-nat -- load the nftables NAT modules that rootless podman needs.
+#
+# netavark, podman's network backend, gives a bridge network with a published
+# port (`podman run -p`, anything `podman compose` starts) an nftables table
+# that uses masquerade, dnat, a nat chain and `fib daddr type local`. Those
+# come from nft_masq, nft_nat, nft_chain_nat and nft_fib_inet, all =m in
+# configs/kernel/config-6.17-raven. The note there says nf_tables loads them
+# by name the first time such a table is created. That holds for root --
+# libvirt, rootful podman -- but not for rootless podman: its rules are
+# applied inside a user namespace, and the kernel does not load modules on a
+# request from there. Whatever is not already loaded fails, and the container
+# never starts:
+#
+#   Error: Could not process rule: Operation not supported
+#   netavark: nftables error: "nft" did not return successfully ...
+#
+# Loading them once at boot, as root, is all it takes. No daemon stays behind.
+#
+# SHIPPED DISABLED, like libvirtd.toml. modprobe is on every image, so
+# stage4's activate_service_templates always turns this template into a
+# drop-in; whether it runs is up to the machine. One that uses rootless
+# podman turns it on:
+#
+#   raven-rc enable container-nat
+#
+# after = ["udev"] for the same reason the firewall gives in init.toml: the
+# udev stage is what makes module loading work this early. Nothing waits on
+# this; a podman started before it finishes would only fail the way it does
+# without it.
+[[services]]
+name = "container-nat"
+description = "Load the nftables NAT modules rootless podman bridge networks need"
+exec = "/usr/bin/modprobe"
+args = ["-a", "nft_nat", "nft_masq", "nft_chain_nat", "nft_fib_inet"]
+after = ["udev"]
+type = "oneshot"
+restart = false
+enabled = false
+critical = false
